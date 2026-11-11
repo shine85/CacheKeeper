@@ -71,6 +71,9 @@ jobs:
       - name: Build Package
         run: |
           set -euo pipefail
+          # 网页上传/Git 不保留可执行位，维护脚本在仓库里是 0644，
+          # dpkg-deb 要求 >=0555，打包前先补上（postinst/prerm）。
+          chmod 0755 layout/DEBIAN/postinst layout/DEBIAN/prerm
           command -v ldid
           make clean
           make package THEOS_PACKAGE_DIR="$PWD/packages"
