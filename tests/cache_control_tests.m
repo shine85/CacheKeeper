@@ -311,6 +311,28 @@ int main(int argc, const char *argv[]) {
             ![fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"store/inner.sqlite"]] &&
             ![fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"store/poster.png"]] &&
             [fm fileExistsAtPath:fullRoot] && [fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"store"]], @"全量清理后文件清空、目录本身保留");
+        // 真机形态（抖音 2026-11-11）：数据文件藏在子目录里而非根级——普通模式只删根级散落媒体、整棵数据子树保留；
+        // 全量清理必须能删净该子树内全部文件且不报阶段错误（此前真机 263 项 errno 22 全灭）。
+        NSString *nestedRoot=[fixture stringByAppendingPathComponent:@"nested-cache"];
+        require([fm createDirectoryAtPath:[nestedRoot stringByAppendingPathComponent:@"vault"] withIntermediateDirectories:YES attributes:nil error:nil], @"嵌套数据子树夹具");
+        writeMedia([nestedRoot stringByAppendingPathComponent:@"loose.png"]);
+        writeFile([nestedRoot stringByAppendingPathComponent:@"vault/inner.sqlite"]);
+        writeMedia([nestedRoot stringByAppendingPathComponent:@"vault/photo.png"]);
+        writeMedia([nestedRoot stringByAppendingPathComponent:@"vault/clip.mp4"]);
+        AxsCacheKeeperSweep *nestedMedia=[[AxsCacheKeeperSweep alloc] initWithRoot:nestedRoot clock:^NSTimeInterval{return future;}];
+        for (NSUInteger pass=0;!nestedMedia.complete && pass<100;pass++) [nestedMedia advance:64 shouldContinue:^BOOL{return YES;}];
+        require(nestedMedia.complete && nestedMedia.removed==1 && nestedMedia.failed==0 &&
+            ![fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"loose.png"]] &&
+            [fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"vault/photo.png"]] &&
+            [fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"vault/inner.sqlite"]], @"普通模式删根级媒体、数据子树整棵保留");
+        AxsCacheKeeperSweep *nestedFull=[[AxsCacheKeeperSweep alloc] initWithRoot:nestedRoot clock:^NSTimeInterval{return future;} fullClear:YES];
+        for (NSUInteger pass=0;!nestedFull.complete && pass<100;pass++) [nestedFull advance:64 shouldContinue:^BOOL{return YES;}];
+        require(nestedFull.complete && nestedFull.failed==0 && nestedFull.removed==3 && !nestedFull.error.length &&
+            ![fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"vault/inner.sqlite"]] &&
+            ![fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"vault/photo.png"]] &&
+            ![fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"vault/clip.mp4"]] &&
+            [fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"vault"]],
+            [NSString stringWithFormat:@"全量清理删净嵌套数据子树（removed=%lu failed=%lu error=%@）",(unsigned long)nestedFull.removed,(unsigned long)nestedFull.failed,nestedFull.error]);
         NSString *lateDir=[fixture stringByAppendingPathComponent:@"late-database"];
         require([fm createDirectoryAtPath:lateDir withIntermediateDirectories:YES attributes:nil error:nil], @"延迟发现数据库夹具");
         writeMedia([lateDir stringByAppendingPathComponent:@"a.png"]);

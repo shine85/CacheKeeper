@@ -30,6 +30,7 @@
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSArray *> *directorySnapshots;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSMutableDictionary *> *fileSnapshots;
 @property(nonatomic,strong) NSMutableSet<NSString *> *checkedDirectories;
+@property(nonatomic,copy) NSArray<NSString *> *rootForms;
 @end
 
 @implementation AxsCacheKeeperSweep
@@ -54,6 +55,14 @@
         return self;
     }
     _device = info.st_dev; _inode = info.st_ino;
+    // 删除入口的父路径校验要容忍路径形态差异（解析符号链接前后、标准化前后）：
+    // 真机上容器根是解析后的 /private/var/... 形态，枚举条目路径形态可能不同，
+    // 字符串直比会把根内文件整批误判为根外（errno 22 全灭，2026-11-11 抖音真机 263 项）。
+    NSMutableSet<NSString *> *forms = [NSMutableSet setWithObject:root];
+    [forms addObject:root.stringByStandardizingPath];
+    NSString *resolvedRoot = [NSURL fileURLWithPath:root].URLByResolvingSymlinksInPath.path;
+    if (resolvedRoot) { [forms addObject:resolvedRoot]; [forms addObject:resolvedRoot.stringByStandardizingPath]; }
+    _rootForms = forms.allObjects;
     _checking = YES;
     _dataDirectories = [NSMutableSet new];
     _directorySnapshots = [NSMutableDictionary new];
@@ -82,6 +91,15 @@
     for (NSString *directory in self.dataDirectories)
         if ([path isEqual:directory] || [path hasPrefix:[directory stringByAppendingString:@"/"]]) return YES;
     return NO;
+}
+// 返回 path 命中的根形态（已标准化），不命中返回 nil；相对路径按命中形态的长度切分。
+- (NSString *)axs_cachekeeper_matched_root_form:(NSString *)path {
+    NSString *standard = path.stringByStandardizingPath;
+    for (NSString *form in self.rootForms) {
+        NSString *base = form.stringByStandardizingPath;
+        if ([standard isEqual:base] || [standard hasPrefix:[base stringByAppendingString:@"/"]]) return base;
+    }
+    return nil;
 }
 - (void)axs_cachekeeper_inspect:(NSURL *)entry info:(struct stat)info {
     if (S_ISDIR(info.st_mode)) {
@@ -125,16 +143,27 @@
     [self.checkedDirectories addObject:directory];return YES;
 }
 - (BOOL)axs_cachekeeper_remove:(NSURL *)entry expected:(struct stat)expected {
+    self.error = nil;
     NSString *parent = entry.URLByDeletingLastPathComponent.path;
-    if (![parent isEqual:self.root] && ![parent hasPrefix:[self.root stringByAppendingString:@"/"]]) { errno = EINVAL; return NO; }
+    NSString *matchedForm = [self axs_cachekeeper_matched_root_form:parent];
+    if (!matchedForm) {
+        self.error = [NSString stringWithFormat:@"删除失败·路径校验（errno %d）", EINVAL];
+        errno = EINVAL; return NO;
+    }
     // 从已核对身份的缓存根逐级打开，不能靠 realpath 后再打开绝对路径防竞态。
     int fd = axs_cachekeeper_open_directory(self.root);
-    if (fd < 0) return NO;
+    if (fd < 0) {
+        int openError = errno;
+        self.error = [NSString stringWithFormat:@"删除失败·打开缓存根（errno %d）", openError];
+        errno = openError; return NO;
+    }
     struct stat openedRoot;
     if (fstat(fd, &openedRoot) || openedRoot.st_dev != self.device || openedRoot.st_ino != self.inode) {
-        close(fd); errno = ESTALE; return NO;
+        close(fd); errno = ESTALE;
+        self.error = [NSString stringWithFormat:@"删除失败·缓存根已变化（errno %d）", ESTALE];
+        return NO;
     }
-    NSString *relativeParent = [parent substringFromIndex:self.root.length];
+    NSString *relativeParent = [parent.stringByStandardizingPath substringFromIndex:matchedForm.length];
     NSString *openedPath=self.root;
     for (NSString *part in [relativeParent componentsSeparatedByString:@"/"]) {
         if (!part.length) continue;
@@ -147,7 +176,10 @@
         int child = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
         int savedError = errno;
         close(fd);
-        if (child < 0) { errno = savedError; return NO; }
+        if (child < 0) {
+            self.error = [NSString stringWithFormat:@"删除失败·打开子目录（errno %d）", savedError];
+            errno = savedError; return NO;
+        }
         fd = child;
         openedPath=[openedPath stringByAppendingPathComponent:part];
     }
@@ -182,10 +214,13 @@
         if (contentOK) {
             struct stat final;
             if (!fstatat(fd, name, &final, AT_SYMLINK_NOFOLLOW) && final.st_ino == current.st_ino &&
-                final.st_dev == current.st_dev && axs_cachekeeper_old_enough(final, self.clock())) removed = unlinkat(fd, name, 0) == 0;
-            else errno = ESTALE;
+                final.st_dev == current.st_dev && axs_cachekeeper_old_enough(final, self.clock())) {
+                removed = unlinkat(fd, name, 0) == 0;
+                if (!removed) self.error = [NSString stringWithFormat:@"删除失败·删除文件（errno %d）", errno];
+            }
+            else { errno = ESTALE; self.error = [NSString stringWithFormat:@"删除失败·文件已变化（errno %d）", ESTALE]; }
         }
-    } else { errno = ESTALE; }
+    } else { errno = ESTALE; self.error = [NSString stringWithFormat:@"删除失败·文件状态已变化（errno %d）", ESTALE]; }
     int savedError = errno;
     if (removed && !fstat(fd,&parentInfo)) self.directorySnapshots[parent]=[self axs_cachekeeper_snapshot:parentInfo];
     if (removed) [self.fileSnapshots[parent] removeObjectForKey:entry.lastPathComponent];
@@ -236,7 +271,7 @@
         if (info.st_nlink != 1 || (!self.fullClear && !axs_cachekeeper_ordinary_cache_file(relative))) { self.protectedCount++; continue; }
         if (!axs_cachekeeper_old_enough(info, self.clock())) { self.recentCount++; continue; }
         if ([self axs_cachekeeper_remove:entry expected:info]) { self.removed++; self.bytes += info.st_size; }
-        else if (errno != ENOENT && errno != EBUSY) { self.failed++; self.error = [NSString stringWithFormat:@"删除失败（errno %d）", errno]; }
+        else if (errno != ENOENT && errno != EBUSY) { self.failed++; if (![self.error hasPrefix:@"删除失败·"]) self.error = [NSString stringWithFormat:@"删除失败（errno %d）", errno]; }
     }
 }
 @end
