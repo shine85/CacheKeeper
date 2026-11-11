@@ -59,8 +59,6 @@ NSArray<NSString *> *axs_cachekeeper_scan_directories(NSURL *home, NSError **err
                 continue;
             }
             if (!S_ISDIR(info.st_mode) || S_ISLNK(info.st_mode)) continue;
-            // 隔离测试的留置/再生副本不是 APP 目录，不进检测列表。
-            if ([entry.lastPathComponent containsString:@".ckq-"] || [entry.lastPathComponent containsString:@".ckr-"]) continue;
             NSString *relative=base.length ? [base stringByAppendingPathComponent:entry.lastPathComponent] : entry.lastPathComponent;
             if (!axs_cachekeeper_hidden_directory(relative)) [paths addObject:relative];
         }

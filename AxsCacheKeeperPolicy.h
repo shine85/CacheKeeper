@@ -47,7 +47,7 @@ static inline BOOL axs_cachekeeper_data_marker(NSString *name) {
         [stem rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet.invertedSet].location==NSNotFound;
 }
 static inline NSArray<NSString *> *axs_cachekeeper_cache_roots(void) {
-    return @[@"Library/Caches", @"tmp", @"Library/Logs", @"Caches", @"Cache", @"cache", @".cache"];
+    return @[@"Library/Caches", @"tmp", @"Caches", @"Cache", @"cache", @".cache"];
 }
 // 扫描可展示所有一级数据目录；允许删除的根只来自这里，不能由目录名字含 cache 推断。
 static inline BOOL axs_cachekeeper_cache_path(NSString *path) {
@@ -77,7 +77,7 @@ static inline NSString *axs_cachekeeper_directory_kind(NSString *path) {
     if ([path hasPrefix:@"Group/"]) return @"shared";
     if (axs_cachekeeper_cache_path(path)) return @"cache";
     NSString *inner=axs_cachekeeper_inner_path(path);
-    for (NSString *root in @[@"Library/Application Support",@"Library/HTTPStorages",@"Library/SplashBoard",@"Library/Saved Application State"]) {
+    for (NSString *root in @[@"Library/Application Support",@"Library/HTTPStorages",@"Library/SplashBoard",@"Library/Saved Application State",@"Library/Logs"]) {
         if ([inner isEqual:root] || [inner hasPrefix:[root stringByAppendingString:@"/"]]) return @"mixed";
     }
     return @"unknown";
@@ -87,14 +87,14 @@ static inline NSString *axs_cachekeeper_directory_description(NSString *path) {
     NSDictionary *descriptions=@{
         @"tmp":@"临时工作文件、导入导出与下载中转；仅识别出的媒体缓存可清理",
         @"Library/Caches":@"可重建缓存；普通媒体可清理，数据库与未知内容保留",
-        @"Library/Logs":@"日志与诊断；日志、数据库 WAL 和未知内容保留",
+        @"Library/Logs":@"平台约定：日志与诊断，也可能含数据库 WAL；当前不提供清理开关，可深度检测",
         @"Library/Application Support":@"混合用途：业务数据、数据库、离线资源或缓存；未逐项验证可删性",
         @"Library/HTTPStorages":@"混合用途：网络持久化数据与会话状态；未验证可删性",
         @"Library/WebKit":@"网页缓存、网站数据库与登录态；仅查看",
         @"Library/Cookies":@"Cookie 与登录会话；仅查看",
         @"Library/Preferences":@"APP 设置与偏好；仅查看",
-        @"Library/SplashBoard":@"启动与切换画面快照；仅查看",
-        @"Library/Saved Application State":@"界面恢复与运行状态；仅查看",
+        @"Library/SplashBoard":@"平台约定：可再生的启动与切换画面快照；未实测可删性",
+        @"Library/Saved Application State":@"平台约定：界面恢复状态；未实测可删性",
         @"Documents":@"用户文稿、聊天附件和离线文件；仅查看",
         @"Downloads":@"用户下载与离线文件；仅查看",
         @"Inbox":@"导入或共享接收的用户文件；仅查看"
@@ -192,22 +192,17 @@ static inline BOOL axs_cachekeeper_should_prevent(id state) {
 static inline BOOL axs_cachekeeper_auto_discover(id state) {
     return [state isKindOfClass:NSDictionary.class] && [state[@"autoDiscover"] isKindOfClass:NSNumber.class] && [state[@"autoDiscover"] boolValue];
 }
-// 只有主容器内的未知/混合目录走证据通道；共享、受保护与白名单目录不抽检、不隔离、不接受用户判定。
-static inline BOOL axs_cachekeeper_probe_eligible(NSString *path) {
-    if (!axs_cachekeeper_relative_path(path) || [path hasPrefix:@"Group/"]) return NO;
-    if (axs_cachekeeper_protected_path(path) || axs_cachekeeper_cache_path(path)) return NO;
-    NSString *kind = axs_cachekeeper_directory_kind(path);
-    return [kind isEqual:@"unknown"] || [kind isEqual:@"mixed"];
+// 标准缓存全量清理（按 APP 开关，默认关闭）：开启后该 APP 的平台缓存契约目录在完全退出后清空全部文件。
+// 一键开启与模式切换不写此键，只能由用户在详情页逐个 APP 打开。
+static inline BOOL axs_cachekeeper_full_clear(id state) {
+    return [state isKindOfClass:NSDictionary.class] && [state[@"fullClear"] isKindOfClass:NSNumber.class] && [state[@"fullClear"] boolValue];
 }
-static inline NSArray<NSString *> *axs_cachekeeper_valid_exclusions(NSArray *paths) {
-    // 排除名单除白名单外还须保留证据通道目录，否则对定级/判定目录的关闭会在状态回写时丢失。
-    NSMutableArray *result = [NSMutableArray new];
-    if ([paths isKindOfClass:NSArray.class]) for (id path in paths)
-        if ([path isKindOfClass:NSString.class] && (axs_cachekeeper_cache_path(path) || axs_cachekeeper_probe_eligible(path))) [result addObject:path];
-    return axs_cachekeeper_parent_paths(result);
+// 全量清理只作用于 kind=cache 的白名单缓存根；Library/Logs 自 0.7.0 起归混合类（可能含数据库 WAL），不在此列。
+static inline BOOL axs_cachekeeper_full_clear_path(id state, NSString *path) {
+    return axs_cachekeeper_full_clear(state) && [axs_cachekeeper_directory_kind(path) isEqual:@"cache"];
 }
 static inline NSArray<NSString *> *axs_cachekeeper_exclusions(id state) {
-    return [state isKindOfClass:NSDictionary.class] ? axs_cachekeeper_valid_exclusions(state[@"excludedPaths"]) : @[];
+    return [state isKindOfClass:NSDictionary.class] ? axs_cachekeeper_cache_paths(state[@"excludedPaths"]) : @[];
 }
 static inline BOOL axs_cachekeeper_paths_overlap(NSString *left, NSString *right) {
     return [left isEqual:right] || [left hasPrefix:[right stringByAppendingString:@"/"]] ||
@@ -225,16 +220,10 @@ static inline NSArray<NSString *> *axs_cachekeeper_effective_paths(NSArray *sele
     }
     return axs_cachekeeper_cache_paths(paths);
 }
-static inline NSArray<NSString *> *axs_cachekeeper_judged_paths(id state) {
-    NSMutableArray *result = [NSMutableArray new];
-    if ([state isKindOfClass:NSDictionary.class] && [state[@"judgedPaths"] isKindOfClass:NSArray.class])
-        for (id path in state[@"judgedPaths"]) if (axs_cachekeeper_probe_eligible(path)) [result addObject:path];
-    return result;
-}
 static inline NSMutableDictionary *axs_cachekeeper_app_state(id previous, BOOL enabled) {
     return [@{@"enabled":@(enabled), @"mode":axs_cachekeeper_mode(previous), @"urlCache":@(axs_cachekeeper_url_cache_enabled(previous)),
-        @"autoDiscover":@(axs_cachekeeper_auto_discover(previous)), @"excludedPaths":axs_cachekeeper_exclusions(previous),
-        @"judgedPaths":axs_cachekeeper_judged_paths(previous)} mutableCopy];
+        @"autoDiscover":@(axs_cachekeeper_auto_discover(previous)), @"fullClear":@(axs_cachekeeper_full_clear(previous)),
+        @"excludedPaths":axs_cachekeeper_exclusions(previous)} mutableCopy];
 }
 static inline NSArray *axs_cachekeeper_activation_paths(id previous) {
     return axs_cachekeeper_cache_paths(previous);
@@ -262,115 +251,13 @@ static inline NSString *axs_cachekeeper_summary(NSDictionary *scan, NSDictionary
     }
     return parts.count ? [parts componentsJoinedByString:@"\n"] : @"尚未检测；检测后开启 APP 缓存控制";
 }
-
-// 证据分级：抽检结论只来自文件计数，不凭目录名推断。data=检出数据标记或数据库头；
-// cachelike=全量核查且全部文件均为可识别媒体、无数据标记；其余情况不下结论。
-static inline NSString *axs_cachekeeper_evidence_grade(NSDictionary *evidence) {
-    if (![evidence isKindOfClass:NSDictionary.class]) return @"";
-    if ([evidence[@"data"] unsignedIntegerValue] > 0) return @"data";
-    NSUInteger files = [evidence[@"files"] unsignedIntegerValue];
-    NSUInteger media = [evidence[@"media"] unsignedIntegerValue];
-    NSUInteger other = [evidence[@"other"] unsignedIntegerValue];
-    NSUInteger unchecked = [evidence[@"unchecked"] unsignedIntegerValue];
-    if ([evidence[@"complete"] boolValue] && files > 0 && media == files && other == 0 && unchecked == 0) return @"cachelike";
-    return @"";
-}
-static inline NSSet<NSString *> *axs_cachekeeper_cachelike_paths(NSArray *rows) {
-    NSMutableSet *result = [NSMutableSet new];
-    if ([rows isKindOfClass:NSArray.class]) for (id row in rows) {
-        if (![row isKindOfClass:NSDictionary.class]) continue;
-        NSString *path = row[@"path"];
-        if (axs_cachekeeper_probe_eligible(path) && [axs_cachekeeper_evidence_grade(row[@"evidence"]) isEqual:@"cachelike"])
-            [result addObject:path];
-    }
-    return result;
-}
-// 证据通道可开启集合：抽检定级为缓存特征的目录 + 用户看过深度档案后明确判定的目录。
-static inline NSSet<NSString *> *axs_cachekeeper_extra_selectable(NSArray *rows, id state) {
-    NSMutableSet *result = [axs_cachekeeper_cachelike_paths(rows) mutableCopy];
-    [result addObjectsFromArray:axs_cachekeeper_judged_paths(state)];
-    return result;
-}
-static inline NSArray<NSString *> *axs_cachekeeper_effective_paths_tiered(NSArray *selected, id state, NSArray *discovered, NSSet *extra) {
-    NSMutableArray *paths = [axs_cachekeeper_effective_paths(selected, state, discovered) mutableCopy];
-    if (!axs_cachekeeper_app_enabled(state) || ![selected isKindOfClass:NSArray.class]) return axs_cachekeeper_parent_paths(paths);
-    NSArray *excluded = axs_cachekeeper_exclusions(state);
-    for (id path in selected) {
-        if (![path isKindOfClass:NSString.class] || ![extra containsObject:path]) continue;
-        BOOL blocked = NO;
-        for (NSString *ex in excluded) if (axs_cachekeeper_paths_overlap(path, ex)) { blocked = YES; break; }
-        if (!blocked) [paths addObject:path];
-    }
-    return axs_cachekeeper_parent_paths(paths);
-}
-static inline NSArray<NSString *> *axs_cachekeeper_selected_paths_tiered(NSDictionary *directories, NSDictionary *states, NSString *bundle, NSArray *rows) {
-    if (!axs_cachekeeper_bundle_id(bundle) || ![directories isKindOfClass:NSDictionary.class]) return @[];
-    if (states && ![states isKindOfClass:NSDictionary.class]) return @[];
-    if (!axs_cachekeeper_app_enabled(states[bundle])) return @[];
-    return axs_cachekeeper_effective_paths_tiered(directories[bundle], states[bundle], @[], axs_cachekeeper_extra_selectable(rows, states[bundle]));
-}
-static inline BOOL axs_cachekeeper_can_clean_tiered(NSDictionary *directories, NSDictionary *states, NSString *bundle, NSArray *rows) {
-    return axs_cachekeeper_bundle_id(bundle) && [states isKindOfClass:NSDictionary.class] &&
-        axs_cachekeeper_app_enabled(states[bundle]) && axs_cachekeeper_wants_cleanup(states[bundle]) &&
-        (axs_cachekeeper_selected_paths_tiered(directories, states, bundle, rows).count > 0 || axs_cachekeeper_auto_discover(states[bundle]));
-}
-static inline NSString *axs_cachekeeper_evidence_summary(NSDictionary *evidence) {
-    if (![evidence isKindOfClass:NSDictionary.class]) return @"尚未抽检内容；点按目录可查看处置选项";
-    NSUInteger files = [evidence[@"files"] unsignedIntegerValue];
-    NSUInteger media = [evidence[@"media"] unsignedIntegerValue];
-    NSUInteger data = [evidence[@"data"] unsignedIntegerValue];
-    NSUInteger other = [evidence[@"other"] unsignedIntegerValue];
-    NSUInteger unchecked = [evidence[@"unchecked"] unsignedIntegerValue];
-    NSString *scope = [evidence[@"complete"] boolValue] ? @"全量" : @"部分";
-    NSString *grade = axs_cachekeeper_evidence_grade(evidence);
-    if ([grade isEqual:@"data"]) return [NSString stringWithFormat:@"抽检（%@ %lu 个文件）：检出 %lu 个数据文件，仅查看", scope, (unsigned long)files, (unsigned long)data];
-    if ([grade isEqual:@"cachelike"]) return [NSString stringWithFormat:@"抽检（全量 %lu 个文件）：均为可识别媒体，无数据标记", (unsigned long)files];
-    if (!files) return @"抽检：目录为空或没有可读文件";
-    return [NSString stringWithFormat:@"抽检（%@ %lu 个文件）：媒体 %lu · 数据 %lu · 未识别 %lu · 未查 %lu", scope, (unsigned long)files, (unsigned long)media, (unsigned long)data, (unsigned long)other, (unsigned long)unchecked];
-}
-// 纵向旁证：generations 为最新在前的 {rows, updated} 列表；只描述大小序列，不参与定性。
-static inline NSString *axs_cachekeeper_trend_label(NSArray *generations, NSString *path) {
-    if (![generations isKindOfClass:NSArray.class] || generations.count < 3) return nil;
-    NSMutableArray *sizes = [NSMutableArray new];
-    NSDate *newest = nil, *oldest = nil;
-    for (id generation in generations) {
-        if (![generation isKindOfClass:NSDictionary.class]) continue;
-        BOOL found = NO; unsigned long long bytes = 0;
-        if ([generation[@"rows"] isKindOfClass:NSArray.class]) for (id row in generation[@"rows"])
-            if ([row isKindOfClass:NSDictionary.class] && [row[@"path"] isEqual:path]) { bytes = [row[@"bytes"] unsignedLongLongValue]; found = YES; break; }
-        if (!found) return nil;
-        [sizes addObject:@(bytes)];
-        NSDate *date = generation[@"updated"];
-        if ([date isKindOfClass:NSDate.class]) { if (!newest) newest = date; oldest = date; }
-    }
-    if (sizes.count < 3 || !newest || !oldest) return nil;
-    BOOL same = YES, growing = [sizes.firstObject unsignedLongLongValue] > [sizes.lastObject unsignedLongLongValue];
-    for (NSUInteger i = 1; i < sizes.count; i++) {
-        if (![sizes[i] isEqual:sizes[0]]) same = NO;
-        if ([sizes[i] unsignedLongLongValue] > [sizes[i - 1] unsignedLongLongValue]) growing = NO;
-    }
-    if (same && [newest timeIntervalSinceDate:oldest] >= 7 * 86400) return @"多次检测大小无变化";
-    if (growing && !same) return @"近几次检测持续增长";
-    return nil;
-}
-static inline NSDictionary *axs_cachekeeper_quarantine_entry(NSDictionary *quarantine, NSString *bundle, NSString *path) {
-    if (![quarantine[bundle] isKindOfClass:NSDictionary.class]) return nil;
-    NSDictionary *entry = quarantine[bundle][path];
-    return [entry isKindOfClass:NSDictionary.class] ? entry : nil;
-}
-static inline BOOL axs_cachekeeper_quarantine_active(NSDictionary *quarantine, NSString *bundle, NSString *path) {
-    NSDictionary *entry = axs_cachekeeper_quarantine_entry(quarantine, bundle, path);
-    return [entry[@"status"] isEqual:@"active"] && [entry[@"holding"] isKindOfClass:NSString.class] && [entry[@"holding"] length];
-}
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 NSDictionary *axs_cachekeeper_restore_paths(NSArray *paths, NSString *journal);
 void axs_cachekeeper_request_cleanup(NSString *bundle);
 void CKScanRequests(void);
-void CKDeepRequests(void);
-void CKQuarantineRequests(void);
+void CKInspectRequests(void);
 void CKApplyDirectorySwitches(void);
 #ifdef __cplusplus
 }

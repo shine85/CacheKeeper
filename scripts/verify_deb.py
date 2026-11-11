@@ -1,6 +1,7 @@
 """检查真实 deb 的身份及关键文件，并生成可下载的校验信息。"""
 import hashlib
 import pathlib
+import plistlib
 import subprocess
 import sys
 import tarfile
@@ -26,6 +27,15 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
     archive.seek(0)
     with tarfile.open(fileobj=archive) as tar:
         names = [item.name.removeprefix('./') for item in tar]
+        infos = [item for item in tar.getmembers() if item.name.endswith('/CacheKeeperPrefs.bundle/Info.plist')]
+        if len(infos) != 1:
+            raise SystemExit('Missing or duplicate preference bundle metadata')
+        info = plistlib.load(tar.extractfile(infos[0]))
+        version = field('Version')
+        base, _, build = version.partition('-')
+        if (info.get('CacheKeeperPackageVersion') != version or
+                info.get('CFBundleShortVersionString') != base or info.get('CFBundleVersion') != (build or base)):
+            raise SystemExit('Preference bundle and Debian package versions disagree')
 
 required = [
     'Library/MobileSubstrate/DynamicLibraries/CacheKeeper.dylib',

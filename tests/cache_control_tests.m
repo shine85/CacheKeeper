@@ -7,6 +7,8 @@
 #import "../AxsCacheKeeperDirectories.h"
 #import "../AxsCacheKeeperSelection.h"
 #import "../AxsCacheKeeperFilza.h"
+#import "../AxsCacheKeeperProcess.h"
+#import "../AxsCacheKeeperInspection.h"
 #import <objc/runtime.h>
 
 static void require(BOOL condition, NSString *message) {
@@ -24,6 +26,20 @@ static void writeMedia(NSString *path) {
 @property(nonatomic,copy) NSDictionary *frontBoardOptions;
 @end
 @implementation AxsTestOpenConfiguration
+@end
+@interface AxsTestProcess : NSObject
+@property(nonatomic,copy) NSString *bundleIdentifier;
+@property(nonatomic) BOOL running;
+- (BOOL)isRunning;
+@end
+@implementation AxsTestProcess
+- (BOOL)isRunning { return self.running; }
+@end
+@interface AxsTestProcessManager : NSObject
+@property(nonatomic,strong) id allApplicationProcesses;
+@property(nonatomic,strong) AxsTestProcess *systemApplicationProcess;
+@end
+@implementation AxsTestProcessManager
 @end
 @interface AxsTestWorkspace : NSObject
 @property(nonatomic,copy) NSString *expectedPath;
@@ -45,6 +61,18 @@ int main(int argc, const char *argv[]) {
         require(![fm fileExistsAtPath:fixture], @"测试目录必须是新目录");
         require([fm createDirectoryAtPath:fixture withIntermediateDirectories:YES attributes:nil error:nil], @"创建测试目录");
         NSString *bundle = @"test.cache.app";
+        NSString *reason=nil;
+        require(axs_cachekeeper_process_state(nil,bundle,&reason)==AxsCacheKeeperProcessUnknown && reason.length, @"缺少进程接口不能判断已退出");
+        AxsTestProcessManager *manager=[AxsTestProcessManager new];manager.allApplicationProcesses=@[];
+        require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessUnknown, @"系统未就绪时空进程列表不能放行");
+        AxsTestProcess *system=[AxsTestProcess new];system.running=YES;manager.systemApplicationProcess=system;
+        require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessStopped, @"完整进程清单中不存在 APP 时可确认退出");
+        manager.allApplicationProcesses=nil;
+        require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessUnknown, @"nil 清单不能模拟空数组成功");
+        AxsTestProcess *application=[AxsTestProcess new];application.bundleIdentifier=bundle;manager.allApplicationProcesses=@[application];
+        require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessRunning, @"保留启动或退出中的进程记录，不依赖瞬时 isRunning");
+        manager.allApplicationProcesses=@[[NSObject new]];
+        require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessUnknown, @"不完整的进程记录不得授权删除");
         NSDictionary *selection = @{bundle:@[@"Library/Caches/a", @"Library/Caches", @"Library/Caches/a",
             @"Library/Application Support", @"Library/Caches/../Preferences", @"Library/CachesOther"]};
         require([axs_cachekeeper_selected_paths(selection, @{bundle:@YES}, bundle) isEqual:@[@"Library/Caches"]], @"过滤保护目录并去掉父子重复选择");
@@ -67,6 +95,20 @@ int main(int argc, const char *argv[]) {
         require(!axs_cachekeeper_wants_restriction(@{@"enabled":@YES,@"restrict":@NO}), @"独立限写开关");
         require([axs_cachekeeper_app_state(@{@"enabled":@YES,@"restrict":@NO}, NO)[@"mode"] isEqual:@"clean"], @"总开关修改保留模式并兼容旧配置");
         require(!axs_cachekeeper_wants_cleanup(@{@"mode":@"prevent"}), @"只禁止不能删除文件");
+        require(!axs_cachekeeper_full_clear(nil) && !axs_cachekeeper_full_clear(@{}) &&
+            !axs_cachekeeper_full_clear(@{@"fullClear":@"yes"}) &&
+            axs_cachekeeper_full_clear(@{@"fullClear":@YES}) && !axs_cachekeeper_full_clear(@{@"fullClear":@NO}), @"全量清理默认关闭且只认明确的布尔真值");
+        require(!axs_cachekeeper_full_clear(axs_cachekeeper_app_state(nil,YES)), @"新 APP 经状态构建后全量清理仍默认关闭");
+        require(axs_cachekeeper_full_clear(axs_cachekeeper_app_state(@{@"enabled":@YES,@"fullClear":@YES},NO)), @"总开关与模式保存必须保留已开启的全量清理");
+        require(!axs_cachekeeper_full_clear(axs_cachekeeper_app_state(@{@"enabled":@YES},YES)), @"状态构建不能凭空打开全量清理");
+        NSDictionary *fullOn=@{@"enabled":@YES,@"fullClear":@YES};
+        require(axs_cachekeeper_full_clear_path(fullOn,@"Library/Caches") && axs_cachekeeper_full_clear_path(fullOn,@"tmp") &&
+            axs_cachekeeper_full_clear_path(fullOn,@"Caches"), @"全量清理覆盖平台缓存契约根");
+        require(!axs_cachekeeper_full_clear_path(fullOn,@"Library/Logs") &&
+            !axs_cachekeeper_full_clear_path(fullOn,@"Library/Application Support") &&
+            !axs_cachekeeper_full_clear_path(fullOn,@"Group/com.example/Library/Caches") &&
+            !axs_cachekeeper_full_clear_path(fullOn,@"Documents") &&
+            !axs_cachekeeper_full_clear_path(@{@"enabled":@YES},@"Library/Caches"), @"全量清理不越出缓存根：Logs 已归混合类、共享与受保护目录除外、未开开关不生效");
         require([axs_cachekeeper_parent_paths(@[@"tmp/a/b",@"tmp",@"tmp/a",@"Library/Caches/video",@"Library/Caches"]) isEqual:@[@"Library/Caches",@"tmp"]], @"父目录优先忽略所有后代");
         for (NSString *protectedPath in @[@"tmp/login/avatar.jpg",@"tmp/WebKit/cache.tmp",@"Library/Caches/Cache.db",@"Library/Caches/Cookies/file.tmp",@"Library/Preferences"]) {
             require(!axs_cachekeeper_cache_path(protectedPath), @"受保护目录不可纳入清理");
@@ -110,6 +152,9 @@ int main(int argc, const char *argv[]) {
         require([sorted[0][@"path"] isEqual:@"tmp"] && [sorted[1][@"path"] isEqual:@"Library/Caches"], @"已开启置顶，同组按大小排序");
         NSArray *sortedAuto=axs_cachekeeper_prioritized_rows(sorted,@[],@{@"enabled":@YES,@"autoDiscover":@YES,@"excludedPaths":@[@"Library/Caches"]});
         require([sortedAuto.lastObject[@"path"] isEqual:@"Library/Caches"], @"自动纳入与排除使用同一开启排序依据");
+        NSArray *offSorted=axs_cachekeeper_prioritized_rows(sorted,@[@"tmp"],@{@"enabled":@NO,@"autoDiscover":@YES});
+        require([offSorted.firstObject[@"path"] isEqual:@"Library/Caches"] && !axs_cachekeeper_effective_paths(@[@"tmp"],@{@"enabled":@NO,@"autoDiscover":@YES},@[@"Library/Caches"]).count, @"关闭 APP 时，残留选择和自动发现都不能点亮开关或置顶");
+        require(!axs_cachekeeper_cache_path(@"Library/Logs") && [axs_cachekeeper_directory_kind(@"Library/Logs") isEqual:@"mixed"], @"日志不提供不能实际清理的开关");
         require([axs_cachekeeper_directory_description(@"Library/Application Support") containsString:@"业务数据"] &&
             !axs_cachekeeper_cache_path(@"Library/Application Support"), @"业务数据明确标注且不可自动清理");
         NSArray *largeFirst=axs_cachekeeper_size_ordered_rows(@[@{@"path":@"tmp",@"bytes":@1},@{@"path":@"Documents",@"bytes":@500},@{@"path":@"tmp/child",@"bytes":@999}]);
@@ -167,7 +212,7 @@ int main(int argc, const char *argv[]) {
         require(!delivered && openError, @"目标 API 不存在时明确失败，不模拟打开成功");
         NSDictionary *automaticState=savedStates[bundle];
         NSArray *discovered=@[@"Library/Caches",@"tmp",@"Library/Logs",@"Library/Application Support",@"Group/group.example/Library/Caches"];
-        require([axs_cachekeeper_effective_paths(@[@"tmp"],automaticState,discovered) isEqual:@[@"Library/Caches",@"Library/Logs",@"tmp"]], @"自动发现只纳入标准缓存根并按父目录去重");
+        require([axs_cachekeeper_effective_paths(@[@"tmp"],automaticState,discovered) isEqual:@[@"Library/Caches",@"tmp"]], @"自动发现只纳入有清理支持的缓存根并按父目录去重");
         require(!axs_cachekeeper_update_selection(preferences,bundle,@[@"Library/Caches"],NO), @"直接取消父目录");
         require([([NSDictionary dictionaryWithContentsOfFile:directoriesPath][bundle]) isEqual:@[@"tmp"]], @"取消不影响其他已选目录");
         NSDictionary *afterExclusion=[NSDictionary dictionaryWithContentsOfFile:statesPath][bundle];
@@ -237,6 +282,28 @@ int main(int argc, const char *argv[]) {
         require([fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"business.sqlite"]] &&
             [fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"paired.png"]] &&
             [fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"assets/attachment.png"]] && [fm fileExistsAtPath:disguised], @"数据库目录及配套媒体、后代整体保留，其他独立目录仍可清理");
+        NSString *fullRoot=[fixture stringByAppendingPathComponent:@"full-cache"];
+        require([fm createDirectoryAtPath:[fullRoot stringByAppendingPathComponent:@"store"] withIntermediateDirectories:YES attributes:nil error:nil], @"全量清理夹具");
+        writeMedia([fullRoot stringByAppendingPathComponent:@"clip.mp4"]);
+        writeFile([fullRoot stringByAppendingPathComponent:@"blob.bin"]);
+        require([@"SQLite format 3\0payload" writeToFile:[fullRoot stringByAppendingPathComponent:@"state.sqlite"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"全量清理数据库夹具");
+        writeFile([fullRoot stringByAppendingPathComponent:@"store/inner.sqlite"]);
+        writeMedia([fullRoot stringByAppendingPathComponent:@"store/poster.png"]);
+        AxsCacheKeeperSweep *mediaOnly=[[AxsCacheKeeperSweep alloc] initWithRoot:fullRoot clock:^NSTimeInterval{return future;}];
+        for (NSUInteger pass=0;!mediaOnly.complete && pass<100;pass++) [mediaOnly advance:64 shouldContinue:^BOOL{return YES;}];
+        require(mediaOnly.complete && mediaOnly.removed==0 &&
+            [fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"clip.mp4"]] &&
+            [fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"state.sqlite"]], @"对照：根目录含数据库时普通模式整根保留");
+        AxsCacheKeeperSweep *fullSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:fullRoot clock:^NSTimeInterval{return future;} fullClear:YES];
+        for (NSUInteger pass=0;!fullSweep.complete && pass<100;pass++) [fullSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(fullSweep.complete && fullSweep.failed==0 && fullSweep.removed==5,
+            [NSString stringWithFormat:@"全量清理删除根内全部普通文件（removed=%lu failed=%lu）",(unsigned long)fullSweep.removed,(unsigned long)fullSweep.failed]);
+        require(![fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"clip.mp4"]] &&
+            ![fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"blob.bin"]] &&
+            ![fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"state.sqlite"]] &&
+            ![fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"store/inner.sqlite"]] &&
+            ![fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"store/poster.png"]] &&
+            [fm fileExistsAtPath:fullRoot] && [fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"store"]], @"全量清理后文件清空、目录本身保留");
         NSString *lateDir=[fixture stringByAppendingPathComponent:@"late-database"];
         require([fm createDirectoryAtPath:lateDir withIntermediateDirectories:YES attributes:nil error:nil], @"延迟发现数据库夹具");
         writeMedia([lateDir stringByAppendingPathComponent:@"a.png"]);
@@ -284,6 +351,34 @@ int main(int argc, const char *argv[]) {
         NSDictionary *rejected = axs_cachekeeper_restore_paths(@[cache], journal);
         require([rejected[@"failed"] unsignedIntegerValue] > 0 && !lstat(cache.fileSystemRepresentation, &info) && (info.st_mode & 0777) == 0770, @"损坏记录不能改变目录权限");
 
+        NSString *inspectionRoot=[fixture stringByAppendingPathComponent:@"inspection"];
+        require([fm createDirectoryAtPath:inspectionRoot withIntermediateDirectories:YES attributes:nil error:nil], @"建立深度检测目录");
+        for (NSUInteger i=0;i<600;i++) writeMedia([inspectionRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"%lu.bin",(unsigned long)i]]);
+        writeFile([inspectionRoot stringByAppendingPathComponent:@"ordinary.txt"]);
+        require([[@"{\"example\":true}" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:[inspectionRoot stringByAppendingPathComponent:@"data.json"] atomically:YES], @"JSON 检测夹具");
+        const unsigned char zip[]={0x50,0x4b,3,4,0};
+        require([[NSData dataWithBytes:zip length:sizeof(zip)] writeToFile:[inspectionRoot stringByAppendingPathComponent:@"archive"] atomically:YES], @"压缩格式夹具");
+        require(!symlink(inspectionRoot.fileSystemRepresentation,[[inspectionRoot stringByAppendingPathComponent:@"loop"] fileSystemRepresentation]), @"检测链接环夹具");
+        AxsCacheKeeperInspection *inspection=[[AxsCacheKeeperInspection alloc] initWithRoot:inspectionRoot];
+        [inspection advance:32];require(!inspection.complete, @"深度检测必须可分批，不能把一批当成完成");
+        for (NSUInteger pass=0;!inspection.complete && pass<100;pass++) [inspection advance:32];
+        NSDictionary *profile=[inspection report];
+        require(inspection.complete && [profile[@"coverageComplete"] boolValue] && [profile[@"files"] unsignedIntegerValue]==603 &&
+            [profile[@"types"][@"媒体文件头"][@"count"] unsignedIntegerValue]==600, @"全量枚举超过 512 个文件并保留类型组成");
+        require([profile[@"types"][@"JSON 数据"][@"count"] unsignedIntegerValue]==1 &&
+            [profile[@"types"][@"归档或压缩文件"][@"count"] unsignedIntegerValue]==1 &&
+            [profile[@"types"][@"文本头特征（用途未定）"][@"count"] unsignedIntegerValue]==1, @"JSON、压缩和文本识别只形成证据");
+        require([profile[@"largest"] count]==10 && [profile[@"links"] unsignedIntegerValue]==1 &&
+            [fm fileExistsAtPath:[inspectionRoot stringByAppendingPathComponent:@"599.bin"]], @"档案只读，最大文件列表有界，链接不跟随");
+        NSDictionary *h1=@{@"updated":NSDate.date,@"home":@"same",@"rows":@[@{@"path":@"tmp",@"bytes":@1,@"complete":@YES}]};
+        NSDictionary *h2=@{@"updated":NSDate.date,@"home":@"same",@"rows":@[@{@"path":@"tmp",@"bytes":@2,@"complete":@YES}]};
+        NSDictionary *h3=@{@"updated":NSDate.date,@"home":@"same",@"rows":@[@{@"path":@"tmp",@"bytes":@3,@"complete":@YES}]};
+        require([axs_cachekeeper_growth_evidence(@"tmp",@[h1,h2],h3) containsString:@"持续增长"], @"连续完整快照提供增长旁证");
+        NSMutableDictionary *partial=[h2 mutableCopy];partial[@"rows"]=@[@{@"path":@"tmp",@"bytes":@2,@"complete":@NO}];
+        require([axs_cachekeeper_growth_evidence(@"tmp",@[h1,partial],h3) containsString:@"需至少"], @"不完整统计不能产生增长结论");
+        partial=[h3 mutableCopy];partial[@"recentScans"]=@[h1,h1,h1,h2,h2];
+        require(axs_cachekeeper_recent_scans(partial).count==4, @"只保留最近四次旧记录加本轮，防止快照递归膨胀");
+
         IMP originalSetter=method_getImplementation(class_getInstanceMethod(NSURLCache.class,@selector(setDiskCapacity:)));
         IMP originalInitializer=method_getImplementation(class_getInstanceMethod(NSURLCache.class,@selector(initWithMemoryCapacity:diskCapacity:diskPath:)));
         require(axs_cachekeeper_configure_network_cache(NO), @"未启用状态可直接返回");
@@ -297,62 +392,6 @@ int main(int argc, const char *argv[]) {
         require(axs_cachekeeper_configure_network_cache(NO) && network.diskCapacity==16777216, @"关闭后恢复 APP 最新请求的容量");
         network.diskCapacity=33554432;
         require(axs_cachekeeper_configure_network_cache(NO) && network.diskCapacity==33554432, @"关闭后重复刷新不得重写 APP 容量");
-        // 证据通道：抽检定级、保存校验、用户判定与纵向旁证。
-        NSDictionary *allMedia=@{@"files":@3,@"data":@0,@"media":@3,@"other":@0,@"unchecked":@0,@"complete":@YES};
-        NSDictionary *withData=@{@"files":@3,@"data":@1,@"media":@2,@"other":@0,@"unchecked":@0,@"complete":@YES};
-        NSDictionary *partial=@{@"files":@3,@"data":@0,@"media":@2,@"other":@0,@"unchecked":@1,@"complete":@YES};
-        require([axs_cachekeeper_evidence_grade(allMedia) isEqual:@"cachelike"], @"全量媒体且无数据标记才定级缓存特征");
-        require([axs_cachekeeper_evidence_grade(withData) isEqual:@"data"], @"检出数据文件优先定级为数据");
-        require([axs_cachekeeper_evidence_grade(partial) isEqual:@""], @"有未查文件时不定级");
-        require([axs_cachekeeper_evidence_grade(@{@"files":@0,@"data":@0,@"media":@0,@"other":@0,@"unchecked":@0,@"complete":@YES}) isEqual:@""], @"空目录不定级");
-        require(axs_cachekeeper_probe_eligible(@"Library/SomeSDK") && axs_cachekeeper_probe_eligible(@"Library/Application Support"), @"未知与混合目录可走证据通道");
-        require(!axs_cachekeeper_probe_eligible(@"Documents") && !axs_cachekeeper_probe_eligible(@"Library/Caches") &&
-            !axs_cachekeeper_probe_eligible(@"Group/g.example/Library/Caches") && !axs_cachekeeper_probe_eligible(@"Library/Preferences"), @"受保护、白名单与共享目录不走证据通道");
-        NSArray *gradedRows=@[@{@"path":@"Library/SomeSDK",@"evidence":allMedia},
-            @{@"path":@"Library/DataBox",@"evidence":withData},
-            @{@"path":@"Group/g.example/Library/SomeSDK",@"evidence":allMedia}];
-        require([axs_cachekeeper_cachelike_paths(gradedRows) isEqual:[NSSet setWithObject:@"Library/SomeSDK"]], @"只有主容器内全量媒体的未知目录进入缓存特征集合");
-        NSSet *extraSet=axs_cachekeeper_extra_selectable(gradedRows,@{@"judgedPaths":@[@"Library/Manual"]});
-        require([extraSet containsObject:@"Library/SomeSDK"] && [extraSet containsObject:@"Library/Manual"] && extraSet.count==2, @"证据通道集合由定级目录与用户判定目录组成");
-        NSDictionary *tieredState=@{@"enabled":@YES,@"mode":@"auto",@"judgedPaths":@[@"Library/Manual"]};
-        require([axs_cachekeeper_effective_paths_tiered(@[@"Library/SomeSDK",@"Library/DataBox",@"Documents"],tieredState,@[],extraSet) isEqual:@[@"Library/SomeSDK"]], @"分级有效路径只接受定级目录，数据与受保护目录仍拒绝");
-        require([axs_cachekeeper_effective_paths_tiered(@[@"Library/Manual"],tieredState,@[],extraSet) isEqual:@[@"Library/Manual"]], @"用户判定目录可进入有效路径");
-        NSDictionary *tieredExcluded=@{@"enabled":@YES,@"mode":@"auto",@"judgedPaths":@[@"Library/Manual"],@"excludedPaths":@[@"Library/Manual"]};
-        require(![axs_cachekeeper_effective_paths_tiered(@[@"Library/Manual"],tieredExcluded,@[],extraSet) count], @"手动排除对证据通道同样有效");
-        NSString *gradedPreferences=[fixture stringByAppendingPathComponent:@"graded-preferences"];
-        require([fm createDirectoryAtPath:gradedPreferences withIntermediateDirectories:YES attributes:nil error:nil], @"定级保存夹具目录");
-        NSString *gradedStates=[gradedPreferences stringByAppendingPathComponent:@"appEnabled.plist"];
-        NSString *gradedDirectories=[gradedPreferences stringByAppendingPathComponent:@"directories.plist"];
-        NSString *gradedSnapshots=[gradedPreferences stringByAppendingPathComponent:@"snapshots.plist"];
-        require([@{bundle:@{@"rows":gradedRows}} writeToFile:gradedSnapshots atomically:YES], @"定级保存夹具快照");
-        require([@{} writeToFile:gradedStates atomically:YES] && [@{} writeToFile:gradedDirectories atomically:YES], @"定级保存夹具配置");
-        require(!axs_cachekeeper_update_selection(gradedPreferences,bundle,@[@"Library/SomeSDK"],YES), @"抽检定级目录可单项开启");
-        require([[NSDictionary dictionaryWithContentsOfFile:gradedDirectories][bundle] isEqual:@[@"Library/SomeSDK"]], @"定级目录写入选择");
-        require(axs_cachekeeper_update_selection(gradedPreferences,bundle,@[@"Library/DataBox"],YES)!=nil, @"检出数据文件的目录不能开启");
-        require(axs_cachekeeper_update_selection(gradedPreferences,bundle,@[@"Library/Never"],YES)!=nil, @"未抽检定级的未知目录不能开启");
-        require([@{bundle:@{@"rows":@[@{@"path":@"Library/SomeSDK",@"evidence":partial}]}} writeToFile:gradedSnapshots atomically:YES], @"重新定级夹具");
-        require(!axs_cachekeeper_update_selection(gradedPreferences,bundle,@[@"Library/SomeSDK"],NO), @"目录被重新定级后仍可关闭");
-        require([@{bundle:@{@"rows":gradedRows}} writeToFile:gradedSnapshots atomically:YES], @"恢复定级夹具");
-        require(!axs_cachekeeper_save_judged(gradedPreferences,bundle,@"Library/Manual",YES), @"用户判定开启成功");
-        NSDictionary *judgedStates=[NSDictionary dictionaryWithContentsOfFile:gradedStates];
-        NSDictionary *judgedDirectories=[NSDictionary dictionaryWithContentsOfFile:gradedDirectories];
-        require([axs_cachekeeper_judged_paths(judgedStates[bundle]) isEqual:@[@"Library/Manual"]] && [judgedDirectories[bundle] containsObject:@"Library/Manual"], @"判定记录与目录选择同时落盘");
-        require([axs_cachekeeper_selected_paths_tiered(judgedDirectories,judgedStates,bundle,gradedRows) containsObject:@"Library/Manual"], @"判定目录进入分级已选路径");
-        require(axs_cachekeeper_save_judged(gradedPreferences,bundle,@"Library/DataBox",YES)!=nil, @"已检出数据文件的目录在保存层拒绝判定");
-        require(!axs_cachekeeper_save_judged(gradedPreferences,bundle,@"Library/Manual",NO), @"取消用户判定成功");
-        require(![axs_cachekeeper_judged_paths([NSDictionary dictionaryWithContentsOfFile:gradedStates][bundle]) count] &&
-            ![[NSDictionary dictionaryWithContentsOfFile:gradedDirectories][bundle] containsObject:@"Library/Manual"], @"取消判定同时撤销选择");
-        NSDate *now=NSDate.date;
-        NSArray *flatGens=@[@{@"rows":@[@{@"path":@"Library/SomeSDK",@"bytes":@100}],@"updated":now},
-            @{@"rows":@[@{@"path":@"Library/SomeSDK",@"bytes":@100}],@"updated":[now dateByAddingTimeInterval:-4*86400]},
-            @{@"rows":@[@{@"path":@"Library/SomeSDK",@"bytes":@100}],@"updated":[now dateByAddingTimeInterval:-8*86400]}];
-        require([axs_cachekeeper_trend_label(flatGens,@"Library/SomeSDK") isEqual:@"多次检测大小无变化"], @"三代同大小且跨度足够时标注无变化");
-        NSArray *growingGens=@[@{@"rows":@[@{@"path":@"Library/SomeSDK",@"bytes":@300}],@"updated":now},
-            @{@"rows":@[@{@"path":@"Library/SomeSDK",@"bytes":@200}],@"updated":[now dateByAddingTimeInterval:-86400]},
-            @{@"rows":@[@{@"path":@"Library/SomeSDK",@"bytes":@100}],@"updated":[now dateByAddingTimeInterval:-2*86400]}];
-        require([axs_cachekeeper_trend_label(growingGens,@"Library/SomeSDK") isEqual:@"近几次检测持续增长"], @"大小逐代增长时标注持续增长");
-        require(!axs_cachekeeper_trend_label(@[flatGens[0],flatGens[1]],@"Library/SomeSDK"), @"不足三代不给纵向结论");
-
         puts("PASS: configuration, modes, deduplication, age, protected files, cleanup, cancellation, permission restoration and URLCache");
     }
     return 0;

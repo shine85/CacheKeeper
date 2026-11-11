@@ -67,7 +67,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     return cell;
 }
 - (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];[self axs_cachekeeper_reload_apps];[self updateBatch];[self axs_cachekeeper_show_restore_report];
+    [super viewWillAppear:animated];[self axs_cachekeeper_reload_apps];[self updateBatch];
     if (!self.batchTimer) {
         __weak typeof(self) weak=self;
         self.batchTimer=[NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer){[weak updateBatch];}];
@@ -75,15 +75,6 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 }
 - (void)viewWillDisappear:(BOOL)animated { [super viewWillDisappear:animated];[self.batchTimer invalidate];self.batchTimer=nil; }
 - (void)dealloc { [self.batchTimer invalidate]; }
-- (void)axs_cachekeeper_show_restore_report {
-    NSString *path=jbroot(@"/var/mobile/Library/CacheKeeper/restore-report.plist");
-    NSDictionary *report=[NSDictionary dictionaryWithContentsOfFile:path];
-    if (![report isKindOfClass:NSDictionary.class] || ![report[@"failed"] unsignedIntegerValue]) return;
-    [NSFileManager.defaultManager removeItemAtPath:path error:nil];
-    UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"旧权限恢复未完成" message:[NSString stringWithFormat:@"上次恢复旧版目录权限时有 %lu 项失败（%@）。相关目录可能仍保持旧权限；重新安装或再次卸载时会重试。",(unsigned long)[report[@"failed"] unsignedIntegerValue],report[@"error"] ?: @""] preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
 - (void)axs_cachekeeper_reload_apps {
     id manager=axs_cachekeeper_app_property(NSClassFromString(@"LSApplicationWorkspace"),@"defaultWorkspace");
     NSArray *installed=axs_cachekeeper_app_property(manager,@"allInstalledApplications");

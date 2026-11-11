@@ -17,7 +17,8 @@
 @property(nonatomic, readwrite) NSUInteger recentCount;
 @property(nonatomic, readwrite) unsigned long long bytes;
 @property(nonatomic, readwrite, copy) NSString *error;
-@property(nonatomic, copy) NSString *root;
+@property(nonatomic, readwrite, copy) NSString *root;
+@property(nonatomic, readwrite) BOOL fullClear;
 @property(nonatomic) dev_t device;
 @property(nonatomic) ino_t inode;
 @property(nonatomic, strong) NSDirectoryEnumerator *entries;
@@ -33,11 +34,18 @@
 
 @implementation AxsCacheKeeperSweep
 - (instancetype)initWithRoot:(NSString *)root {
-    return [self initWithRoot:root clock:^NSTimeInterval { return NSDate.date.timeIntervalSince1970; }];
+    return [self initWithRoot:root clock:^NSTimeInterval { return NSDate.date.timeIntervalSince1970; } fullClear:NO];
 }
 - (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock {
+    return [self initWithRoot:root clock:clock fullClear:NO];
+}
+- (instancetype)initWithRoot:(NSString *)root fullClear:(BOOL)fullClear {
+    return [self initWithRoot:root clock:^NSTimeInterval { return NSDate.date.timeIntervalSince1970; } fullClear:fullClear];
+}
+- (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock fullClear:(BOOL)fullClear {
     if (!(self = [super init])) return nil;
     _root = [root copy];
+    _fullClear = fullClear;
     _clock = [clock copy];
     struct stat info;
     if (![root isEqual:[NSURL fileURLWithPath:root].URLByResolvingSymlinksInPath.path] ||
@@ -78,7 +86,8 @@
 - (void)axs_cachekeeper_inspect:(NSURL *)entry info:(struct stat)info {
     if (S_ISDIR(info.st_mode)) {
         self.directorySnapshots[entry.path]=[self axs_cachekeeper_snapshot:info];
-        if (axs_cachekeeper_data_marker(entry.lastPathComponent)) {
+        // 全量清理不按名字/文件头把子目录判为数据目录，但仍记录快照供删除前核对变化。
+        if (!self.fullClear && axs_cachekeeper_data_marker(entry.lastPathComponent)) {
             [self.dataDirectories addObject:entry.path];[self.entries skipDescendants];
         }
         return;
@@ -87,6 +96,7 @@
     NSString *parent=entry.URLByDeletingLastPathComponent.path;
     if (!self.fileSnapshots[parent]) self.fileSnapshots[parent]=[NSMutableDictionary new];
     self.fileSnapshots[parent][entry.lastPathComponent]=[self axs_cachekeeper_snapshot:info];
+    if (self.fullClear) return;
     if (axs_cachekeeper_data_marker(entry.lastPathComponent)) { [self.dataDirectories addObject:parent]; return; }
     int directory=axs_cachekeeper_open_directory(parent);
     int file=directory>=0 ? openat(directory,entry.lastPathComponent.fileSystemRepresentation,O_RDONLY|O_NOFOLLOW|O_NONBLOCK) : -1;
@@ -155,16 +165,21 @@
     if (file >= 0 && !fstat(file, &current) && S_ISREG(current.st_mode) && current.st_nlink == 1 &&
         current.st_ino == expected.st_ino && current.st_dev == expected.st_dev &&
         axs_cachekeeper_old_enough(current, self.clock())) {
-        unsigned char signature[32] = {0};
-        ssize_t readCount = pread(file, signature, sizeof(signature), 0);
-        BOOL database = readCount >= 15 && !memcmp(signature, "SQLite format 3", 15);
-        BOOL propertyList = readCount >= 6 && !memcmp(signature, "bplist", 6);
-        if (readCount < 0) { self.error = @"无法核对文件内容，保留文件"; }
-        else if (database || propertyList || !axs_cachekeeper_media_signature(signature, (size_t)readCount)) {
-            if (database || propertyList) [self.dataDirectories addObject:parent];
-            self.protectedCount++; errno = EBUSY;
+        // 全量清理只核对文件身份与年龄，不按内容分类；其余模式保持媒体签名与数据库门槛。
+        BOOL contentOK = self.fullClear;
+        if (!contentOK) {
+            unsigned char signature[32] = {0};
+            ssize_t readCount = pread(file, signature, sizeof(signature), 0);
+            BOOL database = readCount >= 15 && !memcmp(signature, "SQLite format 3", 15);
+            BOOL propertyList = readCount >= 6 && !memcmp(signature, "bplist", 6);
+            if (readCount < 0) { self.error = @"无法核对文件内容，保留文件"; }
+            else if (database || propertyList || !axs_cachekeeper_media_signature(signature, (size_t)readCount)) {
+                if (database || propertyList) [self.dataDirectories addObject:parent];
+                self.protectedCount++; errno = EBUSY;
+            }
+            else contentOK = YES;
         }
-        else {
+        if (contentOK) {
             struct stat final;
             if (!fstatat(fd, name, &final, AT_SYMLINK_NOFOLLOW) && final.st_ino == current.st_ino &&
                 final.st_dev == current.st_dev && axs_cachekeeper_old_enough(final, self.clock())) removed = unlinkat(fd, name, 0) == 0;
@@ -210,14 +225,15 @@
             self.protectedCount++;if (S_ISDIR(info.st_mode)) [self.entries skipDescendants];continue;
         }
         NSString *relative = [entry.path substringFromIndex:self.root.length + 1];
-        if (axs_cachekeeper_protected_path(relative)) {
+        // 全量清理的根已由策略层限定为平台缓存契约目录，根内不再按受保护名拦截；其余模式不变。
+        if (!self.fullClear && axs_cachekeeper_protected_path(relative)) {
             self.protectedCount++;
             if (S_ISDIR(info.st_mode)) [self.entries skipDescendants];
             continue;
         }
         if (S_ISDIR(info.st_mode)) continue;
         if (!S_ISREG(info.st_mode)) continue;
-        if (!axs_cachekeeper_ordinary_cache_file(relative) || info.st_nlink != 1) { self.protectedCount++; continue; }
+        if (info.st_nlink != 1 || (!self.fullClear && !axs_cachekeeper_ordinary_cache_file(relative))) { self.protectedCount++; continue; }
         if (!axs_cachekeeper_old_enough(info, self.clock())) { self.recentCount++; continue; }
         if ([self axs_cachekeeper_remove:entry expected:info]) { self.removed++; self.bytes += info.st_size; }
         else if (errno != ENOENT && errno != EBUSY) { self.failed++; self.error = [NSString stringWithFormat:@"删除失败（errno %d）", errno]; }

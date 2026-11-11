@@ -1,6 +1,6 @@
 Package: dev.local.cachekeeper
 Name: 缓存管家
-Version: 0.6.1
+Version: 0.7.0
 Architecture: iphoneos-arm64e
 Description: Per-app cache cleanup for iOS 16-17. RootHide device-test build.
 Maintainer: Local Developer

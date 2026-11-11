@@ -6,7 +6,7 @@ FINALPACKAGE = 1
 DEBUG = 0
 include $(THEOS)/makefiles/common.mk
 BUNDLE_NAME = CacheKeeperPrefs
-CacheKeeperPrefs_FILES = Prefs/Settings.m Prefs/ScanPage.m
+CacheKeeperPrefs_FILES = Prefs/Settings.m Prefs/ScanPage.m Prefs/InspectionPage.m
 CacheKeeperPrefs_INSTALL_PATH = /Library/PreferenceBundles
 CacheKeeperPrefs_CFLAGS = -fobjc-arc
 CacheKeeperPrefs_FRAMEWORKS = UIKit Foundation
@@ -16,7 +16,7 @@ CacheKeeperPrefs_RESOURCE_FILES = Prefs/Info.plist
 CacheKeeperPrefs_CODESIGN_FLAGS = -S -Idev.local.cachekeeper.preferences
 include $(THEOS_MAKE_PATH)/bundle.mk
 TWEAK_NAME = CacheKeeper
-CacheKeeper_FILES = Cleaner.m Desktop.xm Permissions.m Scanner.m Baseline.m AxsCacheKeeperNetworkCache.m AxsCacheKeeperDirectories.m
+CacheKeeper_FILES = Cleaner.m Desktop.xm Permissions.m Scanner.m Baseline.m AxsCacheKeeperNetworkCache.m AxsCacheKeeperDirectories.m AxsCacheKeeperInspection.m
 CacheKeeper_CFLAGS = -fobjc-arc -IVendor
 CacheKeeper_FRAMEWORKS = UIKit Foundation
 CacheKeeper_LIBRARIES = roothide sandy substrate
@@ -32,3 +32,6 @@ ckrestore_LIBRARIES =
 ckrestore_INSTALL_PATH = /usr/bin
 ckrestore_CODESIGN_FLAGS = -S -Idev.local.cachekeeper.restore
 include $(THEOS_MAKE_PATH)/tool.mk
+
+after-stage::
+	python3 scripts/sync_version.py "$(THEOS_STAGING_DIR)"
