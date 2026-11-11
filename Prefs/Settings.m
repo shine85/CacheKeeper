@@ -61,7 +61,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     NSDictionary *states=self.statesSnapshot;
     toggle.on=axs_cachekeeper_app_enabled(states[app[@"id"]]);
     if (!toggle.on) cell.detailTextLabel.text=[@"未开启缓存控制\n" stringByAppendingString:axs_cachekeeper_summary(scan,nil)];
-    else if (!axs_cachekeeper_selected_paths(directories,states,app[@"id"]).count) cell.detailTextLabel.text=@"总开关已开启；没有文件清理目录，网络缓存按独立选项执行";
+    else if (!axs_cachekeeper_selected_paths_tiered(directories,states,axs_cachekeeper_tiers_by_path(scan[@"rows"]),app[@"id"]).count) cell.detailTextLabel.text=@"总开关已开启；没有文件清理目录，网络缓存按独立选项执行";
     [toggle addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = toggle; cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     return cell;

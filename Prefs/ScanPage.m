@@ -87,7 +87,7 @@
 - (NSArray *)orderedRows {
     NSArray *rows = axs_cachekeeper_size_ordered_rows(self.rows);
     NSDictionary *config = [self axs_cachekeeper_display:@"directories.plist"];
-    NSArray *selected = axs_cachekeeper_cache_paths(config[self.bundle]);
+    NSArray *selected = axs_cachekeeper_selectable_paths(config[self.bundle], [self tiers]);
     if (!selected.count) return rows;
     NSMutableArray *enabledRows = [NSMutableArray new];
     NSMutableArray *otherRows = [NSMutableArray new];
@@ -128,14 +128,17 @@
         return [UIMenu menuWithTitle:@"" children:@[open]];
     }];
 }
+- (NSDictionary *)tiers { return axs_cachekeeper_tiers_by_path(self.rows); }
 - (NSArray *)manageableRows {
+    NSDictionary *tiers = [self tiers];
     NSMutableArray *result = [NSMutableArray new];
-    for (NSDictionary *row in [self orderedRows]) if (axs_cachekeeper_cache_path(row[@"path"])) [result addObject:row];
+    for (NSDictionary *row in [self orderedRows]) if (axs_cachekeeper_selectable_path(row[@"path"], tiers)) [result addObject:row];
     return result;
 }
 - (NSArray *)viewOnlyRows {
+    NSDictionary *tiers = [self tiers];
     NSMutableArray *result = [NSMutableArray new];
-    for (NSDictionary *row in [self orderedRows]) if (!axs_cachekeeper_cache_path(row[@"path"])) [result addObject:row];
+    for (NSDictionary *row in [self orderedRows]) if (!axs_cachekeeper_selectable_path(row[@"path"], tiers)) [result addObject:row];
     return result;
 }
 - (NSInteger)summaryRowIndex {
@@ -161,7 +164,7 @@
     return count;
 }
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
-    NSString *message=@"检测后可一键开启全部可管理目录，也可逐项开启，均直接打开此 APP 总开关，无需再次确认。仅查看目录与 Group/ 共享容器不纳入；模式和网络选项保持原选择。首次运行已有缓存也检查，不按开启时间保留；仅在 APP 完全退出且文件超过 60 秒后清理通过数据预检的媒体。已选父目录内新增文件/子目录自动覆盖，新顶级目录需重新检测选择。";
+    NSString *message=@"检测后可一键开启全部可管理目录，也可逐项开启，均直接打开此 APP 总开关，无需再次确认。仅查看目录与 Group/ 共享容器不纳入；模式和网络选项保持原选择。首次运行已有缓存也检查，不按开启时间保留；仅在 APP 完全退出且文件超过 60 秒后清理通过数据预检的媒体。已选父目录内新增文件/子目录自动覆盖，新顶级目录需重新检测选择。未知目录经内容抽检全量为媒体、无数据标记的，定为缓存特征，可逐项开启（不纳入一键开启）。";
     return self.scanError.length ? [self.scanError stringByAppendingFormat:@"\n%@",message] : message;
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
@@ -176,7 +179,7 @@
         UISwitch *toggle=[UISwitch new];
         toggle.on=axs_cachekeeper_app_enabled(states[self.bundle]);
         if (!toggle.on) cell.detailTextLabel.text=@"未开启；打开总开关、单项开启或一键开启后才生效";
-        else if (!axs_cachekeeper_selected_paths(selected,states,self.bundle).count) cell.detailTextLabel.text=@"总开关已开启；未选择文件清理目录，网络缓存按独立选项执行";
+        else if (!axs_cachekeeper_selected_paths_tiered(selected,states,[self tiers],self.bundle).count) cell.detailTextLabel.text=@"总开关已开启；未选择文件清理目录，网络缓存按独立选项执行";
         [toggle addTarget:self action:@selector(master:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=toggle;
         return cell;
     }
@@ -205,19 +208,37 @@
     NSDictionary *row = [self directoryRowAtIndexPath:path summary:&summary];
     if (summary) {
         NSArray *viewOnly = [self viewOnlyRows];
+        NSDictionary *tiers = [self tiers];
         unsigned long long bytes = 0;
-        for (NSDictionary *item in viewOnly) bytes += [item[@"bytes"] unsignedLongLongValue];
+        NSDictionary *largest = nil;
+        NSUInteger dataCount = 0, unknownCount = 0, sharedCount = 0;
+        for (NSDictionary *item in viewOnly) {
+            bytes += [item[@"bytes"] unsignedLongLongValue];
+            if (!largest || [item[@"bytes"] unsignedLongLongValue] > [largest[@"bytes"] unsignedLongLongValue]) largest = item;
+            NSString *tier = tiers[item[@"path"]];
+            if ([tier isEqual:@"data"]) dataCount++;
+            else if ([tier isEqual:@"shared"]) sharedCount++;
+            else unknownCount++;
+        }
+        NSMutableArray *parts = [NSMutableArray new];
+        if (dataCount) [parts addObject:[NSString stringWithFormat:@"数据 %lu", (unsigned long)dataCount]];
+        if (unknownCount) [parts addObject:[NSString stringWithFormat:@"未确认 %lu", (unsigned long)unknownCount]];
+        if (sharedCount) [parts addObject:[NSString stringWithFormat:@"共享 %lu", (unsigned long)sharedCount]];
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
         cell.textLabel.text = @"仅查看目录（不锁不删）";
+        cell.textLabel.font = [UIFont boldSystemFontOfSize:cell.textLabel.font.pointSize];
         cell.detailTextLabel.numberOfLines = 0;
-        cell.detailTextLabel.text = [NSString stringWithFormat:@"共 %lu 个 · 合计 %.2f MB\n含应用数据与用途未确认的目录，插件不处理；点击%@", (unsigned long)viewOnly.count, bytes / 1048576.0, self.viewOnlyExpanded ? @"收起" : @"展开"];
+        cell.detailTextLabel.text = [NSString stringWithFormat:@"共 %lu 个 · 合计 %.2f MB%@\n构成：%@；插件不处理，点击%@",
+            (unsigned long)viewOnly.count, bytes / 1048576.0,
+            largest ? [NSString stringWithFormat:@" · 最大：%@ %.2f MB", largest[@"path"], [largest[@"bytes"] doubleValue] / 1048576.0] : @"",
+            [parts componentsJoinedByString:@" · "], self.viewOnlyExpanded ? @"收起" : @"展开"];
         return cell;
     }
     if (!row) return [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
     NSString *relative = row[@"path"];
     NSDictionary *config=[self axs_cachekeeper_display:@"directories.plist"];
     BOOL enabled=NO, partial=NO;
-    for (NSString *selected in axs_cachekeeper_cache_paths(config[self.bundle])) {
+    for (NSString *selected in axs_cachekeeper_selectable_paths(config[self.bundle], [self tiers])) {
         if ([selected isEqual:relative]) enabled=YES;
         else if ([selected hasPrefix:[relative stringByAppendingString:@"/"]]) { enabled=YES;partial=YES; }
     }
@@ -228,12 +249,17 @@
     NSString *growth=compared?[NSString stringWithFormat:@" · 变化 %+.2f MB",([row[@"bytes"] longLongValue]-previous)/1048576.0]:@" · 首次检测";
     NSDictionary *master=[self axs_cachekeeper_display:@"appEnabled.plist"];
     BOOL masterOn=axs_cachekeeper_app_enabled(master[self.bundle]);
-    BOOL manageable=axs_cachekeeper_cache_path(relative);
-    NSString *viewOnlyState = [relative hasPrefix:@"Group/"] ? @"共享数据：仅查看，不锁不删" : (axs_cachekeeper_known_data_path(relative) ? @"应用数据：仅查看，不锁不删" : @"用途未确认：仅查看，不锁不删");
+    BOOL manageable=axs_cachekeeper_selectable_path(relative, [self tiers]);
+    NSString *tier=[self tiers][relative];
+    NSString *viewOnlyState = [tier isEqual:@"shared"] ? @"共享数据：仅查看，不锁不删" :
+        ([tier isEqual:@"data"] ? ((axs_cachekeeper_known_data_path(relative) || axs_cachekeeper_protected_path(relative)) ? @"应用数据：仅查看，不锁不删" : @"检出数据文件：仅查看，不锁不删") : @"用途未确认：仅查看，不锁不删");
+    NSString *detail = axs_cachekeeper_directory_description(relative);
+    if (!axs_cachekeeper_cache_path(relative) && [row[@"evidence"] isKindOfClass:NSDictionary.class])
+        detail = axs_cachekeeper_evidence_summary(relative, row[@"evidence"]);
     NSString *state=!manageable?viewOnlyState:(enabled?(!masterOn?@"已选中，等待打开 APP 总开关":(axs_cachekeeper_wants_cleanup(master[self.bundle])?@"已选中；退出后仅清理超过 60 秒的普通缓存":@"只禁止模式：不删除目录内文件")):@"未选中");
     if (partial) state=[state stringByAppendingString:@"（保留旧配置中选定的部分子目录）"];
     cell.detailTextLabel.text=[NSString stringWithFormat:@"%.2f MB%@%@\n%@\n%@\n%@",[row[@"bytes"] doubleValue]/1048576,growth,[row[@"complete"] boolValue]?@"":@" · 大小未统计完",
-        axs_cachekeeper_directory_description(relative),manageable?@"可选择清理（受文件保护规则约束）":@"仅查看（不锁不删）",state];
+        detail,manageable?@"可选择清理（受文件保护规则约束）":@"仅查看（不锁不删）",state];
     UISwitch *toggle=[UISwitch new];toggle.on=enabled && manageable;toggle.enabled=manageable && !self.timer;toggle.accessibilityIdentifier=relative;
     [toggle addTarget:self action:@selector(toggle:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=toggle;
     return cell;

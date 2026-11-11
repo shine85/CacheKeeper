@@ -184,6 +184,60 @@ static inline NSArray<NSString *> *axs_cachekeeper_selected_paths(NSDictionary *
 static inline BOOL axs_cachekeeper_can_clean(NSDictionary *directories, NSDictionary *states, NSString *bundle) {
     return axs_cachekeeper_selected_paths(directories,states,bundle).count > 0 && axs_cachekeeper_wants_cleanup(states[bundle]);
 }
+// 证据分级：名称只是先验，内容抽检才是依据；证据不足一律“未确认”，不冒充应用数据。
+// cache=白名单缓存；data=应用/检出数据；shared=共享容器；cachelike=全量抽检均为媒体、无数据标记（仅可手动开启）；unknown=未确认。
+static inline NSString *axs_cachekeeper_directory_tier(NSString *path, NSDictionary *evidence) {
+    if ([path hasPrefix:@"Group/"]) return @"shared";
+    if (!axs_cachekeeper_relative_path(path)) return @"unknown";
+    if (axs_cachekeeper_protected_path(path) || axs_cachekeeper_known_data_path(path)) return @"data";
+    if (axs_cachekeeper_cache_path(path)) return @"cache";
+    if ([evidence isKindOfClass:NSDictionary.class]) {
+        if ([evidence[@"data"] unsignedIntegerValue]) return @"data";
+        NSUInteger files = [evidence[@"files"] unsignedIntegerValue];
+        NSUInteger media = [evidence[@"media"] unsignedIntegerValue];
+        NSUInteger other = [evidence[@"other"] unsignedIntegerValue];
+        NSUInteger unchecked = [evidence[@"unchecked"] unsignedIntegerValue];
+        if ([evidence[@"complete"] boolValue] && files && !other && !unchecked && media == files) return @"cachelike";
+    }
+    return @"unknown";
+}
+static inline NSDictionary *axs_cachekeeper_tiers_by_path(NSArray *rows) {
+    NSMutableDictionary *tiers = [NSMutableDictionary new];
+    for (NSDictionary *row in axs_cachekeeper_parent_rows(rows))
+        tiers[row[@"path"]] = axs_cachekeeper_directory_tier(row[@"path"], row[@"evidence"]);
+    return tiers;
+}
+static inline BOOL axs_cachekeeper_selectable_path(NSString *path, NSDictionary *tiers) {
+    if (axs_cachekeeper_cache_path(path)) return YES;
+    return [tiers[path] isEqual:@"cachelike"];
+}
+static inline NSArray<NSString *> *axs_cachekeeper_selectable_paths(NSArray *paths, NSDictionary *tiers) {
+    NSMutableArray *safe = [NSMutableArray new];
+    if ([paths isKindOfClass:NSArray.class]) for (id path in paths) if (axs_cachekeeper_selectable_path(path, tiers)) [safe addObject:path];
+    return axs_cachekeeper_parent_paths(safe);
+}
+static inline NSArray<NSString *> *axs_cachekeeper_selected_paths_tiered(NSDictionary *directories, NSDictionary *states, NSDictionary *tiers, NSString *bundle) {
+    if (!axs_cachekeeper_bundle_id(bundle) || ![directories isKindOfClass:NSDictionary.class]) return @[];
+    if (states && ![states isKindOfClass:NSDictionary.class]) return @[];
+    if (!axs_cachekeeper_app_enabled(states[bundle])) return @[];
+    return axs_cachekeeper_selectable_paths(directories[bundle], tiers);
+}
+static inline BOOL axs_cachekeeper_can_clean_tiered(NSDictionary *directories, NSDictionary *states, NSDictionary *tiers, NSString *bundle) {
+    return axs_cachekeeper_selected_paths_tiered(directories, states, tiers, bundle).count > 0 && axs_cachekeeper_wants_cleanup(states[bundle]);
+}
+static inline NSString *axs_cachekeeper_evidence_summary(NSString *path, NSDictionary *evidence) {
+    NSString *tier = axs_cachekeeper_directory_tier(path, evidence);
+    if ([tier isEqual:@"cachelike"]) return [NSString stringWithFormat:@"内容抽检（全量 %lu 个文件）：均为可识别媒体，未发现数据标记", (unsigned long)[evidence[@"files"] unsignedIntegerValue]];
+    if ([tier isEqual:@"data"] && [evidence isKindOfClass:NSDictionary.class] && [evidence[@"data"] unsignedIntegerValue] &&
+        !axs_cachekeeper_known_data_path(path) && !axs_cachekeeper_protected_path(path))
+        return @"内容抽检：发现数据库、登录或配置类文件";
+    if ([evidence isKindOfClass:NSDictionary.class]) {
+        NSUInteger files = [evidence[@"files"] unsignedIntegerValue];
+        NSUInteger checked = files - [evidence[@"unchecked"] unsignedIntegerValue];
+        if (files) return [NSString stringWithFormat:@"内容抽检：已检 %lu/%lu 个文件，含无法确认内容", (unsigned long)checked, (unsigned long)files];
+    }
+    return @"尚未抽检内容，不能确认用途";
+}
 static inline NSString *axs_cachekeeper_summary(NSDictionary *scan, NSDictionary *report) {
     NSMutableArray *parts = [NSMutableArray new];
     if ([scan[@"rows"] isKindOfClass:NSArray.class]) [parts addObject:[NSString stringWithFormat:@"检测到 %lu 个目录（大小为检测快照）", (unsigned long)[scan[@"rows"] count]]];

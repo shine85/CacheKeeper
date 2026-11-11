@@ -4,6 +4,9 @@
 #include <sys/stat.h>
 #include <signal.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperSweep.h"
 #import "AxsCacheKeeperDirectories.h"
@@ -56,16 +59,45 @@ void CKScanRequests(void) {
             remainingDirectories--;
             NSURL *root=candidate[@"root"];
             unsigned long long size=0; NSUInteger files=0; __block BOOL complete=YES;
+            // 仅对“未知”目录做内容抽检：白名单缓存无需定级，公认数据目录与共享容器按先验定级。
+            BOOL probe = ![relative hasPrefix:@"Group/"] && !axs_cachekeeper_cache_path(relative) &&
+                !axs_cachekeeper_known_data_path(relative) && !axs_cachekeeper_protected_path(relative);
+            NSUInteger probeFiles=0, probeData=0, probeMedia=0, probeOther=0, probeChecked=0;
             NSDirectoryEnumerator *entries=[NSFileManager.defaultManager enumeratorAtURL:root includingPropertiesForKeys:nil options:0 errorHandler:^BOOL(NSURL *url,NSError *error){complete=NO;return YES;}];
             for (NSURL *entry in entries) {
                 if (NSProcessInfo.processInfo.systemUptime>directoryDeadline || ++files>100000) {complete=NO;break;}
                 struct stat info;
                 if (lstat(entry.path.fileSystemRepresentation,&info)) {complete=NO;continue;}
                 if (S_ISLNK(info.st_mode)) continue;
-                if (S_ISREG(info.st_mode)) size+=info.st_size;
+                if (probe && S_ISDIR(info.st_mode) && axs_cachekeeper_data_marker(entry.lastPathComponent)) probeData++;
+                if (S_ISREG(info.st_mode)) {
+                    size+=info.st_size;
+                    if (probe) {
+                        probeFiles++;
+                        if (axs_cachekeeper_data_marker(entry.lastPathComponent)) probeData++;
+                        else if (probeChecked<512 && info.st_size>=3) {
+                            int fd=open(entry.path.fileSystemRepresentation,O_RDONLY|O_NOFOLLOW|O_NONBLOCK);
+                            unsigned char header[16]={0};
+                            ssize_t count=-1;
+                            if (fd>=0) { count=pread(fd,header,sizeof(header),0); close(fd); }
+                            if (count>=3) {
+                                probeChecked++;
+                                if ((count>=15 && !memcmp(header,"SQLite format 3",15)) || (count>=6 && !memcmp(header,"bplist",6))) probeData++;
+                                else if (axs_cachekeeper_media_signature(header,(size_t)count)) probeMedia++;
+                                else probeOther++;
+                            }
+                        }
+                    }
+                }
             }
             if (!entries || NSProcessInfo.processInfo.systemUptime>directoryDeadline) complete=NO;
-            [rows addObject:@{@"path":relative,@"bytes":@(size),@"complete":@(complete),@"manageable":@(![candidate[@"readOnly"] boolValue])}];
+            NSMutableDictionary *row=[@{@"path":relative,@"bytes":@(size),@"complete":@(complete),@"manageable":@(![candidate[@"readOnly"] boolValue])} mutableCopy];
+            if (probe) {
+                NSUInteger classified=probeData+probeMedia+probeOther;
+                row[@"evidence"]=@{@"files":@(probeFiles),@"data":@(probeData),@"media":@(probeMedia),@"other":@(probeOther),
+                    @"unchecked":@(probeFiles>classified ? probeFiles-classified : 0),@"complete":@(complete)};
+            }
+            [rows addObject:row];
         }
         NSMutableDictionary *history=[[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"snapshots.plist"]] mutableCopy]?:[NSMutableDictionary new];
         NSDictionary *old=history[bundle];
@@ -132,7 +164,8 @@ void axs_cachekeeper_request_cleanup(NSString *bundle) {
     if (!axs_cachekeeper_bundle_id(bundle)) return;
     NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:[axs_cachekeeper_folder() stringByAppendingPathComponent:@"directories.plist"]];
     NSDictionary *states = [NSDictionary dictionaryWithContentsOfFile:[axs_cachekeeper_folder() stringByAppendingPathComponent:@"appEnabled.plist"]];
-    if (!axs_cachekeeper_selected_paths(selection,states,bundle).count) return;
+    NSDictionary *snapshots = [NSDictionary dictionaryWithContentsOfFile:[axs_cachekeeper_folder() stringByAppendingPathComponent:@"snapshots.plist"]];
+    if (!axs_cachekeeper_selected_paths_tiered(selection,states,axs_cachekeeper_tiers_by_path(snapshots[bundle][@"rows"]),bundle).count) return;
     if ([axs_cachekeeper_mode(states[bundle]) isEqual:@"prevent"]) {
         axs_cachekeeper_report(bundle, @"prevent", @"当前为只禁止模式，不删除缓存文件", 0, 0, 0); return;
     }
@@ -156,6 +189,7 @@ void CKApplyDirectorySwitches(void) {
     NSString *stateFile = [folder stringByAppendingPathComponent:@"appEnabled.plist"];
     NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:selectionFile];
     NSDictionary *states = [NSDictionary dictionaryWithContentsOfFile:stateFile];
+    NSDictionary *snapshots = [NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"snapshots.plist"]];
     if ((!selection && [NSFileManager.defaultManager fileExistsAtPath:selectionFile]) ||
         (!states && [NSFileManager.defaultManager fileExistsAtPath:stateFile])) {
         NSLog(@"[CacheKeeper] 用户配置不可读，停止本轮处理"); return;
@@ -165,7 +199,7 @@ void CKApplyDirectorySwitches(void) {
     NSMutableDictionary *targets = [NSMutableDictionary new];
     for (NSString *bundle in bundles) {
         if (!axs_cachekeeper_bundle_id(bundle)) continue;
-        NSArray *selected = axs_cachekeeper_selected_paths(selection, states, bundle);
+        NSArray *selected = axs_cachekeeper_selected_paths_tiered(selection, states, axs_cachekeeper_tiers_by_path(snapshots[bundle][@"rows"]), bundle);
         if (!selected.count) { [axs_cachekeeper_manual removeObject:bundle]; continue; }
         BOOL manual = [axs_cachekeeper_manual containsObject:bundle];
         NSString *mode = axs_cachekeeper_mode(states[bundle]);
@@ -225,9 +259,11 @@ void CKApplyDirectorySwitches(void) {
                     NSDictionary *currentStates = [NSDictionary dictionaryWithContentsOfFile:stateFile];
                     BOOL readable = (currentSelection || ![NSFileManager.defaultManager fileExistsAtPath:selectionFile]) &&
                         (currentStates || ![NSFileManager.defaultManager fileExistsAtPath:stateFile]);
-                    NSArray *currentPaths = axs_cachekeeper_selected_paths(currentSelection, currentStates, bundle);
+                    NSDictionary *currentSnapshots = [NSDictionary dictionaryWithContentsOfFile:[axs_cachekeeper_folder() stringByAppendingPathComponent:@"snapshots.plist"]];
+                    NSDictionary *currentTiers = axs_cachekeeper_tiers_by_path(currentSnapshots[bundle][@"rows"]);
+                    NSArray *currentPaths = axs_cachekeeper_selected_paths_tiered(currentSelection, currentStates, currentTiers, bundle);
                     BOOL selected = [currentPaths isEqual:paths] && [axs_cachekeeper_mode(currentStates[bundle]) isEqual:mode];
-                    allowed = readable && selected && axs_cachekeeper_can_clean(currentSelection,currentStates,bundle) && [Container(bundle).path isEqual:target[@"home"]] &&
+                    allowed = readable && selected && axs_cachekeeper_can_clean_tiered(currentSelection,currentStates,currentTiers,bundle) && [Container(bundle).path isEqual:target[@"home"]] &&
                         axs_cachekeeper_process(bundle) == AxsCacheKeeperProcessStopped;
                 });
                 return allowed;

@@ -120,6 +120,24 @@ int main(int argc, const char *argv[]) {
         require([([NSDictionary dictionaryWithContentsOfFile:directoriesPath][bundle]) isEqual:@[@"tmp"]], @"取消不影响其他已选目录");
         require(!axs_cachekeeper_update_selection(preferences,@"single.app",@[@"Library/Caches/video"],YES), @"单项开启无需另开总开关");
         require(axs_cachekeeper_app_enabled([NSDictionary dictionaryWithContentsOfFile:statesPath][@"single.app"]), @"单项开启仅激活对应 APP");
+        NSDictionary *mediaEvidence=@{@"files":@3,@"data":@0,@"media":@3,@"other":@0,@"unchecked":@0,@"complete":@YES};
+        require([axs_cachekeeper_directory_tier(@"Library/CustomCache", mediaEvidence) isEqual:@"cachelike"], @"全量抽检均为媒体才可定为缓存特征");
+        require([axs_cachekeeper_directory_tier(@"Library/CustomCache", @{@"files":@3,@"data":@1,@"media":@2,@"other":@0,@"unchecked":@0,@"complete":@YES}) isEqual:@"data"], @"抽检发现数据文件必须定为数据目录");
+        require([axs_cachekeeper_directory_tier(@"Library/CustomCache", @{@"files":@9,@"data":@0,@"media":@3,@"other":@0,@"unchecked":@6,@"complete":@NO}) isEqual:@"unknown"], @"抽检未覆盖全量不得定为缓存特征");
+        require([axs_cachekeeper_directory_tier(@"Library/CustomCache", @{@"files":@3,@"data":@0,@"media":@2,@"other":@1,@"unchecked":@0,@"complete":@YES}) isEqual:@"unknown"], @"含无法识别内容不得定为缓存特征");
+        require([axs_cachekeeper_directory_tier(@"Library/Application Support", mediaEvidence) isEqual:@"data"], @"已知数据目录不因抽检全是媒体而开放");
+        require([axs_cachekeeper_directory_tier(@"Group/g/Library/Caches", mediaEvidence) isEqual:@"shared"], @"共享容器恒为只读分级");
+        require([axs_cachekeeper_directory_tier(@"Library/Caches", nil) isEqual:@"cache"], @"白名单缓存目录保持原分类");
+        require([axs_cachekeeper_directory_tier(@"Library/CustomCache", nil) isEqual:@"unknown"], @"无抽检证据的未知目录保持未确认");
+        NSArray *tierRows=@[@{@"path":@"Library/CustomCache",@"evidence":mediaEvidence}];
+        NSDictionary *tierMap=axs_cachekeeper_tiers_by_path(tierRows);
+        require(axs_cachekeeper_selectable_path(@"Library/CustomCache", tierMap) && !axs_cachekeeper_selectable_path(@"Documents", tierMap), @"缓存特征目录可手动选择，受保护目录仍拒绝");
+        NSString *snapshotsPath=[preferences stringByAppendingPathComponent:@"snapshots.plist"];
+        require([@{@"evidence.app":@{@"rows":tierRows}} writeToFile:snapshotsPath atomically:YES], @"建立抽检快照夹具");
+        require(!axs_cachekeeper_update_selection(preferences,@"evidence.app",@[@"Library/CustomCache"],YES), @"缓存特征目录可经保存路径开启");
+        require(axs_cachekeeper_app_enabled([NSDictionary dictionaryWithContentsOfFile:statesPath][@"evidence.app"]), @"开启缓存特征目录同时打开该 APP 总开关");
+        require([axs_cachekeeper_selected_paths_tiered([NSDictionary dictionaryWithContentsOfFile:directoriesPath],[NSDictionary dictionaryWithContentsOfFile:statesPath],tierMap,@"evidence.app") isEqual:@[@"Library/CustomCache"]], @"引擎口径下缓存特征选择有效");
+        require(axs_cachekeeper_update_selection(preferences,@"evidence.app",@[@"Documents"],YES)!=nil, @"有快照时受保护目录仍不可开启");
         NSData *beforeInvalid=[NSData dataWithContentsOfFile:directoriesPath];
         require(axs_cachekeeper_update_selection(preferences,bundle,@[@"Documents"],YES)!=nil &&
             [[NSData dataWithContentsOfFile:directoriesPath] isEqual:beforeInvalid], @"非法目录不改变现有配置");
