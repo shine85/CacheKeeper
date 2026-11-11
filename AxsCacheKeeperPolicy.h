@@ -199,13 +199,15 @@ static inline BOOL axs_cachekeeper_probe_eligible(NSString *path) {
     NSString *kind = axs_cachekeeper_directory_kind(path);
     return [kind isEqual:@"unknown"] || [kind isEqual:@"mixed"];
 }
-static inline NSArray<NSString *> *axs_cachekeeper_exclusions(id state) {
-    if (![state isKindOfClass:NSDictionary.class] || ![state[@"excludedPaths"] isKindOfClass:NSArray.class]) return @[];
+static inline NSArray<NSString *> *axs_cachekeeper_valid_exclusions(NSArray *paths) {
     // 排除名单除白名单外还须保留证据通道目录，否则对定级/判定目录的关闭会在状态回写时丢失。
     NSMutableArray *result = [NSMutableArray new];
-    for (id path in state[@"excludedPaths"])
+    if ([paths isKindOfClass:NSArray.class]) for (id path in paths)
         if ([path isKindOfClass:NSString.class] && (axs_cachekeeper_cache_path(path) || axs_cachekeeper_probe_eligible(path))) [result addObject:path];
     return axs_cachekeeper_parent_paths(result);
+}
+static inline NSArray<NSString *> *axs_cachekeeper_exclusions(id state) {
+    return [state isKindOfClass:NSDictionary.class] ? axs_cachekeeper_valid_exclusions(state[@"excludedPaths"]) : @[];
 }
 static inline BOOL axs_cachekeeper_paths_overlap(NSString *left, NSString *right) {
     return [left isEqual:right] || [left hasPrefix:[right stringByAppendingString:@"/"]] ||

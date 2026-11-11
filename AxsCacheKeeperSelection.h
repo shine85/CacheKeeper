@@ -103,6 +103,13 @@ static inline NSArray<NSDictionary *> *axs_cachekeeper_display_rows(NSArray *row
 }
 
 // 只更新当前 APP；自动发现的实时结果由引擎计算，不回写用户选择。
+static inline NSArray<NSString *> *axs_cachekeeper_selectable_paths(NSArray *paths, NSSet *extra) {
+    // 选择名单的规范化必须与开启资格同一口径：白名单或证据通道，否则定级/判定目录写入时会被静默丢弃。
+    NSMutableArray *kept = [NSMutableArray new];
+    if ([paths isKindOfClass:NSArray.class]) for (id path in paths)
+        if (axs_cachekeeper_cache_path(path) || [extra containsObject:path]) [kept addObject:path];
+    return axs_cachekeeper_parent_paths(kept);
+}
 static inline NSString *axs_cachekeeper_save_selection_extra(NSString *folder, NSString *bundle, NSArray *changes, BOOL enable, BOOL oneClick, NSSet *extra) {
     if (!axs_cachekeeper_bundle_id(bundle) || ![changes isKindOfClass:NSArray.class] || !changes.count) return @"没有可开启的缓存目录。";
     // 开启时才需要资格校验（白名单或证据通道）；关闭任何已选项永远允许，避免目录被重新定级后关不掉。
@@ -113,7 +120,7 @@ static inline NSString *axs_cachekeeper_save_selection_extra(NSString *folder, N
     NSMutableDictionary *states=axs_cachekeeper_edit_configuration(stateFile);
     if (!directories || !states || (directories[bundle] && ![directories[bundle] isKindOfClass:NSArray.class])) return @"原配置不可读或目录记录损坏，已停止保存。";
     NSDictionary *previousDirectories=[directories copy];
-    NSMutableArray *paths=[axs_cachekeeper_cache_paths(directories[bundle]) mutableCopy];
+    NSMutableArray *paths=[axs_cachekeeper_selectable_paths(directories[bundle],extra) mutableCopy];
     NSMutableDictionary *state=axs_cachekeeper_app_state(states[bundle],enable ? YES : axs_cachekeeper_app_enabled(states[bundle]));
     NSMutableArray *exclusions=[axs_cachekeeper_exclusions(states[bundle]) mutableCopy];
     if (enable) [paths addObjectsFromArray:changes];
@@ -127,9 +134,9 @@ static inline NSString *axs_cachekeeper_save_selection_extra(NSString *folder, N
             if (axs_cachekeeper_paths_overlap(excluded,added)) { [exclusions removeObject:excluded];break; }
         }
     } else [exclusions addObjectsFromArray:changes];
-    state[@"excludedPaths"]=axs_cachekeeper_cache_paths(exclusions);
+    state[@"excludedPaths"]=axs_cachekeeper_valid_exclusions(exclusions);
     if (oneClick) { state[@"mode"]=@"auto";state[@"urlCache"]=@YES;state[@"autoDiscover"]=@YES; }
-    directories[bundle]=axs_cachekeeper_cache_paths(paths);
+    directories[bundle]=axs_cachekeeper_selectable_paths(paths,extra);
     if (![directories writeToFile:directoryFile atomically:YES]) return @"目录选择保存失败。";
     states[bundle]=state;
     if (![states writeToFile:stateFile atomically:YES]) {
@@ -171,7 +178,8 @@ static inline NSString *axs_cachekeeper_save_judged(NSString *folder, NSString *
     state[@"judgedPaths"]=list;
     states[bundle]=state;
     if (![states writeToFile:stateFile atomically:YES]) return @"用户判定保存失败。";
-    NSString *error=axs_cachekeeper_save_selection_extra(folder,bundle,@[path],judged,NO,axs_cachekeeper_extra_selectable(@[],state));
+    // 用完整的证据通道集合保存，避免判定操作顺带丢弃其他已选的定级目录。
+    NSString *error=axs_cachekeeper_save_selection_extra(folder,bundle,@[path],judged,NO,axs_cachekeeper_save_extra(folder,bundle));
     if (error && judged) {
         NSMutableDictionary *rollback=axs_cachekeeper_app_state(state, axs_cachekeeper_app_enabled(state));
         NSMutableArray *back=[axs_cachekeeper_judged_paths(state) mutableCopy];
