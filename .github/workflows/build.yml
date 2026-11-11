@@ -1,97 +1,137 @@
-name: Build CacheKeeper (Roothide)
-# macos-15-intel = Intel runner, standard label, available to private Free repos.
-# macos-14 retired 2026-11-02 and was ARM-only; macos-13 retired 2025-12-04.
-# macOS 15 image ships Xcode 16.0-16.4 + 26.x only (default 16.4) - no Xcode 15.x,
-# so setup-xcode must ask for 16.4. Theos still uses the cloned iPhoneOS16.5.sdk.
+name: 构建 CacheKeeper RootHide
 
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-env:
-  HOMEBREW_NO_AUTO_UPDATE: 1
-  HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
-  THEOS: ${{ github.workspace }}/theos-roothide
+concurrency:
+  group: cachekeeper-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    name: Build roothide deb
-    runs-on: macos-15-intel
-
+    name: 测试、编译与检查 deb
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      THEOS: ${{ github.workspace }}/tmp/theos
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: '1'
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Setup Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: '16.4'
-
-      - name: Checkout
+      - name: 获取源码
         uses: actions/checkout@v4
 
-      - name: Setup Environment
-        run: |
-          echo "$THEOS/bin" >> "$GITHUB_PATH"
-          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
-          echo "THEOS_IGNORE_PARALLEL_BUILDING_NOTICE=yes" >> "$HOME/.theosrc"
+      - name: 原生回归测试
+        run: python3 tests/run_native_tests.py
 
-      - name: Checkout Theos (RootHide)
+      - name: 获取 RootHide Theos
         uses: actions/checkout@v4
         with:
           repository: roothide/theos
-          path: theos-roothide
+          path: tmp/theos
           submodules: recursive
+          persist-credentials: false
 
-      - name: Install iOS SDK (iPhoneOS16.5)
+      - name: 获取 iPhoneOS 16.5 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: theos/sdks
+          path: tmp/ios-sdks
+          sparse-checkout: iPhoneOS16.5.sdk
+          persist-credentials: false
+
+      - name: 准备工具链
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$THEOS/sdks"
-          if [ -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
-            echo "iPhoneOS16.5.sdk already present"
-            exit 0
-          fi
-          SDK_STAGE="$(mktemp -d)"
-          trap 'rm -rf "$SDK_STAGE"' EXIT
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$SDK_STAGE/sdks"
-          git -C "$SDK_STAGE/sdks" sparse-checkout set iPhoneOS16.5.sdk
-          cp -R "$SDK_STAGE/sdks/iPhoneOS16.5.sdk" "$THEOS/sdks/"
-          ls -1 "$THEOS/sdks"
-
-      - name: Install Theos dependencies
-        run: |
           brew install ldid dpkg xz
-          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          test -d tmp/ios-sdks/iPhoneOS16.5.sdk
+          mkdir -p "$THEOS/sdks"
+          cp -R tmp/ios-sdks/iPhoneOS16.5.sdk "$THEOS/sdks/"
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+          xcodebuild -version
+          command -v ldid
+          command -v dpkg-deb
 
-      # 本工程的 Makefile 已写死 THEOS_PACKAGE_SCHEME = roothide，
-      # 编译命令与交接说明一致，不需要再传 scheme。
-      - name: Build Package
+      - name: 生成本次包版本
+        id: version
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+          BUILD_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re
+          path = pathlib.Path('control')
+          text = path.read_text(encoding='utf-8')
+          base = re.search(r'^Version: (\S+)$', text, re.M).group(1)
+          version = f"{base}-{os.environ['BUILD_NUMBER']}.{os.environ['BUILD_ATTEMPT']}"
+          path.write_text(re.sub(r'^Version: .*$', f'Version: {version}', text, flags=re.M), encoding='utf-8')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              print(f'version={version}', file=output)
+          print(f'构建版本：{version}')
+          PY
+
+      - name: 编译 RootHide 包
+        shell: bash
         run: |
           set -euo pipefail
-          # 网页上传/Git 不保留可执行位，维护脚本在仓库里是 0644，
-          # dpkg-deb 要求 >=0555，打包前先补上（postinst/prerm）。
-          chmod 0755 layout/DEBIAN/postinst layout/DEBIAN/prerm
-          command -v ldid
           make clean
           make package THEOS_PACKAGE_DIR="$PWD/packages"
-          echo "=== .deb files ==="
-          find ./packages -name "*.deb" -type f
 
-      - name: Inspect deb
-        run: |
-          set -euo pipefail
-          for deb in ./packages/*.deb; do
-            echo "--- $deb ---"
-            dpkg-deb -I "$deb"
-            dpkg-deb -c "$deb"
-          done
+      - name: 验证 deb 内容
+        run: python3 scripts/verify_deb.py packages
 
-      - name: Upload Artifacts
+      - name: 保存构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: CacheKeeper-deb
-          path: ./packages/*.deb
+          name: CacheKeeper-RootHide-${{ steps.version.outputs.version }}
+          path: packages/*
           if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: 发布可下载测试包
+    needs: build
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: 取得验证后的产物
+        uses: actions/download-artifact@v4
+        with:
+          name: CacheKeeper-RootHide-${{ needs.build.outputs.version }}
+          path: packages
+
+      - name: 创建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PACKAGE_VERSION: ${{ needs.build.outputs.version }}
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          cat > tmp/release-notes.md <<EOF
+          自动构建的 CacheKeeper RootHide 测试包，目标 iOS 16–17。
+
+          - 源码提交：$SOURCE_SHA
+          - 构建记录：$RUN_URL
+          - 已完成：macOS 原生回归、Theos 编译、deb 文件检查。
+          - 尚未完成：iOS 真机注入与功能验收。
+
+          下载下方 .deb 文件；SHA256SUMS 可用于完整性校验。
+          EOF
+          gh release create "v$PACKAGE_VERSION" packages/*.deb packages/SHA256SUMS packages/package-contents.txt \
+            --repo "$GH_REPO" --target "$SOURCE_SHA" --prerelease \
+            --title "缓存管家 $PACKAGE_VERSION · RootHide" --notes-file tmp/release-notes.md
