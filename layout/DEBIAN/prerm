@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+# dpkg invokes this new script when the installed version fails its upgrade prerm.
+# The repaired helper is available after the new payload has been unpacked.
+if [ "${1:-}" = failed-upgrade ]; then
+    exit 0
+fi
+/usr/bin/ckrestore

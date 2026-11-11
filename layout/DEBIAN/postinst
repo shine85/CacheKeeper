@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+mkdir -p /var/mobile/Library/CacheKeeper/Status
+chown -R mobile:mobile /var/mobile/Library/CacheKeeper
+chmod 0755 /var/mobile/Library/CacheKeeper

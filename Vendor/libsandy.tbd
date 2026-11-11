@@ -1,0 +1,10 @@
+---
+archs: [ arm64, arm64e ]
+platform: ios
+install-name: '@loader_path/.jbroot/usr/lib/libsandy.dylib'
+current-version: 0.0.0
+compatibility-version: 0.0.0
+exports:
+  - archs: [ arm64, arm64e ]
+    symbols: [ _libSandy_applyProfile, _libSandy_works ]
+...
