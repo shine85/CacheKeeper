@@ -194,6 +194,129 @@ void CKScanRequests(void) {
         });
     });
 }
+// 0.5.0 “安全类”目录：内容按系统约定可再生（缓存/临时/启动快照/界面状态），
+// 一键开启、自动纳入、存量清理都只对这类目录生效。HTTPStorages 可能混
+// cookies 文件，不算安全类；Application Support 与各自建目录一律手动。
+static BOOL CKSafeRelative(NSString *relative) {
+    NSString *inner = relative;
+    if ([relative hasPrefix:@"Group/"]) {
+        NSString *rest = [relative substringFromIndex:6];
+        NSRange slash = [rest rangeOfString:@"/"];
+        if (slash.location == NSNotFound) return NO;
+        inner = [rest substringFromIndex:slash.location + 1];
+    }
+    return [@[@"Library/Caches", @"tmp", @"Library/SplashBoard", @"Library/Saved Application State"] containsObject:inner];
+}
+static BOOL CKAppRunning(NSString *bundle) {
+    id manager = SRead(NSClassFromString(@"SBApplicationController"), @"sharedInstance");
+    SEL lookup = NSSelectorFromString(@"applicationWithBundleIdentifier:");
+    id app = [manager respondsToSelector:lookup] ? ((id(*)(id,SEL,id))objc_msgSend)(manager, lookup, bundle) : nil;
+    id state = SRead(app, @"processState") ?: SRead(app, @"_internalProcessState");
+    SEL rs = NSSelectorFromString(@"isRunning");
+    // 状态拿不到时按“在运行”处理：宁可等下一轮，也不在使用中动文件。
+    if (![state respondsToSelector:rs]) return YES;
+    return ((BOOL(*)(id,SEL))objc_msgSend)(state, rs);
+}
+static unsigned long long CKBoundedSize(NSURL *root) {
+    unsigned long long size = 0; NSUInteger files = 0;
+    NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + 10;
+    NSDirectoryEnumerator *entries = [NSFileManager.defaultManager enumeratorAtURL:root includingPropertiesForKeys:nil options:0 errorHandler:^BOOL(NSURL *url, NSError *error){ return YES; }];
+    for (NSURL *entry in entries) {
+        if (NSProcessInfo.processInfo.systemUptime > deadline || ++files > 100000) break;
+        struct stat info;
+        if (lstat(entry.path.fileSystemRepresentation, &info)) continue;
+        if (S_ISLNK(info.st_mode)) { [entries skipDescendants]; continue; }
+        if (S_ISREG(info.st_mode)) size += info.st_size;
+    }
+    return size;
+}
+// 0.5.0 附加通道（用户 2026-11-11 第 2、3 点）：
+//  (a) 存量清理：设置页对已开启的 App 写下 stock.plist 请求后，在该 App 未
+//      运行时，把它已选中“安全类”目录里的【已有】文件一次清掉（开启插件
+//      之前那次运行产生的缓存）。只走安全类；数据库/登录文件与数据目录由
+//      基线函数内部的保护规则照常跳过；目录本身保留。
+//  (b) 自动纳入：policy.autoNew 打开的 App，每小时至多一次重扫候选，把新
+//      出现的“安全类”目录自动加入选择并补进快照行；谨慎类永不自动加。
+static void CKProcessExtras(void) {
+    NSString *folder = jbroot(@"/var/mobile/Library/CacheKeeper");
+    NSDictionary *appEnabled = [NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"appEnabled.plist"]] ?: @{};
+    NSString *stockPath = [folder stringByAppendingPathComponent:@"stock.plist"];
+    NSMutableDictionary *stock = [[NSDictionary dictionaryWithContentsOfFile:stockPath] mutableCopy];
+    if (stock.count) {
+        NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"directories.plist"]] ?: @{};
+        BOOL stockDirty = NO;
+        for (NSString *bundle in stock.allKeys) {
+            if (![appEnabled[bundle] boolValue]) { [stock removeObjectForKey:bundle]; stockDirty = YES; continue; }
+            NSURL *home = Container(bundle);
+            if (!home) { [stock removeObjectForKey:bundle]; stockDirty = YES; continue; }
+            if (CKAppRunning(bundle)) continue; // 还在运行：留到下一轮
+            NSDictionary *groups = GroupHomes(bundle);
+            NSUInteger removed = 0; unsigned long long bytes = 0;
+            for (NSString *relative in config[bundle]) {
+                if (!CKSafeRelative(relative)) continue;
+                NSString *inner = nil;
+                NSURL *base = CKHomeForRelative(relative, home, groups, &inner);
+                if (!base) continue;
+                NSString *path = [base.path stringByAppendingPathComponent:inner];
+                struct stat info;
+                if (lstat(path.fileSystemRepresentation, &info) || !S_ISDIR(info.st_mode)) continue;
+                BOOL protectedRoot = NO;
+                CKBaselineDirectories(path, 0, YES, &removed, &bytes, &protectedRoot);
+            }
+            NSString *report = [[folder stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[bundle stringByAppendingString:@".auto.plist"]];
+            NSDictionary *prior = [NSDictionary dictionaryWithContentsOfFile:report];
+            [@{@"updated": NSDate.date, @"removed": @([prior[@"removed"] unsignedIntegerValue] + removed),
+               @"bytes": @([prior[@"bytes"] unsignedLongLongValue] + bytes)} writeToFile:report atomically:YES];
+            [stock removeObjectForKey:bundle]; stockDirty = YES;
+        }
+        if (stockDirty) [stock writeToFile:stockPath atomically:YES];
+    }
+    static NSMutableDictionary *lastRefresh;
+    if (!lastRefresh) lastRefresh = [NSMutableDictionary new];
+    NSDictionary *policies = [NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"policy.plist"]] ?: @{};
+    NSString *selectionPath = [folder stringByAppendingPathComponent:@"directories.plist"];
+    NSMutableDictionary *config = [[NSDictionary dictionaryWithContentsOfFile:selectionPath] mutableCopy] ?: [NSMutableDictionary new];
+    BOOL configDirty = NO;
+    for (NSString *bundle in policies) {
+        if (![policies[bundle][@"autoNew"] boolValue] || ![appEnabled[bundle] boolValue]) continue;
+        NSDate *last = lastRefresh[bundle];
+        if (last && [NSDate.date timeIntervalSinceDate:last] < 3600) continue;
+        NSURL *home = Container(bundle); if (!home) continue;
+        lastRefresh[bundle] = NSDate.date;
+        NSDictionary *groups = GroupHomes(bundle);
+        NSArray *candidates = PrefixedCandidates(home, groups);
+        NSMutableArray *selected = [config[bundle] mutableCopy] ?: [NSMutableArray new];
+        NSMutableArray *added = [NSMutableArray new];
+        for (NSString *relative in candidates)
+            if (CKSafeRelative(relative) && ![selected containsObject:relative]) { [selected addObject:relative]; [added addObject:relative]; }
+        if (!added.count) continue;
+        config[bundle] = selected; configDirty = YES;
+        NSString *snapPath = [folder stringByAppendingPathComponent:@"snapshots.plist"];
+        NSMutableDictionary *history = [[NSDictionary dictionaryWithContentsOfFile:snapPath] mutableCopy] ?: [NSMutableDictionary new];
+        NSMutableDictionary *snap = [history[bundle] mutableCopy] ?: [NSMutableDictionary new];
+        NSMutableArray *rows = [snap[@"rows"] mutableCopy] ?: [NSMutableArray new];
+        NSMutableSet *known = [NSMutableSet new];
+        for (NSDictionary *row in rows) if (row[@"path"]) [known addObject:row[@"path"]];
+        for (NSString *relative in added) {
+            if ([known containsObject:relative]) continue;
+            NSString *inner = nil;
+            NSURL *base = CKHomeForRelative(relative, home, groups, &inner);
+            if (!base) continue;
+            [rows addObject:@{@"path": relative, @"bytes": @(CKBoundedSize([base URLByAppendingPathComponent:inner])), @"complete": @YES}];
+        }
+        snap[@"rows"] = rows;
+        if (!snap[@"home"]) {
+            snap[@"home"] = home.path;
+            NSMutableDictionary *groupPaths = [NSMutableDictionary new];
+            for (NSString *gid in groups) groupPaths[gid] = [groups[gid] path];
+            snap[@"groups"] = groupPaths;
+        }
+        history[bundle] = snap;
+        [history writeToFile:snapPath atomically:YES];
+    }
+    if (configDirty) [config writeToFile:selectionPath atomically:YES];
+}
+
 void CKApplyDirectorySwitches(void) {
     NSString *folder=jbroot(@"/var/mobile/Library/CacheKeeper");
     NSMutableDictionary *config=[[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"directories.plist"]] mutableCopy] ?: [NSMutableDictionary new];
@@ -395,4 +518,5 @@ void CKApplyDirectorySwitches(void) {
         }
     }
     if (fallbackDirty) [fallback writeToFile:[folder stringByAppendingPathComponent:@"fallback.plist"] atomically:YES];
+    CKProcessExtras();
 }

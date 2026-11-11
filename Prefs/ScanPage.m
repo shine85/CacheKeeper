@@ -68,8 +68,8 @@
     return [enabled arrayByAddingObjectsFromArray:other];
 }
 - (UIContextMenuConfiguration *)tableView:(UITableView *)table contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)path point:(CGPoint)point {
-    if (path.section != 0 || path.row == 0) return nil;
-    NSString *relative = [self orderedRows][path.row-1][@"path"];
+    if (path.section != 0 || path.row < 2) return nil;
+    NSString *relative = [self orderedRows][path.row-2][@"path"];
     NSArray *selected = [self cached:@"directories.plist"][self.bundle];
     if (![selected containsObject:relative]) return nil;
     NSString *full = [self fullPath:relative];
@@ -89,14 +89,14 @@
 }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)table {return 2;}
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
-    return section == 0 ? self.rows.count + 1 : 3;
+    return section == 0 ? self.rows.count + 2 : 5;
 }
 - (NSString *)tableView:(UITableView *)table titleForHeaderInSection:(NSInteger)section {
     return section == 1 ? @"清理策略" : nil;
 }
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
-    if (section == 1) return @"候选中的 Group/ 开头条目是 App Group 共享容器（主 App 与小组件/扩展共用），规则相同。自动：先限制写入；限制未生效、限权后仍有新文件生成、或应用反复秒退时，自动降级为只清理（原因显示在上方状态行）。只禁止：只限制写入，不自动降级。只清理：不限制写入，仅在 App 退后台/退出后清理基线后新建的缓存文件。目录只按根目录管理（父目录优先，子条目忽略）；60 秒内新建的文件不动；数据库、登录数据、Documents、Preferences、WebKit、Cookies 永不限制、永不删除。重新打开目录开关或切换策略会清除降级记录、重新尝试。";
-    return @"检测会为尚未配置的 App 自动预选 Library/Caches，总开关保持关闭；打开 App 总开关才会应用。候选只按根级列（父目录优先、子条目忽略）：固定根 Caches、tmp、HTTPStorages（可能混 cookies 类文件）、SplashBoard（启动快照）、Saved Application State（界面恢复状态，清理后不恢复上次现场），加上 Application Support、Library 与容器根下的一级子目录（各 SDK 与 App 自建目录，可能存放重要资源，谨慎开启）。已有文件不会自动删除；清理只发生在 App 退后台或退出后。开关约 2 秒内应用，首次安装需注销。";
+    if (section == 1) return @"候选中的 Group/ 开头条目是 App Group 共享容器（主 App 与小组件/扩展共用），规则相同。自动：先限制写入；限制未生效、限权后仍有新文件生成、或应用反复秒退时，自动降级为只清理（原因显示在上方状态行）。只禁止：只限制写入，不自动降级。只清理：不限制写入，仅在 App 退后台/退出后清理基线后新建的缓存文件。目录只按根目录管理（父目录优先，子条目忽略）；60 秒内新建的文件不动；数据库、登录数据、Documents、Preferences、WebKit、Cookies 永不限制、永不删除。重新打开目录开关或切换策略会清除降级记录、重新尝试。自动纳入只对安全类新目录生效；存量清理只清安全类目录的已有文件，两者都绕开数据库与登录数据。";
+    return @"检测会为尚未配置的 App 自动预选 Library/Caches，总开关保持关闭；打开 App 总开关才会应用。候选只按根级列（父目录优先、子条目忽略）：固定根 Caches、tmp、HTTPStorages（可能混 cookies 类文件）、SplashBoard（启动快照）、Saved Application State（界面恢复状态，清理后不恢复上次现场），加上 Application Support、Library 与容器根下的一级子目录（各 SDK 与 App 自建目录，可能存放重要资源，谨慎开启）。逐项开关与一键开启都是点按即生效、没有确认框。已有文件默认不会自动删除（想清开启前产生的存量缓存，用策略区「清理已有缓存」）；日常清理只发生在 App 退后台或退出后。开关约 2 秒内应用，首次安装需注销。";
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
     if (path.section == 1) {
@@ -117,6 +117,17 @@
             toggle.on = [[self policyEntry][@"urlCache"] boolValue];
             [toggle addTarget:self action:@selector(urlCacheChanged:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = toggle;
+        } else if (path.row == 2) {
+            cell.textLabel.text = @"自动纳入新增安全目录";
+            cell.detailTextLabel.text = @"开启后：该 App 新生成的系统缓存类目录（Caches、tmp、启动快照、界面状态及共享容器同类）自动加入管理；谨慎类目录仍需手动开启";
+            UISwitch *toggle = [UISwitch new];
+            toggle.on = [[self policyEntry][@"autoNew"] boolValue];
+            [toggle addTarget:self action:@selector(autoNewChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = toggle;
+        } else if (path.row == 3) {
+            cell.textLabel.text = @"清理已有缓存";
+            cell.textLabel.textColor = UIColor.systemBlueColor;
+            cell.detailTextLabel.text = @"把开启本插件之前已产生的缓存文件也清掉：仅安全类目录，App 完全退出后自动执行，数据库/登录文件自动跳过，结果计入总开关行的累计记录";
         } else {
             cell.textLabel.text = @"当前生效状态";
             NSDictionary *snapshot = [self cached:@"snapshots.plist"][self.bundle];
@@ -155,7 +166,15 @@
         [toggle addTarget:self action:@selector(master:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=toggle;
         return cell;
     }
-    NSDictionary *row=[self orderedRows][path.row-1];NSString *relative=row[@"path"];
+    if (path.row==1) {
+        UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+        cell.textLabel.text=@"一键开启";
+        cell.textLabel.textColor=UIColor.systemBlueColor;
+        cell.detailTextLabel.numberOfLines=0;
+        cell.detailTextLabel.text=@"打开总开关并勾选全部安全类目录（Caches、tmp、启动快照、界面状态及共享容器同类）；HTTPStorages、Application Support 与各自建目录仍需逐个手动开。点按即生效，没有确认框。";
+        return cell;
+    }
+    NSDictionary *row=[self orderedRows][path.row-2];NSString *relative=row[@"path"];
     NSDictionary *config=[self cached:@"directories.plist"];
     BOOL enabled=[config[self.bundle] containsObject:relative];
     long long previous=0;BOOL compared=NO;
@@ -169,7 +188,7 @@
     NSDictionary *master=[self cached:@"appEnabled.plist"];
     BOOL masterOn=[master[self.bundle] boolValue];
     NSString *state=enabled?(!masterOn?@"已选中，等待打开 App 总开关":(blocked && records[full]?@"已限制写入":@"等待基线或权限应用，请打开 App 完成加载再返回桌面")):@"未选中";
-    cell.detailTextLabel.text=[NSString stringWithFormat:@"%.2f MB%@%@\n%@",[row[@"bytes"] doubleValue]/1048576,growth,[row[@"complete"] boolValue]?@"":@" · 大小未统计完",state];
+    cell.detailTextLabel.text=[NSString stringWithFormat:@"%.2f MB%@%@%@\n%@",[row[@"bytes"] doubleValue]/1048576,growth,[row[@"complete"] boolValue]?@"":@" · 大小未统计完",[self classTag:relative],state];
     UISwitch *toggle=[UISwitch new];toggle.on=enabled;toggle.accessibilityIdentifier=relative;
     [toggle addTarget:self action:@selector(toggle:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=toggle;
     return cell;
@@ -198,6 +217,65 @@
         for (NSString *prefix in prefixes)
             if ([key hasPrefix:prefix]) { [fallback removeObjectForKey:key]; changed = YES; break; }
     if (changed) [fallback writeToFile:[self file:@"fallback.plist"] atomically:YES];
+}
+- (BOOL)isSafe:(NSString *)relative {
+    NSString *inner = relative;
+    if ([relative hasPrefix:@"Group/"]) {
+        NSString *rest = [relative substringFromIndex:6];
+        NSRange slash = [rest rangeOfString:@"/"];
+        if (slash.location == NSNotFound) return NO;
+        inner = [rest substringFromIndex:slash.location + 1];
+    }
+    return [@[@"Library/Caches", @"tmp", @"Library/SplashBoard", @"Library/Saved Application State"] containsObject:inner];
+}
+- (NSString *)classTag:(NSString *)relative {
+    if ([self isSafe:relative]) return @" · 安全类（系统缓存，可再生）";
+    NSString *inner = relative;
+    if ([relative hasPrefix:@"Group/"]) {
+        NSString *rest = [relative substringFromIndex:6];
+        NSRange slash = [rest rangeOfString:@"/"];
+        if (slash.location != NSNotFound) inner = [rest substringFromIndex:slash.location + 1];
+    }
+    if ([inner isEqual:@"Library/HTTPStorages"]) return @" · 谨慎类（网络缓存，可能混 cookies）";
+    if ([inner hasPrefix:@"Library/Application Support/"]) return @" · 谨慎类（应用数据区，逐个判断）";
+    return @" · 谨慎类（App/SDK 自建目录，逐个判断）";
+}
+- (void)oneClickEnable {
+    if (!self.rows.count) { [self message:@"请先点右上角「检测目录」，再一键开启。"]; return; }
+    NSMutableDictionary *config=[[self cached:@"directories.plist"] mutableCopy]?:[NSMutableDictionary new];
+    NSMutableArray *paths=[config[self.bundle] mutableCopy]?:[NSMutableArray new];
+    NSUInteger added=0;
+    for (NSDictionary *row in self.rows) {
+        NSString *relative=row[@"path"];
+        if ([self isSafe:relative] && ![paths containsObject:relative]) { [paths addObject:relative]; added++; }
+    }
+    config[self.bundle]=paths;
+    if (![config writeToFile:[self file:@"directories.plist"] atomically:YES]) { [self message:@"保存失败，一键开启未应用。"]; return; }
+    NSMutableDictionary *states=[[self cached:@"appEnabled.plist"] mutableCopy]?:[NSMutableDictionary new];
+    states[self.bundle]=@YES;
+    if (![states writeToFile:[self file:@"appEnabled.plist"] atomically:YES]) { [self message:@"总开关保存失败。"]; return; }
+    [self clearFallback];
+    self.fileCache=nil;
+    [self.tableView reloadData];
+    [self message:[NSString stringWithFormat:@"已一键开启：总开关已打开，本次新增 %lu 个安全类目录（当前共选中 %lu 个）。谨慎类目录请逐个手动开。",(unsigned long)added,(unsigned long)paths.count]];
+}
+- (void)autoNewChanged:(UISwitch *)toggle {
+    NSMutableDictionary *entry = [[self policyEntry] mutableCopy];
+    entry[@"autoNew"] = @(toggle.on);
+    [self savePolicy:entry];
+    [self.tableView reloadData];
+}
+- (void)requestStockClean {
+    if (![[self cached:@"appEnabled.plist"][self.bundle] boolValue]) { [self message:@"请先打开该 App 的总开关（或点一键开启），再清理已有缓存。"]; return; }
+    NSMutableDictionary *stock=[[NSDictionary dictionaryWithContentsOfFile:[self file:@"stock.plist"]] mutableCopy]?:[NSMutableDictionary new];
+    stock[self.bundle]=@YES;
+    if (![stock writeToFile:[self file:@"stock.plist"] atomically:YES]) { [self message:@"提交失败。"]; return; }
+    [self message:@"已安排：该 App 完全退出后自动执行，只清安全类目录里的已有文件，数据库/登录文件跳过。"];
+}
+- (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
+    [table deselectRowAtIndexPath:path animated:YES];
+    if (path.section == 0 && path.row == 1) [self oneClickEnable];
+    else if (path.section == 1 && path.row == 3) [self requestStockClean];
 }
 - (void)modeChanged:(UISegmentedControl *)control {
     NSArray *modes = @[@"auto", @"lock", @"clean"];
@@ -275,12 +353,7 @@
     [self.tableView reloadData];
 }
 - (void)toggle:(UISwitch *)toggle {
-    NSString *relative=toggle.accessibilityIdentifier;
-    if (!toggle.on) {[self save:relative enabled:NO];return;}
-    toggle.on=NO;
-    UIAlertController *confirm=[UIAlertController alertControllerWithTitle:@"限制此目录写入？" message:[relative stringByAppendingString:@"\n可能影响该 App 的功能。可随时关闭恢复原权限。"] preferredStyle:UIAlertControllerStyleAlert];
-    [confirm addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [confirm addAction:[UIAlertAction actionWithTitle:@"开启限制" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action){[self save:relative enabled:YES];}]];
-    [self presentViewController:confirm animated:YES completion:nil];
+    // 0.5.0（用户第 1 点）：逐项开启不再弹确认框，拨动即生效；关掉即恢复。
+    [self save:toggle.accessibilityIdentifier enabled:toggle.on];
 }
 @end
