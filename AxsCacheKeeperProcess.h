@@ -1,8 +1,8 @@
 #pragma once
 #import <Foundation/Foundation.h>
 #import <objc/message.h>
-#include <libproc.h>
-#include <sys/proc_info.h>
+#include <sys/sysctl.h>
+#include <sys/types.h>
 
 typedef NS_ENUM(NSInteger, AxsCacheKeeperProcessState) {
     AxsCacheKeeperProcessUnknown, AxsCacheKeeperProcessRunning, AxsCacheKeeperProcessStopped
@@ -73,10 +73,16 @@ static inline NSString *axs_cachekeeper_process_identity(id manager, NSString *b
         if (![item respondsToSelector:pidSelector]) return nil;
         int pid=((int(*)(id,SEL))objc_msgSend)(item,pidSelector);
         if (pid<=0) return nil;
-        struct proc_taskallinfo info;
-        if (proc_pidinfo(pid, PROC_PIDTASKALLINFO, 0, &info, sizeof(info)) != (int)sizeof(info)) return nil;
-        return [NSString stringWithFormat:@"%d:%llu.%06u", pid,
-            (unsigned long long)info.pbsd.pbi_start_tvsec, (unsigned)info.pbsd.pbi_start_tvusec];
+        // 启动时间经 sysctl KERN_PROC_PID 读取（iOS SDK 无 libproc.h，构建 #28 已证伪；
+        // sysctl 与 kinfo_proc 为各 SDK 均备的标准头文件路径）。
+        int mib[4]={CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+        struct kinfo_proc info;
+        size_t size=sizeof(info);
+        if (sysctl(mib, 4, &info, &size, NULL, 0) || !size) return nil;
+        struct timeval start=info.kp_proc.p_starttime;
+        if (!start.tv_sec) return nil;
+        return [NSString stringWithFormat:@"%d:%lld.%06d", pid,
+            (long long)start.tv_sec, (int)start.tv_usec];
     }
     return nil;
 }
