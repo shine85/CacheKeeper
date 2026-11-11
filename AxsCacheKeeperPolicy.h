@@ -239,6 +239,15 @@ static inline BOOL axs_cachekeeper_can_clean(NSDictionary *directories, NSDictio
         axs_cachekeeper_app_enabled(states[bundle]) && axs_cachekeeper_wants_cleanup(states[bundle]) &&
         (axs_cachekeeper_selected_paths(directories,states,bundle).count > 0 || axs_cachekeeper_auto_discover(states[bundle]));
 }
+// 界面时间统一按设备本地时区显示；NSDate 的 %@ 描述恒为 UTC（+0000），会与机器时间差出时区小时数。
+static inline NSString *axs_cachekeeper_time_string(id value) {
+    if (![value isKindOfClass:NSDate.class]) return @"时间未知";
+    NSDateFormatter *formatter = [NSDateFormatter new];
+    formatter.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+    formatter.timeZone = NSTimeZone.localTimeZone;
+    formatter.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+    return [formatter stringFromDate:(NSDate *)value];
+}
 static inline NSString *axs_cachekeeper_summary(NSDictionary *scan, NSDictionary *report) {
     NSMutableArray *parts = [NSMutableArray new];
     if ([scan[@"rows"] isKindOfClass:NSArray.class]) [parts addObject:[NSString stringWithFormat:@"检测到 %lu 个目录（大小为检测快照）", (unsigned long)[scan[@"rows"] count]]];
@@ -247,7 +256,7 @@ static inline NSString *axs_cachekeeper_summary(NSDictionary *scan, NSDictionary
         if ([message isKindOfClass:NSString.class] && message.length) [parts addObject:message];
         [parts addObject:[NSString stringWithFormat:@"累计清理 %lu 个 · %.2f MB", (unsigned long)[report[@"removed"] unsignedIntegerValue], [report[@"bytes"] doubleValue] / 1048576.0]];
         if ([report[@"failed"] unsignedIntegerValue]) [parts addObject:[NSString stringWithFormat:@"本轮失败 %@ 项", report[@"failed"]]];
-        if (report[@"updated"]) [parts addObject:[NSString stringWithFormat:@"最近检查 %@", report[@"updated"]]];
+        if (report[@"updated"]) [parts addObject:[NSString stringWithFormat:@"最近检查 %@", axs_cachekeeper_time_string(report[@"updated"])]];
     }
     return parts.count ? [parts componentsJoinedByString:@"\n"] : @"尚未检测；检测后开启 APP 缓存控制";
 }

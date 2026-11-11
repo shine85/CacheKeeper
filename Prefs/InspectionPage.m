@@ -1,4 +1,5 @@
 #import "InspectionPage.h"
+#import "../AxsCacheKeeperPolicy.h"
 #include <roothide.h>
 
 @interface AxsCacheKeeperInspectionPage ()
@@ -57,7 +58,7 @@
     if (self.requestError.length) [text appendFormat:@"%@\n\n",self.requestError];
     if (self.stopping) [text appendString:@"已请求停止，等待当前请求的停止回执。\n\n"];
     NSDictionary *cleanup=[NSDictionary dictionaryWithContentsOfFile:[self axs_cachekeeper_file:[NSString stringWithFormat:@"Status/%@.auto.plist",self.bundle]]][@"directories"][self.relative];
-    if (cleanup) [text appendFormat:@"最近一轮清理记录（%@）：%@\n删除 %@ 个文件 · %.2f MB；保留受保护／未知 %@ 项、近期文件 %@ 项，变化目录 %@ 项，失败 %@ 项。\n%@\n\n",cleanup[@"updated"],[cleanup[@"cancelled"] boolValue] ? @"已中止" : [cleanup[@"complete"] boolValue] ? @"检查完成" : @"尚未完成",cleanup[@"removed"],[cleanup[@"bytes"] doubleValue]/1048576,cleanup[@"protected"],cleanup[@"recent"],cleanup[@"changed"],cleanup[@"failed"],cleanup[@"error"] ?: @""];
+    if (cleanup) [text appendFormat:@"最近一轮清理记录（%@）：%@\n删除 %@ 个文件 · %.2f MB；保留受保护／未知 %@ 项、近期文件 %@ 项，变化目录 %@ 项，失败 %@ 项。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),[cleanup[@"cancelled"] boolValue] ? @"已中止" : [cleanup[@"complete"] boolValue] ? @"检查完成" : @"尚未完成",cleanup[@"removed"],[cleanup[@"bytes"] doubleValue]/1048576,cleanup[@"protected"],cleanup[@"recent"],cleanup[@"changed"],cleanup[@"failed"],cleanup[@"error"] ?: @""];
     else [text appendString:@"本目录尚无清理回执；占用减少不能据此归因于插件。\n\n"];
     if (![report[@"path"] isEqual:self.relative] || (self.token && ![report[@"token"] isEqual:self.token])) {
         [text appendString:self.token ? @"等待检测服务响应…" : @"尚无本目录档案。"];
@@ -65,7 +66,7 @@
         self.textView.text=text;return;
     }
     BOOL complete=[report[@"complete"] boolValue],cancelled=[report[@"cancelled"] boolValue];
-    [text appendFormat:@"%@ · %@\n读取 %lu 个普通文件，%.2f MB\n%@\n\n",cancelled ? @"已停止（部分结果）" : complete ? ([report[@"coverageComplete"] boolValue] ? @"枚举完成" : @"结束但未完整读取") : @"正在分批读取",report[@"updated"] ?: @"",(unsigned long)[report[@"files"] unsignedIntegerValue],[report[@"bytes"] doubleValue]/1048576,report[@"evidence"] ?: @""];
+    [text appendFormat:@"%@ · %@\n读取 %lu 个普通文件，%.2f MB\n%@\n\n",cancelled ? @"已停止（部分结果）" : complete ? ([report[@"coverageComplete"] boolValue] ? @"枚举完成" : @"结束但未完整读取") : @"正在分批读取",axs_cachekeeper_time_string(report[@"updated"]),(unsigned long)[report[@"files"] unsignedIntegerValue],[report[@"bytes"] doubleValue]/1048576,report[@"evidence"] ?: @""];
     if (!complete && !cancelled && -[report[@"updated"] timeIntervalSinceNow]>30) [text appendString:@"进度超过 30 秒未更新；可以停止后重检，当前不能判定已完成。\n"];
     [text appendFormat:@"读取失败 %@ 项；扫描中变化 %@ 项；跳过链接 %@ 项、敏感目录 %@ 项。\n%@\n\n文件类型组成：\n",report[@"failures"] ?: @0,report[@"changed"] ?: @0,report[@"links"] ?: @0,report[@"hidden"] ?: @0,report[@"error"] ?: @""];
     for (NSString *kind in [report[@"types"] allKeys]) [text appendFormat:@"%@：%@ 个 · %.2f MB\n",kind,report[@"types"][kind][@"count"],[report[@"types"][kind][@"bytes"] doubleValue]/1048576];

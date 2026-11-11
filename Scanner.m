@@ -170,7 +170,7 @@ static NSString *axs_cachekeeper_network_status(NSString *bundle) {
     NSDictionary *report = [NSDictionary dictionaryWithContentsOfFile:path];
     if (![report isKindOfClass:NSDictionary.class]) return @"尚无进程内网络缓存回执；请重新打开 APP 检查注入";
     NSString *message = [report[@"message"] isKindOfClass:NSString.class] ? report[@"message"] : @"回执格式不完整";
-    return [NSString stringWithFormat:@"网络缓存回执：%@（%@）", message, report[@"updated"] ?: @"时间未知"];
+    return [NSString stringWithFormat:@"网络缓存回执：%@（%@）", message, axs_cachekeeper_time_string(report[@"updated"])];
 }
 void axs_cachekeeper_request_cleanup(NSString *bundle) {
     if (!axs_cachekeeper_bundle_id(bundle)) return;
@@ -243,7 +243,7 @@ void CKApplyDirectorySwitches(void) {
             if ([mode isEqual:@"prevent"]) {
                 [jobs removeObjectForKey:bundle]; [finished removeObjectForKey:bundle];
                 NSString *network=axs_cachekeeper_url_cache_enabled(states[bundle]) ? axs_cachekeeper_network_status(bundle) : @"网络缓存开关已关闭，当前不执行缓存干预";
-                axs_cachekeeper_report(bundle, @"prevent", [@"只禁止模式，不清理文件。\n" stringByAppendingString:network], 0, 0, 0, paths, nil, nil);
+                axs_cachekeeper_report(bundle, @"prevent", [@"只禁止模式：仅限制标准网络缓存，不删除文件；APP 自行写入缓存目录的文件仍会产生。\n" stringByAppendingString:network], 0, 0, 0, paths, nil, nil);
                 if (manual) dispatch_async(dispatch_get_main_queue(), ^{ [axs_cachekeeper_manual removeObject:bundle]; });
                 continue;
             }
