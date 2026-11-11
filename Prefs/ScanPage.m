@@ -14,6 +14,7 @@
 @property(nonatomic) NSTimeInterval started;
 @property(nonatomic,strong) NSTimer *statusTimer;
 @property(nonatomic,copy) NSString *scanError;
+@property(nonatomic) BOOL viewOnlyExpanded;
 @property(nonatomic,strong) NSMutableDictionary *displayCache;
 @property(nonatomic,strong) UIBarButtonItem *scanButton;
 @property(nonatomic,strong) UIBarButtonItem *enableAllButton;
@@ -100,8 +101,10 @@
     return [enabledRows arrayByAddingObjectsFromArray:otherRows];
 }
 - (UIContextMenuConfiguration *)tableView:(UITableView *)table contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)path point:(CGPoint)point {
-    if (path.row < 3) return nil;
-    NSString *relative = [self orderedRows][path.row-3][@"path"];
+    BOOL summary = NO;
+    NSDictionary *directoryRow = [self directoryRowAtIndexPath:path summary:&summary];
+    if (!directoryRow) return nil;
+    NSString *relative = directoryRow[@"path"];
     NSDictionary *history=[self axs_cachekeeper_display:@"snapshots.plist"][self.bundle];
     NSString *home=history[@"home"];
     if ([relative hasPrefix:@"Group/"]) {
@@ -125,7 +128,38 @@
         return [UIMenu menuWithTitle:@"" children:@[open]];
     }];
 }
-- (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {return self.rows.count+3;}
+- (NSArray *)manageableRows {
+    NSMutableArray *result = [NSMutableArray new];
+    for (NSDictionary *row in [self orderedRows]) if (axs_cachekeeper_cache_path(row[@"path"])) [result addObject:row];
+    return result;
+}
+- (NSArray *)viewOnlyRows {
+    NSMutableArray *result = [NSMutableArray new];
+    for (NSDictionary *row in [self orderedRows]) if (!axs_cachekeeper_cache_path(row[@"path"])) [result addObject:row];
+    return result;
+}
+- (NSInteger)summaryRowIndex {
+    return [self viewOnlyRows].count ? 3 + (NSInteger)[self manageableRows].count : -1;
+}
+- (NSDictionary *)directoryRowAtIndexPath:(NSIndexPath *)path summary:(BOOL *)summary {
+    if (summary) *summary = NO;
+    NSInteger index = path.row - 3;
+    if (index < 0) return nil;
+    NSArray *manageable = [self manageableRows];
+    if (index < (NSInteger)manageable.count) return manageable[index];
+    NSArray *viewOnly = [self viewOnlyRows];
+    if (!viewOnly.count) return nil;
+    if (index == (NSInteger)manageable.count) { if (summary) *summary = YES; return nil; }
+    if (!self.viewOnlyExpanded) return nil;
+    NSInteger viewIndex = index - (NSInteger)manageable.count - 1;
+    return viewIndex < (NSInteger)viewOnly.count ? viewOnly[viewIndex] : nil;
+}
+- (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
+    NSInteger count = 3 + [self manageableRows].count;
+    NSArray *viewOnly = [self viewOnlyRows];
+    if (viewOnly.count) count += 1 + (self.viewOnlyExpanded ? (NSInteger)viewOnly.count : 0);
+    return count;
+}
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
     NSString *message=@"检测后可一键开启全部可管理目录，也可逐项开启，均直接打开此 APP 总开关，无需再次确认。仅查看目录与 Group/ 共享容器不纳入；模式和网络选项保持原选择。首次运行已有缓存也检查，不按开启时间保留；仅在 APP 完全退出且文件超过 60 秒后清理通过数据预检的媒体。已选父目录内新增文件/子目录自动覆盖，新顶级目录需重新检测选择。";
     return self.scanError.length ? [self.scanError stringByAppendingFormat:@"\n%@",message] : message;
@@ -167,7 +201,20 @@
         [toggle addTarget:self action:@selector(axs_cachekeeper_network_changed:) forControlEvents:UIControlEventValueChanged];
         cell.accessoryView=toggle;return cell;
     }
-    NSDictionary *row=[self orderedRows][path.row-3];NSString *relative=row[@"path"];
+    BOOL summary = NO;
+    NSDictionary *row = [self directoryRowAtIndexPath:path summary:&summary];
+    if (summary) {
+        NSArray *viewOnly = [self viewOnlyRows];
+        unsigned long long bytes = 0;
+        for (NSDictionary *item in viewOnly) bytes += [item[@"bytes"] unsignedLongLongValue];
+        UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+        cell.textLabel.text = @"仅查看目录（不锁不删）";
+        cell.detailTextLabel.numberOfLines = 0;
+        cell.detailTextLabel.text = [NSString stringWithFormat:@"共 %lu 个 · 合计 %.2f MB\n含应用数据与用途未确认的目录，插件不处理；点击%@", (unsigned long)viewOnly.count, bytes / 1048576.0, self.viewOnlyExpanded ? @"收起" : @"展开"];
+        return cell;
+    }
+    if (!row) return [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    NSString *relative = row[@"path"];
     NSDictionary *config=[self axs_cachekeeper_display:@"directories.plist"];
     BOOL enabled=NO, partial=NO;
     for (NSString *selected in axs_cachekeeper_cache_paths(config[self.bundle])) {
@@ -182,7 +229,8 @@
     NSDictionary *master=[self axs_cachekeeper_display:@"appEnabled.plist"];
     BOOL masterOn=axs_cachekeeper_app_enabled(master[self.bundle]);
     BOOL manageable=axs_cachekeeper_cache_path(relative);
-    NSString *state=!manageable?@"应用数据：仅查看占用，不锁不删":(enabled?(!masterOn?@"已选中，等待打开 APP 总开关":(axs_cachekeeper_wants_cleanup(master[self.bundle])?@"已选中；退出后仅清理超过 60 秒的普通缓存":@"只禁止模式：不删除目录内文件")):@"未选中");
+    NSString *viewOnlyState = [relative hasPrefix:@"Group/"] ? @"共享数据：仅查看，不锁不删" : (axs_cachekeeper_known_data_path(relative) ? @"应用数据：仅查看，不锁不删" : @"用途未确认：仅查看，不锁不删");
+    NSString *state=!manageable?viewOnlyState:(enabled?(!masterOn?@"已选中，等待打开 APP 总开关":(axs_cachekeeper_wants_cleanup(master[self.bundle])?@"已选中；退出后仅清理超过 60 秒的普通缓存":@"只禁止模式：不删除目录内文件")):@"未选中");
     if (partial) state=[state stringByAppendingString:@"（保留旧配置中选定的部分子目录）"];
     cell.detailTextLabel.text=[NSString stringWithFormat:@"%.2f MB%@%@\n%@\n%@\n%@",[row[@"bytes"] doubleValue]/1048576,growth,[row[@"complete"] boolValue]?@"":@" · 大小未统计完",
         axs_cachekeeper_directory_description(relative),manageable?@"可选择清理（受文件保护规则约束）":@"仅查看（不锁不删）",state];
@@ -242,6 +290,7 @@
 }
 - (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
     [table deselectRowAtIndexPath:path animated:YES];
+    if (path.row == [self summaryRowIndex]) { self.viewOnlyExpanded = !self.viewOnlyExpanded; [self axs_cachekeeper_reload]; return; }
     if (path.row!=1) return;
     UIAlertController *choice=[UIAlertController alertControllerWithTitle:@"缓存控制模式" message:@"禁止只作用于标准 NSURLCache，可能增加流量并影响离线访问；自建视频或图片缓存仍需退出后清理。" preferredStyle:UIAlertControllerStyleAlert];
     NSDictionary *names=@{@"auto":@"自动：禁止 + 清理",@"prevent":@"只禁止：不删文件",@"clean":@"只清理：允许网络缓存"};

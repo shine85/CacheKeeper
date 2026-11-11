@@ -74,6 +74,14 @@ static inline NSString *axs_cachekeeper_directory_description(NSString *path) {
     if (descriptions[path]) return descriptions[path];
     return axs_cachekeeper_cache_path(path) ? @"缓存目录；仅清理可识别的普通媒体，其他内容保留" : @"APP 自定义数据，用途未确认；仅查看";
 }
+// 平台约定下用途明确的数据目录；不在此列的一律按“用途未确认”标注，不冒充应用数据。
+static inline BOOL axs_cachekeeper_known_data_path(NSString *path) {
+    if ([path hasPrefix:@"Group/"]) return YES;
+    for (NSString *known in @[@"Library/Application Support", @"Library/HTTPStorages", @"Library/WebKit",
+        @"Library/Cookies", @"Library/Preferences", @"Library/SplashBoard", @"Library/Saved Application State",
+        @"Documents", @"Downloads", @"Inbox"]) if ([path isEqual:known]) return YES;
+    return NO;
+}
 static inline BOOL axs_cachekeeper_ordinary_cache_file(NSString *relative) {
     return !axs_cachekeeper_protected_path(relative);
 }
