@@ -150,6 +150,20 @@
     }
     [self.checkedDirectories addObject:directory];return YES;
 }
+// 删除前的目录复核。标准/全量模式为目录级稳定性门：目录快照全等且目录内全部预检文件未变。
+// 日志模式只核对目录身份（inode/设备）：热日志目录里兄弟文件增删会改目录时间戳，
+// 若沿用目录级门会整轮空转（2026-11-11 抖音 alog 真机：14 个目录判变化、删除 0）；
+// 文件自身稳定性改由删除时逐文件比对预检记录保证（remove 的日志分支），数据子树保护不受影响。
+- (BOOL)axs_cachekeeper_verify_directory:(NSString *)path fd:(int)fd {
+    struct stat info;
+    if (fstat(fd, &info)) return NO;
+    if (!self.logMode) {
+        return [[self axs_cachekeeper_snapshot:info] isEqual:self.directorySnapshots[path]] &&
+            [self axs_cachekeeper_check_files:path fd:fd];
+    }
+    NSArray *record = self.directorySnapshots[path];
+    return record && [@(info.st_ino) isEqual:record[0]] && [@(info.st_dev) isEqual:record[1]];
+}
 - (BOOL)axs_cachekeeper_remove:(NSURL *)entry expected:(struct stat)expected {
     self.error = nil;
     NSString *parent = entry.URLByDeletingLastPathComponent.path;
@@ -183,9 +197,8 @@
     NSString *openedPath=self.root;
     for (NSString *part in [relativeParent componentsSeparatedByString:@"/"]) {
         if (!part.length) continue;
-        struct stat ancestor;
-        if (fstat(fd,&ancestor) || ![[self axs_cachekeeper_snapshot:ancestor] isEqual:self.directorySnapshots[openedPath]] ||
-            ![self axs_cachekeeper_check_files:openedPath fd:fd]) {
+        if (![self axs_cachekeeper_verify_directory:openedPath fd:fd]) {
+            if (self.logMode) { close(fd); errno = EBUSY; self.error = @"预检后目录身份发生变化，已跳过该文件"; return NO; }
             if (![self.dataDirectories containsObject:openedPath]) self.changedCount++;
             [self.dataDirectories addObject:openedPath];close(fd);errno=EBUSY;return NO;
         }
@@ -201,13 +214,25 @@
     }
     struct stat current;
     struct stat parentInfo;
-    if (fstat(fd,&parentInfo) || ![[self axs_cachekeeper_snapshot:parentInfo] isEqual:self.directorySnapshots[parent]] ||
-        ![self axs_cachekeeper_check_files:parent fd:fd]) {
+    if (![self axs_cachekeeper_verify_directory:parent fd:fd]) {
+        if (self.logMode) { close(fd); errno = EBUSY; self.error = @"预检后目录身份发生变化，已跳过该文件"; return NO; }
         if (![self.dataDirectories containsObject:parent]) self.changedCount++;
         [self.dataDirectories addObject:parent];self.error=@"预检后目录发生变化，已跳过";
         close(fd);errno=EBUSY;return NO;
     }
     const char *name = entry.lastPathComponent.fileSystemRepresentation;
+    if (self.logMode) {
+        // 文件级稳定性门：只比对目标文件自身的预检记录；未预检（预检后新增）或已变化的跳过本文件，
+        // 不连坐同目录其他文件。计入变化数而非失败数（errno EBUSY 不计失败）。
+        NSArray *record = self.fileSnapshots[parent][entry.lastPathComponent];
+        struct stat currentRecord;
+        if (!record || fstatat(fd, name, &currentRecord, AT_SYMLINK_NOFOLLOW) ||
+            ![[self axs_cachekeeper_snapshot:currentRecord] isEqual:record]) {
+            self.changedCount++;
+            self.error = @"预检后文件发生变化，已跳过该文件";
+            close(fd); errno = EBUSY; return NO;
+        }
+    }
     BOOL removed = NO;
     int file = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
     if (file >= 0 && !fstat(file, &current) && S_ISREG(current.st_mode) && current.st_nlink == 1 &&

@@ -373,6 +373,35 @@ int main(int argc, const char *argv[]) {
             [fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"ready/notes.txt"]] &&
             [fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"vault/inner.sqlite"]] &&
             [fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"vault/inside.log"]], @"日志模式保留媒体、文本与数据子树（含其内日志）");
+        // 热目录稳定性（2026-11-11 抖音 alog 真机：目录级门下 14 个目录判变化、整轮删除 0）：
+        // 预检后同目录兄弟文件被改写时，日志模式只跳过变化文件本身，其余预检通过的日志照常删除；
+        // 目录级模式（全量清理对照）则整目录跳过，两档差异必须保持。
+        NSString *hotRoot=[fixture stringByAppendingPathComponent:@"hot-log"];
+        require([fm createDirectoryAtPath:[hotRoot stringByAppendingPathComponent:@"ready"] withIntermediateDirectories:YES attributes:nil error:nil], @"热日志目录夹具");
+        writeFile([hotRoot stringByAppendingPathComponent:@"ready/stable-one.alog"]);
+        writeFile([hotRoot stringByAppendingPathComponent:@"ready/stable-two.log"]);
+        writeFile([hotRoot stringByAppendingPathComponent:@"ready/keep-changing.log"]);
+        AxsCacheKeeperSweep *hotLog=[[AxsCacheKeeperSweep alloc] initWithRoot:hotRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:YES];
+        for (NSUInteger pass=0;hotLog.checking && !hotLog.complete && pass<100;pass++) [hotLog advance:1 shouldContinue:^BOOL{return YES;}];
+        require(!hotLog.checking && hotLog.removed==0, @"热目录预检阶段不删除");
+        writeFile([hotRoot stringByAppendingPathComponent:@"ready/keep-changing.log"]);
+        for (NSUInteger pass=0;!hotLog.complete && pass<100;pass++) [hotLog advance:64 shouldContinue:^BOOL{return YES;}];
+        require(hotLog.complete && hotLog.failed==0 && hotLog.removed==2 && hotLog.changedCount>0,
+            [NSString stringWithFormat:@"日志模式文件级稳定性门：兄弟变化只跳过自身（removed=%lu failed=%lu changed=%lu error=%@）",(unsigned long)hotLog.removed,(unsigned long)hotLog.failed,(unsigned long)hotLog.changedCount,hotLog.error]);
+        require(![fm fileExistsAtPath:[hotRoot stringByAppendingPathComponent:@"ready/stable-one.alog"]] &&
+            ![fm fileExistsAtPath:[hotRoot stringByAppendingPathComponent:@"ready/stable-two.log"]] &&
+            [fm fileExistsAtPath:[hotRoot stringByAppendingPathComponent:@"ready/keep-changing.log"]], @"变化文件保留、稳定日志删除");
+        NSString *hotRoot2=[fixture stringByAppendingPathComponent:@"hot-full"];
+        require([fm createDirectoryAtPath:[hotRoot2 stringByAppendingPathComponent:@"ready"] withIntermediateDirectories:YES attributes:nil error:nil], @"热目录对照夹具");
+        writeFile([hotRoot2 stringByAppendingPathComponent:@"ready/stable-one.alog"]);
+        writeFile([hotRoot2 stringByAppendingPathComponent:@"ready/stable-two.log"]);
+        writeFile([hotRoot2 stringByAppendingPathComponent:@"ready/keep-changing.log"]);
+        AxsCacheKeeperSweep *hotFull=[[AxsCacheKeeperSweep alloc] initWithRoot:hotRoot2 clock:^NSTimeInterval{return future;} fullClear:YES];
+        for (NSUInteger pass=0;hotFull.checking && !hotFull.complete && pass<100;pass++) [hotFull advance:1 shouldContinue:^BOOL{return YES;}];
+        writeFile([hotRoot2 stringByAppendingPathComponent:@"ready/keep-changing.log"]);
+        for (NSUInteger pass=0;!hotFull.complete && pass<100;pass++) [hotFull advance:64 shouldContinue:^BOOL{return YES;}];
+        require(hotFull.complete && hotFull.removed==0 &&
+            [fm fileExistsAtPath:[hotRoot2 stringByAppendingPathComponent:@"ready/stable-one.alog"]], @"对照：目录级稳定性门下兄弟变化整目录保留");
         NSString *lateDir=[fixture stringByAppendingPathComponent:@"late-database"];
         require([fm createDirectoryAtPath:lateDir withIntermediateDirectories:YES attributes:nil error:nil], @"延迟发现数据库夹具");
         writeMedia([lateDir stringByAppendingPathComponent:@"a.png"]);
