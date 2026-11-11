@@ -358,6 +358,43 @@ int main(int argc, const char *argv[]) {
         NSDictionary *rejected = axs_cachekeeper_restore_paths(@[cache], journal);
         require([rejected[@"failed"] unsignedIntegerValue] > 0 && !lstat(cache.fileSystemRepresentation, &info) && (info.st_mode & 0777) == 0770, @"损坏记录不能改变目录权限");
 
+        NSString *lockRoot = [fixture stringByAppendingPathComponent:@"lock-root"];
+        NSString *lockSub = [lockRoot stringByAppendingPathComponent:@"sub"];
+        require([fm createDirectoryAtPath:lockSub withIntermediateDirectories:YES attributes:nil error:nil], @"写锁夹具目录");
+        writeFile([lockRoot stringByAppendingPathComponent:@"a.txt"]);
+        writeFile([lockSub stringByAppendingPathComponent:@"b.txt"]);
+        NSString *lockOutside = [fixture stringByAppendingPathComponent:@"lock-outside"];
+        writeFile(lockOutside);
+        require(!symlink(lockOutside.fileSystemRepresentation, [lockRoot stringByAppendingPathComponent:@"link"].fileSystemRepresentation), @"写锁链接夹具");
+        chmod(lockRoot.fileSystemRepresentation, 0755); chmod(lockSub.fileSystemRepresentation, 0755);
+        chmod([lockRoot stringByAppendingPathComponent:@"a.txt"].fileSystemRepresentation, 0644);
+        chmod([lockSub stringByAppendingPathComponent:@"b.txt"].fileSystemRepresentation, 0600);
+        NSString *lockJournal = [fixture stringByAppendingPathComponent:@"lock-permissions.plist"];
+        NSDictionary *lockResult = axs_cachekeeper_lock_paths(@[lockRoot], lockJournal);
+        require([lockResult[@"failed"] unsignedIntegerValue] == 0 && [lockResult[@"locked"] unsignedIntegerValue] == 4,
+            [NSString stringWithFormat:@"写锁覆盖根、子目录与两个文件（locked=%@ error=%@）", lockResult[@"locked"], lockResult[@"error"]]);
+        struct stat lockInfo;
+        require(!lstat(lockRoot.fileSystemRepresentation, &lockInfo) && (lockInfo.st_mode & 0222) == 0 &&
+            !lstat(lockSub.fileSystemRepresentation, &lockInfo) && (lockInfo.st_mode & 0222) == 0 &&
+            !lstat([lockRoot stringByAppendingPathComponent:@"a.txt"].fileSystemRepresentation, &lockInfo) && (lockInfo.st_mode & 0777) == 0444 &&
+            !lstat([lockSub stringByAppendingPathComponent:@"b.txt"].fileSystemRepresentation, &lockInfo) && (lockInfo.st_mode & 0777) == 0400, @"锁定后目录与文件均不可写且保留其他权限位");
+        require(!lstat(lockOutside.fileSystemRepresentation, &lockInfo) && (lockInfo.st_mode & 0222) != 0, @"符号链接指向的外部文件不被锁定");
+        FILE *blocked = fopen([lockRoot stringByAppendingPathComponent:@"a.txt"].fileSystemRepresentation, "a");
+        require(!blocked, @"锁定后追加写入被系统拒绝");
+        require(![fm createFileAtPath:[lockRoot stringByAppendingPathComponent:@"new.txt"] contents:nil attributes:nil], @"锁定后新建文件被系统拒绝");
+        NSDictionary *lockRecords = [NSDictionary dictionaryWithContentsOfFile:lockJournal];
+        require([lockRecords[lockRoot][@"mode"] unsignedIntValue] == 0755 &&
+            [lockRecords[[lockSub stringByAppendingPathComponent:@"b.txt"]][@"mode"] unsignedIntValue] == 0600 &&
+            !lockRecords[[lockRoot stringByAppendingPathComponent:@"link"]], @"先记录原始权限再锁定，链接不入记录");
+        NSDictionary *relock = axs_cachekeeper_lock_paths(@[lockRoot], lockJournal);
+        require([relock[@"failed"] unsignedIntegerValue] == 0 && [relock[@"locked"] unsignedIntegerValue] == 0 &&
+            [[NSDictionary dictionaryWithContentsOfFile:lockJournal][lockRoot][@"mode"] unsignedIntValue] == 0755, @"重复锁定不覆盖原始权限记录");
+        NSDictionary *unlockResult = axs_cachekeeper_restore_paths(nil, lockJournal);
+        require([unlockResult[@"failed"] unsignedIntegerValue] == 0 &&
+            !lstat(lockRoot.fileSystemRepresentation, &lockInfo) && (lockInfo.st_mode & 0777) == 0755 &&
+            !lstat([lockSub stringByAppendingPathComponent:@"b.txt"].fileSystemRepresentation, &lockInfo) && (lockInfo.st_mode & 0777) == 0600 &&
+            ![NSDictionary dictionaryWithContentsOfFile:lockJournal].count, @"按记录精确恢复目录与文件权限并清空记录");
+
         NSString *inspectionRoot=[fixture stringByAppendingPathComponent:@"inspection"];
         require([fm createDirectoryAtPath:inspectionRoot withIntermediateDirectories:YES attributes:nil error:nil], @"建立深度检测目录");
         for (NSUInteger i=0;i<600;i++) writeMedia([inspectionRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"%lu.bin",(unsigned long)i]]);

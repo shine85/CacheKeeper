@@ -264,6 +264,7 @@ static inline NSString *axs_cachekeeper_summary(NSDictionary *scan, NSDictionary
 extern "C" {
 #endif
 NSDictionary *axs_cachekeeper_restore_paths(NSArray *paths, NSString *journal);
+NSDictionary *axs_cachekeeper_lock_paths(NSArray *roots, NSString *journal);
 void axs_cachekeeper_request_cleanup(NSString *bundle);
 void CKScanRequests(void);
 void CKInspectRequests(void);

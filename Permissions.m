@@ -17,7 +17,9 @@ static NSString *jbroot(NSString *path) {
 #include <roothide.h>
 #endif
 
-// 仅恢复旧版修改的权限。禁止再锁缓存根，以免连带阻断数据库或登录态写入。
+// 权限记录 permissions.plist 由两方共用：旧版残留权限的恢复，以及只禁止模式的目录写锁
+// （用户 2026-11-11 在对话中确认：选了只禁止就同时锁已选缓存目录；仅在 APP 完全退出后上锁/解锁，
+// 关模式、关总开关或卸载时按记录恢复。记录格式 {inode, device, mode} 两方通用。）
 NSDictionary *axs_cachekeeper_restore_paths(NSArray *paths, NSString *file) {
     NSDictionary *stored = [NSDictionary dictionaryWithContentsOfFile:file];
     if ((!stored && [NSFileManager.defaultManager fileExistsAtPath:file]) || !file.length)
@@ -34,12 +36,16 @@ NSDictionary *axs_cachekeeper_restore_paths(NSArray *paths, NSString *file) {
             failed++; message = @"原权限记录损坏，保留记录等待修复"; continue;
         }
         int fd = axs_cachekeeper_open_directory(path);
+        if (fd < 0 && errno == ENOTDIR) fd = axs_cachekeeper_open_regular_file(path);
         if (fd < 0) {
             if (errno == ENOENT) { [records removeObjectForKey:path]; continue; }
-            failed++; message = [NSString stringWithFormat:@"恢复目录访问失败（errno %d）", errno]; continue;
+            failed++; message = [NSString stringWithFormat:@"恢复条目访问失败（errno %d）", errno]; continue;
         }
         struct stat info;
-        if (fstat(fd, &info)) { failed++; message = @"无法核对目录身份"; close(fd); continue; }
+        if (fstat(fd, &info)) { failed++; message = @"无法核对条目身份"; close(fd); continue; }
+        if (!S_ISDIR(info.st_mode) && !S_ISREG(info.st_mode)) {
+            failed++; message = @"条目类型异常，保留记录等待修复"; close(fd); continue;
+        }
         if ([saved[@"inode"] unsignedLongLongValue] != info.st_ino || [saved[@"device"] unsignedLongLongValue] != info.st_dev) {
             [records removeObjectForKey:path]; close(fd); continue;
         }
@@ -54,8 +60,73 @@ NSDictionary *axs_cachekeeper_restore_paths(NSArray *paths, NSString *file) {
     }
     return @{@"failed":@(failed), @"applied":@(applied), @"error":message};
 }
+// 只禁止模式的目录写锁：先把未记录条目的原始权限写入记录并落盘，再逐项去掉写权限并核对；
+// 任一项失败回滚本轮已改条目。已无写权限的条目跳过，重复调用只补锁被改回的条目。
+NSDictionary *axs_cachekeeper_lock_paths(NSArray *roots, NSString *file) {
+    NSDictionary *stored = [NSDictionary dictionaryWithContentsOfFile:file];
+    if ((!stored && [NSFileManager.defaultManager fileExistsAtPath:file]) || !file.length)
+        return @{@"failed":@1, @"locked":@0, @"error":@"权限记录不可读，未锁定任何目录"};
+    NSMutableDictionary *records = [stored mutableCopy] ?: [NSMutableDictionary new];
+    NSMutableArray<NSDictionary *> *targets = [NSMutableArray new];
+    __block BOOL enumerationFailed = NO;
+    for (NSString *root in roots ?: @[]) {
+        struct stat info;
+        if (![root isEqual:[NSURL fileURLWithPath:root].URLByResolvingSymlinksInPath.path] ||
+            lstat(root.fileSystemRepresentation, &info) || !S_ISDIR(info.st_mode))
+            return @{@"failed":@1, @"locked":@0, @"error":@"缓存目录不可访问或包含符号链接，未锁定"};
+        NSMutableArray<NSString *> *found = [NSMutableArray arrayWithObject:root];
+        NSDirectoryEnumerator *enumerator = [NSFileManager.defaultManager enumeratorAtURL:[NSURL fileURLWithPath:root isDirectory:YES]
+            includingPropertiesForKeys:nil options:0 errorHandler:^BOOL(NSURL *url, NSError *error) { enumerationFailed = YES; return YES; }];
+        if (!enumerator) return @{@"failed":@1, @"locked":@0, @"error":@"无法打开缓存目录，未锁定"};
+        for (NSURL *entry in enumerator) {
+            struct stat child;
+            if (lstat(entry.path.fileSystemRepresentation, &child)) { enumerationFailed = YES; continue; }
+            if (S_ISLNK(child.st_mode) || (!S_ISDIR(child.st_mode) && !S_ISREG(child.st_mode))) continue;
+            [found addObject:entry.path];
+            if (found.count > 100000) return @{@"failed":@1, @"locked":@0, @"error":@"目录条目过多，未锁定"};
+        }
+        if (enumerationFailed) return @{@"failed":@1, @"locked":@0, @"error":@"目录遍历不完整，未锁定"};
+        for (NSString *path in found) {
+            struct stat current;
+            if (lstat(path.fileSystemRepresentation, &current))
+                return @{@"failed":@1, @"locked":@0, @"error":@"锁定前文件状态变化，未锁定"};
+            if ((current.st_mode & 0222) == 0) continue;
+            [targets addObject:@{@"path":path, @"mode":@(current.st_mode & 07777),
+                @"inode":@(current.st_ino), @"device":@(current.st_dev)}];
+        }
+    }
+    if (!targets.count) return @{@"failed":@0, @"locked":@0, @"error":@""};
+    BOOL journalChanged = NO;
+    for (NSDictionary *target in targets) {
+        if (!records[target[@"path"]]) {
+            records[target[@"path"]] = @{@"inode":target[@"inode"], @"device":target[@"device"], @"mode":target[@"mode"]};
+            journalChanged = YES;
+        }
+    }
+    if (journalChanged && ![records writeToFile:file atomically:YES])
+        return @{@"failed":@1, @"locked":@0, @"error":@"权限记录保存失败，未锁定"};
+    NSMutableArray<NSString *> *changed = [NSMutableArray new];
+    for (NSDictionary *target in targets) {
+        NSString *path = target[@"path"];
+        int fd = axs_cachekeeper_open_directory(path);
+        if (fd < 0 && errno == ENOTDIR) fd = axs_cachekeeper_open_regular_file(path);
+        struct stat current;
+        BOOL ok = fd >= 0 && !fstat(fd, &current) &&
+            current.st_ino == [target[@"inode"] unsignedLongLongValue] &&
+            current.st_dev == [target[@"device"] unsignedLongLongValue] &&
+            !fchmod(fd, (mode_t)([target[@"mode"] unsignedIntValue] & ~0222)) &&
+            !fstat(fd, &current) && (current.st_mode & 0222) == 0;
+        if (fd >= 0) close(fd);
+        if (!ok) {
+            axs_cachekeeper_restore_paths(changed, file);
+            return @{@"failed":@1, @"locked":@0, @"error":@"锁定中途失败，已回滚本轮改动"};
+        }
+        [changed addObject:path];
+    }
+    return @{@"failed":@0, @"locked":@(changed.count), @"error":@""};
+}
 NSDictionary *CKPermissions(NSURL *home, BOOL enabled) {
-    if (enabled) return @{@"failed":@1,@"error":@"不再支持目录 chmod 限写"};
+    if (enabled) return @{@"failed":@1,@"error":@"目录写锁由桌面进程按只禁止模式统一处理，此入口不执行锁定"};
     NSString *journal = jbroot(@"/var/mobile/Library/CacheKeeper/permissions.plist");
     NSArray *paths = nil;
     if (home) {

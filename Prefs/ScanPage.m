@@ -241,7 +241,7 @@
         control.accessibilityLabel=@"缓存控制模式，三选一";
         [control addTarget:self action:@selector(axs_cachekeeper_mode_changed:) forControlEvents:UIControlEventValueChanged];
         UILabel *detail=[UILabel new];detail.numberOfLines=0;detail.font=[UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];detail.textColor=UIColor.secondaryLabelColor;detail.adjustsFontForContentSizeCategory=YES;
-        detail.text=@"自动：网络限制 + 退出后清理\n只禁止：仅限制标准网络缓存，不删文件；APP 自行写入 Library/Caches、tmp 的文件不在禁止范围，运行后仍会产生\n只清理：允许网络缓存，仅退出后清理";
+        detail.text=@"自动：网络限制 + 退出后清理\n只禁止：限制网络缓存 + 锁定已选缓存目录写入（可读不可写），不删除已有文件；APP 完全退出后上锁，切换模式或关闭总开关后解锁\n只清理：允许网络缓存，仅退出后清理";
         UIStackView *stack=[[UIStackView alloc] initWithArrangedSubviews:@[label,control,detail]];
         stack.axis=UILayoutConstraintAxisVertical;stack.spacing=10;stack.translatesAutoresizingMaskIntoConstraints=NO;
         [cell.contentView addSubview:stack];
@@ -315,7 +315,7 @@
     NSString *growth=compared?[NSString stringWithFormat:@" · 变化 %+.2f MB",([row[@"bytes"] longLongValue]-previous)/1048576.0]:@" · 首次检测";
     BOOL masterOn=axs_cachekeeper_app_enabled(master[self.bundle]);
     BOOL manageable=axs_cachekeeper_row_manageable(row);
-    NSString *state=!manageable?@"仅供分析":(!masterOn?@"APP 未开启：不处理任何目录":(enabled?(axs_cachekeeper_wants_cleanup(master[self.bundle])?(axs_cachekeeper_full_clear_path(master[self.bundle],relative)?@"已纳入；全量清理开启，退出后清空该目录全部文件":@"已纳入；退出后处理通过预检的缓存"):@"只禁止模式：不删除目录内文件"):@"未开启／已手动排除"));
+    NSString *state=!manageable?@"仅供分析":(!masterOn?@"APP 未开启：不处理任何目录":(enabled?(axs_cachekeeper_wants_cleanup(master[self.bundle])?(axs_cachekeeper_full_clear_path(master[self.bundle],relative)?@"已纳入；全量清理开启，退出后清空该目录全部文件":@"已纳入；退出后处理通过预检的缓存"):@"只禁止模式：不删除文件，目录写入锁定见顶部状态"):@"未开启／已手动排除"));
     if (partial) state=[state stringByAppendingString:@"（保留旧配置中选定的部分子目录）"];
     NSString *size=row[@"bytes"] ? [NSString stringWithFormat:@"%.2f MB%@%@",[row[@"bytes"] doubleValue]/1048576,growth,[row[@"complete"] boolValue]?@"":@" · 大小未统计完"] : @"自动发现，大小待检测";
     NSDictionary *snapshot=[self axs_cachekeeper_display:@"snapshots.plist"][self.bundle];

@@ -191,11 +191,11 @@ void axs_cachekeeper_request_cleanup(NSString *bundle) {
 void CKApplyDirectorySwitches(void) {
     static BOOL busy;
     static dispatch_queue_t queue;
-    static NSMutableDictionary *jobs, *finished, *discovery;
+    static NSMutableDictionary *jobs, *finished, *discovery, *lockChecks;
     if (busy) return;
     if (!queue) {
         queue = dispatch_queue_create("dev.local.cachekeeper.cleanup", DISPATCH_QUEUE_SERIAL);
-        jobs = [NSMutableDictionary new]; finished = [NSMutableDictionary new]; discovery = [NSMutableDictionary new];
+        jobs = [NSMutableDictionary new]; finished = [NSMutableDictionary new]; discovery = [NSMutableDictionary new]; lockChecks = [NSMutableDictionary new];
     }
     NSString *folder = axs_cachekeeper_folder();
     NSString *selectionFile = [folder stringByAppendingPathComponent:@"directories.plist"];
@@ -227,7 +227,23 @@ void CKApplyDirectorySwitches(void) {
     }
     busy = YES;
     dispatch_async(queue, ^{
-        NSDictionary *restored = axs_cachekeeper_restore_paths(nil, [folder stringByAppendingPathComponent:@"permissions.plist"]);
+        // 权限记录只恢复「不再被期望锁定」的部分：期望集合 = 已启用且只禁止模式的 APP 的已选缓存根；
+        // 其余记录（含旧版残留、已切换模式或关闭总开关的 APP）每轮在此恢复，期望内条目保持锁定。
+        NSString *journal = [folder stringByAppendingPathComponent:@"permissions.plist"];
+        NSDictionary *journalRecords = [NSDictionary dictionaryWithContentsOfFile:journal];
+        NSMutableArray *desiredRoots = [NSMutableArray new];
+        for (NSString *bundle in targets) if ([targets[bundle][@"mode"] isEqual:@"prevent"])
+            [desiredRoots addObjectsFromArray:targets[bundle][@"roots"]];
+        NSMutableArray *undesired = [NSMutableArray new];
+        for (NSString *path in journalRecords) {
+            BOOL wanted = NO;
+            for (NSString *root in desiredRoots)
+                if ([path isEqual:root] || [path hasPrefix:[root stringByAppendingString:@"/"]]) { wanted = YES; break; }
+            if (!wanted) [undesired addObject:path];
+        }
+        NSDictionary *restored = undesired.count ? axs_cachekeeper_restore_paths(undesired, journal) :
+            @{@"failed":@0, @"applied":@0, @"error":@""};
+        for (NSString *bundle in lockChecks.allKeys) if (!targets[bundle]) [lockChecks removeObjectForKey:bundle];
         for (NSString *bundle in jobs.allKeys) if (!targets[bundle]) [jobs removeObjectForKey:bundle];
         for (NSString *bundle in finished.allKeys) if (!targets[bundle]) [finished removeObjectForKey:bundle];
         for (NSString *bundle in discovery.allKeys) if (!targets[bundle]) [discovery removeObjectForKey:bundle];
@@ -243,7 +259,24 @@ void CKApplyDirectorySwitches(void) {
             if ([mode isEqual:@"prevent"]) {
                 [jobs removeObjectForKey:bundle]; [finished removeObjectForKey:bundle];
                 NSString *network=axs_cachekeeper_url_cache_enabled(states[bundle]) ? axs_cachekeeper_network_status(bundle) : @"网络缓存开关已关闭，当前不执行缓存干预";
-                axs_cachekeeper_report(bundle, @"prevent", [@"只禁止模式：仅限制标准网络缓存，不删除文件；APP 自行写入缓存目录的文件仍会产生。\n" stringByAppendingString:network], 0, 0, 0, paths, nil, nil);
+                NSString *lockMessage;
+                if ([target[@"process"] integerValue] != AxsCacheKeeperProcessStopped) {
+                    lockMessage = @"只禁止模式：限制网络缓存并锁定已选缓存目录写入；APP 未完全退出，上锁将在退出后自动执行。";
+                } else if (!roots.count) {
+                    lockMessage = @"只禁止模式：限制网络缓存，不删除文件；尚未选择缓存目录，没有可锁定的目录。";
+                } else {
+                    NSString *signature = [roots componentsJoinedByString:@"\n"];
+                    NSDictionary *last = lockChecks[bundle];
+                    NSDictionary *result = ([last[@"signature"] isEqual:signature] && -[last[@"time"] timeIntervalSinceNow] < 30) ? last[@"result"] : nil;
+                    if (!result) {
+                        result = axs_cachekeeper_lock_paths(roots, journal);
+                        lockChecks[bundle] = @{@"signature":signature, @"time":NSDate.date, @"result":result};
+                    }
+                    lockMessage = [result[@"failed"] unsignedIntegerValue] ?
+                        [NSString stringWithFormat:@"只禁止模式：目录写入锁定失败：%@；网络缓存限制照常执行。", result[@"error"]] :
+                        [NSString stringWithFormat:@"只禁止模式：已锁定 %lu 个缓存目录的写入（可读取、不可新建或修改），不删除已有文件。", (unsigned long)roots.count];
+                }
+                axs_cachekeeper_report(bundle, @"prevent", [lockMessage stringByAppendingFormat:@"\n%@", network], 0, 0, 0, paths, nil, nil);
                 if (manual) dispatch_async(dispatch_get_main_queue(), ^{ [axs_cachekeeper_manual removeObject:bundle]; });
                 continue;
             }

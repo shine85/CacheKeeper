@@ -20,3 +20,17 @@ static inline int axs_cachekeeper_open_directory(NSString *path) {
     }
     return fd;
 }
+
+// 与目录版同一链路：逐级打开父目录后以 NOFOLLOW 打开末级普通文件，供权限恢复核对身份后 fchmod。
+static inline int axs_cachekeeper_open_regular_file(NSString *path) {
+    if (![path hasPrefix:@"/"]) { errno = EINVAL; return -1; }
+    NSString *name = path.lastPathComponent;
+    if (!name.length || [name isEqual:@"."] || [name isEqual:@".."]) { errno = EINVAL; return -1; }
+    int fd = axs_cachekeeper_open_directory(path.stringByDeletingLastPathComponent);
+    if (fd < 0) return -1;
+    int file = openat(fd, name.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    int error = errno;
+    close(fd);
+    errno = error;
+    return file;
+}
