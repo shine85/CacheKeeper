@@ -84,7 +84,20 @@
     [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];[self presentViewController:alert animated:YES completion:nil];
 }
 - (NSArray *)orderedRows {
-    return axs_cachekeeper_size_ordered_rows(self.rows);
+    NSArray *rows = axs_cachekeeper_size_ordered_rows(self.rows);
+    NSDictionary *config = [self axs_cachekeeper_display:@"directories.plist"];
+    NSArray *selected = axs_cachekeeper_cache_paths(config[self.bundle]);
+    if (!selected.count) return rows;
+    NSMutableArray *enabledRows = [NSMutableArray new];
+    NSMutableArray *otherRows = [NSMutableArray new];
+    for (NSDictionary *row in rows) {
+        BOOL on = NO;
+        for (NSString *path in selected) {
+            if ([path isEqual:row[@"path"]] || [path hasPrefix:[row[@"path"] stringByAppendingString:@"/"]]) { on = YES; break; }
+        }
+        [(on ? enabledRows : otherRows) addObject:row];
+    }
+    return [enabledRows arrayByAddingObjectsFromArray:otherRows];
 }
 - (UIContextMenuConfiguration *)tableView:(UITableView *)table contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)path point:(CGPoint)point {
     if (path.row < 3) return nil;
