@@ -256,8 +256,12 @@ void CKApplyDirectorySwitches(void) {
         NSString *journal = [folder stringByAppendingPathComponent:@"permissions.plist"];
         NSDictionary *journalRecords = [NSDictionary dictionaryWithContentsOfFile:journal];
         NSMutableArray *desiredRoots = [NSMutableArray new];
-        for (NSString *bundle in targets) if ([targets[bundle][@"mode"] isEqual:@"prevent"])
-            [desiredRoots addObjectsFromArray:targets[bundle][@"roots"]];
+        for (NSString *bundle in targets) if ([targets[bundle][@"mode"] isEqual:@"prevent"]) {
+            // 只禁止的写锁只作用于标准缓存根；定级日志目录不因只禁止模式被上锁（其语义是退出后清理）。
+            NSArray *targetPaths = targets[bundle][@"paths"], *targetRoots = targets[bundle][@"roots"];
+            for (NSUInteger index = 0; index < targetPaths.count && index < targetRoots.count; index++)
+                if ([axs_cachekeeper_directory_kind(targetPaths[index]) isEqual:@"cache"]) [desiredRoots addObject:targetRoots[index]];
+        }
         NSMutableArray *undesired = [NSMutableArray new];
         for (NSString *path in journalRecords) {
             BOOL wanted = NO;
@@ -335,6 +339,8 @@ void CKApplyDirectorySwitches(void) {
                 axs_cachekeeper_report(bundle,@"waiting",message,0,0,discoveryError.length ? 1 : 0,@[],axs_cachekeeper_auto_discover(states[bundle]) ? discovered : nil,nil);continue;
             }
             BOOL fullClear = axs_cachekeeper_full_clear(states[bundle]);
+            BOOL hasLogRoot = NO;
+            for (NSString *path in paths) if ([axs_cachekeeper_log_paths(states[bundle]) containsObject:path]) { hasLogRoot = YES; break; }
             NSString *signature = [NSString stringWithFormat:@"%@\n%@\n%@\n%@", [roots componentsJoinedByString:@"\n"], mode, fullClear ? @"full" : @"media", target[@"instance"]];
             NSDictionary *done = finished[bundle];
             if (!manual && [done[@"signature"] isEqual:signature] && -[done[@"time"] timeIntervalSinceNow] < 30) continue;
@@ -346,7 +352,8 @@ void CKApplyDirectorySwitches(void) {
                     struct stat info;
                     if (lstat(root.fileSystemRepresentation, &info) && errno == ENOENT) continue;
                     BOOL rootFullClear = index < paths.count && axs_cachekeeper_full_clear_path(states[bundle], paths[index]);
-                    [sweeps addObject:[[AxsCacheKeeperSweep alloc] initWithRoot:root fullClear:rootFullClear]];
+                    BOOL rootLog = index < paths.count && [axs_cachekeeper_log_paths(states[bundle]) containsObject:paths[index]];
+                    [sweeps addObject:[[AxsCacheKeeperSweep alloc] initWithRoot:root fullClear:rootFullClear logMode:rootLog]];
                 }
                 job = [@{@"signature":signature, @"sweeps":sweeps, @"removed":@0, @"bytes":@0,
                     @"instance":target[@"instance"] ?: @"", @"started":NSDate.date} mutableCopy];
@@ -406,6 +413,7 @@ void CKApplyDirectorySwitches(void) {
                     [NSString stringWithFormat:@"本轮检查完成；保留 %lu 项受保护/未知内容、%lu 项近期文件", (unsigned long)protectedCount, (unsigned long)recentCount]);
                 if (changedCount) message=[message stringByAppendingFormat:@"；%lu 个目录在预检后变化，已跳过等待下轮",(unsigned long)changedCount];
                 if (fullClear) message=[message stringByAppendingString:@"\n全量清理开启：标准缓存目录内的文件按平台缓存契约处理，不按类型保留（60 秒内新文件除外）"];
+                if (hasLogRoot) message=[message stringByAppendingString:@"\n含用户定级的日志目录：仅清理日志特征文件（.log/.alog/.xlog)，数据与未知内容保留"];
                 if ([mode isEqual:@"auto"] && axs_cachekeeper_url_cache_enabled(states[bundle])) message = [message stringByAppendingFormat:@"\n%@", axs_cachekeeper_network_status(bundle)];
                 finished[bundle] = @{@"signature":signature, @"time":NSDate.date};
                 [jobs removeObjectForKey:bundle];

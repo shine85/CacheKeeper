@@ -19,6 +19,7 @@
 @property(nonatomic, readwrite, copy) NSString *error;
 @property(nonatomic, readwrite, copy) NSString *root;
 @property(nonatomic, readwrite) BOOL fullClear;
+@property(nonatomic, readwrite) BOOL logMode;
 @property(nonatomic) dev_t device;
 @property(nonatomic) ino_t inode;
 @property(nonatomic, strong) NSDirectoryEnumerator *entries;
@@ -35,18 +36,25 @@
 
 @implementation AxsCacheKeeperSweep
 - (instancetype)initWithRoot:(NSString *)root {
-    return [self initWithRoot:root clock:^NSTimeInterval { return NSDate.date.timeIntervalSince1970; } fullClear:NO];
+    return [self initWithRoot:root clock:^NSTimeInterval { return NSDate.date.timeIntervalSince1970; } fullClear:NO logMode:NO];
 }
 - (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock {
-    return [self initWithRoot:root clock:clock fullClear:NO];
+    return [self initWithRoot:root clock:clock fullClear:NO logMode:NO];
 }
 - (instancetype)initWithRoot:(NSString *)root fullClear:(BOOL)fullClear {
-    return [self initWithRoot:root clock:^NSTimeInterval { return NSDate.date.timeIntervalSince1970; } fullClear:fullClear];
+    return [self initWithRoot:root clock:^NSTimeInterval { return NSDate.date.timeIntervalSince1970; } fullClear:fullClear logMode:NO];
 }
 - (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock fullClear:(BOOL)fullClear {
+    return [self initWithRoot:root clock:clock fullClear:fullClear logMode:NO];
+}
+- (instancetype)initWithRoot:(NSString *)root fullClear:(BOOL)fullClear logMode:(BOOL)logMode {
+    return [self initWithRoot:root clock:^NSTimeInterval { return NSDate.date.timeIntervalSince1970; } fullClear:fullClear logMode:logMode];
+}
+- (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock fullClear:(BOOL)fullClear logMode:(BOOL)logMode {
     if (!(self = [super init])) return nil;
     _root = [root copy];
     _fullClear = fullClear;
+    _logMode = logMode;
     _clock = [clock copy];
     struct stat info;
     if (![root isEqual:[NSURL fileURLWithPath:root].URLByResolvingSymlinksInPath.path] ||
@@ -205,15 +213,20 @@
     if (file >= 0 && !fstat(file, &current) && S_ISREG(current.st_mode) && current.st_nlink == 1 &&
         current.st_ino == expected.st_ino && current.st_dev == expected.st_dev &&
         axs_cachekeeper_old_enough(current, self.clock())) {
-        // 全量清理只核对文件身份与年龄，不按内容分类；其余模式保持媒体签名与数据库门槛。
+        // 全量清理只核对文件身份与年龄，不按内容分类；
+        // 日志模式在数据库/bplist 门槛之上再加文件名日志特征门与数据标记名否决；
+        // 标准模式保持媒体签名与数据库门槛。
         BOOL contentOK = self.fullClear;
         if (!contentOK) {
             unsigned char signature[32] = {0};
             ssize_t readCount = pread(file, signature, sizeof(signature), 0);
             BOOL database = readCount >= 15 && !memcmp(signature, "SQLite format 3", 15);
             BOOL propertyList = readCount >= 6 && !memcmp(signature, "bplist", 6);
+            BOOL contentRejected = self.logMode ?
+                (!axs_cachekeeper_log_file_name(entry.lastPathComponent) || axs_cachekeeper_data_marker(entry.lastPathComponent)) :
+                !axs_cachekeeper_media_signature(signature, (size_t)readCount);
             if (readCount < 0) { self.error = @"无法核对文件内容，保留文件"; }
-            else if (database || propertyList || !axs_cachekeeper_media_signature(signature, (size_t)readCount)) {
+            else if (database || propertyList || contentRejected) {
                 if (database || propertyList) [self.dataDirectories addObject:parent];
                 self.protectedCount++; errno = EBUSY;
             }

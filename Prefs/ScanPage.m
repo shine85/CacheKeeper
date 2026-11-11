@@ -207,7 +207,7 @@
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
     if (section==0) return @"一键开启 = 自动模式 + 网络磁盘缓存限制 + 新增缓存自动发现。可能增加流量和重复加载，网络选项可随时关闭。";
     if (section==2) return self.otherRows.count ? @"这些目录可能同时包含资源、业务状态或缓存，尚未逐项确认；不自动清理。已知敏感持久化目录已隐藏。" : nil;
-    if (section==3) return self.unknownRows.count ? @"点击目录进入只读深度检测：类型组成、文件时间与最大文件。未知不等于必需，也不等于垃圾；不参加一键开启。" : nil;
+    if (section==3) return self.unknownRows.count ? @"点击目录进入只读深度检测：类型组成、文件时间与最大文件。未知不等于必需，也不等于垃圾；不参加一键开启。在档案页看过证据后，可把目录定级为日志目录，按日志规则清理；已定级的目录可在此关闭定级。" : nil;
     NSDictionary *footerStates=[self axs_cachekeeper_display:@"appEnabled.plist"];
     NSString *message=axs_cachekeeper_full_clear(footerStates[self.bundle]) ?
         @"首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后处理。全量清理已开启：标准缓存目录内的全部文件都清空（含数据库与未知文件）；其他目录仍只删除可识别媒体。已选目录内新增内容自动覆盖；手动关闭的目录保持排除。" :
@@ -315,8 +315,11 @@
     NSString *growth=compared?[NSString stringWithFormat:@" · 变化 %+.2f MB",([row[@"bytes"] longLongValue]-previous)/1048576.0]:@" · 首次检测";
     BOOL masterOn=axs_cachekeeper_app_enabled(master[self.bundle]);
     BOOL manageable=axs_cachekeeper_row_manageable(row);
+    BOOL judged=[axs_cachekeeper_log_paths(viewState) containsObject:relative];
     NSString *state=!manageable?@"仅供分析":(!masterOn?@"APP 未开启：不处理任何目录":(enabled?(axs_cachekeeper_wants_cleanup(master[self.bundle])?(axs_cachekeeper_full_clear_path(master[self.bundle],relative)?@"已纳入；全量清理开启，退出后清空该目录全部文件":@"已纳入；退出后处理通过预检的缓存"):@"只禁止模式：不删除文件，目录写入锁定见顶部状态"):@"未开启／已手动排除"));
     if (partial) state=[state stringByAppendingString:@"（保留旧配置中选定的部分子目录）"];
+    if (judged) state=!masterOn ? @"已定级：日志目录；APP 未开启，不处理" :
+        (axs_cachekeeper_wants_cleanup(master[self.bundle]) ? @"已定级：日志目录；退出后仅清理日志特征文件，数据与未知内容保留" : @"已定级：日志目录；只禁止模式不删除文件");
     NSString *size=row[@"bytes"] ? [NSString stringWithFormat:@"%.2f MB%@%@",[row[@"bytes"] doubleValue]/1048576,growth,[row[@"complete"] boolValue]?@"":@" · 大小未统计完"] : @"自动发现，大小待检测";
     NSDictionary *snapshot=[self axs_cachekeeper_display:@"snapshots.plist"][self.bundle];
     NSString *trend=axs_cachekeeper_growth_evidence(relative,snapshot[@"recentScans"] ?: @[],snapshot);
@@ -324,6 +327,9 @@
     if (manageable) {
         UISwitch *toggle=[UISwitch new];toggle.on=enabled;toggle.enabled=!self.timer;toggle.accessibilityIdentifier=relative;
         [toggle addTarget:self action:@selector(toggle:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=toggle;
+    } else if (judged) {
+        UISwitch *toggle=[UISwitch new];toggle.on=YES;toggle.enabled=!self.timer;toggle.accessibilityIdentifier=relative;
+        [toggle addTarget:self action:@selector(axs_cachekeeper_log_toggle:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=toggle;
     }
     return cell;
 }
@@ -402,6 +408,13 @@
     if (![states writeToFile:path atomically:YES]) [self message:@"全量清理设置保存失败。"];
     else axs_cachekeeper_notify_preferences();
     self.actionStatus=toggle.on ? @"已开启标准缓存目录全量清理；该 APP 完全退出后生效" : @"已关闭全量清理；恢复为仅清理可识别媒体";
+    [self axs_cachekeeper_reload];
+}
+- (void)axs_cachekeeper_log_toggle:(UISwitch *)toggle {
+    if (self.timer) { [self axs_cachekeeper_reload];return; }
+    NSString *error=axs_cachekeeper_set_log_path(jbroot(@"/var/mobile/Library/CacheKeeper"),self.bundle,toggle.accessibilityIdentifier,toggle.on);
+    if (error) [self message:error]; else axs_cachekeeper_notify_preferences();
+    self.actionStatus=error ?: (toggle.on ? @"已定级为日志目录；完全退出后按日志规则清理" : @"已取消日志目录定级；恢复为用途未知、不处理");
     [self axs_cachekeeper_reload];
 }
 - (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {

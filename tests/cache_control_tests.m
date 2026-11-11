@@ -334,6 +334,45 @@ int main(int argc, const char *argv[]) {
             ![fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"vault/clip.mp4"]] &&
             [fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"vault"]],
             [NSString stringWithFormat:@"全量清理删净嵌套数据子树（removed=%lu failed=%lu error=%@）",(unsigned long)nestedFull.removed,(unsigned long)nestedFull.failed,nestedFull.error]);
+        // 日志定级通道（通用机制，2026-11-11）：定级只接受用途未知目录；日志模式只删日志特征文件，
+        // 媒体/文本保留，数据子树整棵保留（含其内日志文件）。
+        require(axs_cachekeeper_log_file_name(@"BDALog_20261111_193314.alog.iOS.1128"), @"复合后缀日志名命中");
+        require(axs_cachekeeper_log_file_name(@"app.log") && axs_cachekeeper_log_file_name(@"mm.xlog"), @"标准日志扩展名命中");
+        require(!axs_cachekeeper_log_file_name(@"photo.jpg") && !axs_cachekeeper_log_file_name(@"notes.txt") && !axs_cachekeeper_log_file_name(@"catalog"), @"非日志名不命中");
+        NSDictionary *judgedState=@{@"enabled":@YES,@"logPaths":@[@"Library/alog",@"Library/Caches",@"Documents",@"Library",@"Library/Preferences"]};
+        require([axs_cachekeeper_log_paths(judgedState) isEqual:@[@"Library/alog"]], @"定级路径只接受用途未知目录");
+        NSDictionary *judgedEnabled=@{@"enabled":@YES,@"mode":@"auto",@"logPaths":@[@"Library/alog"]};
+        require([axs_cachekeeper_effective_paths(@[],judgedEnabled,@[]) containsObject:@"Library/alog"], @"定级目录进入有效根");
+        require([axs_cachekeeper_app_state(judgedEnabled,YES)[@"logPaths"] isEqual:@[@"Library/alog"]], @"状态保存保留定级清单");
+        NSString *gradeFolder=[fixture stringByAppendingPathComponent:@"grade-config"];
+        require([fm createDirectoryAtPath:gradeFolder withIntermediateDirectories:YES attributes:nil error:nil], @"定级配置夹具");
+        require(!axs_cachekeeper_set_log_path(gradeFolder,@"com.example.app",@"Library/alog",YES), @"定级保存成功");
+        NSDictionary *gradeStates=[NSDictionary dictionaryWithContentsOfFile:[gradeFolder stringByAppendingPathComponent:@"appEnabled.plist"]];
+        require([axs_cachekeeper_log_paths(gradeStates[@"com.example.app"]) isEqual:@[@"Library/alog"]], @"定级回读一致");
+        require(axs_cachekeeper_set_log_path(gradeFolder,@"com.example.app",@"Library/Caches",YES).length>0, @"标准缓存根不可定级");
+        require(!axs_cachekeeper_set_log_path(gradeFolder,@"com.example.app",@"Library/alog",NO), @"取消定级成功");
+        require(axs_cachekeeper_log_paths([NSDictionary dictionaryWithContentsOfFile:[gradeFolder stringByAppendingPathComponent:@"appEnabled.plist"]][@"com.example.app"]).count==0, @"取消定级回读为空");
+        NSString *logRoot=[fixture stringByAppendingPathComponent:@"Library/alog"];
+        require([fm createDirectoryAtPath:[logRoot stringByAppendingPathComponent:@"ready"] withIntermediateDirectories:YES attributes:nil error:nil], @"日志目录夹具");
+        require([fm createDirectoryAtPath:[logRoot stringByAppendingPathComponent:@"vault"] withIntermediateDirectories:YES attributes:nil error:nil], @"日志目录数据子树夹具");
+        writeFile([logRoot stringByAppendingPathComponent:@"ready/BDALog_20261111_193314.alog.iOS.1128"]);
+        writeFile([logRoot stringByAppendingPathComponent:@"ready/today.log"]);
+        writeMedia([logRoot stringByAppendingPathComponent:@"ready/poster.png"]);
+        writeFile([logRoot stringByAppendingPathComponent:@"ready/notes.txt"]);
+        writeFile([logRoot stringByAppendingPathComponent:@"top.alog"]);
+        writeFile([logRoot stringByAppendingPathComponent:@"vault/inner.sqlite"]);
+        writeFile([logRoot stringByAppendingPathComponent:@"vault/inside.log"]);
+        AxsCacheKeeperSweep *logSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:logRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:YES];
+        for (NSUInteger pass=0;!logSweep.complete && pass<100;pass++) [logSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(logSweep.complete && logSweep.failed==0 && logSweep.removed==3,
+            [NSString stringWithFormat:@"日志模式只删日志特征文件（removed=%lu failed=%lu error=%@）",(unsigned long)logSweep.removed,(unsigned long)logSweep.failed,logSweep.error]);
+        require(![fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"ready/BDALog_20261111_193314.alog.iOS.1128"]] &&
+            ![fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"ready/today.log"]] &&
+            ![fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"top.alog"]] &&
+            [fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"ready/poster.png"]] &&
+            [fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"ready/notes.txt"]] &&
+            [fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"vault/inner.sqlite"]] &&
+            [fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"vault/inside.log"]], @"日志模式保留媒体、文本与数据子树（含其内日志）");
         NSString *lateDir=[fixture stringByAppendingPathComponent:@"late-database"];
         require([fm createDirectoryAtPath:lateDir withIntermediateDirectories:YES attributes:nil error:nil], @"延迟发现数据库夹具");
         writeMedia([lateDir stringByAppendingPathComponent:@"a.png"]);

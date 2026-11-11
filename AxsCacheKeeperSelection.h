@@ -106,3 +106,24 @@ static inline NSString *axs_cachekeeper_update_selection(NSString *folder, NSStr
 static inline NSString *axs_cachekeeper_one_click(NSString *folder, NSString *bundle, NSArray *rows) {
     return axs_cachekeeper_save_selection(folder,bundle,axs_cachekeeper_enableable_paths(rows),YES,YES);
 }
+// 日志目录定级（逐 APP、逐目录的用户判定，只写状态文件）：定级要求路径通过
+// axs_cachekeeper_log_path_valid；取消定级对已存路径无条件放行。永不由一键开启/自动发现调用。
+static inline NSString *axs_cachekeeper_set_log_path(NSString *folder, NSString *bundle, NSString *path, BOOL mark) {
+    if (!axs_cachekeeper_bundle_id(bundle) || !axs_cachekeeper_relative_path(path)) return @"目录路径无效，未应用。";
+    if (mark && !axs_cachekeeper_log_path_valid(path)) return @"该目录不属于可定级的用途未知目录，未应用。";
+    NSString *stateFile=[folder stringByAppendingPathComponent:@"appEnabled.plist"];
+    NSMutableDictionary *states=axs_cachekeeper_edit_configuration(stateFile);
+    if (!states) return @"原配置不可读或损坏，已停止保存。";
+    NSMutableDictionary *state=axs_cachekeeper_app_state(states[bundle],axs_cachekeeper_app_enabled(states[bundle]));
+    NSMutableArray *list=[NSMutableArray new];
+    if ([states[bundle] isKindOfClass:NSDictionary.class] && [states[bundle][@"logPaths"] isKindOfClass:NSArray.class])
+        for (id item in states[bundle][@"logPaths"]) if ([item isKindOfClass:NSString.class]) [list addObject:item];
+    [list removeObject:path];
+    if (mark) [list addObject:path];
+    state[@"logPaths"]=axs_cachekeeper_log_paths(@{@"logPaths":list});
+    states[bundle]=state;
+    if (![states writeToFile:stateFile atomically:YES]) return @"定级保存失败。";
+    NSDictionary *readStates=[NSDictionary dictionaryWithContentsOfFile:stateFile];
+    if (![readStates[bundle] isEqual:state]) return @"保存后回读不一致，请检查配置访问；未确认设置已应用。";
+    return nil;
+}

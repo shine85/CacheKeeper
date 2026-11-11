@@ -4,6 +4,7 @@
 @interface AxsCacheKeeperSweep : NSObject
 @property(nonatomic, readonly, copy) NSString *root;
 @property(nonatomic, readonly) BOOL fullClear;
+@property(nonatomic, readonly) BOOL logMode;
 @property(nonatomic, readonly) BOOL complete;
 @property(nonatomic, readonly) BOOL cancelled;
 @property(nonatomic, readonly) NSUInteger removed;
@@ -19,5 +20,7 @@
 - (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock;
 - (instancetype)initWithRoot:(NSString *)root fullClear:(BOOL)fullClear;
 - (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock fullClear:(BOOL)fullClear;
+- (instancetype)initWithRoot:(NSString *)root fullClear:(BOOL)fullClear logMode:(BOOL)logMode;
+- (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock fullClear:(BOOL)fullClear logMode:(BOOL)logMode;
 - (void)advance:(NSUInteger)limit shouldContinue:(BOOL (^)(void))shouldContinue;
 @end

@@ -1,5 +1,6 @@
 #import "InspectionPage.h"
 #import "../AxsCacheKeeperPolicy.h"
+#import "../AxsCacheKeeperSelection.h"
 #include <roothide.h>
 
 @interface AxsCacheKeeperInspectionPage ()
@@ -7,6 +8,7 @@
 @property(nonatomic,copy) NSString *relative;
 @property(nonatomic,copy) NSString *token;
 @property(nonatomic,strong) UITextView *textView;
+@property(nonatomic,strong) UIBarButtonItem *judgeButton;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,strong) NSDate *submitted;
 @property(nonatomic) BOOL stopping;
@@ -25,6 +27,12 @@
     self.navigationItem.rightBarButtonItems=@[
         [[UIBarButtonItem alloc] initWithTitle:@"深度检测" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_start)],
         [[UIBarButtonItem alloc] initWithTitle:@"停止" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_stop)]];
+    // 日志目录定级只对用途未知类目录开放：先在本页看完深度检测证据，再由用户逐项判定。
+    if ([axs_cachekeeper_directory_kind(self.relative) isEqual:@"unknown"]) {
+        self.judgeButton=[[UIBarButtonItem alloc] initWithTitle:@"定级·日志" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_judge)];
+        self.navigationItem.rightBarButtonItems=[self.navigationItem.rightBarButtonItems arrayByAddingObject:self.judgeButton];
+        [self axs_cachekeeper_update_judge_button];
+    }
     [self axs_cachekeeper_refresh];
 }
 - (void)viewWillAppear:(BOOL)animated {
@@ -50,6 +58,29 @@
     else { self.token=request[@"token"];self.stopping=YES;self.requestError=nil; }
     [self axs_cachekeeper_refresh];
 }
+- (BOOL)axs_cachekeeper_judged {
+    NSDictionary *states=[NSDictionary dictionaryWithContentsOfFile:[self axs_cachekeeper_file:@"appEnabled.plist"]];
+    return [axs_cachekeeper_log_paths(states[self.bundle]) containsObject:self.relative];
+}
+- (void)axs_cachekeeper_update_judge_button {
+    self.judgeButton.title=[self axs_cachekeeper_judged] ? @"取消定级" : @"定级·日志";
+}
+- (void)axs_cachekeeper_judge {
+    BOOL judged=[self axs_cachekeeper_judged];
+    if (!judged) {
+        // 证据门：没有一份已完成且读到过普通文件的深度检测档案，不予定级（如 Pitaya 读到 0 个文件）。
+        NSDictionary *report=[NSDictionary dictionaryWithContentsOfFile:[self axs_cachekeeper_file:[NSString stringWithFormat:@"Status/%@.inspection.plist",self.bundle]]][@"reports"][self.relative];
+        if (![report[@"path"] isEqual:self.relative] || ![report[@"complete"] boolValue] || ![report[@"files"] unsignedIntegerValue]) {
+            self.requestError=@"证据不足：请先完成一次深度检测且读到至少 1 个普通文件，再定级为日志目录。";
+            [self axs_cachekeeper_refresh];return;
+        }
+    }
+    NSString *error=axs_cachekeeper_set_log_path(jbroot(@"/var/mobile/Library/CacheKeeper"),self.bundle,self.relative,!judged);
+    if (error) self.requestError=error;
+    else { self.requestError=nil; axs_cachekeeper_notify_preferences(); }
+    [self axs_cachekeeper_update_judge_button];
+    [self axs_cachekeeper_refresh];
+}
 - (void)axs_cachekeeper_refresh {
     NSDictionary *report=[NSDictionary dictionaryWithContentsOfFile:[self axs_cachekeeper_file:[NSString stringWithFormat:@"Status/%@.inspection.plist",self.bundle]]][@"reports"][self.relative];
     BOOL matches=!self.token || [report[@"token"] isEqual:self.token];
@@ -60,6 +91,7 @@
     NSDictionary *cleanup=[NSDictionary dictionaryWithContentsOfFile:[self axs_cachekeeper_file:[NSString stringWithFormat:@"Status/%@.auto.plist",self.bundle]]][@"directories"][self.relative];
     if (cleanup) [text appendFormat:@"最近一轮清理记录（%@）：%@\n删除 %@ 个文件 · %.2f MB；保留受保护／未知 %@ 项、近期文件 %@ 项，变化目录 %@ 项，失败 %@ 项。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),[cleanup[@"cancelled"] boolValue] ? @"已中止" : [cleanup[@"complete"] boolValue] ? @"检查完成" : @"尚未完成",cleanup[@"removed"],[cleanup[@"bytes"] doubleValue]/1048576,cleanup[@"protected"],cleanup[@"recent"],cleanup[@"changed"],cleanup[@"failed"],cleanup[@"error"] ?: @""];
     else [text appendString:@"本目录尚无清理回执；占用减少不能据此归因于插件。\n\n"];
+    if ([self axs_cachekeeper_judged]) [text appendString:@"本目录已定级为日志目录：该 APP 完全退出后，仅清理本目录内的日志特征文件（.log/.alog/.xlog），数据与未知内容保留；可在本页取消定级。\n\n"];
     if (![report[@"path"] isEqual:self.relative] || (self.token && ![report[@"token"] isEqual:self.token])) {
         [text appendString:self.token ? @"等待检测服务响应…" : @"尚无本目录档案。"];
         if (self.submitted && -self.submitted.timeIntervalSinceNow>30) [text appendString:@"\n尚未收到回执：可能正在切换任务、桌面服务未加载或回执无法写入；可再次检测。持续失败请提供插件版本与此页面信息。"];

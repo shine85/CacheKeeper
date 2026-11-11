@@ -201,6 +201,34 @@ static inline BOOL axs_cachekeeper_full_clear(id state) {
 static inline BOOL axs_cachekeeper_full_clear_path(id state, NSString *path) {
     return axs_cachekeeper_full_clear(state) && [axs_cachekeeper_directory_kind(path) isEqual:@"cache"];
 }
+static inline BOOL axs_cachekeeper_log_file_name(NSString *name) {
+    // 日志特征文件名（定级日志目录内的删除门）：常见日志扩展名及其复合后缀形态
+    //（如 BDALog_20261111.alog.iOS.1128、微信 *.xlog）。仅名字特征，不读内容另行判断。
+    NSString *n=name.lowercaseString;
+    if (!n.length) return NO;
+    for (NSString *ext in @[@".log", @".alog", @".xlog"]) {
+        if ([n hasSuffix:ext] || [n containsString:[ext stringByAppendingString:@"."]]) return YES;
+    }
+    return NO;
+}
+static inline BOOL axs_cachekeeper_log_path_valid(NSString *path) {
+    // 可定级为日志目录的路径：用途未知类目录，且不是任何受保护/标准缓存根的祖先
+    //（如 Library 本身），避免一次定级吞掉整片区域。Group/混合/缓存/受保护类均不可定级。
+    if (!axs_cachekeeper_relative_path(path) || axs_cachekeeper_protected_path(path)) return NO;
+    if (![axs_cachekeeper_directory_kind(path) isEqual:@"unknown"]) return NO;
+    for (NSString *root in @[@"Documents",@"Inbox",@"Downloads",@"Library/Preferences",@"Library/Cookies",
+        @"Library/WebKit",@"Library/Keychains",@"Library/Caches",@"tmp",@"Caches",@"Cache",@"cache",@".cache"]) {
+        if ([root hasPrefix:[path stringByAppendingString:@"/"]]) return NO;
+    }
+    return YES;
+}
+static inline NSArray<NSString *> *axs_cachekeeper_log_paths(id state) {
+    if (![state isKindOfClass:NSDictionary.class]) return @[];
+    NSMutableArray *valid=[NSMutableArray new];
+    if ([state[@"logPaths"] isKindOfClass:NSArray.class]) for (id path in state[@"logPaths"])
+        if (axs_cachekeeper_log_path_valid(path)) [valid addObject:path];
+    return axs_cachekeeper_parent_paths(valid);
+}
 static inline NSArray<NSString *> *axs_cachekeeper_exclusions(id state) {
     return [state isKindOfClass:NSDictionary.class] ? axs_cachekeeper_cache_paths(state[@"excludedPaths"]) : @[];
 }
@@ -214,15 +242,20 @@ static inline NSArray<NSString *> *axs_cachekeeper_effective_paths(NSArray *sele
     if (axs_cachekeeper_auto_discover(state) && [discovered isKindOfClass:NSArray.class]) {
         for (id path in discovered) if ([axs_cachekeeper_cache_roots() containsObject:path]) [paths addObject:path];
     }
+    // 用户逐项定级的日志目录与缓存根并列为有效根（定级只存于状态，永不由一键开启/自动发现写入）。
+    [paths addObjectsFromArray:axs_cachekeeper_log_paths(state)];
     // 不能通过加入父目录绕过子目录的手动排除。
     for (NSString *path in [paths copy]) for (NSString *excluded in axs_cachekeeper_exclusions(state)) {
         if (axs_cachekeeper_paths_overlap(path,excluded)) { [paths removeObject:path];break; }
     }
-    return axs_cachekeeper_cache_paths(paths);
+    NSMutableArray *result=[axs_cachekeeper_cache_paths(paths) mutableCopy];
+    for (NSString *path in paths) if (axs_cachekeeper_log_path_valid(path) && ![result containsObject:path]) [result addObject:path];
+    return axs_cachekeeper_parent_paths(result);
 }
 static inline NSMutableDictionary *axs_cachekeeper_app_state(id previous, BOOL enabled) {
     return [@{@"enabled":@(enabled), @"mode":axs_cachekeeper_mode(previous), @"urlCache":@(axs_cachekeeper_url_cache_enabled(previous)),
         @"autoDiscover":@(axs_cachekeeper_auto_discover(previous)), @"fullClear":@(axs_cachekeeper_full_clear(previous)),
+        @"logPaths":axs_cachekeeper_log_paths(previous),
         @"excludedPaths":axs_cachekeeper_exclusions(previous)} mutableCopy];
 }
 static inline NSArray *axs_cachekeeper_activation_paths(id previous) {
