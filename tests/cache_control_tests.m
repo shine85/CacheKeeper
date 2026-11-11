@@ -364,7 +364,7 @@ int main(int argc, const char *argv[]) {
         writeFile([logRoot stringByAppendingPathComponent:@"vault/inside.log"]);
         AxsCacheKeeperSweep *logSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:logRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:YES];
         for (NSUInteger pass=0;!logSweep.complete && pass<100;pass++) [logSweep advance:64 shouldContinue:^BOOL{return YES;}];
-        require(logSweep.complete && logSweep.failed==0 && logSweep.removed==3,
+        require(logSweep.complete && logSweep.failed==0 && logSweep.removed==4,
             [NSString stringWithFormat:@"日志模式只删日志特征文件（removed=%lu failed=%lu error=%@）",(unsigned long)logSweep.removed,(unsigned long)logSweep.failed,logSweep.error]);
         require(![fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"ready/BDALog_20261111_193314.alog.iOS.1128"]] &&
             ![fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"ready/today.log"]] &&
@@ -372,7 +372,35 @@ int main(int argc, const char *argv[]) {
             [fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"ready/poster.png"]] &&
             [fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"ready/notes.txt"]] &&
             [fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"vault/inner.sqlite"]] &&
-            [fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"vault/inside.log"]], @"日志模式保留媒体、文本与数据子树（含其内日志）");
+            ![fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"vault/inside.log"]], @"日志模式文件级保护：数据文件本体保留，其旁的日志文件照常清理");
+        // 混放目录（真机 alog 的 ready/ 形态）：数据名文件、SQLite 头文件与纯日志同目录时，
+        // 数据文件只保护自身，不得整目录连坐；深层嵌套（四级）日志必须能走到删除（祖先链记录键回归）。
+        NSString *mixedRoot=[fixture stringByAppendingPathComponent:@"mixed-log"];
+        require([fm createDirectoryAtPath:[mixedRoot stringByAppendingPathComponent:@"ready"] withIntermediateDirectories:YES attributes:nil error:nil], @"混放日志目录夹具");
+        writeFile([mixedRoot stringByAppendingPathComponent:@"ready/pure-one.alog"]);
+        writeFile([mixedRoot stringByAppendingPathComponent:@"ready/pure-two.log"]);
+        writeFile([mixedRoot stringByAppendingPathComponent:@"ready/000003.log"]);
+        require([@"SQLite format 3\0payload" writeToFile:[mixedRoot stringByAppendingPathComponent:@"ready/fake.alog"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"伪装日志名的数据库夹具");
+        writeFile([mixedRoot stringByAppendingPathComponent:@"ready/plain.txt"]);
+        AxsCacheKeeperSweep *mixedSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:mixedRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:YES];
+        for (NSUInteger pass=0;!mixedSweep.complete && pass<100;pass++) [mixedSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(mixedSweep.complete && mixedSweep.failed==0 && mixedSweep.removed==2,
+            [NSString stringWithFormat:@"混放目录只删纯日志（removed=%lu failed=%lu error=%@）",(unsigned long)mixedSweep.removed,(unsigned long)mixedSweep.failed,mixedSweep.error]);
+        require(![fm fileExistsAtPath:[mixedRoot stringByAppendingPathComponent:@"ready/pure-one.alog"]] &&
+            ![fm fileExistsAtPath:[mixedRoot stringByAppendingPathComponent:@"ready/pure-two.log"]] &&
+            [fm fileExistsAtPath:[mixedRoot stringByAppendingPathComponent:@"ready/000003.log"]] &&
+            [fm fileExistsAtPath:[mixedRoot stringByAppendingPathComponent:@"ready/fake.alog"]] &&
+            [fm fileExistsAtPath:[mixedRoot stringByAppendingPathComponent:@"ready/plain.txt"]], @"数据名文件、数据库头文件与非日志文件保留");
+        NSString *deepRoot=[fixture stringByAppendingPathComponent:@"deep-log"];
+        require([fm createDirectoryAtPath:[deepRoot stringByAppendingPathComponent:@"a/b/c/d"] withIntermediateDirectories:YES attributes:nil error:nil], @"深层日志目录夹具");
+        writeFile([deepRoot stringByAppendingPathComponent:@"a/b/c/d/deep.alog"]);
+        writeFile([deepRoot stringByAppendingPathComponent:@"a/b/mid.log"]);
+        AxsCacheKeeperSweep *deepSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:deepRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:YES];
+        for (NSUInteger pass=0;!deepSweep.complete && pass<100;pass++) [deepSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(deepSweep.complete && deepSweep.failed==0 && deepSweep.removed==2 &&
+            ![fm fileExistsAtPath:[deepRoot stringByAppendingPathComponent:@"a/b/c/d/deep.alog"]] &&
+            ![fm fileExistsAtPath:[deepRoot stringByAppendingPathComponent:@"a/b/mid.log"]],
+            [NSString stringWithFormat:@"四级嵌套日志可删（removed=%lu failed=%lu error=%@）",(unsigned long)deepSweep.removed,(unsigned long)deepSweep.failed,deepSweep.error]);
         // 热目录稳定性（2026-11-11 抖音 alog 真机：目录级门下 14 个目录判变化、整轮删除 0）：
         // 预检后同目录兄弟文件被改写时，日志模式只跳过变化文件本身，其余预检通过的日志照常删除；
         // 目录级模式（全量清理对照）则整目录跳过，两档差异必须保持。

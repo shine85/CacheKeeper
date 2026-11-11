@@ -28,6 +28,8 @@
 @property(nonatomic, readwrite) NSUInteger inspected;
 @property(nonatomic, readwrite) NSUInteger changedCount;
 @property(nonatomic,strong) NSMutableSet<NSString *> *dataDirectories;
+@property(nonatomic,strong) NSMutableSet<NSString *> *dataFiles;
+@property(nonatomic,copy) NSString *verifyDetail;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSArray *> *directorySnapshots;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSMutableDictionary *> *fileSnapshots;
 @property(nonatomic,strong) NSMutableSet<NSString *> *checkedDirectories;
@@ -73,15 +75,21 @@
     _rootForms = forms.allObjects;
     _checking = YES;
     _dataDirectories = [NSMutableSet new];
+    _dataFiles = [NSMutableSet new];
     _directorySnapshots = [NSMutableDictionary new];
     _fileSnapshots = [NSMutableDictionary new];
-    _directorySnapshots[root]=[self axs_cachekeeper_snapshot:info];
+    _directorySnapshots[[self axs_cachekeeper_directory_key:root]]=[self axs_cachekeeper_snapshot:info];
     [self axs_cachekeeper_open_enumerator];
     return self;
 }
 - (NSArray *)axs_cachekeeper_snapshot:(struct stat)info {
     return @[@(info.st_ino),@(info.st_dev),@(info.st_mtimespec.tv_sec),@(info.st_mtimespec.tv_nsec),
         @(info.st_ctimespec.tv_sec),@(info.st_ctimespec.tv_nsec)];
+}
+// 目录快照的记录键统一标准化：枚举器给出的目录路径形态（尾随斜杠等）与删除时构造/剥离的形态
+// 在真机上可能不一致，键不统一会让复核全灭（31.1 真机 alog 身份核对失败、删除 0）。
+- (NSString *)axs_cachekeeper_directory_key:(NSString *)path {
+    return path.stringByStandardizingPath;
 }
 - (void)axs_cachekeeper_open_enumerator {
     __weak typeof(self) weak = self;
@@ -111,7 +119,7 @@
 }
 - (void)axs_cachekeeper_inspect:(NSURL *)entry info:(struct stat)info {
     if (S_ISDIR(info.st_mode)) {
-        self.directorySnapshots[entry.path]=[self axs_cachekeeper_snapshot:info];
+        self.directorySnapshots[[self axs_cachekeeper_directory_key:entry.path]]=[self axs_cachekeeper_snapshot:info];
         // 全量清理不按名字/文件头把子目录判为数据目录，但仍记录快照供删除前核对变化。
         if (!self.fullClear && axs_cachekeeper_data_marker(entry.lastPathComponent)) {
             [self.dataDirectories addObject:entry.path];[self.entries skipDescendants];
@@ -123,7 +131,14 @@
     if (!self.fileSnapshots[parent]) self.fileSnapshots[parent]=[NSMutableDictionary new];
     self.fileSnapshots[parent][entry.lastPathComponent]=[self axs_cachekeeper_snapshot:info];
     if (self.fullClear) return;
-    if (axs_cachekeeper_data_marker(entry.lastPathComponent)) { [self.dataDirectories addObject:parent]; return; }
+    // 日志模式下数据保护是文件级的：数据文件只标记自身，不连坐同目录的日志文件
+    //（真机 alog 的 ready/ 里日志与数据名文件混放，目录级标记曾使整轮删除 0）；
+    // 标准模式维持目录级：数据文件所在目录整体保留（其媒体多为数据附件）。
+    if (axs_cachekeeper_data_marker(entry.lastPathComponent)) {
+        if (self.logMode) [self.dataFiles addObject:entry.path];
+        else [self.dataDirectories addObject:parent];
+        return;
+    }
     int directory=axs_cachekeeper_open_directory(parent);
     int file=directory>=0 ? openat(directory,entry.lastPathComponent.fileSystemRepresentation,O_RDONLY|O_NOFOLLOW|O_NONBLOCK) : -1;
     struct stat opened;
@@ -131,9 +146,15 @@
     ssize_t count=-1;
     if (file>=0 && !fstat(file,&opened) && S_ISREG(opened.st_mode) && opened.st_ino==info.st_ino && opened.st_dev==info.st_dev)
         count=pread(file,signature,sizeof(signature),0);
-    if (count<0) { [self.dataDirectories addObject:parent];self.failed++;self.error=@"文件预检未完成，该目录不清理"; }
-    else if ((count>=15 && !memcmp(signature,"SQLite format 3",15)) || (count>=6 && !memcmp(signature,"bplist",6)))
-        [self.dataDirectories addObject:parent];
+    if (count<0) {
+        if (self.logMode) [self.dataFiles addObject:entry.path];
+        else [self.dataDirectories addObject:parent];
+        self.failed++;self.error=self.logMode ? @"文件预检未完成，该文件不清理" : @"文件预检未完成，该目录不清理";
+    }
+    else if ((count>=15 && !memcmp(signature,"SQLite format 3",15)) || (count>=6 && !memcmp(signature,"bplist",6))) {
+        if (self.logMode) [self.dataFiles addObject:entry.path];
+        else [self.dataDirectories addObject:parent];
+    }
     if (file>=0) close(file);
     if (directory>=0) close(directory);
 }
@@ -153,16 +174,23 @@
 // 删除前的目录复核。标准/全量模式为目录级稳定性门：目录快照全等且目录内全部预检文件未变。
 // 日志模式只核对目录身份（inode/设备）：热日志目录里兄弟文件增删会改目录时间戳，
 // 若沿用目录级门会整轮空转（2026-11-11 抖音 alog 真机：14 个目录判变化、删除 0）；
-// 文件自身稳定性改由删除时逐文件比对预检记录保证（remove 的日志分支），数据子树保护不受影响。
+// 文件自身稳定性改由删除时逐文件比对预检记录保证（remove 的日志分支），数据文件保护不受影响。
+// 失败原因写入 verifyDetail（记录缺失/目录已被替换/变化），回执据此定位，不再只有一个笼统结论。
 - (BOOL)axs_cachekeeper_verify_directory:(NSString *)path fd:(int)fd {
     struct stat info;
-    if (fstat(fd, &info)) return NO;
+    self.verifyDetail = nil;
+    if (fstat(fd, &info)) { self.verifyDetail = @"读取目录状态失败"; return NO; }
+    NSArray *record = self.directorySnapshots[[self axs_cachekeeper_directory_key:path]];
+    if (!record) { self.verifyDetail = @"预检记录缺失"; return NO; }
     if (!self.logMode) {
-        return [[self axs_cachekeeper_snapshot:info] isEqual:self.directorySnapshots[path]] &&
+        BOOL stable = [[self axs_cachekeeper_snapshot:info] isEqual:record] &&
             [self axs_cachekeeper_check_files:path fd:fd];
+        if (!stable) self.verifyDetail = @"目录或其文件已变化";
+        return stable;
     }
-    NSArray *record = self.directorySnapshots[path];
-    return record && [@(info.st_ino) isEqual:record[0]] && [@(info.st_dev) isEqual:record[1]];
+    BOOL identity = [@(info.st_ino) isEqual:record[0]] && [@(info.st_dev) isEqual:record[1]];
+    if (!identity) self.verifyDetail = @"目录已被替换";
+    return identity;
 }
 - (BOOL)axs_cachekeeper_remove:(NSURL *)entry expected:(struct stat)expected {
     self.error = nil;
@@ -194,11 +222,26 @@
         return NO;
     }
     NSString *relativeParent = [parent.stringByStandardizingPath substringFromIndex:matchedForm.length];
+    // 祖先链的记录键取枚举器形态：由 parent 逐级剥组件得到（root 用其自身为键）。
+    // 不用 root 拼接的构造形态查记录：构造形态与枚举器给出的目录路径形态在真机上可能不一致，
+    // 曾致 30.1/31.1 真机 alog 深层文件全灭（判变化/身份核对失败）。
+    NSMutableArray<NSString *> *ancestorKeys = [NSMutableArray new];
+    {
+        NSMutableArray<NSString *> *stripped = [NSMutableArray new];
+        NSString *cursor = parent;
+        NSUInteger depth = 0;
+        for (NSString *part in [relativeParent componentsSeparatedByString:@"/"]) if (part.length) depth++;
+        for (NSUInteger i = 0; i < depth; i++) { [stripped addObject:cursor]; cursor = cursor.stringByDeletingLastPathComponent; }
+        for (NSUInteger i = depth; i-- > 1;) [ancestorKeys addObject:stripped[i]];
+        // ancestorKeys[0] 对应一级子目录，ancestorKeys[depth-2] 对应 parent 的上一级；parent 本身由下方父目录复核处理。
+    }
     NSString *openedPath=self.root;
+    NSUInteger partIndex = 0;
     for (NSString *part in [relativeParent componentsSeparatedByString:@"/"]) {
         if (!part.length) continue;
-        if (![self axs_cachekeeper_verify_directory:openedPath fd:fd]) {
-            if (self.logMode) { close(fd); errno = EBUSY; self.error = @"预检后目录身份发生变化，已跳过该文件"; return NO; }
+        NSString *verifyKey = partIndex == 0 ? self.root : ancestorKeys[partIndex - 1];
+        if (![self axs_cachekeeper_verify_directory:verifyKey fd:fd]) {
+            if (self.logMode) { close(fd); errno = EBUSY; self.error = [NSString stringWithFormat:@"预检后目录身份发生变化（%@），已跳过该文件", self.verifyDetail ?: @"原因未明"]; return NO; }
             if (![self.dataDirectories containsObject:openedPath]) self.changedCount++;
             [self.dataDirectories addObject:openedPath];close(fd);errno=EBUSY;return NO;
         }
@@ -211,11 +254,12 @@
         }
         fd = child;
         openedPath=[openedPath stringByAppendingPathComponent:part];
+        partIndex++;
     }
     struct stat current;
     struct stat parentInfo;
     if (![self axs_cachekeeper_verify_directory:parent fd:fd]) {
-        if (self.logMode) { close(fd); errno = EBUSY; self.error = @"预检后目录身份发生变化，已跳过该文件"; return NO; }
+        if (self.logMode) { close(fd); errno = EBUSY; self.error = [NSString stringWithFormat:@"预检后目录身份发生变化（%@），已跳过该文件", self.verifyDetail ?: @"原因未明"]; return NO; }
         if (![self.dataDirectories containsObject:parent]) self.changedCount++;
         [self.dataDirectories addObject:parent];self.error=@"预检后目录发生变化，已跳过";
         close(fd);errno=EBUSY;return NO;
@@ -268,7 +312,7 @@
         }
     } else { errno = ESTALE; self.error = [NSString stringWithFormat:@"删除失败·文件状态已变化（errno %d）", ESTALE]; }
     int savedError = errno;
-    if (removed && !fstat(fd,&parentInfo)) self.directorySnapshots[parent]=[self axs_cachekeeper_snapshot:parentInfo];
+    if (removed && !fstat(fd,&parentInfo)) self.directorySnapshots[[self axs_cachekeeper_directory_key:parent]]=[self axs_cachekeeper_snapshot:parentInfo];
     if (removed) [self.fileSnapshots[parent] removeObjectForKey:entry.lastPathComponent];
     if (file >= 0) close(file);
     close(fd); errno = savedError;
@@ -305,6 +349,8 @@
         if ([self axs_cachekeeper_is_data_directory:entry.path]) {
             self.protectedCount++;if (S_ISDIR(info.st_mode)) [self.entries skipDescendants];continue;
         }
+        // 日志模式的文件级数据保护：预检已标记的数据文件只跳过自身（同目录日志不受影响）。
+        if (self.logMode && [self.dataFiles containsObject:entry.path]) { self.protectedCount++; continue; }
         NSString *relative = [entry.path substringFromIndex:self.root.length + 1];
         // 全量清理的根已由策略层限定为平台缓存契约目录，根内不再按受保护名拦截；其余模式不变。
         if (!self.fullClear && axs_cachekeeper_protected_path(relative)) {
