@@ -70,7 +70,6 @@ void CKSetPaths(NSArray *paths, BOOL enabled) {
     }
 }
 
-void CKPermissions(NSURL *home, BOOL enabled) {
-    NSArray *paths = home ? @[[home.path stringByAppendingPathComponent:@"Library/Application Support/gurd_cache"], [home.path stringByAppendingPathComponent:@"Library/Caches/TTPlayerCache"]] : nil;
-    CKSetPaths(paths, enabled);
-}
+// 0.4.3 删除原 CKPermissions：它写死了某个 App 的两个目录路径（专用逻辑），
+// 与“对所有已安装 App 通用”的定位冲突。卸载恢复改由 ckrestore 直接调
+// CKSetPaths(nil, NO) 还原全部记录，行为不变。

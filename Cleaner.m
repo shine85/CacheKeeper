@@ -16,6 +16,15 @@ __attribute__((constructor)) static void Start(void) {
             ![NSBundle.mainBundle.bundlePath.pathExtension isEqual:@"app"] ||
             [NSBundle.mainBundle.bundleIdentifier hasPrefix:@"com.apple."]) return;
         if (libSandy_applyProfile("CacheKeeperAccess") != kLibSandySuccess) return;
+        // 0.4.0 可选硬手段：设置页开启「禁止网络缓存生成」后，把共享 NSURLCache 的
+        // 内存与磁盘容量置 0，系统网络缓存不再生成落盘（唯一能真正禁止生成的品类）。
+        // 登录与 Cookie 不存放在 NSURLCache 中，不受影响；代价是重复内容需重新下载。
+        NSDictionary *policy = [NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/policy.plist")][NSBundle.mainBundle.bundleIdentifier];
+        // 0.4.6：未被用户开启的 App，插件在其进程内什么都不做——这个独立的
+        // 网络缓存开关同样受总开关约束。
+        NSNumber *masterOn = [NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")][NSBundle.mainBundle.bundleIdentifier];
+        if ([masterOn boolValue] && [policy[@"urlCache"] boolValue])
+            [NSURLCache setSharedURLCache:[[NSURLCache alloc] initWithMemoryCapacity:0 diskCapacity:0 diskPath:nil]];
         dispatch_async(dispatch_get_main_queue(), ^{
             NSString *report = [jbroot(@"/var/mobile/Library/CacheKeeper/Status") stringByAppendingPathComponent:[NSBundle.mainBundle.bundleIdentifier stringByAppendingString:@".background.plist"]];
             NSDate *launched = NSDate.date;

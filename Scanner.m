@@ -5,7 +5,7 @@
 #include <signal.h>
 #include <errno.h>
 extern void CKSetPaths(NSArray *,BOOL);
-extern NSArray *CKBaselineDirectories(NSString *,NSTimeInterval,BOOL,NSUInteger *,unsigned long long *);
+extern NSArray *CKBaselineDirectories(NSString *,NSTimeInterval,BOOL,NSUInteger *,unsigned long long *,BOOL *);
 static id SRead(id target,NSString *name) { SEL s=NSSelectorFromString(name);return [target respondsToSelector:s]?((id(*)(id,SEL))objc_msgSend)(target,s):nil; }
 static NSURL *Container(NSString *bundle) {
     Class proxy=NSClassFromString(@"LSApplicationProxy"); SEL s=NSSelectorFromString(@"applicationProxyForIdentifier:");
@@ -15,22 +15,85 @@ static NSURL *Container(NSString *bundle) {
     home=home.URLByResolvingSymlinksInPath;
     return [home.path containsString:@"/Containers/Data/Application/"]?home:nil;
 }
+// 0.4.1 禁区硬拦截：以下路径永不列、永不锁、永不删。不只靠“不生成”保证，
+// 在候选产出与配置应用两处再各拦一道，旧配置或手工改过的配置也进不来。
+static BOOL CKForbiddenPath(NSString *relative) {
+    for (NSString *zone in @[@"Documents", @"Library/Preferences", @"Library/Cookies", @"Library/WebKit"])
+        if ([relative isEqual:zone] || [relative hasPrefix:[zone stringByAppendingString:@"/"]]) return YES;
+    return NO;
+}
+
 static NSArray *Candidates(NSURL *home) {
-    NSMutableArray *paths=[NSMutableArray array];
-    for (NSString *base in @[@"Library/Caches",@"Library/Application Support"]) {
-        NSURL *root=[home URLByAppendingPathComponent:base];
+    NSMutableArray *paths = [NSMutableArray array];
+    // 0.4.0 根目录粒度：只列根目录本体，不列其下任何子目录（父目录优先，子条目忽略）。
+    // tmp 与 Library/HTTPStorages 一并纳入为根候选；HTTPStorages 可能混有 cookies 类
+    // 文件，仅作为可选项出现，默认预选仍只有 Library/Caches。
+    for (NSString *base in @[@"Library/Caches", @"tmp", @"Library/HTTPStorages"]) {
+        NSURL *root = [home URLByAppendingPathComponent:base];
+        struct stat info;
+        if (lstat(root.path.fileSystemRepresentation, &info) || !S_ISDIR(info.st_mode) || S_ISLNK(info.st_mode)) continue;
         if (![root.path isEqual:root.URLByResolvingSymlinksInPath.path]) continue;
-        NSArray *entries=[NSFileManager.defaultManager contentsOfDirectoryAtURL:root includingPropertiesForKeys:nil options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
-        if ([base isEqual:@"Library/Caches"] && entries) [paths addObject:base];
+        if ([base isEqual:@"Library/Caches"] &&
+            ![NSFileManager.defaultManager contentsOfDirectoryAtURL:root includingPropertiesForKeys:nil options:0 error:nil].count) continue;
+        [paths addObject:base];
+    }
+    // Application Support 例外：根下混有应用数据（含数据库），只列一级子目录供手动
+    // 选择，永不列根目录本身；这些子目录彼此不嵌套，不违反父优先规则。
+    NSURL *support = [home URLByAppendingPathComponent:@"Library/Application Support"];
+    if ([support.path isEqual:support.URLByResolvingSymlinksInPath.path]) {
+        NSArray *entries = [NSFileManager.defaultManager contentsOfDirectoryAtURL:support includingPropertiesForKeys:nil options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
         for (NSURL *entry in entries) {
             struct stat info;
-            if (!lstat(entry.path.fileSystemRepresentation,&info) && S_ISDIR(info.st_mode) && !S_ISLNK(info.st_mode))
-                [paths addObject:[base stringByAppendingPathComponent:entry.lastPathComponent]];
-            if (paths.count>=150) return paths;
+            if (!lstat(entry.path.fileSystemRepresentation, &info) && S_ISDIR(info.st_mode) && !S_ISLNK(info.st_mode))
+                [paths addObject:[@"Library/Application Support" stringByAppendingPathComponent:entry.lastPathComponent]];
+            if (paths.count >= 150) break;
         }
     }
-    return paths;
+    NSMutableArray *allowed = [NSMutableArray new];
+    for (NSString *path in paths) if (!CKForbiddenPath(path)) [allowed addObject:path];
+    return allowed;
 }
+
+// 0.4.2 App Group 共享容器：不少 App 会把主 App 与小组件/扩展共用
+// 的缓存放在 /var/mobile/Containers/Shared/AppGroup/<UUID>/ 下，那里同样有
+// Library/Caches、tmp 等目录，只扫主容器会漏掉这一池。groupContainerURLs 给出
+// 组 ID -> 容器 URL；候选以 "Group/<组ID>/<相对路径>" 的形式并入同一套管理。
+static NSDictionary *GroupHomes(NSString *bundle) {
+    Class proxy = NSClassFromString(@"LSApplicationProxy");
+    SEL s = NSSelectorFromString(@"applicationProxyForIdentifier:");
+    id app = [proxy respondsToSelector:s] ? ((id(*)(id,SEL,id))objc_msgSend)(proxy, s, bundle) : nil;
+    NSDictionary *groups = SRead(app, @"groupContainerURLs");
+    if (![groups isKindOfClass:NSDictionary.class]) return @{};
+    NSMutableDictionary *result = [NSMutableDictionary new];
+    for (NSString *gid in groups) {
+        NSURL *url = groups[gid];
+        if (![url isKindOfClass:NSURL.class]) continue;
+        url = url.URLByResolvingSymlinksInPath;
+        if ([url.path containsString:@"/Containers/Shared/AppGroup/"]) result[gid] = url;
+    }
+    return result;
+}
+static NSArray *PrefixedCandidates(NSURL *home, NSDictionary *groups) {
+    NSMutableArray *all = [NSMutableArray arrayWithArray:Candidates(home)];
+    for (NSString *gid in [groups.allKeys sortedArrayUsingSelector:@selector(compare:)])
+        for (NSString *inner in Candidates(groups[gid]))
+            [all addObject:[NSString stringWithFormat:@"Group/%@/%@", gid, inner]];
+    return all;
+}
+static NSURL *CKHomeForRelative(NSString *relative, NSURL *home, NSDictionary *groups, NSString **inner) {
+    if ([relative hasPrefix:@"Group/"]) {
+        NSString *rest = [relative substringFromIndex:6];
+        NSRange slash = [rest rangeOfString:@"/"];
+        if (slash.location != NSNotFound) {
+            NSURL *groupHome = groups[[rest substringToIndex:slash.location]];
+            if (groupHome) { *inner = [rest substringFromIndex:slash.location + 1]; return groupHome; }
+        }
+        return nil;
+    }
+    *inner = relative;
+    return home;
+}
+
 void CKScanRequests(void) {
     static BOOL busy;
     if (busy) return;
@@ -51,14 +114,18 @@ void CKScanRequests(void) {
     NSString *bundle=request[@"bundle"],*token=request[@"token"];
     if (![bundle isKindOfClass:NSString.class] || ![token isKindOfClass:NSString.class] || !token.length) return;
     NSURL *home=Container(bundle);
-    NSArray *candidates=home?Candidates(home):@[];
+    NSDictionary *groups=home?GroupHomes(bundle):@{};
+    NSArray *candidates=home?PrefixedCandidates(home,groups):@[];
     if (!batchItem) [NSFileManager.defaultManager removeItemAtPath:requestPath error:nil];
     busy=YES;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
         NSMutableArray *rows=[NSMutableArray array];
         NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+15;
         for (NSString *relative in candidates) {
-            NSURL *root=[home URLByAppendingPathComponent:relative];
+            NSString *inner=nil;
+            NSURL *base=CKHomeForRelative(relative,home,groups,&inner);
+            if (!base) continue;
+            NSURL *root=[base URLByAppendingPathComponent:inner];
             unsigned long long size=0; NSUInteger files=0; __block BOOL complete=YES;
             NSDirectoryEnumerator *entries=[NSFileManager.defaultManager enumeratorAtURL:root includingPropertiesForKeys:nil options:0 errorHandler:^BOOL(NSURL *url,NSError *error){complete=NO;return YES;}];
             for (NSURL *entry in entries) {
@@ -72,7 +139,9 @@ void CKScanRequests(void) {
         }
         NSMutableDictionary *history=[[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"snapshots.plist"]] mutableCopy]?:[NSMutableDictionary new];
         NSDictionary *old=history[bundle];
-        NSDictionary *result=@{@"token":token,@"bundle":bundle,@"home":home.path?:@"",@"rows":rows,@"updated":NSDate.date,@"previousRows":old[@"rows"]?:@[]};
+        NSMutableDictionary *groupPaths=[NSMutableDictionary new];
+        for (NSString *gid in groups) groupPaths[gid]=[groups[gid] path];
+        NSDictionary *result=@{@"token":token,@"bundle":bundle,@"home":home.path?:@"",@"groups":groupPaths,@"rows":rows,@"updated":NSDate.date,@"previousRows":old[@"rows"]?:@[]};
         history[bundle]=result;
         [history writeToFile:[folder stringByAppendingPathComponent:@"snapshots.plist"] atomically:YES];
         if (!batchItem) [result writeToFile:[folder stringByAppendingPathComponent:@"scan.plist"] atomically:YES];
@@ -118,13 +187,47 @@ void CKApplyDirectorySwitches(void) {
     if (!lastBackground) lastBackground = [NSMutableDictionary new];
     if (!lastRunning) lastRunning = [NSMutableDictionary new];
     if (!lastCleanup) lastCleanup = [NSMutableDictionary new];
+    // 0.4.0：每 App 策略与自动降级状态。policy.plist 由设置页写：
+    // bundle -> { mode: auto|lock|clean, urlCache: BOOL }，缺省 auto / 关。
+    // fallback.plist 以受管目录绝对路径为键：{ strikes: N } 是警告计数，
+    // 出现 reason 表示该目录已降级为只清理（权限由下方恢复环节自动还原）。
+    NSDictionary *policies = [NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"policy.plist"]] ?: @{};
+    NSMutableDictionary *fallback = [[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"fallback.plist"]] mutableCopy] ?: [NSMutableDictionary new];
+    BOOL fallbackDirty = NO;
+    NSMutableDictionary *lockRoots = [NSMutableDictionary new];
+    static NSMutableDictionary *shortRuns;
+    if (!shortRuns) shortRuns = [NSMutableDictionary new];
+    // 0.4.6 严格按人选（用户拍板，推翻 0.4.5 的默认全开）：全部 App 只在设置
+    // 列表里列出，由用户逐个开启；未开启的 App 引擎完全不管（微信类 App 绝
+    // 不能碰）。未开启但曾被管理过的 App 走到下面时 selected 为空，只做一件
+    // 事：把此前锁过的权限全部恢复（见本轮末尾的恢复段）。
     for (NSString *bundle in config) {
-        BOOL masterOff = appEnabled[bundle] && ![appEnabled[bundle] boolValue];
-        if (masterOff) continue;
         NSURL *home=Container(bundle); if (!home) continue;
-        NSArray *candidates= Candidates(home);
-        NSArray *selected = config[bundle];
-        if (![selected isKindOfClass:NSArray.class]) continue;
+        NSDictionary *groups=GroupHomes(bundle);
+        NSArray *candidates= PrefixedCandidates(home,groups);
+        NSString *mode = policies[bundle][@"mode"] ?: @"auto";
+        BOOL cleanMode = [mode isEqual:@"clean"];
+        NSArray *rawSelected = config[bundle];
+        if (![rawSelected isKindOfClass:NSArray.class]) rawSelected = @[];
+        BOOL optedIn = [appEnabled[bundle] boolValue];
+        // 0.4.0 父目录优先、子条目忽略：已存选择里父子并存时，只保留父目录。
+        NSMutableArray *effective = [NSMutableArray new];
+        for (NSString *relative in rawSelected) {
+            NSString *innerCheck = relative;
+            if ([relative hasPrefix:@"Group/"]) {
+                NSString *rest = [relative substringFromIndex:6];
+                NSRange slash = [rest rangeOfString:@"/"];
+                if (slash.location != NSNotFound) innerCheck = [rest substringFromIndex:slash.location + 1];
+            }
+            if (CKForbiddenPath(innerCheck)) continue;
+            BOOL child = NO;
+            for (NSString *other in rawSelected)
+                if ([other isKindOfClass:NSString.class] && other.length < relative.length &&
+                    [relative hasPrefix:[other stringByAppendingString:@"/"]]) { child = YES; break; }
+            if (!child) [effective addObject:relative];
+        }
+        // 未开启的 App 选择集强制为空：不建基线、不锁、不删，只走恢复。
+        NSArray *selected = optedIn ? effective : @[];
         NSString *signal = [[folder stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[bundle stringByAppendingString:@".background.plist"]];
         NSDictionary *lifecycle = [NSDictionary dictionaryWithContentsOfFile:signal];
         NSDate *background = lifecycle[@"time"];
@@ -144,12 +247,42 @@ void CKApplyDirectorySwitches(void) {
         BOOL retry = (background || stopped || reportedProcessExited) &&
             (!lastCleanup[bundle] || -[lastCleanup[bundle] timeIntervalSinceNow] >= 10);
         BOOL cleanup = newBackground || justStopped || retry;
+        // 0.4.0 自动降级（三）：自动模式下，App 被限权后若反复“秒退”（启动不足
+        // 10 秒、未退后台就直接结束，多为闪退），15 分钟内累计 3 次，把该 App 全部
+        // 目录降级为只清理；已限权的目录会在本轮末尾的恢复环节自动还原原权限。
+        if ([mode isEqual:@"auto"] && justStopped && launched &&
+            (!background || [background compare:launched] == NSOrderedAscending) &&
+            [NSDate.date timeIntervalSinceDate:launched] < 10) {
+            NSMutableArray *events = [shortRuns[bundle] mutableCopy] ?: [NSMutableArray new];
+            [events addObject:NSDate.date];
+            NSDate *window = [NSDate dateWithTimeIntervalSinceNow:-900];
+            [events filterUsingPredicate:[NSPredicate predicateWithFormat:@"SELF > %@", window]];
+            shortRuns[bundle] = events;
+            if (events.count >= 3) {
+                for (NSString *relative in selected) {
+                    NSString *innerPath = nil;
+                    NSURL *dirHome = CKHomeForRelative(relative, home, groups, &innerPath);
+                    if (!dirHome) continue;
+                    NSString *path = [dirHome.path stringByAppendingPathComponent:innerPath];
+                    if (!fallback[path][@"reason"]) {
+                        fallback[path] = @{@"reason": @"应用反复秒退，已自动降级为只清理", @"time": NSDate.date};
+                        fallbackDirty = YES;
+                    }
+                }
+                [shortRuns removeObjectForKey:bundle];
+            }
+        }
+        // 只禁止（lock）模式语义纯粹化：只限权、从不删文件；其余模式照常清扫。
+        BOOL sweep = cleanup && ![mode isEqual:@"lock"];
         NSUInteger removed = 0;
         unsigned long long bytes = 0;
         BOOL attempted = NO;
         for (NSString *relative in selected) {
             if (![candidates containsObject:relative]) continue;
-            NSString *path = [home.path stringByAppendingPathComponent:relative];
+            NSString *inner = nil;
+            NSURL *dirHome = CKHomeForRelative(relative, home, groups, &inner);
+            if (!dirHome) continue;
+            NSString *path = [dirHome.path stringByAppendingPathComponent:inner];
             struct stat info;
             if (lstat(path.fileSystemRepresentation, &info) || !S_ISDIR(info.st_mode)) continue;
             NSDictionary *record = previous[path];
@@ -163,17 +296,44 @@ void CKApplyDirectorySwitches(void) {
             NSMutableDictionary *next = [@{@"inode":@(info.st_ino),@"device":@(info.st_dev),@"armed":armed} mutableCopy];
             if (cutoff) {
                 next[@"cutoff"] = cutoff;
+                if (record[@"protectedRoot"]) next[@"protectedRoot"] = record[@"protectedRoot"];
                 NSArray *locked = record[@"locked"];
                 // 0.3.8 优化：无清理事件的轮询原来也每 2 秒全量重扫目录树只为重建锁定清单。
                 // 清单上一轮已存进 baselines.plist，目录被限写后集合基本冻结，直接复用；
                 // 有清理时必重扫，每 30 轮（约 1 分钟）兜底刷新一次，防清单漂移。
                 BOOL refreshLocked = (applyPolls % 30 == 0);
+                NSDictionary *fb = fallback[path];
+                BOOL cleanDir = cleanMode || fb[@"reason"] != nil;
                 if (!locked || cleanup || refreshLocked) {
-                    locked = CKBaselineDirectories(path,cutoff.timeIntervalSince1970,cleanup,&removed,&bytes);
-                    attempted |= cleanup;
+                    NSUInteger removedBefore = removed;
+                    BOOL protectedRoot = NO;
+                    locked = CKBaselineDirectories(path,cutoff.timeIntervalSince1970,sweep,&removed,&bytes,&protectedRoot);
+                    next[@"protectedRoot"] = @(protectedRoot);
+                    attempted |= sweep;
+                    // 0.4.0 自动降级（二）：目录明明处于限权状态，一轮清理却仍删到了
+                    // 基线后新建的文件，说明 App 把权限改了回去（沙盒内属主可改自己
+                    // 文件的权限，限权本质是软限制）。连续两轮如此，该目录降级为只清理。
+                    if (!cleanDir && [mode isEqual:@"auto"] && sweep && removed > removedBefore) {
+                        NSUInteger strikes = [fb[@"strikes"] unsignedIntegerValue] + 1;
+                        if (strikes >= 2) {
+                            fallback[path] = @{@"reason": @"限权后仍有新文件生成，已自动降级为只清理", @"time": NSDate.date};
+                            fallbackDirty = YES; cleanDir = YES;
+                        } else {
+                            NSMutableDictionary *entry = [fb mutableCopy] ?: [NSMutableDictionary new];
+                            entry[@"strikes"] = @(strikes); fallback[path] = entry; fallbackDirty = YES;
+                        }
+                    } else if (!cleanDir && [mode isEqual:@"auto"] && sweep && fb[@"strikes"]) {
+                        NSMutableDictionary *entry = [fb mutableCopy];
+                        [entry removeObjectForKey:@"strikes"]; fallback[path] = entry; fallbackDirty = YES;
+                    }
                 }
                 next[@"locked"] = locked;
-                [enabled addObjectsFromArray:locked];
+                if (!cleanDir) {
+                    [enabled addObjectsFromArray:locked];
+                    NSMutableArray *roots = lockRoots[bundle] ?: [NSMutableArray new];
+                    if (![roots containsObject:path]) [roots addObject:path];
+                    lockRoots[bundle] = roots;
+                }
             }
             baselines[path] = next;
         }
@@ -192,4 +352,26 @@ void CKApplyDirectorySwitches(void) {
     for (NSString *path in saved) if (![enabled containsObject:path]) [restore addObject:path];
     if (![previous isEqual:baselines] && ![baselines writeToFile:baselinePath atomically:YES]) return;
     CKSetPaths(restore,NO); CKSetPaths(enabled,YES);
+    // 0.4.0 自动降级（一）：限权后立刻复查根目录的属主写位；仍可写说明本轮限权
+    // 没生效（改权限被拒或记录落盘失败），方法 2 对该目录不可行，登记降级，
+    // 下一轮起自动只做事后清理。
+    for (NSString *bundle in lockRoots) {
+        if (![(policies[bundle][@"mode"] ?: @"auto") isEqual:@"auto"]) continue;
+        for (NSString *path in lockRoots[bundle]) {
+            if (fallback[path][@"reason"]) continue;
+            // 0.4.4：根目录本身装有数据库/登录文件、按红线被排除出锁定清单的，
+            // 不是限权失败——自动模式下直接转只清理并写明原因。
+            if ([baselines[path][@"protectedRoot"] boolValue]) {
+                fallback[path] = @{@"reason": @"目录含数据库/登录文件，按红线不锁定，已转只清理", @"time": NSDate.date};
+                fallbackDirty = YES;
+                continue;
+            }
+            struct stat info;
+            if (!lstat(path.fileSystemRepresentation, &info) && S_ISDIR(info.st_mode) && (info.st_mode & S_IWUSR)) {
+                fallback[path] = @{@"reason": @"写入限制未生效，已自动降级为只清理", @"time": NSDate.date};
+                fallbackDirty = YES;
+            }
+        }
+    }
+    if (fallbackDirty) [fallback writeToFile:[folder stringByAppendingPathComponent:@"fallback.plist"] atomically:YES];
 }

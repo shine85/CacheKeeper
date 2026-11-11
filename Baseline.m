@@ -6,6 +6,21 @@
 #include <stdlib.h>
 
 // Use birth time so a later write to a preloaded file cannot classify it as new.
+// 0.4.0/0.4.1 红线（禁区）：数据库与 cookies 类文件永不删、永不锁（不只靠目录层避开，文件名再兜底一层）。
+static BOOL CKProtectedName(NSString *name) {
+    NSString *n = name.lowercaseString;
+    return [n hasSuffix:@".db"] || [n hasSuffix:@".sqlite"] || [n hasSuffix:@".sqlite3"] ||
+        [n hasSuffix:@".realm"] || [n hasSuffix:@".db-journal"] || [n hasSuffix:@".sqlite-journal"] ||
+        [n containsString:@".db-wal"] || [n containsString:@".db-shm"] ||
+        [n containsString:@".sqlite-wal"] || [n containsString:@".sqlite-shm"] ||
+        [n containsString:@"cookies"];
+}
+// 0.4.0 红线：60 秒内刚生成的文件不动（可能仍在写入），留到下一轮清理。
+static BOOL CKTooFresh(struct stat info) {
+    NSTimeInterval birth = info.st_birthtimespec.tv_sec + info.st_birthtimespec.tv_nsec / 1e9;
+    return birth > 0 && birth > NSDate.date.timeIntervalSince1970 - 60;
+}
+
 static BOOL NewEntry(struct stat info, NSTimeInterval cutoff) {
     return info.st_birthtimespec.tv_sec > 0 &&
         info.st_birthtimespec.tv_sec + info.st_birthtimespec.tv_nsec / 1e9 > cutoff;
@@ -40,7 +55,7 @@ static BOOL RemoveEntry(NSURL *entry, NSString *root, struct stat expected) {
     return removed;
 }
 
-NSArray *CKBaselineDirectories(NSString *root, NSTimeInterval cutoff, BOOL cleanup, NSUInteger *removed, unsigned long long *bytes) {
+NSArray *CKBaselineDirectories(NSString *root, NSTimeInterval cutoff, BOOL cleanup, NSUInteger *removed, unsigned long long *bytes, BOOL *protectedRoot) {
     NSURL *url = [NSURL fileURLWithPath:root isDirectory:YES];
     if (![root isEqual:url.URLByResolvingSymlinksInPath.path]) return @[];
     char *resolvedRoot = realpath(root.fileSystemRepresentation, NULL);
@@ -50,9 +65,13 @@ NSArray *CKBaselineDirectories(NSString *root, NSTimeInterval cutoff, BOOL clean
     url = [NSURL fileURLWithPath:canonical isDirectory:YES];
     NSMutableArray *directories = [NSMutableArray arrayWithObject:root];
     NSMutableArray *newDirectories = [NSMutableArray array];
-    // 0.3.8 优化：原时限只有 75ms，大目录一轮枚举不完，锁定清单缺尾部目录、
-    // 清理要靠多轮重试从头再扫。调用方已移出 SpringBoard 主线程（见 Desktop.xm），
-    // 时限放宽到 1 秒，并加 30000 条上限兜底，避免病态目录无限占用。
+    NSMutableArray *newFiles = [NSMutableArray array];
+    // 0.4.4 边界修正（用户指出）：对整根目录限写会连带挡住其中数据库的日志文件
+    // （-wal/-shm 必须在数据库同目录创建/删除）、登录态文件的轮换新建，与“永不锁”
+    // 冲突。改为先识别“数据目录”——直接装有数据库/cookies 类文件的目录：
+    // 这类目录一律不进锁定清单，其内的新生普通文件也不删（可能与数据配套）。
+    NSMutableSet *protectedDirs = [NSMutableSet set];
+    // 枚举时限 1 秒、30000 条上限（0.3.8 定版，避免大目录反复从头扫）。
     NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + 1.0;
     NSUInteger entryCount = 0;
     NSDirectoryEnumerator *entries = [NSFileManager.defaultManager enumeratorAtURL:url
@@ -63,19 +82,37 @@ NSArray *CKBaselineDirectories(NSString *root, NSTimeInterval cutoff, BOOL clean
         if (lstat(entry.fileSystemRepresentation,&info)) continue;
         if (S_ISLNK(info.st_mode)) { [entries skipDescendants]; continue; }
         if (S_ISDIR(info.st_mode)) {
-            [directories addObject:entry.path];
-            if (cleanup && NewEntry(info, cutoff)) [newDirectories addObject:entry];
-        } else if (cleanup && S_ISREG(info.st_mode) && NewEntry(info, cutoff)) {
-            if (RemoveEntry(entry, canonical, info)) {
+            if (!CKProtectedName(entry.lastPathComponent)) [directories addObject:entry.path];
+            if (cleanup && NewEntry(info, cutoff) && !CKProtectedName(entry.lastPathComponent) && !CKTooFresh(info)) [newDirectories addObject:entry];
+        } else if (S_ISREG(info.st_mode)) {
+            if (CKProtectedName(entry.lastPathComponent)) {
+                [protectedDirs addObject:entry.URLByDeletingLastPathComponent.path];
+            } else if (cleanup && NewEntry(info, cutoff) && !CKTooFresh(info)) {
+                // 删除推迟到枚举结束后统一执行：要先知道哪些目录是数据目录。
+                [newFiles addObject:@{@"url":entry,@"inode":@(info.st_ino),@"device":@(info.st_dev),@"size":@(info.st_size)}];
+            }
+        }
+    }
+    if (protectedRoot) *protectedRoot = [protectedDirs containsObject:canonical];
+    if (cleanup) {
+        for (NSDictionary *file in newFiles) {
+            NSURL *entry = file[@"url"];
+            if ([protectedDirs containsObject:entry.URLByDeletingLastPathComponent.path]) continue;
+            struct stat expected = {0};
+            expected.st_ino = [file[@"inode"] unsignedLongLongValue];
+            expected.st_dev = [file[@"device"] unsignedLongLongValue];
+            if (RemoveEntry(entry, canonical, expected)) {
                 if (removed) (*removed)++;
-                if (bytes) *bytes += info.st_size;
+                if (bytes) *bytes += [file[@"size"] unsignedLongLongValue];
             }
         }
     }
     for (NSURL *entry in newDirectories.reverseObjectEnumerator) {
+        if ([protectedDirs containsObject:entry.URLByDeletingLastPathComponent.path]) continue;
         struct stat info;
         if (!lstat(entry.fileSystemRepresentation,&info) && S_ISDIR(info.st_mode) &&
             NewEntry(info, cutoff)) RemoveEntry(entry, canonical, info);
     }
+    [directories removeObjectsInArray:protectedDirs.allObjects];
     return directories;
 }

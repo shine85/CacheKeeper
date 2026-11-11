@@ -47,9 +47,9 @@
     self.navigationItem.rightBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"检测全部" style:UIBarButtonItemStylePlain target:self action:@selector(scanAll)];
 }
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section { return self.visibleApps.count; }
-- (NSString *)tableView:(UITableView *)table titleForHeaderInSection:(NSInteger)section { return @"检测全部后点应用管理目录 · 右侧开关限制写入"; }
+- (NSString *)tableView:(UITableView *)table titleForHeaderInSection:(NSInteger)section { return @"全部 App 都在此列表 · 右侧开关开启后插件才对该 App 生效"; }
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
-    return @"选择已安装的 App 检测目录，再开启需要的写入限制。首次加载完成后退到后台建立缓存基线，关闭限制后恢复原权限。首次安装请注销桌面。";
+    return @"只有你亲手开启开关的 App，插件才会管理：它退到后台时建立基线，之后自动限制写入或清理。未开启的 App 插件完全不碰——微信这类绝不能动的 App 保持关闭即可。开启时默认只管理 Caches，点该 App 进详情页可增减目录、修改策略。把某 App 关闭后，它此前被限制的目录自动恢复原权限。“检测全部”仅统计各目录大小，与是否开启无关。首次安装请注销桌面。";
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
     NSDictionary *app = self.visibleApps[path.row];
@@ -69,7 +69,8 @@
     // 0.3.8 优化：原来每行都从磁盘重读这两份 plist，列表一刷新就是 N 次读盘；改用 updateBatch 刷新的缓存
     NSDictionary *directories=self.directoriesCache ?: [NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist")];
     NSDictionary *states=self.statesCache ?: [NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")];
-    toggle.on=[directories[app[@"id"]] count] && (!states[app[@"id"]] || [states[app[@"id"]] boolValue]);
+    // 0.4.6：开关就是用户的人选结果——没亲手开过的就是关
+    toggle.on=[states[app[@"id"]] boolValue];
     [toggle addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = toggle; cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     return cell;
@@ -126,7 +127,7 @@
         pinyin = [pinyin stringByApplyingTransform:NSStringTransformStripCombiningMarks reverse:NO] ?: pinyin;
         if (query.length && ![name localizedCaseInsensitiveContainsString:query] &&
             ![bundle localizedCaseInsensitiveContainsString:query] && ![pinyin localizedCaseInsensitiveContainsString:query]) continue;
-        if ([directories[bundle] count] && (!states[bundle] || [states[bundle] boolValue])) [enabled addObject:bundle];
+        if ([states[bundle] boolValue]) [enabled addObject:bundle];
         sortKeys[bundle] = pinyin;
         [matches addObject:app];
     }
@@ -154,12 +155,9 @@
     NSString *bundle=toggle.accessibilityIdentifier;
     NSString *directoryPath=jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist");
     NSMutableDictionary *directories=[[NSDictionary dictionaryWithContentsOfFile:directoryPath] mutableCopy]?:[NSMutableDictionary new];
-    if (toggle.on && ![directories[bundle] count]) {
-        BOOL found=NO;
-        for (NSDictionary *row in self.scanHistory[bundle][@"rows"]) if ([row[@"path"] isEqual:@"Library/Caches"]) found=YES;
-        if (!found) { toggle.on=NO; [self scanAll];return; }
-        directories[bundle]=@[@"Library/Caches"];
-    }
+    // 0.4.6：开启即生效——没选过目录的 App 预选 Library/Caches（详情页可再改），
+    // 不再要求先扫描；关闭后引擎下一轮自动恢复该 App 的全部原权限。
+    if (toggle.on && ![directories[bundle] count]) directories[bundle]=@[@"Library/Caches"];
     NSMutableDictionary *states=[[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")] mutableCopy]?:[NSMutableDictionary new];
     states[bundle]=@(toggle.on);
     if ([states writeToFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist") atomically:YES]) [directories writeToFile:directoryPath atomically:YES];
