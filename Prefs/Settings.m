@@ -61,13 +61,13 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     NSDictionary *states=self.statesSnapshot;
     toggle.on=axs_cachekeeper_app_enabled(states[app[@"id"]]);
     if (!toggle.on) cell.detailTextLabel.text=[@"未开启缓存控制\n" stringByAppendingString:axs_cachekeeper_summary(scan,nil)];
-    else if (!axs_cachekeeper_selected_paths_tiered(directories,states,axs_cachekeeper_tiers_by_path(scan[@"rows"]),app[@"id"]).count) cell.detailTextLabel.text=@"总开关已开启；没有文件清理目录，网络缓存按独立选项执行";
+    else if (!axs_cachekeeper_selected_paths(directories,states,app[@"id"]).count && !axs_cachekeeper_auto_discover(states[app[@"id"]])) cell.detailTextLabel.text=@"总开关已开启；没有文件清理目录，网络缓存按独立选项执行";
     [toggle addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = toggle; cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     return cell;
 }
 - (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];[self axs_cachekeeper_reload_apps];[self updateBatch];
+    [super viewWillAppear:animated];[self axs_cachekeeper_reload_apps];[self updateBatch];[self axs_cachekeeper_show_restore_report];
     if (!self.batchTimer) {
         __weak typeof(self) weak=self;
         self.batchTimer=[NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer){[weak updateBatch];}];
@@ -75,6 +75,15 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 }
 - (void)viewWillDisappear:(BOOL)animated { [super viewWillDisappear:animated];[self.batchTimer invalidate];self.batchTimer=nil; }
 - (void)dealloc { [self.batchTimer invalidate]; }
+- (void)axs_cachekeeper_show_restore_report {
+    NSString *path=jbroot(@"/var/mobile/Library/CacheKeeper/restore-report.plist");
+    NSDictionary *report=[NSDictionary dictionaryWithContentsOfFile:path];
+    if (![report isKindOfClass:NSDictionary.class] || ![report[@"failed"] unsignedIntegerValue]) return;
+    [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+    UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"旧权限恢复未完成" message:[NSString stringWithFormat:@"上次恢复旧版目录权限时有 %lu 项失败（%@）。相关目录可能仍保持旧权限；重新安装或再次卸载时会重试。",(unsigned long)[report[@"failed"] unsignedIntegerValue],report[@"error"] ?: @""] preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
 - (void)axs_cachekeeper_reload_apps {
     id manager=axs_cachekeeper_app_property(NSClassFromString(@"LSApplicationWorkspace"),@"defaultWorkspace");
     NSArray *installed=axs_cachekeeper_app_property(manager,@"allInstalledApplications");
@@ -152,10 +161,8 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     NSMutableDictionary *directories=axs_cachekeeper_edit_configuration(directoryPath);
     NSMutableDictionary *states=axs_cachekeeper_edit_configuration(jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist"));
     if (!directories || !states) { [self axs_cachekeeper_configuration_error]; [self updateBatch]; return; }
-    if (toggle.on && !directories[bundle]) directories[bundle]=axs_cachekeeper_activation_paths(nil);
     states[bundle]=axs_cachekeeper_app_state(states[bundle],toggle.on);
-    if (![directories writeToFile:directoryPath atomically:YES] ||
-        ![states writeToFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist") atomically:YES]) {
+    if (![states writeToFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist") atomically:YES]) {
         UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"保存失败" message:@"缓存控制设置未完整保存，请检查安装与目录权限。" preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:alert animated:YES completion:nil];

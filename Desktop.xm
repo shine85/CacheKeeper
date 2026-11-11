@@ -26,7 +26,8 @@ static id Read(id object, NSString *name) {
     }
     NSDictionary *directories=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist")];
     NSDictionary *states=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")];
-    if (!axs_cachekeeper_can_clean(directories,states,bundle)) {
+    NSDictionary *snapshots=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/snapshots.plist")];
+    if (!axs_cachekeeper_can_clean_tiered(directories,states,bundle,snapshots[bundle][@"rows"])) {
         NSMutableArray *filtered=[NSMutableArray new];
         BOOL removed=NO;
         for (id item in items) {
@@ -59,6 +60,8 @@ static id Read(id object, NSString *name) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSTimer *timer = [NSTimer timerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer) {
             CKScanRequests();
+            CKDeepRequests();
+            CKQuarantineRequests();
             CKApplyDirectorySwitches();
         }];
         [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
