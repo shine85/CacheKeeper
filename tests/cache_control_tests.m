@@ -2,6 +2,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #import "../AxsCacheKeeperPolicy.h"
+#import "../AxsCacheKeeperFileAccess.h"
 #import "../AxsCacheKeeperSweep.h"
 #import "../AxsCacheKeeperNetworkCache.h"
 #import "../AxsCacheKeeperDirectories.h"
@@ -379,6 +380,20 @@ int main(int argc, const char *argv[]) {
         require([@"invalid journal" writeToFile:journal atomically:YES encoding:NSUTF8StringEncoding error:nil], @"损坏记录测试");
         NSDictionary *rejected = axs_cachekeeper_restore_paths(@[cache], journal);
         require([rejected[@"failed"] unsignedIntegerValue] > 0 && !lstat(cache.fileSystemRepresentation, &info) && (info.st_mode & 0777) == 0770, @"损坏记录不能改变目录权限");
+
+        // 路径解析回归（真机 2026-11-11：删除在「打开缓存根」以 ENOTDIR 全灭）：中间组件是符号链接时
+        // 逐级打开必须跟随（与内核一致，如 /var→/private/var）；末级目标本身是链接仍须拒绝。
+        NSString *linkTarget = [fixture stringByAppendingPathComponent:@"link-target"];
+        require([fm createDirectoryAtPath:[linkTarget stringByAppendingPathComponent:@"sub"] withIntermediateDirectories:YES attributes:nil error:nil], @"链接中间层夹具");
+        NSString *linkPath = [fixture stringByAppendingPathComponent:@"link-mid"];
+        require(!symlink(linkTarget.fileSystemRepresentation, linkPath.fileSystemRepresentation), @"建立中间层链接");
+        int throughFd = axs_cachekeeper_open_directory([linkPath stringByAppendingPathComponent:@"sub"]);
+        struct stat throughInfo;
+        require(throughFd >= 0 && !fstat(throughFd, &throughInfo) && S_ISDIR(throughInfo.st_mode), @"经符号链接中间层打开目录成功");
+        if (throughFd >= 0) close(throughFd);
+        NSString *finalLink = [fixture stringByAppendingPathComponent:@"link-final"];
+        require(!symlink(linkTarget.fileSystemRepresentation, finalLink.fileSystemRepresentation), @"建立末级链接");
+        require(axs_cachekeeper_open_directory(finalLink) < 0, @"末级目标是符号链接仍拒绝打开");
 
         NSString *lockRoot = [fixture stringByAppendingPathComponent:@"lock-root"];
         NSString *lockSub = [lockRoot stringByAppendingPathComponent:@"sub"];

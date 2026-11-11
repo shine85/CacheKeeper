@@ -154,7 +154,15 @@
     int fd = axs_cachekeeper_open_directory(self.root);
     if (fd < 0) {
         int openError = errno;
-        self.error = [NSString stringWithFormat:@"删除失败·打开缓存根（errno %d）", openError];
+        NSString *bad = @"?";
+        NSString *walk = @"";
+        for (NSString *part in [self.root componentsSeparatedByString:@"/"]) {
+            if (!part.length) continue;
+            walk = [walk stringByAppendingPathComponent:part];
+            struct stat componentInfo;
+            if (lstat(walk.fileSystemRepresentation, &componentInfo) || !S_ISDIR(componentInfo.st_mode)) { bad = part; break; }
+        }
+        self.error = [NSString stringWithFormat:@"删除失败·打开缓存根（errno %d，卡在组件 %@）", openError, bad];
         errno = openError; return NO;
     }
     struct stat openedRoot;

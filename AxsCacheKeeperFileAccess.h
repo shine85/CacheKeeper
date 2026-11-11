@@ -9,10 +9,16 @@ static inline int axs_cachekeeper_open_directory(NSString *path) {
     if (![path hasPrefix:@"/"]) { errno = EINVAL; return -1; }
     int fd = open("/", O_RDONLY | O_DIRECTORY);
     if (fd < 0) return -1;
-    for (NSString *part in [path componentsSeparatedByString:@"/"]) {
-        if (!part.length) continue;
+    NSMutableArray<NSString *> *parts = [NSMutableArray new];
+    for (NSString *part in [path componentsSeparatedByString:@"/"]) if (part.length) [parts addObject:part];
+    NSUInteger index = 0;
+    for (NSString *part in parts) {
         if ([part isEqual:@"."] || [part isEqual:@".."]) { close(fd); errno = EINVAL; return -1; }
-        int next = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        // 中间组件按内核路径解析跟随符号链接（/var→/private/var、越狱根链接等系统形态）；
+        // 只有末级目标目录保持 NOFOLLOW，防目标本身被换成链接。调用方均另有身份核对兜底。
+        // 旧实现逐级 NOFOLLOW：中间任一组件是链接就以 ENOTDIR 失败（真机 2026-11-11 删除全灭于此）。
+        BOOL last = ++index == parts.count;
+        int next = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | (last ? O_NOFOLLOW : 0));
         int error = errno;
         close(fd);
         if (next < 0) { errno = error; return -1; }
