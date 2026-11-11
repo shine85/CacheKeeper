@@ -192,8 +192,20 @@ static inline BOOL axs_cachekeeper_should_prevent(id state) {
 static inline BOOL axs_cachekeeper_auto_discover(id state) {
     return [state isKindOfClass:NSDictionary.class] && [state[@"autoDiscover"] isKindOfClass:NSNumber.class] && [state[@"autoDiscover"] boolValue];
 }
+// 只有主容器内的未知/混合目录走证据通道；共享、受保护与白名单目录不抽检、不隔离、不接受用户判定。
+static inline BOOL axs_cachekeeper_probe_eligible(NSString *path) {
+    if (!axs_cachekeeper_relative_path(path) || [path hasPrefix:@"Group/"]) return NO;
+    if (axs_cachekeeper_protected_path(path) || axs_cachekeeper_cache_path(path)) return NO;
+    NSString *kind = axs_cachekeeper_directory_kind(path);
+    return [kind isEqual:@"unknown"] || [kind isEqual:@"mixed"];
+}
 static inline NSArray<NSString *> *axs_cachekeeper_exclusions(id state) {
-    return [state isKindOfClass:NSDictionary.class] ? axs_cachekeeper_cache_paths(state[@"excludedPaths"]) : @[];
+    if (![state isKindOfClass:NSDictionary.class] || ![state[@"excludedPaths"] isKindOfClass:NSArray.class]) return @[];
+    // 排除名单除白名单外还须保留证据通道目录，否则对定级/判定目录的关闭会在状态回写时丢失。
+    NSMutableArray *result = [NSMutableArray new];
+    for (id path in state[@"excludedPaths"])
+        if ([path isKindOfClass:NSString.class] && (axs_cachekeeper_cache_path(path) || axs_cachekeeper_probe_eligible(path))) [result addObject:path];
+    return axs_cachekeeper_parent_paths(result);
 }
 static inline BOOL axs_cachekeeper_paths_overlap(NSString *left, NSString *right) {
     return [left isEqual:right] || [left hasPrefix:[right stringByAppendingString:@"/"]] ||
@@ -210,13 +222,6 @@ static inline NSArray<NSString *> *axs_cachekeeper_effective_paths(NSArray *sele
         if (axs_cachekeeper_paths_overlap(path,excluded)) { [paths removeObject:path];break; }
     }
     return axs_cachekeeper_cache_paths(paths);
-}
-// 只有主容器内的未知/混合目录走证据通道；共享、受保护与白名单目录不抽检、不隔离、不接受用户判定。
-static inline BOOL axs_cachekeeper_probe_eligible(NSString *path) {
-    if (!axs_cachekeeper_relative_path(path) || [path hasPrefix:@"Group/"]) return NO;
-    if (axs_cachekeeper_protected_path(path) || axs_cachekeeper_cache_path(path)) return NO;
-    NSString *kind = axs_cachekeeper_directory_kind(path);
-    return [kind isEqual:@"unknown"] || [kind isEqual:@"mixed"];
 }
 static inline NSArray<NSString *> *axs_cachekeeper_judged_paths(id state) {
     NSMutableArray *result = [NSMutableArray new];
