@@ -149,7 +149,6 @@
             ? [NSString stringWithFormat:@"自动清理累计 %@ 个文件 · %.2f MB\n最近检查 %@",report[@"removed"],[report[@"bytes"] doubleValue]/1048576,report[@"updated"]]
             : @"等待自动清理记录，目录大小以检测时间为准";
         NSDictionary *states=[self cached:@"appEnabled.plist"];
-        NSDictionary *selected=[self cached:@"directories.plist"];
         UISwitch *toggle=[UISwitch new];
         // 0.4.6：总开关就是用户的人选结果——没亲手开过的就是关
         toggle.on=[states[self.bundle] boolValue];
@@ -168,7 +167,7 @@
     NSString *full=[self fullPath:relative];
     struct stat info;BOOL blocked=full && !lstat(full.fileSystemRepresentation,&info) && !(info.st_mode&S_IWUSR);
     NSDictionary *master=[self cached:@"appEnabled.plist"];
-    BOOL masterOn=!master[self.bundle] || [master[self.bundle] boolValue];
+    BOOL masterOn=[master[self.bundle] boolValue];
     NSString *state=enabled?(!masterOn?@"已选中，等待打开 App 总开关":(blocked && records[full]?@"已限制写入":@"等待基线或权限应用，请打开 App 完成加载再返回桌面")):@"未选中";
     cell.detailTextLabel.text=[NSString stringWithFormat:@"%.2f MB%@%@\n%@",[row[@"bytes"] doubleValue]/1048576,growth,[row[@"complete"] boolValue]?@"":@" · 大小未统计完",state];
     UISwitch *toggle=[UISwitch new];toggle.on=enabled;toggle.accessibilityIdentifier=relative;
