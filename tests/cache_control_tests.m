@@ -28,9 +28,16 @@ static void writeMedia(NSString *path) {
 @end
 @implementation AxsTestOpenConfiguration
 @end
+@interface AxsTestProcessState : NSObject
+@property(nonatomic) NSInteger taskState;
+@end
+@implementation AxsTestProcessState
+@end
 @interface AxsTestProcess : NSObject
 @property(nonatomic,copy) NSString *bundleIdentifier;
 @property(nonatomic) BOOL running;
+@property(nonatomic,strong) AxsTestProcessState *state;
+@property(nonatomic) int pid;
 - (BOOL)isRunning;
 @end
 @implementation AxsTestProcess
@@ -74,6 +81,22 @@ int main(int argc, const char *argv[]) {
         require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessRunning, @"保留启动或退出中的进程记录，不依赖瞬时 isRunning");
         manager.allApplicationProcesses=@[[NSObject new]];
         require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessUnknown, @"不完整的进程记录不得授权删除");
+        AxsTestProcessState *execState=[AxsTestProcessState new];
+        application.state=execState;
+        application.pid=NSProcessInfo.processInfo.processIdentifier;
+        manager.allApplicationProcesses=@[application];
+        NSString *execIdentity=nil; NSInteger rawTaskState=-1;
+        execState.taskState=1;
+        require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecExecuting && rawTaskState==1, @"taskState=1 判为执行中");
+        execState.taskState=2;
+        require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecSuspended && execIdentity.length, @"taskState=2 判为已挂起且能取实例标识");
+        execState.taskState=7;
+        require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecUnknown, @"未知 taskState 一律不放行");
+        application.state=nil;
+        require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecUnknown, @"读不到进程状态对象时不放行");
+        manager.allApplicationProcesses=@[];
+        require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecAbsent, @"完整清单中无记录判为进程消失");
+        manager.allApplicationProcesses=@[application];
         NSDictionary *selection = @{bundle:@[@"Library/Caches/a", @"Library/Caches", @"Library/Caches/a",
             @"Library/Application Support", @"Library/Caches/../Preferences", @"Library/CachesOther"]};
         require([axs_cachekeeper_selected_paths(selection, @{bundle:@YES}, bundle) isEqual:@[@"Library/Caches"]], @"过滤保护目录并去掉父子重复选择");
