@@ -82,6 +82,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # 通过网页/连接器推送的文件会丢失可执行位，deb 打包前先修复维护脚本权限（git 推送时本就是 755，此步无副作用）
+          chmod 0755 layout/DEBIAN/postinst layout/DEBIAN/prerm
           make clean
           make package THEOS_PACKAGE_DIR="$PWD/packages"
 
