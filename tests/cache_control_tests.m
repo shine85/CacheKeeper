@@ -114,8 +114,8 @@ int main(int argc, const char *argv[]) {
         NSDateFormatter *expect=[NSDateFormatter new];expect.dateFormat=@"yyyy-MM-dd HH:mm:ss";expect.timeZone=NSTimeZone.localTimeZone;expect.locale=[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
         require([shown isEqual:[expect stringFromDate:fixedDate]] && shown.length==19 && ![shown containsString:@"+0000"], @"界面时间按设备本地时区显示，不用 NSDate 的 UTC 描述");
         require([axs_cachekeeper_time_string(nil) isEqual:@"时间未知"] && [axs_cachekeeper_time_string(@"2026") isEqual:@"时间未知"], @"非日期值显示时间未知");
-        NSString *summary=axs_cachekeeper_summary(nil,@{@"updated":fixedDate,@"removed":@0,@"bytes":@0});
-        require([summary containsString:shown] && ![summary containsString:@"+0000"], @"摘要中的最近检查使用本地时间");
+        NSString *summaryText=axs_cachekeeper_summary(nil,@{@"updated":fixedDate,@"removed":@0,@"bytes":@0});
+        require([summaryText containsString:shown] && ![summaryText containsString:@"+0000"], @"摘要中的最近检查使用本地时间");
         require([axs_cachekeeper_parent_paths(@[@"tmp/a/b",@"tmp",@"tmp/a",@"Library/Caches/video",@"Library/Caches"]) isEqual:@[@"Library/Caches",@"tmp"]], @"父目录优先忽略所有后代");
         for (NSString *protectedPath in @[@"tmp/login/avatar.jpg",@"tmp/WebKit/cache.tmp",@"Library/Caches/Cache.db",@"Library/Caches/Cookies/file.tmp",@"Library/Preferences"]) {
             require(!axs_cachekeeper_cache_path(protectedPath), @"受保护目录不可纳入清理");
