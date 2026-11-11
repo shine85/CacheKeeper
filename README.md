@@ -1,17 +1,14 @@
-# CacheKeeper 仓库说明（GitHub 自动编译版）
+# CacheKeeper 缓存管家
 
-本目录就是仓库根目录：`Makefile`、`control`、源码都在根下，
-`.github/workflows/build.yml` 已按本工程调好（roothide/theos、iPhoneOS 16.5 SDK、
-macos-14、Xcode 15.4、ldid/dpkg），与交接说明里的本地编译条件对齐。
+iOS 16–17 RootHide 插件。列出已安装 APP，由用户逐个开启缓存控制；支持自动、只禁止、只清理模式。
 
-## 怎么用
+- [下载编译后的测试包](https://github.com/shine85/CacheKeeper/releases)
+- [查看自动构建与日志](https://github.com/shine85/CacheKeeper/actions/workflows/build.yml)
+- [目录、保护规则与模式说明](docs/缓存控制优化.md)
+- [本地编译与交接](交接说明.md)
 
-1. 在 GitHub 新建一个 **Private** 仓库（名字随意，如 `cachekeeper`），不要勾选自动生成 README。
-2. 把本目录的**全部内容**（包括隐藏的 `.github` 文件夹，别漏）推到仓库的 `main` 分支。
-3. 推送会自动触发编译；也可以在仓库的 Actions 页手动点 “Build CacheKeeper (Roothide)” → Run workflow。
-4. 编译成功后，在那次运行页面底部 Artifacts 下载 `CacheKeeper-deb`，
-   里面是 `dev.local.cachekeeper_0.3.9_iphoneos-arm64e.deb`。
-5. 编译失败时，把失败步骤的日志发回给 Muse，按日志改工作流或代码，不要靠猜。
+推送到 `main` / `master` 后，GitHub Actions 自动运行原生回归、编译 RootHide deb 并检查关键文件；通过后创建带 `.deb`、SHA256 校验和、包文件清单的预发布版本。也可在 Actions 页面手动运行工作流。
 
-注意：私有仓库 Actions 免费额度按分钟计，macOS 按 10 倍计费，一次编译约几分钟，
-日常迭代够用，别开无意义的重复触发。版本号在 `control` 里，升版改那里，不要让 CI 改。
+包版本保留 `control` 的基础版本，追加构建序号与重试序号，避免不同构建重名。构建通过不等于已完成真机验证；下载包默认关闭 APP 功能，需在设置中自行开启。
+
+本地 `BK/`、`tmp/`、`memory/`、构建目录及 `.deb` 不上传到源码仓库。

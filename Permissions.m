@@ -1,75 +1,69 @@
 #import <Foundation/Foundation.h>
+#import "AxsCacheKeeperPolicy.h"
+#import "AxsCacheKeeperFileAccess.h"
 #if CK_STANDALONE_RESTORE
 #include <mach-o/dyld.h>
 #include <stdlib.h>
 static NSString *jbroot(NSString *path) {
-    char buffer[4096]; uint32_t size=sizeof(buffer);
-    if (_NSGetExecutablePath(buffer,&size)) return nil;
-    char *resolved=realpath(buffer,NULL);
+    char buffer[4096]; uint32_t size = sizeof(buffer);
+    if (_NSGetExecutablePath(buffer, &size)) return nil;
+    char *resolved = realpath(buffer, NULL);
     if (!resolved) return nil;
-    NSString *executable=[NSString stringWithUTF8String:resolved]; free(resolved);
-    NSString *root=executable.stringByDeletingLastPathComponent.stringByDeletingLastPathComponent.stringByDeletingLastPathComponent;
+    NSString *executable = [NSString stringWithUTF8String:resolved]; free(resolved);
+    NSString *root = executable.stringByDeletingLastPathComponent.stringByDeletingLastPathComponent.stringByDeletingLastPathComponent;
     return [root stringByAppendingPathComponent:path];
 }
 #else
 #include <roothide.h>
 #endif
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
 
-void CKSetPaths(NSArray *paths, BOOL enabled) {
-    NSString *file = jbroot(@"/var/mobile/Library/CacheKeeper/permissions.plist");
-    NSMutableDictionary *records = [[NSDictionary dictionaryWithContentsOfFile:file] mutableCopy] ?: [NSMutableDictionary new];
-    if (enabled) {
-        // 0.3.8 优化（不改“恢复记录先落盘、然后才改权限”的安全顺序）：
-        // 原实现每遇到一个新目录就把 permissions.plist 原子写一遍，目录上百时写上百次。
-        // 改为两段式：先收集全部新记录并整表写一次，成功后才统一改权限；
-        // 写失败时本轮只处理此前已有记录的目录，新目录一律不动。
-        // 另外，已处于限写状态（属主写位已清）的目录跳过重复 fchmod。
-        NSMutableSet *ready = [NSMutableSet set];
-        NSMutableSet *fresh = [NSMutableSet set];
-        for (NSString *path in paths) {
-            if (![path isEqual:[NSURL fileURLWithPath:path].URLByResolvingSymlinksInPath.path]) continue;
-            int fd = open(path.fileSystemRepresentation,O_RDONLY|O_DIRECTORY|O_NOFOLLOW);
-            if (fd < 0) continue;
-            struct stat info;
-            if (fstat(fd,&info)) { close(fd); continue; }
-            close(fd);
-            NSDictionary *saved = records[path];
-            if (saved && [saved[@"inode"] unsignedLongLongValue] == info.st_ino && [saved[@"device"] unsignedLongLongValue] == info.st_dev) {
-                [ready addObject:path];
-            } else {
-                records[path] = @{@"mode":@(info.st_mode & 0777),@"inode":@(info.st_ino),@"device":@(info.st_dev)};
-                [fresh addObject:path];
-            }
+// 仅恢复旧版修改的权限。禁止再锁缓存根，以免连带阻断数据库或登录态写入。
+NSDictionary *axs_cachekeeper_restore_paths(NSArray *paths, NSString *file) {
+    NSDictionary *stored = [NSDictionary dictionaryWithContentsOfFile:file];
+    if ((!stored && [NSFileManager.defaultManager fileExistsAtPath:file]) || !file.length)
+        return @{@"failed":@1, @"applied":@0, @"error":@"权限恢复记录不可读"};
+    NSMutableDictionary *records = [stored mutableCopy] ?: [NSMutableDictionary new];
+    NSUInteger applied = 0, failed = 0;
+    NSString *message = @"";
+    for (NSString *path in (paths ?: records.allKeys)) {
+        NSDictionary *saved = records[path];
+        if (!saved) continue;
+        if (![path isKindOfClass:NSString.class] || ![saved isKindOfClass:NSDictionary.class] ||
+            ![saved[@"inode"] isKindOfClass:NSNumber.class] || ![saved[@"device"] isKindOfClass:NSNumber.class] ||
+            ![saved[@"mode"] isKindOfClass:NSNumber.class]) {
+            failed++; message = @"原权限记录损坏，保留记录等待修复"; continue;
         }
-        if (fresh.count && [records writeToFile:file atomically:YES]) [ready unionSet:fresh];
-        for (NSString *path in ready) {
-            int fd = open(path.fileSystemRepresentation,O_RDONLY|O_DIRECTORY|O_NOFOLLOW);
-            if (fd < 0) continue;
-            struct stat info;
-            NSDictionary *saved = records[path];
-            if (!fstat(fd,&info) && saved && [saved[@"inode"] unsignedLongLongValue] == info.st_ino && [saved[@"device"] unsignedLongLongValue] == info.st_dev && (info.st_mode & S_IWUSR)) {
-                fchmod(fd,(info.st_mode & 0777) & ~S_IWUSR);
-            }
-            close(fd);
+        int fd = axs_cachekeeper_open_directory(path);
+        if (fd < 0) {
+            if (errno == ENOENT) { [records removeObjectForKey:path]; continue; }
+            failed++; message = [NSString stringWithFormat:@"恢复目录访问失败（errno %d）", errno]; continue;
         }
-    } else {
-        for (NSString *path in (paths ?: records.allKeys)) {
-            if (![path isEqual:[NSURL fileURLWithPath:path].URLByResolvingSymlinksInPath.path]) continue;
-            int fd = open(path.fileSystemRepresentation,O_RDONLY|O_DIRECTORY|O_NOFOLLOW);
-            if (fd < 0) continue;
-            struct stat info; NSDictionary *saved = records[path];
-            // 0.3.8 优化：权限已等于原值时视为已恢复，不再重复 fchmod（记录照常清除）
-            mode_t wantedMode = [saved[@"mode"] unsignedIntValue];
-            if (!fstat(fd,&info) && saved && [saved[@"inode"] unsignedLongLongValue] == info.st_ino && [saved[@"device"] unsignedLongLongValue] == info.st_dev && ((info.st_mode & 0777) == wantedMode || !fchmod(fd,wantedMode))) [records removeObjectForKey:path];
-            close(fd);
+        struct stat info;
+        if (fstat(fd, &info)) { failed++; message = @"无法核对目录身份"; close(fd); continue; }
+        if ([saved[@"inode"] unsignedLongLongValue] != info.st_ino || [saved[@"device"] unsignedLongLongValue] != info.st_dev) {
+            [records removeObjectForKey:path]; close(fd); continue;
         }
-        [records writeToFile:file atomically:YES];
+        mode_t mode = [saved[@"mode"] unsignedIntValue] & 07777;
+        if (fchmod(fd, mode) || fstat(fd, &info) || (info.st_mode & 07777) != mode) {
+            failed++; message = [NSString stringWithFormat:@"恢复原权限失败（errno %d）", errno];
+        } else { applied++; [records removeObjectForKey:path]; }
+        close(fd);
     }
+    if (![records isEqual:stored ?: @{}] && ![records writeToFile:file atomically:YES]) {
+        failed++; message = @"恢复记录保存失败，将在下次重试";
+    }
+    return @{@"failed":@(failed), @"applied":@(applied), @"error":message};
 }
-
-// 0.4.3 删除原 CKPermissions：它写死了某个 App 的两个目录路径（专用逻辑），
-// 与“对所有已安装 App 通用”的定位冲突。卸载恢复改由 ckrestore 直接调
-// CKSetPaths(nil, NO) 还原全部记录，行为不变。
+void CKPermissions(NSURL *home, BOOL enabled) {
+    if (enabled) { NSLog(@"[CacheKeeper] 不再支持目录 chmod 限写"); return; }
+    NSString *journal = jbroot(@"/var/mobile/Library/CacheKeeper/permissions.plist");
+    NSArray *paths = nil;
+    if (home) {
+        NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:journal];
+        NSMutableArray *matching = [NSMutableArray new];
+        for (NSString *path in saved) if ([path hasPrefix:[home.path stringByAppendingString:@"/"]]) [matching addObject:path];
+        paths = matching;
+    }
+    NSDictionary *result = axs_cachekeeper_restore_paths(paths, journal);
+    if ([result[@"failed"] unsignedIntegerValue]) NSLog(@"[CacheKeeper] %@", result[@"error"]);
+}

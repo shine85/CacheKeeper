@@ -1,6 +1,8 @@
 #import <UIKit/UIKit.h>
 #include <roothide.h>
 #include <sys/stat.h>
+#import "../AxsCacheKeeperPolicy.h"
+#import "../AxsCacheKeeperSelection.h"
 
 @interface CKScanPage : UITableViewController
 @property(nonatomic,copy) NSString *bundle;
@@ -9,75 +11,98 @@
 @property(nonatomic,strong) NSDictionary *previous;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,copy) NSString *token;
-@property(nonatomic,strong) NSMutableDictionary *fileCache;
 @property(nonatomic) NSTimeInterval started;
+@property(nonatomic,strong) NSTimer *statusTimer;
+@property(nonatomic,copy) NSString *scanError;
+@property(nonatomic,strong) NSMutableDictionary *displayCache;
+@property(nonatomic,strong) UIBarButtonItem *scanButton;
+@property(nonatomic,strong) UIBarButtonItem *enableAllButton;
 @end
 @implementation CKScanPage
 - (instancetype)init {return [super initWithStyle:UITableViewStyleInsetGrouped];}
 - (NSString *)file:(NSString *)name {return [jbroot(@"/var/mobile/Library/CacheKeeper") stringByAppendingPathComponent:name];}
-// 0.3.8 优化：cellForRow 原来每行重读 directories/appEnabled/permissions/snapshots 四份 plist，
-// 改为按刷新周期缓存；写配置或检测完成后置空缓存，数据时效不变
-- (NSDictionary *)cached:(NSString *)name {
-    if (!self.fileCache) self.fileCache = [NSMutableDictionary new];
-    NSDictionary *value = self.fileCache[name];
-    if (!value) { value = [NSDictionary dictionaryWithContentsOfFile:[self file:name]] ?: @{}; self.fileCache[name] = value; }
-    return value;
+- (NSDictionary *)axs_cachekeeper_display:(NSString *)name {
+    if (!self.displayCache) self.displayCache=[NSMutableDictionary new];
+    if (!self.displayCache[name]) self.displayCache[name]=[NSDictionary dictionaryWithContentsOfFile:[self file:name]] ?: @{};
+    return self.displayCache[name];
+}
+- (void)axs_cachekeeper_reload {
+    self.displayCache=nil;
+    self.enableAllButton.enabled=!self.timer && axs_cachekeeper_enableable_paths(self.rows).count>0;
+    [self.tableView reloadData];
 }
 - (void)viewDidLoad {
     [super viewDidLoad];self.title=self.appName;
-    NSDictionary *history=[self cached:@"snapshots.plist"];
-    self.rows=[self collapseRows:history[self.bundle][@"rows"]?:@[]];
+    NSDictionary *history=[NSDictionary dictionaryWithContentsOfFile:[self file:@"snapshots.plist"]];
+    self.rows=axs_cachekeeper_parent_rows(history[self.bundle][@"rows"]);
     self.previous=@{@"rows":history[self.bundle][@"previousRows"]?:@[]};
-    self.navigationItem.rightBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"检测目录" style:UIBarButtonItemStylePlain target:self action:@selector(scan)];
+    self.scanError=history[self.bundle][@"error"];
+    self.scanButton=[[UIBarButtonItem alloc] initWithTitle:@"检测目录" style:UIBarButtonItemStylePlain target:self action:@selector(scan)];
+    self.enableAllButton=[[UIBarButtonItem alloc] initWithTitle:@"一键开启" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_enable_all)];
+    self.enableAllButton.accessibilityLabel=@"开启此 APP 检测到的全部可管理缓存目录";
+    self.navigationItem.rightBarButtonItems=@[self.enableAllButton,self.scanButton];
+    [self axs_cachekeeper_reload];
 }
 - (void)scan {
     if (self.timer) return;
     self.token=NSUUID.UUID.UUIDString;
     if (![@{@"bundle":self.bundle,@"token":self.token} writeToFile:[self file:@"request.plist"] atomically:YES]) { [self message:@"无法提交检测，请重新安装插件。"];return; }
     self.started=NSProcessInfo.processInfo.systemUptime;
-    self.navigationItem.rightBarButtonItem.enabled=NO;
+    self.scanButton.enabled=NO;
+    self.enableAllButton.enabled=NO;
     self.title=@"正在检测…";
     __weak typeof(self) weak=self;
     self.timer=[NSTimer scheduledTimerWithTimeInterval:.5 repeats:YES block:^(NSTimer *timer){[weak check];}];
+    [self axs_cachekeeper_reload];
 }
 - (void)check {
     NSDictionary *result=[NSDictionary dictionaryWithContentsOfFile:[self file:@"scan.plist"]];
     if ([result[@"token"] isEqual:self.token]) {
-        [self.timer invalidate];self.timer=nil;self.navigationItem.rightBarButtonItem.enabled=YES;self.title=self.appName;
-        self.rows=[self collapseRows:result[@"rows"]?:@[]];
+        [self.timer invalidate];self.timer=nil;self.scanButton.enabled=YES;self.title=self.appName;
+        self.rows=axs_cachekeeper_parent_rows(result[@"rows"]);
         self.previous=@{@"rows":result[@"previousRows"]?:@[]};
-        self.fileCache=nil;
-        [self.tableView reloadData];
+        self.scanError=result[@"error"];
+        [self axs_cachekeeper_reload];
+        if (self.scanError.length) { [self message:self.scanError];return; }
         if (!self.rows.count) [self message:@"没有检测到候选目录。请先打开该应用再返回检测，或检查插件是否已加载。"];return;
     }
     if (NSProcessInfo.processInfo.systemUptime-self.started>25) {
-        [self.timer invalidate];self.timer=nil;self.title=self.appName;self.navigationItem.rightBarButtonItem.enabled=YES;
-        [self message:@"检测超时，请注销桌面后重试。"]; 
+        [self.timer invalidate];self.timer=nil;self.title=self.appName;self.scanButton.enabled=YES;
+        [self axs_cachekeeper_reload];
+        [self message:@"检测超时，请注销桌面后重试。"];
     }
 }
-- (void)viewWillAppear:(BOOL)animated { [super viewWillAppear:animated]; self.fileCache=nil; [self.tableView reloadData]; }
-- (void)dealloc {[self.timer invalidate];}
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated]; [self axs_cachekeeper_reload];
+    __weak typeof(self) weak=self;
+    if (!self.statusTimer) self.statusTimer=[NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer){[weak axs_cachekeeper_reload];}];
+}
+- (void)viewWillDisappear:(BOOL)animated { [super viewWillDisappear:animated]; [self.statusTimer invalidate]; self.statusTimer=nil; }
+- (void)dealloc {[self.timer invalidate];[self.statusTimer invalidate];}
 - (void)message:(NSString *)text {
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"目录检测" message:text preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];[self presentViewController:alert animated:YES completion:nil];
 }
 - (NSArray *)orderedRows {
-    NSArray *selected = [self cached:@"directories.plist"][self.bundle];
-    NSMutableArray *enabled = [NSMutableArray new], *other = [NSMutableArray new];
-    for (NSDictionary *row in self.rows) [([selected containsObject:row[@"path"]] ? enabled : other) addObject:row];
-    return [enabled arrayByAddingObjectsFromArray:other];
+    return axs_cachekeeper_size_ordered_rows(self.rows);
 }
 - (UIContextMenuConfiguration *)tableView:(UITableView *)table contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)path point:(CGPoint)point {
-    if (path.section != 0 || path.row < 2) return nil;
-    NSString *relative = [self orderedRows][path.row-2][@"path"];
-    NSArray *selected = [self cached:@"directories.plist"][self.bundle];
-    if (![selected containsObject:relative]) return nil;
-    NSString *full = [self fullPath:relative];
-    if (!full.length) return nil;
+    if (path.row < 3) return nil;
+    NSString *relative = [self orderedRows][path.row-3][@"path"];
+    NSDictionary *history=[self axs_cachekeeper_display:@"snapshots.plist"][self.bundle];
+    NSString *home=history[@"home"];
+    if ([relative hasPrefix:@"Group/"]) {
+        NSArray *parts=[relative componentsSeparatedByString:@"/"];
+        if (parts.count<3) return nil;
+        home=history[@"groups"][parts[1]];
+        relative=[[parts subarrayWithRange:NSMakeRange(2,parts.count-2)] componentsJoinedByString:@"/"];
+    }
+    if (!axs_cachekeeper_relative_path(relative)) return nil;
+    if (!home.length) return nil;
     NSURLComponents *url = [NSURLComponents new];
     url.scheme = @"filza";
     url.host = @"";
-    url.path = full;
+    url.path = [home stringByAppendingPathComponent:relative];
     return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(NSArray *suggested) {
         UIAction *open = [UIAction actionWithTitle:@"在 Filza 中打开目录" image:[UIImage systemImageNamed:@"folder"] identifier:nil handler:^(UIAction *action) {
             [UIApplication.sharedApplication openURL:url.URL options:@{} completionHandler:^(BOOL success) {
@@ -87,273 +112,130 @@
         return [UIMenu menuWithTitle:@"" children:@[open]];
     }];
 }
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)table {return 2;}
-- (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
-    return section == 0 ? self.rows.count + 2 : 5;
-}
-- (NSString *)tableView:(UITableView *)table titleForHeaderInSection:(NSInteger)section {
-    return section == 1 ? @"清理策略" : nil;
-}
+- (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {return self.rows.count+3;}
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
-    if (section == 1) return @"候选中的 Group/ 开头条目是 App Group 共享容器（主 App 与小组件/扩展共用），规则相同。自动：先限制写入；限制未生效、限权后仍有新文件生成、或应用反复秒退时，自动降级为只清理（原因显示在上方状态行）。只禁止：只限制写入，不自动降级。只清理：不限制写入，仅在 App 退后台/退出后清理基线后新建的缓存文件。目录只按根目录管理（父目录优先，子条目忽略）；60 秒内新建的文件不动；数据库、登录数据、Documents、Preferences、WebKit、Cookies 永不限制、永不删除。重新打开目录开关或切换策略会清除降级记录、重新尝试。自动纳入只对安全类新目录生效；存量清理只清安全类目录的已有文件，两者都绕开数据库与登录数据。";
-    return @"检测会为尚未配置的 App 自动预选 Library/Caches，总开关保持关闭；打开 App 总开关才会应用。候选只按根级列（父目录优先、子条目忽略）：固定根 Caches、tmp、HTTPStorages（可能混 cookies 类文件）、SplashBoard（启动快照）、Saved Application State（界面恢复状态，清理后不恢复上次现场），加上 Application Support、Library 与容器根下的一级子目录（各 SDK 与 App 自建目录，可能存放重要资源，谨慎开启）。逐项开关与一键开启都是点按即生效、没有确认框。已有文件默认不会自动删除（想清开启前产生的存量缓存，用策略区「清理已有缓存」）；日常清理只发生在 App 退后台或退出后。开关约 2 秒内应用，首次安装需注销。";
+    NSString *message=@"检测后可一键开启全部可管理目录，也可逐项开启，均直接打开此 APP 总开关，无需再次确认。仅查看目录与 Group/ 共享容器不纳入；模式和网络选项保持原选择。首次运行已有缓存也检查，不按开启时间保留；仅在 APP 完全退出且文件超过 60 秒后清理通过数据预检的媒体。已选父目录内新增文件/子目录自动覆盖，新顶级目录需重新检测选择。";
+    return self.scanError.length ? [self.scanError stringByAppendingFormat:@"\n%@",message] : message;
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
-    if (path.section == 1) {
-        UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
-        cell.detailTextLabel.numberOfLines = 0;
-        if (path.row == 0) {
-            cell.textLabel.text = @"限制策略";
-            cell.detailTextLabel.text = @"自动（推荐）／只禁止写入／只事后清理";
-            UISegmentedControl *control = [[UISegmentedControl alloc] initWithItems:@[@"自动", @"只禁止", @"只清理"]];
-            NSArray *modes = @[@"auto", @"lock", @"clean"];
-            control.selectedSegmentIndex = [modes indexOfObject:[self mode]];
-            [control addTarget:self action:@selector(modeChanged:) forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = control;
-        } else if (path.row == 1) {
-            cell.textLabel.text = @"禁止网络缓存生成";
-            cell.detailTextLabel.text = @"系统网络缓存不落盘（硬手段）；不影响登录，重复内容需重新下载，下次启动 App 生效";
-            UISwitch *toggle = [UISwitch new];
-            toggle.on = [[self policyEntry][@"urlCache"] boolValue];
-            [toggle addTarget:self action:@selector(urlCacheChanged:) forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = toggle;
-        } else if (path.row == 2) {
-            cell.textLabel.text = @"自动纳入新增安全目录";
-            cell.detailTextLabel.text = @"开启后：该 App 新生成的系统缓存类目录（Caches、tmp、启动快照、界面状态及共享容器同类）自动加入管理；谨慎类目录仍需手动开启";
-            UISwitch *toggle = [UISwitch new];
-            toggle.on = [[self policyEntry][@"autoNew"] boolValue];
-            [toggle addTarget:self action:@selector(autoNewChanged:) forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = toggle;
-        } else if (path.row == 3) {
-            cell.textLabel.text = @"清理已有缓存";
-            cell.textLabel.textColor = UIColor.systemBlueColor;
-            cell.detailTextLabel.text = @"把开启本插件之前已产生的缓存文件也清掉：仅安全类目录，App 完全退出后自动执行，数据库/登录文件自动跳过，结果计入总开关行的累计记录";
-        } else {
-            cell.textLabel.text = @"当前生效状态";
-            NSDictionary *snapshot = [self cached:@"snapshots.plist"][self.bundle];
-            NSMutableArray *homes = [NSMutableArray new];
-            if ([snapshot[@"home"] length]) [homes addObject:snapshot[@"home"]];
-            for (NSString *gid in snapshot[@"groups"]) [homes addObject:snapshot[@"groups"][gid]];
-            NSDictionary *fallback = [self cached:@"fallback.plist"];
-            NSMutableArray *notes = [NSMutableArray new];
-            for (NSString *key in fallback) {
-                NSDictionary *entry = fallback[key];
-                if (!entry[@"reason"]) continue;
-                for (NSString *h in homes)
-                    if ([key hasPrefix:[h stringByAppendingString:@"/"]]) {
-                        [notes addObject:[NSString stringWithFormat:@"%@：%@", [key substringFromIndex:h.length + 1], entry[@"reason"]]];
-                        break;
-                    }
-            }
-            NSString *mode = [self mode];
-            NSString *modeText = [mode isEqual:@"lock"] ? @"只禁止写入" : [mode isEqual:@"clean"] ? @"只事后清理" : @"自动（优先禁止写入）";
-            cell.detailTextLabel.text = notes.count ? [notes componentsJoinedByString:@"\n"] : [NSString stringWithFormat:@"策略：%@ · 未发生自动降级", modeText];
-        }
-        return cell;
-    }
     if (path.row==0) {
         UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
-        cell.textLabel.text=@"此 App 限制写入总开关";
-        NSDictionary *report = [NSDictionary dictionaryWithContentsOfFile:[[self file:@"Status"] stringByAppendingPathComponent:[self.bundle stringByAppendingString:@".auto.plist"]]];
+        cell.textLabel.text=@"此 APP 缓存控制";
+        NSDictionary *report = [self axs_cachekeeper_display:[@"Status/" stringByAppendingFormat:@"%@.auto.plist",self.bundle]];
         cell.detailTextLabel.numberOfLines = 0;
-        cell.detailTextLabel.text = report
-            ? [NSString stringWithFormat:@"自动清理累计 %@ 个文件 · %.2f MB\n最近检查 %@",report[@"removed"],[report[@"bytes"] doubleValue]/1048576,report[@"updated"]]
-            : @"等待自动清理记录，目录大小以检测时间为准";
-        NSDictionary *states=[self cached:@"appEnabled.plist"];
+        cell.detailTextLabel.text = axs_cachekeeper_summary(nil,report);
+        NSDictionary *states=[self axs_cachekeeper_display:@"appEnabled.plist"];
+        NSDictionary *selected=[self axs_cachekeeper_display:@"directories.plist"];
         UISwitch *toggle=[UISwitch new];
-        // 0.4.6：总开关就是用户的人选结果——没亲手开过的就是关
-        toggle.on=[states[self.bundle] boolValue];
+        toggle.on=axs_cachekeeper_app_enabled(states[self.bundle]);
+        if (!toggle.on) cell.detailTextLabel.text=@"未开启；打开总开关、单项开启或一键开启后才生效";
+        else if (!axs_cachekeeper_selected_paths(selected,states,self.bundle).count) cell.detailTextLabel.text=@"总开关已开启；未选择文件清理目录，网络缓存按独立选项执行";
         [toggle addTarget:self action:@selector(master:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=toggle;
         return cell;
     }
     if (path.row==1) {
         UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
-        cell.textLabel.text=@"一键开启";
-        cell.textLabel.textColor=UIColor.systemBlueColor;
+        cell.textLabel.text=@"缓存控制模式";
+        cell.detailTextLabel.text=@"自动：按独立开关限制网络缓存，并在退出后清理";
         cell.detailTextLabel.numberOfLines=0;
-        cell.detailTextLabel.text=@"打开总开关并勾选全部安全类目录（Caches、tmp、启动快照、界面状态及共享容器同类）；HTTPStorages、Application Support 与各自建目录仍需逐个手动开。点按即生效，没有确认框。";
-        return cell;
+        NSDictionary *states=[self axs_cachekeeper_display:@"appEnabled.plist"];
+        NSDictionary *names=@{@"auto":@"自动",@"prevent":@"只禁止",@"clean":@"只清理"};
+        UILabel *label=[UILabel new];label.text=names[axs_cachekeeper_mode(states[self.bundle])];[label sizeToFit];
+        cell.accessoryView=label;cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;return cell;
     }
-    NSDictionary *row=[self orderedRows][path.row-2];NSString *relative=row[@"path"];
-    NSDictionary *config=[self cached:@"directories.plist"];
-    BOOL enabled=[config[self.bundle] containsObject:relative];
+    if (path.row==2) {
+        UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+        cell.textLabel.text=@"禁止网络磁盘缓存";
+        NSDictionary *states=[self axs_cachekeeper_display:@"appEnabled.plist"];
+        UISwitch *toggle=[UISwitch new];toggle.on=axs_cachekeeper_url_cache_enabled(states[self.bundle]);
+        toggle.enabled=axs_cachekeeper_wants_restriction(states[self.bundle]);
+        cell.detailTextLabel.text=toggle.enabled ? @"仅限标准 NSURLCache，可能增加流量；不改变内存缓存" : @"只清理模式不限制网络缓存；选项已保留";
+        cell.detailTextLabel.numberOfLines=0;
+        [toggle addTarget:self action:@selector(axs_cachekeeper_network_changed:) forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView=toggle;return cell;
+    }
+    NSDictionary *row=[self orderedRows][path.row-3];NSString *relative=row[@"path"];
+    NSDictionary *config=[self axs_cachekeeper_display:@"directories.plist"];
+    BOOL enabled=NO, partial=NO;
+    for (NSString *selected in axs_cachekeeper_cache_paths(config[self.bundle])) {
+        if ([selected isEqual:relative]) enabled=YES;
+        else if ([selected hasPrefix:[relative stringByAppendingString:@"/"]]) { enabled=YES;partial=YES; }
+    }
     long long previous=0;BOOL compared=NO;
     for (NSDictionary *old in self.previous[@"rows"]) if ([old[@"path"] isEqual:relative]) {previous=[old[@"bytes"] longLongValue];compared=YES;break;}
     UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
-    cell.textLabel.text=[relative isEqual:@"Library/Caches"]?@"Library/Caches · 自动预选":relative;cell.textLabel.numberOfLines=0;cell.detailTextLabel.numberOfLines=0;
+    cell.textLabel.text=[relative isEqual:@"Library/Caches"]?@"Library/Caches · 标准缓存":relative;cell.textLabel.numberOfLines=0;cell.detailTextLabel.numberOfLines=0;
     NSString *growth=compared?[NSString stringWithFormat:@" · 变化 %+.2f MB",([row[@"bytes"] longLongValue]-previous)/1048576.0]:@" · 首次检测";
-    NSDictionary *records=[self cached:@"permissions.plist"];
-    NSString *full=[self fullPath:relative];
-    struct stat info;BOOL blocked=full && !lstat(full.fileSystemRepresentation,&info) && !(info.st_mode&S_IWUSR);
-    NSDictionary *master=[self cached:@"appEnabled.plist"];
-    BOOL masterOn=[master[self.bundle] boolValue];
-    NSString *state=enabled?(!masterOn?@"已选中，等待打开 App 总开关":(blocked && records[full]?@"已限制写入":@"等待基线或权限应用，请打开 App 完成加载再返回桌面")):@"未选中";
-    cell.detailTextLabel.text=[NSString stringWithFormat:@"%.2f MB%@%@%@\n%@",[row[@"bytes"] doubleValue]/1048576,growth,[row[@"complete"] boolValue]?@"":@" · 大小未统计完",[self classTag:relative],state];
-    UISwitch *toggle=[UISwitch new];toggle.on=enabled;toggle.accessibilityIdentifier=relative;
+    NSDictionary *master=[self axs_cachekeeper_display:@"appEnabled.plist"];
+    BOOL masterOn=axs_cachekeeper_app_enabled(master[self.bundle]);
+    BOOL manageable=axs_cachekeeper_cache_path(relative);
+    NSString *state=!manageable?@"应用数据：仅查看占用，不锁不删":(enabled?(!masterOn?@"已选中，等待打开 APP 总开关":(axs_cachekeeper_wants_cleanup(master[self.bundle])?@"已选中；退出后仅清理超过 60 秒的普通缓存":@"只禁止模式：不删除目录内文件")):@"未选中");
+    if (partial) state=[state stringByAppendingString:@"（保留旧配置中选定的部分子目录）"];
+    cell.detailTextLabel.text=[NSString stringWithFormat:@"%.2f MB%@%@\n%@\n%@\n%@",[row[@"bytes"] doubleValue]/1048576,growth,[row[@"complete"] boolValue]?@"":@" · 大小未统计完",
+        axs_cachekeeper_directory_description(relative),manageable?@"可选择清理（受文件保护规则约束）":@"仅查看（不锁不删）",state];
+    UISwitch *toggle=[UISwitch new];toggle.on=enabled && manageable;toggle.enabled=manageable && !self.timer;toggle.accessibilityIdentifier=relative;
     [toggle addTarget:self action:@selector(toggle:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=toggle;
     return cell;
 }
-// 0.4.0 策略（policy.plist）：mode = auto|lock|clean，urlCache = 禁止网络缓存生成
-- (NSDictionary *)policyEntry { return [self cached:@"policy.plist"][self.bundle] ?: @{}; }
-- (NSString *)mode { return [self policyEntry][@"mode"] ?: @"auto"; }
-- (void)savePolicy:(NSDictionary *)entry {
-    NSMutableDictionary *all = [[NSDictionary dictionaryWithContentsOfFile:[self file:@"policy.plist"]] mutableCopy] ?: [NSMutableDictionary new];
-    all[self.bundle] = entry;
-    if (![all writeToFile:[self file:@"policy.plist"] atomically:YES]) { [self message:@"策略保存失败。"]; return; }
-    self.fileCache = nil;
-}
-// 0.4.0 重新启用（打开目录开关/总开关/切换策略）即视为重新尝试：清掉该 App 的
-// 降级记录，让“自动”模式重新走一遍 限权 -> 判定 -> 降级 的流程。
-- (void)clearFallback {
-    NSString *home = [self cached:@"snapshots.plist"][self.bundle][@"home"];
-    if (!home.length) return;
-    NSMutableDictionary *fallback = [[NSDictionary dictionaryWithContentsOfFile:[self file:@"fallback.plist"]] mutableCopy];
-    if (!fallback) return;
-    NSMutableArray *prefixes = [NSMutableArray arrayWithObject:[home stringByAppendingString:@"/"]];
-    NSDictionary *groups = [self cached:@"snapshots.plist"][self.bundle][@"groups"];
-    for (NSString *gid in groups) [prefixes addObject:[groups[gid] stringByAppendingString:@"/"]];
-    BOOL changed = NO;
-    for (NSString *key in fallback.allKeys)
-        for (NSString *prefix in prefixes)
-            if ([key hasPrefix:prefix]) { [fallback removeObjectForKey:key]; changed = YES; break; }
-    if (changed) [fallback writeToFile:[self file:@"fallback.plist"] atomically:YES];
-}
-- (BOOL)isSafe:(NSString *)relative {
-    NSString *inner = relative;
-    if ([relative hasPrefix:@"Group/"]) {
-        NSString *rest = [relative substringFromIndex:6];
-        NSRange slash = [rest rangeOfString:@"/"];
-        if (slash.location == NSNotFound) return NO;
-        inner = [rest substringFromIndex:slash.location + 1];
+- (void)master:(UISwitch *)toggle {
+    NSMutableDictionary *selected=axs_cachekeeper_edit_configuration([self file:@"directories.plist"]);
+    NSMutableDictionary *states=axs_cachekeeper_edit_configuration([self file:@"appEnabled.plist"]);
+    if (!selected || !states) { [self message:@"原配置存在但不可读，已停止保存。"]; [self axs_cachekeeper_reload]; return; }
+    if (toggle.on && !selected[self.bundle]) {
+        selected[self.bundle]=axs_cachekeeper_activation_paths(nil);
+        if (![selected writeToFile:[self file:@"directories.plist"] atomically:YES]) { toggle.on=NO; [self message:@"目录选择保存失败。"];return; }
     }
-    return [@[@"Library/Caches", @"tmp", @"Library/SplashBoard", @"Library/Saved Application State"] containsObject:inner];
+    states[self.bundle]=axs_cachekeeper_app_state(states[self.bundle],toggle.on);
+    if (![states writeToFile:[self file:@"appEnabled.plist"] atomically:YES]) [self message:@"总开关保存失败。"];
+    else axs_cachekeeper_notify_preferences();
+    [self axs_cachekeeper_reload];
 }
-- (NSString *)classTag:(NSString *)relative {
-    if ([self isSafe:relative]) return @" · 安全类（系统缓存，可再生）";
-    NSString *inner = relative;
-    if ([relative hasPrefix:@"Group/"]) {
-        NSString *rest = [relative substringFromIndex:6];
-        NSRange slash = [rest rangeOfString:@"/"];
-        if (slash.location != NSNotFound) inner = [rest substringFromIndex:slash.location + 1];
-    }
-    if ([inner isEqual:@"Library/HTTPStorages"]) return @" · 谨慎类（网络缓存，可能混 cookies）";
-    if ([inner hasPrefix:@"Library/Application Support/"]) return @" · 谨慎类（应用数据区，逐个判断）";
-    return @" · 谨慎类（App/SDK 自建目录，逐个判断）";
+- (void)save:(NSString *)relative enabled:(BOOL)enabled {
+    NSString *error=axs_cachekeeper_update_selection(jbroot(@"/var/mobile/Library/CacheKeeper"),self.bundle,@[relative],enabled);
+    if (error) [self message:error]; else axs_cachekeeper_notify_preferences();
+    [self axs_cachekeeper_reload];
 }
-- (void)oneClickEnable {
-    if (!self.rows.count) { [self message:@"请先点右上角「检测目录」，再一键开启。"]; return; }
-    NSMutableDictionary *config=[[self cached:@"directories.plist"] mutableCopy]?:[NSMutableDictionary new];
-    NSMutableArray *paths=[config[self.bundle] mutableCopy]?:[NSMutableArray new];
-    NSUInteger added=0;
-    for (NSDictionary *row in self.rows) {
-        NSString *relative=row[@"path"];
-        if ([self isSafe:relative] && ![paths containsObject:relative]) { [paths addObject:relative]; added++; }
-    }
-    config[self.bundle]=paths;
-    if (![config writeToFile:[self file:@"directories.plist"] atomically:YES]) { [self message:@"保存失败，一键开启未应用。"]; return; }
-    NSMutableDictionary *states=[[self cached:@"appEnabled.plist"] mutableCopy]?:[NSMutableDictionary new];
-    states[self.bundle]=@YES;
-    if (![states writeToFile:[self file:@"appEnabled.plist"] atomically:YES]) { [self message:@"总开关保存失败。"]; return; }
-    [self clearFallback];
-    self.fileCache=nil;
-    [self.tableView reloadData];
-    [self message:[NSString stringWithFormat:@"已一键开启：总开关已打开，本次新增 %lu 个安全类目录（当前共选中 %lu 个）。谨慎类目录请逐个手动开。",(unsigned long)added,(unsigned long)paths.count]];
+- (void)toggle:(UISwitch *)toggle {
+    if (self.timer) { [self axs_cachekeeper_reload];return; }
+    [self save:toggle.accessibilityIdentifier enabled:toggle.on];
 }
-- (void)autoNewChanged:(UISwitch *)toggle {
-    NSMutableDictionary *entry = [[self policyEntry] mutableCopy];
-    entry[@"autoNew"] = @(toggle.on);
-    [self savePolicy:entry];
-    [self.tableView reloadData];
+- (void)axs_cachekeeper_enable_all {
+    if (self.timer) return;
+    NSArray *paths=axs_cachekeeper_enableable_paths(self.rows);
+    NSString *error=axs_cachekeeper_update_selection(jbroot(@"/var/mobile/Library/CacheKeeper"),self.bundle,paths,YES);
+    if (error) [self message:error]; else axs_cachekeeper_notify_preferences();
+    [self axs_cachekeeper_reload];
 }
-- (void)requestStockClean {
-    if (![[self cached:@"appEnabled.plist"][self.bundle] boolValue]) { [self message:@"请先打开该 App 的总开关（或点一键开启），再清理已有缓存。"]; return; }
-    NSMutableDictionary *stock=[[NSDictionary dictionaryWithContentsOfFile:[self file:@"stock.plist"]] mutableCopy]?:[NSMutableDictionary new];
-    stock[self.bundle]=@YES;
-    if (![stock writeToFile:[self file:@"stock.plist"] atomically:YES]) { [self message:@"提交失败。"]; return; }
-    [self message:@"已安排：该 App 完全退出后自动执行，只清安全类目录里的已有文件，数据库/登录文件跳过。"];
+- (void)axs_cachekeeper_save_mode:(NSString *)mode {
+    NSString *path=[self file:@"appEnabled.plist"];
+    NSMutableDictionary *states=axs_cachekeeper_edit_configuration(path);
+    if (!states) { [self message:@"原配置存在但不可读，已停止保存。"];return; }
+    BOOL enabled=axs_cachekeeper_app_enabled(states[self.bundle]);
+    NSMutableDictionary *state=axs_cachekeeper_app_state(states[self.bundle],enabled);
+    state[@"mode"]=mode;states[self.bundle]=state;
+    if (![states writeToFile:path atomically:YES]) [self message:@"模式保存失败。"];
+    else axs_cachekeeper_notify_preferences();
+    [self axs_cachekeeper_reload];
+}
+- (void)axs_cachekeeper_network_changed:(UISwitch *)toggle {
+    NSString *path=[self file:@"appEnabled.plist"];
+    NSMutableDictionary *states=axs_cachekeeper_edit_configuration(path);
+    if (!states) { [self message:@"原配置不可读，停止保存。"];[self axs_cachekeeper_reload];return; }
+    NSMutableDictionary *state=axs_cachekeeper_app_state(states[self.bundle],axs_cachekeeper_app_enabled(states[self.bundle]));
+    state[@"urlCache"]=@(toggle.on);states[self.bundle]=state;
+    if (![states writeToFile:path atomically:YES]) [self message:@"网络选项保存失败。"];
+    else axs_cachekeeper_notify_preferences();
+    [self axs_cachekeeper_reload];
 }
 - (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
     [table deselectRowAtIndexPath:path animated:YES];
-    if (path.section == 0 && path.row == 1) [self oneClickEnable];
-    else if (path.section == 1 && path.row == 3) [self requestStockClean];
-}
-- (void)modeChanged:(UISegmentedControl *)control {
-    NSArray *modes = @[@"auto", @"lock", @"clean"];
-    NSMutableDictionary *entry = [[self policyEntry] mutableCopy];
-    entry[@"mode"] = modes[control.selectedSegmentIndex];
-    [self savePolicy:entry];
-    [self clearFallback];
-    [self.tableView reloadData];
-}
-- (void)urlCacheChanged:(UISwitch *)toggle {
-    NSMutableDictionary *entry = [[self policyEntry] mutableCopy];
-    entry[@"urlCache"] = @(toggle.on);
-    [self savePolicy:entry];
-    [self.tableView reloadData];
-}
-// 0.4.0 父目录优先：旧快照里可能残留父子并存的候选行，显示前先归并。
-- (NSArray *)collapseRows:(NSArray *)rows {
-    NSMutableArray *out = [NSMutableArray new];
-    for (NSDictionary *row in rows) {
-        NSString *path = row[@"path"]; BOOL child = NO;
-        for (NSDictionary *other in rows) {
-            NSString *otherPath = other[@"path"];
-            if (otherPath.length < path.length && [path hasPrefix:[otherPath stringByAppendingString:@"/"]]) { child = YES; break; }
-        }
-        if (!child) [out addObject:row];
+    if (path.row!=1) return;
+    UIAlertController *choice=[UIAlertController alertControllerWithTitle:@"缓存控制模式" message:@"禁止只作用于标准 NSURLCache，可能增加流量并影响离线访问；自建视频或图片缓存仍需退出后清理。" preferredStyle:UIAlertControllerStyleAlert];
+    NSDictionary *names=@{@"auto":@"自动：禁止 + 清理",@"prevent":@"只禁止：不删文件",@"clean":@"只清理：允许网络缓存"};
+    for (NSString *mode in @[@"auto",@"prevent",@"clean"]) {
+        [choice addAction:[UIAlertAction actionWithTitle:names[mode] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action){[self axs_cachekeeper_save_mode:mode];}]];
     }
-    return out;
-}
-// 0.4.2 共享容器路径解析：Group/<组ID>/<相对路径> 按快照里的 groups 映射拼全路径
-- (NSString *)fullPath:(NSString *)relative {
-    NSDictionary *history = [self cached:@"snapshots.plist"][self.bundle];
-    if ([relative hasPrefix:@"Group/"]) {
-        NSString *rest = [relative substringFromIndex:6];
-        NSRange slash = [rest rangeOfString:@"/"];
-        if (slash.location != NSNotFound) {
-            NSString *groupHome = history[@"groups"][[rest substringToIndex:slash.location]];
-            if (groupHome.length) return [groupHome stringByAppendingPathComponent:[rest substringFromIndex:slash.location + 1]];
-        }
-        return nil;
-    }
-    NSString *home = history[@"home"];
-    return home.length ? [home stringByAppendingPathComponent:relative] : nil;
-}
-- (void)master:(UISwitch *)toggle {
-    NSDictionary *selected=[self cached:@"directories.plist"];
-    if (toggle.on && ![selected[self.bundle] count]) {
-        toggle.on=NO;
-        for (NSDictionary *row in self.rows) {
-            if ([row[@"path"] isEqual:@"Library/Caches"]) { [self save:@"Library/Caches" enabled:YES];return; }
-        }
-        [self message:@"尚未检测到标准缓存目录，请先打开该 App 再重新检测。"];
-        return;
-    }
-    NSMutableDictionary *states=[[self cached:@"appEnabled.plist"] mutableCopy]?:[NSMutableDictionary new];
-    states[self.bundle]=@(toggle.on);
-    if (![states writeToFile:[self file:@"appEnabled.plist"] atomically:YES]) [self message:@"总开关保存失败。"];
-    if (toggle.on) [self clearFallback];
-    self.fileCache=nil;
-    [self.tableView reloadData];
-}
-- (void)save:(NSString *)relative enabled:(BOOL)enabled {
-    NSMutableDictionary *config=[[self cached:@"directories.plist"] mutableCopy]?:[NSMutableDictionary new];
-    NSMutableArray *paths=[config[self.bundle] mutableCopy]?:[NSMutableArray new];
-    if (enabled && ![paths containsObject:relative]) [paths addObject:relative];
-    if (!enabled) [paths removeObject:relative];
-    config[self.bundle]=paths;
-    if (enabled) {
-        NSMutableDictionary *states=[[self cached:@"appEnabled.plist"] mutableCopy]?:[NSMutableDictionary new];
-        states[self.bundle]=@YES;
-        if (![states writeToFile:[self file:@"appEnabled.plist"] atomically:YES]) { [self message:@"保存失败。"];return; }
-    }
-    if (![config writeToFile:[self file:@"directories.plist"] atomically:YES]) [self message:@"保存失败，开关未应用。"];
-    else if (enabled) [self clearFallback];
-    self.fileCache=nil;
-    [self.tableView reloadData];
-}
-- (void)toggle:(UISwitch *)toggle {
-    // 0.5.0（用户第 1 点）：逐项开启不再弹确认框，拨动即生效；关掉即恢复。
-    [self save:toggle.accessibilityIdentifier enabled:toggle.on];
+    [choice addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:choice animated:YES completion:nil];
 }
 @end

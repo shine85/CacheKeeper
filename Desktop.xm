@@ -1,31 +1,65 @@
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
+#import "AxsCacheKeeperPolicy.h"
 #include <roothide.h>
 
-extern "C" void CKScanRequests(void);
-extern "C" void CKApplyDirectorySwitches(void);
+static NSString *const DouyinID = @"com.ss.iphone.ugc.Aweme";
+static NSString *const ShortcutType = @"dev.local.cachekeeper.clean";
+static id Read(id object, NSString *name) {
+    SEL selector = NSSelectorFromString(name);
+    return [object respondsToSelector:selector] ? ((id(*)(id,SEL))objc_msgSend)(object,selector) : nil;
+}
 
-// 0.4.5：插件定位为纯自动——扫描、基线、限权、自动降级、退后台/退出清理全部
-// 由下面的 2 秒引擎驱动，用户不需要对任何 App 做任何手动操作。原图标长按
-// 「清理缓存」手动入口（0.4.3 曾通用化）按用户要求删除：手动清理不是这个
-// 插件的价值所在，引擎自动完成同样的工作。
+@interface SBIconView : UIView
+@end
+@interface SBSApplicationShortcutItem : NSObject
+@property(nonatomic,copy) NSString *type;
+@property(nonatomic,copy) NSString *localizedTitle;
+@end
+%hook SBIconView
+- (void)setApplicationShortcutItems:(NSArray *)items {
+    id icon = Read(self,@"icon");
+    NSString *bundle = Read(icon,@"applicationBundleID");
+    if (![bundle isEqual:DouyinID]) {
+        %orig;
+        return;
+    }
+    NSDictionary *directories=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist")];
+    NSDictionary *states=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")];
+    if (!axs_cachekeeper_can_clean(directories,states,bundle)) {
+        NSMutableArray *filtered=[NSMutableArray new];
+        BOOL removed=NO;
+        for (id item in items) {
+            if ([Read(item,@"type") isEqual:ShortcutType]) removed=YES;
+            else [filtered addObject:item];
+        }
+        if (removed) %orig(filtered); else %orig;
+        return;
+    }
+    NSMutableArray *updated = [NSMutableArray arrayWithArray:items ?: @[]];
+    for (id item in updated) {
+        if ([Read(item,@"type") isEqual:ShortcutType]) {
+            %orig;
+            return;
+        }
+    }
+    SBSApplicationShortcutItem *item = [NSClassFromString(@"SBSApplicationShortcutItem") new];
+    item.type = ShortcutType; item.localizedTitle = @"清理抖音缓存";
+    if (item) [updated addObject:item];
+    %orig(updated);
+}
++ (void)activateShortcut:(id)item withBundleIdentifier:(NSString *)bundle forIconView:(id)view {
+    if ([bundle isEqual:DouyinID] && [Read(item,@"type") isEqual:ShortcutType]) { axs_cachekeeper_request_cleanup(DouyinID); return; }
+    %orig;
+}
+%end
 %ctor {
     if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.springboard"]) return;
+    %init;
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 0.3.8 定版：扫描与目录限制从 SpringBoard 主线程移到专用串行队列，
-        // 忙时跳过本轮，不堆积不重入。
-        static dispatch_queue_t workQueue;
-        workQueue = dispatch_queue_create("dev.local.cachekeeper.springboard", DISPATCH_QUEUE_SERIAL);
-        __block BOOL workBusy = NO;
         NSTimer *timer = [NSTimer timerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer) {
-            if (!workBusy) {
-                workBusy = YES;
-                dispatch_async(workQueue, ^{
-                    CKScanRequests();
-                    CKApplyDirectorySwitches();
-                    dispatch_async(dispatch_get_main_queue(), ^{ workBusy = NO; });
-                });
-            }
+            CKScanRequests();
+            CKApplyDirectorySwitches();
         }];
         [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
     });

@@ -1,3 +1,10 @@
-.theos/
-packages/
+/BK/
+/tmp/
+/memory/
+/.theos/
+/packages/
 *.deb
+__pycache__/
+*.pyc
+.DS_Store
+/CacheKeeper-0.4.10-source/

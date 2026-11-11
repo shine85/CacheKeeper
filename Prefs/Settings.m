@@ -2,6 +2,12 @@
 #import <Preferences/PSViewController.h>
 #import <objc/message.h>
 #include <roothide.h>
+#import "../AxsCacheKeeperPolicy.h"
+
+static id axs_cachekeeper_app_property(id object, NSString *name) {
+    SEL selector=NSSelectorFromString(name);
+    return [object respondsToSelector:selector] ? ((id(*)(id,SEL))objc_msgSend)(object,selector) : nil;
+}
 
 @interface CKScanPage : UITableViewController
 @property(nonatomic,copy) NSString *bundle;
@@ -14,25 +20,15 @@
 @property(nonatomic,strong) NSArray *visibleApps;
 @property(nonatomic,strong) NSTimer *batchTimer;
 @property(nonatomic,strong) NSDictionary *scanHistory;
-@property(nonatomic,strong) NSDictionary *directoriesCache;
-@property(nonatomic,strong) NSDictionary *statesCache;
-@property(nonatomic,copy) NSString *lastFingerprint;
+@property(nonatomic,copy) NSString *appsError;
+@property(nonatomic,strong) NSDictionary *directoriesSnapshot;
+@property(nonatomic,strong) NSDictionary *statesSnapshot;
 @end
 @implementation CKSettings
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"缓存管家";
-    Class workspace = NSClassFromString(@"LSApplicationWorkspace");
-    id manager = ((id(*)(id,SEL))objc_msgSend)(workspace,NSSelectorFromString(@"defaultWorkspace"));
-    NSArray *installed = ((id(*)(id,SEL))objc_msgSend)(manager,NSSelectorFromString(@"allInstalledApplications"));
-    NSMutableArray *apps = [NSMutableArray array];
-    for (id app in installed) {
-        NSString *type = [app valueForKey:@"applicationType"];
-        NSString *bundle = [app valueForKey:@"applicationIdentifier"];
-        NSString *name = [app valueForKey:@"localizedName"];
-        if (bundle.length && ([type isEqual:@"User"] || (![bundle hasPrefix:@"com.apple."] && [[[app valueForKey:@"bundleURL"] pathExtension] isEqual:@"app"]))) [apps addObject:@{@"id":bundle,@"name":name ?: bundle}];
-    }
-    self.apps = apps;
+    self.apps = @[];
     UISearchController *search = [[UISearchController alloc] initWithSearchResultsController:nil];
     search.searchResultsUpdater = self;
     search.obscuresBackgroundDuringPresentation = NO;
@@ -47,35 +43,31 @@
     self.navigationItem.rightBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"检测全部" style:UIBarButtonItemStylePlain target:self action:@selector(scanAll)];
 }
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section { return self.visibleApps.count; }
-- (NSString *)tableView:(UITableView *)table titleForHeaderInSection:(NSInteger)section { return @"全部 App 都在此列表 · 右侧开关开启后插件才对该 App 生效"; }
+- (NSString *)tableView:(UITableView *)table titleForHeaderInSection:(NSInteger)section {
+    return [NSString stringWithFormat:@"已安装 %lu 个 APP · 点击设置，默认不开启",(unsigned long)self.apps.count];
+}
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
-    return @"只有你亲手开启开关的 App，插件才会管理：它退到后台时建立基线，之后自动限制写入或清理。未开启的 App 插件完全不碰——微信这类绝不能动的 App 保持关闭即可。开启时默认只管理 Caches，点该 App 进详情页可增减目录、修改策略。把某 App 关闭后，它此前被限制的目录自动恢复原权限。“检测全部”仅统计各目录大小，与是否开启无关。首次安装请注销桌面。";
+    return self.appsError ?: @"只有主动开启的 APP 才应用缓存控制；可打开总开关，也可在检测后单项或一键开启。检测和切换模式不启用 APP，微信等特殊 APP 保持关闭即可。";
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
     NSDictionary *app = self.visibleApps[path.row];
-    // 0.3.8 优化：启用 cell 复用（原来每行新建，滚动时反复分配）
-    UITableViewCell *cell = [table dequeueReusableCellWithIdentifier:@"app"];
-    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"app"];
-    cell.textLabel.text = app[@"name"]; NSDictionary *status = [NSDictionary dictionaryWithContentsOfFile:[jbroot(@"/var/mobile/Library/CacheKeeper/Status") stringByAppendingPathComponent:[app[@"id"] stringByAppendingString:@".plist"]]];
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+    cell.textLabel.text = app[@"name"]; NSDictionary *status = [NSDictionary dictionaryWithContentsOfFile:[jbroot(@"/var/mobile/Library/CacheKeeper/Status") stringByAppendingPathComponent:[app[@"id"] stringByAppendingString:@".auto.plist"]]];
     cell.detailTextLabel.numberOfLines = 0;
-    cell.detailTextLabel.text = status ? [NSString stringWithFormat:@"%@ · 清理 %@ 个 · %.2f MB · %@", status[@"mode"], status[@"removed"], [status[@"bytes"] doubleValue]/1048576, status[@"updated"]] : @"尚无清理记录，请开启后完全退出并重新打开应用";
     NSDictionary *scan=self.scanHistory[app[@"id"]];
-    if (scan) cell.detailTextLabel.text=[NSString stringWithFormat:@"检测到 %lu 个候选目录 · %@\n点击查看目录与限制写入开关",(unsigned long)[scan[@"rows"] count],scan[@"updated"]];
-    // 0.3.9 修复：原 else 无条件执行，会把上一行刚写好的清理统计文案覆盖掉，
-    // 使「清理 N 个 · x MB」在列表页永远显示不出来。改为仅在既无检测记录、
-    // 也无清理记录时才显示未检测提示。
-    else if (!status) cell.detailTextLabel.text=@"尚未检测 · 点击右上角检测全部";
+    cell.detailTextLabel.text=axs_cachekeeper_summary(scan,status);
     UISwitch *toggle = [UISwitch new]; toggle.accessibilityIdentifier = app[@"id"];
-    // 0.3.8 优化：原来每行都从磁盘重读这两份 plist，列表一刷新就是 N 次读盘；改用 updateBatch 刷新的缓存
-    NSDictionary *states=self.statesCache ?: [NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")];
-    // 0.4.6：开关就是用户的人选结果——没亲手开过的就是关
-    toggle.on=[states[app[@"id"]] boolValue];
+    NSDictionary *directories=self.directoriesSnapshot;
+    NSDictionary *states=self.statesSnapshot;
+    toggle.on=axs_cachekeeper_app_enabled(states[app[@"id"]]);
+    if (!toggle.on) cell.detailTextLabel.text=[@"未开启缓存控制\n" stringByAppendingString:axs_cachekeeper_summary(scan,nil)];
+    else if (!axs_cachekeeper_selected_paths(directories,states,app[@"id"]).count) cell.detailTextLabel.text=@"总开关已开启；没有文件清理目录，网络缓存按独立选项执行";
     [toggle addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = toggle; cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     return cell;
 }
 - (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];[self.table reloadData];[self updateBatch];
+    [super viewWillAppear:animated];[self axs_cachekeeper_reload_apps];[self updateBatch];
     if (!self.batchTimer) {
         __weak typeof(self) weak=self;
         self.batchTimer=[NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer){[weak updateBatch];}];
@@ -83,6 +75,23 @@
 }
 - (void)viewWillDisappear:(BOOL)animated { [super viewWillDisappear:animated];[self.batchTimer invalidate];self.batchTimer=nil; }
 - (void)dealloc { [self.batchTimer invalidate]; }
+- (void)axs_cachekeeper_reload_apps {
+    id manager=axs_cachekeeper_app_property(NSClassFromString(@"LSApplicationWorkspace"),@"defaultWorkspace");
+    NSArray *installed=axs_cachekeeper_app_property(manager,@"allInstalledApplications");
+    if (![installed isKindOfClass:NSArray.class]) {
+        self.appsError=@"无法读取系统应用列表，请检查插件加载情况；没有修改任何 APP 的开关。";
+        self.apps=@[];return;
+    }
+    self.appsError=nil;
+    NSMutableDictionary *apps=[NSMutableDictionary new];
+    for (id proxy in installed) {
+        NSDictionary *app=axs_cachekeeper_application_entry(axs_cachekeeper_app_property(proxy,@"applicationIdentifier"),
+            axs_cachekeeper_app_property(proxy,@"localizedName"),axs_cachekeeper_app_property(proxy,@"applicationType"),
+            axs_cachekeeper_app_property(proxy,@"bundleURL"));
+        if (app) apps[app[@"id"]]=app;
+    }
+    self.apps=apps.allValues;
+}
 - (void)scanAll {
     NSString *path=jbroot(@"/var/mobile/Library/CacheKeeper/batch.plist");
     NSDictionary *existing=[NSDictionary dictionaryWithContentsOfFile:path];
@@ -100,22 +109,9 @@
 }
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController { [self updateBatch]; }
 - (void)updateBatch {
-    // 0.3.8 优化：本方法由 1 秒定时器驱动，原来每秒都重读 4 份 plist、全表 reloadData，
-    // 页面静置时也在空转。用“搜索词 + 相关文件修改时间”做指纹，无变化直接返回；
-    // 任一配置文件或 Status 目录有更新，指纹变化，仍在 1 秒内刷新，行为不变。
-    NSString *currentQuery = self.navigationItem.searchController.searchBar.text ?: @"";
-    NSMutableString *fingerprint = [NSMutableString stringWithString:currentQuery];
-    NSString *base = jbroot(@"/var/mobile/Library/CacheKeeper");
-    for (NSString *name in @[@"batch.plist",@"snapshots.plist",@"directories.plist",@"appEnabled.plist",@"Status"]) {
-        NSDate *mtime = [NSFileManager.defaultManager attributesOfItemAtPath:[base stringByAppendingPathComponent:name] error:nil][NSFileModificationDate];
-        [fingerprint appendFormat:@"|%f",mtime.timeIntervalSince1970];
-    }
-    if ([fingerprint isEqualToString:self.lastFingerprint]) return;
-    self.lastFingerprint = fingerprint;
-    NSDictionary *directories = [NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist")];
     NSDictionary *states = [NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")];
-    self.directoriesCache = directories;
-    self.statesCache = states;
+    self.statesSnapshot=states;
+    self.directoriesSnapshot=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist")];
     NSString *query = self.navigationItem.searchController.searchBar.text;
     NSMutableDictionary *sortKeys = [NSMutableDictionary new];
     NSMutableSet *enabled = [NSMutableSet new];
@@ -126,7 +122,7 @@
         pinyin = [pinyin stringByApplyingTransform:NSStringTransformStripCombiningMarks reverse:NO] ?: pinyin;
         if (query.length && ![name localizedCaseInsensitiveContainsString:query] &&
             ![bundle localizedCaseInsensitiveContainsString:query] && ![pinyin localizedCaseInsensitiveContainsString:query]) continue;
-        if ([states[bundle] boolValue]) [enabled addObject:bundle];
+        if (axs_cachekeeper_app_enabled(states[bundle])) [enabled addObject:bundle];
         sortKeys[bundle] = pinyin;
         [matches addObject:app];
     }
@@ -153,13 +149,22 @@
 - (void)changed:(UISwitch *)toggle {
     NSString *bundle=toggle.accessibilityIdentifier;
     NSString *directoryPath=jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist");
-    NSMutableDictionary *directories=[[NSDictionary dictionaryWithContentsOfFile:directoryPath] mutableCopy]?:[NSMutableDictionary new];
-    // 0.4.6：开启即生效——没选过目录的 App 预选 Library/Caches（详情页可再改），
-    // 不再要求先扫描；关闭后引擎下一轮自动恢复该 App 的全部原权限。
-    if (toggle.on && ![directories[bundle] count]) directories[bundle]=@[@"Library/Caches"];
-    NSMutableDictionary *states=[[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")] mutableCopy]?:[NSMutableDictionary new];
-    states[bundle]=@(toggle.on);
-    if ([states writeToFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist") atomically:YES]) [directories writeToFile:directoryPath atomically:YES];
+    NSMutableDictionary *directories=axs_cachekeeper_edit_configuration(directoryPath);
+    NSMutableDictionary *states=axs_cachekeeper_edit_configuration(jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist"));
+    if (!directories || !states) { [self axs_cachekeeper_configuration_error]; [self updateBatch]; return; }
+    if (toggle.on && !directories[bundle]) directories[bundle]=axs_cachekeeper_activation_paths(nil);
+    states[bundle]=axs_cachekeeper_app_state(states[bundle],toggle.on);
+    if (![directories writeToFile:directoryPath atomically:YES] ||
+        ![states writeToFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist") atomically:YES]) {
+        UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"保存失败" message:@"缓存控制设置未完整保存，请检查安装与目录权限。" preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+    } else axs_cachekeeper_notify_preferences();
     [self updateBatch];
+}
+- (void)axs_cachekeeper_configuration_error {
+    UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"配置不可读" message:@"原配置存在但读取失败，已停止保存以保护其他 APP 的设置。" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 @end
