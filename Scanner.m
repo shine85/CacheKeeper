@@ -30,6 +30,14 @@ static BOOL CKForbiddenPath(NSString *relative) {
 //  ② Application Support 的一级子目录（混真实数据，只能逐个选，永不列 AS 根）；
 //  ③ 容器根与 Library 下的其他一级子目录逐个成行（各 SDK/App 自建目录常在此
 //     堆缓存）——红线名与已单列的根跳过。用户据此逐个 App、逐个目录定位判断。
+// 0.4.10 补定义：0.4.7 重写 Candidates 时调用了这个存在性检查，但函数本体
+// 一直缺失（旧版用的是内联写法）——Actions 第 10 号运行报未声明函数错误。
+static BOOL Directory(NSURL *home, NSString *relative) {
+    struct stat info;
+    NSString *path = [home.path stringByAppendingPathComponent:relative];
+    return !lstat(path.fileSystemRepresentation, &info) && S_ISDIR(info.st_mode);
+}
+
 static NSArray *Candidates(NSURL *home) {
     NSMutableArray *result = [NSMutableArray new];
     for (NSString *relative in @[@"Library/Caches",@"tmp",@"Library/HTTPStorages",
