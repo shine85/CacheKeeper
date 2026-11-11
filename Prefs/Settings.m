@@ -67,7 +67,6 @@
     else if (!status) cell.detailTextLabel.text=@"尚未检测 · 点击右上角检测全部";
     UISwitch *toggle = [UISwitch new]; toggle.accessibilityIdentifier = app[@"id"];
     // 0.3.8 优化：原来每行都从磁盘重读这两份 plist，列表一刷新就是 N 次读盘；改用 updateBatch 刷新的缓存
-    NSDictionary *directories=self.directoriesCache ?: [NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist")];
     NSDictionary *states=self.statesCache ?: [NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")];
     // 0.4.6：开关就是用户的人选结果——没亲手开过的就是关
     toggle.on=[states[app[@"id"]] boolValue];

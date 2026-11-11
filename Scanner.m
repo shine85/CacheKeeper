@@ -23,35 +23,48 @@ static BOOL CKForbiddenPath(NSString *relative) {
     return NO;
 }
 
+// 候选目录（0.4.0 定版根集 + 0.4.7 补全）：只列“根级”条目——任何条目都不能是
+// 另一条的子路径（父目录优先、子条目忽略）。三类：
+//  ① 固定根：Caches、tmp、HTTPStorages、SplashBoard（启动快照）、
+//     Saved Application State（界面恢复状态）；
+//  ② Application Support 的一级子目录（混真实数据，只能逐个选，永不列 AS 根）；
+//  ③ 容器根与 Library 下的其他一级子目录逐个成行（各 SDK/App 自建目录常在此
+//     堆缓存）——红线名与已单列的根跳过。用户据此逐个 App、逐个目录定位判断。
 static NSArray *Candidates(NSURL *home) {
-    NSMutableArray *paths = [NSMutableArray array];
-    // 0.4.0 根目录粒度：只列根目录本体，不列其下任何子目录（父目录优先，子条目忽略）。
-    // tmp 与 Library/HTTPStorages 一并纳入为根候选；HTTPStorages 可能混有 cookies 类
-    // 文件，仅作为可选项出现，默认预选仍只有 Library/Caches。
-    for (NSString *base in @[@"Library/Caches", @"tmp", @"Library/HTTPStorages"]) {
-        NSURL *root = [home URLByAppendingPathComponent:base];
-        struct stat info;
-        if (lstat(root.path.fileSystemRepresentation, &info) || !S_ISDIR(info.st_mode) || S_ISLNK(info.st_mode)) continue;
-        if (![root.path isEqual:root.URLByResolvingSymlinksInPath.path]) continue;
-        if ([base isEqual:@"Library/Caches"] &&
-            ![NSFileManager.defaultManager contentsOfDirectoryAtURL:root includingPropertiesForKeys:nil options:0 error:nil].count) continue;
-        [paths addObject:base];
-    }
-    // Application Support 例外：根下混有应用数据（含数据库），只列一级子目录供手动
-    // 选择，永不列根目录本身；这些子目录彼此不嵌套，不违反父优先规则。
+    NSMutableArray *result = [NSMutableArray new];
+    for (NSString *relative in @[@"Library/Caches",@"tmp",@"Library/HTTPStorages",
+                                 @"Library/SplashBoard",@"Library/Saved Application State"])
+        if (Directory(home, relative)) [result addObject:relative];
     NSURL *support = [home URLByAppendingPathComponent:@"Library/Application Support"];
-    if ([support.path isEqual:support.URLByResolvingSymlinksInPath.path]) {
-        NSArray *entries = [NSFileManager.defaultManager contentsOfDirectoryAtURL:support includingPropertiesForKeys:nil options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
-        for (NSURL *entry in entries) {
-            struct stat info;
-            if (!lstat(entry.path.fileSystemRepresentation, &info) && S_ISDIR(info.st_mode) && !S_ISLNK(info.st_mode))
-                [paths addObject:[@"Library/Application Support" stringByAppendingPathComponent:entry.lastPathComponent]];
-            if (paths.count >= 150) break;
-        }
+    for (NSURL *entry in [NSFileManager.defaultManager contentsOfDirectoryAtURL:support
+        includingPropertiesForKeys:@[NSURLIsDirectoryKey] options:0 error:nil]) {
+        NSNumber *directory = nil;
+        [entry getResourceValue:&directory forKey:NSURLIsDirectoryKey error:nil];
+        if (directory.boolValue)
+            [result addObject:[@"Library/Application Support/" stringByAppendingString:entry.lastPathComponent]];
     }
-    NSMutableArray *allowed = [NSMutableArray new];
-    for (NSString *path in paths) if (!CKForbiddenPath(path)) [allowed addObject:path];
-    return allowed;
+    NSSet *rootSkip = [NSSet setWithObjects:@"Documents",@"Library",@"tmp",
+        @"Preferences",@"Cookies",@"WebKit",nil];
+    for (NSURL *entry in [NSFileManager.defaultManager contentsOfDirectoryAtURL:home
+        includingPropertiesForKeys:nil options:0 error:nil]) {
+        struct stat info;
+        if (lstat(entry.fileSystemRepresentation,&info) || !S_ISDIR(info.st_mode)) continue;
+        NSString *name = entry.lastPathComponent;
+        if ([rootSkip containsObject:name] || [name hasPrefix:@"."]) continue;
+        [result addObject:name];
+    }
+    NSSet *librarySkip = [NSSet setWithObjects:@"Caches",@"HTTPStorages",@"Application Support",
+        @"Preferences",@"Cookies",@"WebKit",@"SplashBoard",@"Saved Application State",nil];
+    NSURL *library = [home URLByAppendingPathComponent:@"Library"];
+    for (NSURL *entry in [NSFileManager.defaultManager contentsOfDirectoryAtURL:library
+        includingPropertiesForKeys:nil options:0 error:nil]) {
+        struct stat info;
+        if (lstat(entry.fileSystemRepresentation,&info) || !S_ISDIR(info.st_mode)) continue;
+        NSString *name = entry.lastPathComponent;
+        if ([librarySkip containsObject:name] || [name hasPrefix:@"."]) continue;
+        [result addObject:[@"Library/" stringByAppendingString:name]];
+    }
+    return result;
 }
 
 // 0.4.2 App Group 共享容器：不少 App 会把主 App 与小组件/扩展共用

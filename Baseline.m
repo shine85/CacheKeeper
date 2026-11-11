@@ -98,10 +98,11 @@ NSArray *CKBaselineDirectories(NSString *root, NSTimeInterval cutoff, BOOL clean
         for (NSDictionary *file in newFiles) {
             NSURL *entry = file[@"url"];
             if ([protectedDirs containsObject:entry.URLByDeletingLastPathComponent.path]) continue;
-            struct stat expected = {0};
-            expected.st_ino = [file[@"inode"] unsignedLongLongValue];
-            expected.st_dev = [file[@"device"] unsignedLongLongValue];
-            if (RemoveEntry(entry, canonical, expected)) {
+            struct stat now;
+            if (lstat(entry.fileSystemRepresentation,&now) ||
+                now.st_ino != [file[@"inode"] unsignedLongLongValue] ||
+                now.st_dev != (dev_t)[file[@"device"] unsignedLongLongValue]) continue;
+            if (RemoveEntry(entry, canonical, now)) {
                 if (removed) (*removed)++;
                 if (bytes) *bytes += [file[@"size"] unsignedLongLongValue];
             }

@@ -96,7 +96,7 @@
 }
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
     if (section == 1) return @"候选中的 Group/ 开头条目是 App Group 共享容器（主 App 与小组件/扩展共用），规则相同。自动：先限制写入；限制未生效、限权后仍有新文件生成、或应用反复秒退时，自动降级为只清理（原因显示在上方状态行）。只禁止：只限制写入，不自动降级。只清理：不限制写入，仅在 App 退后台/退出后清理基线后新建的缓存文件。目录只按根目录管理（父目录优先，子条目忽略）；60 秒内新建的文件不动；数据库、登录数据、Documents、Preferences、WebKit、Cookies 永不限制、永不删除。重新打开目录开关或切换策略会清除降级记录、重新尝试。";
-    return @"检测会为尚未配置的 App 自动预选 Library/Caches，总开关保持关闭；打开 App 总开关才会应用。候选只列根目录：Library/Caches、tmp、Library/HTTPStorages（可选，内部可能混有 cookies 类文件），以及 Application Support 的一级子目录（可能存放重要资源，谨慎开启）。已有文件不会自动删除；清理只发生在 App 退后台或退出后。开关约 2 秒内应用，首次安装需注销。";
+    return @"检测会为尚未配置的 App 自动预选 Library/Caches，总开关保持关闭；打开 App 总开关才会应用。候选只按根级列（父目录优先、子条目忽略）：固定根 Caches、tmp、HTTPStorages（可能混 cookies 类文件）、SplashBoard（启动快照）、Saved Application State（界面恢复状态，清理后不恢复上次现场），加上 Application Support、Library 与容器根下的一级子目录（各 SDK 与 App 自建目录，可能存放重要资源，谨慎开启）。已有文件不会自动删除；清理只发生在 App 退后台或退出后。开关约 2 秒内应用，首次安装需注销。";
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
     if (path.section == 1) {
