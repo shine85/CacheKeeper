@@ -689,10 +689,13 @@
     }
 }
 
-// 单根兼容入口（测试用）：先预检后删除。多根作业须用拆分后的接口。
+// 单根兼容入口（测试用）：单调用只推进一个阶段，恢复旧 advance: 的语义——
+// 预检未完成时只做预检，预检完成后才删除。#79 初版在同一调用内连续调预检+删除，
+// 抹掉了阶段边界：预检收尾调用已删 1 项，导致“根替换发生在完整预检后且删除前”
+// 测试失败（期望预检完成、删除尚未开始时 removed==0）。多根作业须用拆分后的接口。
 - (void)advance:(NSUInteger)limit shouldContinue:(BOOL (^)(void))shouldContinue {
     if (self.complete || self.cancelled) return;
-    [self advancePreflight:limit];
-    if (!self.checking && !self.complete && !self.cancelled) [self advanceDeletion:limit shouldContinue:shouldContinue];
+    if (self.checking) { [self advancePreflight:limit]; return; }
+    [self advanceDeletion:limit shouldContinue:shouldContinue];
 }
 @end
