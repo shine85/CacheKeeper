@@ -13,6 +13,13 @@ static inline NSArray<NSString *> *axs_cachekeeper_directory_aliases(NSString *r
     if (![standard isEqual:root] && !lstat(root.fileSystemRepresentation,&original) &&
         !lstat(standard.fileSystemRepresentation,&alternate) && S_ISDIR(alternate.st_mode) &&
         original.st_ino==alternate.st_ino && original.st_dev==alternate.st_dev) [aliases addObject:standard];
+    // 解析形态：枚举器给出的路径可能是解析后（/private/var）或未解析（/var）形态，
+    // 仅含标准化的别名会在真机上把整根误判为根外（0.7.2 回归，errno 22 全灭）；
+    // 与删除入口的 rootForms 口径一致。
+    NSString *resolved=[NSURL fileURLWithPath:root].URLByResolvingSymlinksInPath.path;
+    if (resolved.length && ![aliases containsObject:resolved]) [aliases addObject:resolved];
+    NSString *resolvedStandard=resolved.stringByStandardizingPath;
+    if (resolvedStandard.length && ![aliases containsObject:resolvedStandard]) [aliases addObject:resolvedStandard];
     return aliases;
 }
 static inline NSString *axs_cachekeeper_enumerated_path(NSString *path, NSString *root, NSArray<NSString *> *aliases) {
@@ -23,7 +30,14 @@ static inline NSString *axs_cachekeeper_enumerated_path(NSString *path, NSString
         NSString *prefix=[alias stringByAppendingString:@"/"];
         if (![trimmed hasPrefix:prefix]) continue;
         NSString *relative=[trimmed substringFromIndex:prefix.length];
-        if (!axs_cachekeeper_relative_path(relative)) return nil;
+        // 枚举路径已由前缀核对限定在根内，相对部分只需排除空/“.”/“..”分量；
+        // 反斜杠在 POSIX 文件名中是普通字符（抖音等缓存确有此类文件名），
+        // 沿用通用相对路径检查会把整根误判越界（0.7.2 回归，真机 errno 22 全灭）。
+        BOOL relativeOK=relative.length>0;
+        for (NSString *part in [relative componentsSeparatedByString:@"/"]) {
+            if (!part.length || [part isEqual:@"."] || [part isEqual:@".."]) { relativeOK=NO;break; }
+        }
+        if (!relativeOK) return nil;
         return [root stringByAppendingFormat:@"/%@",relative];
     }
     return nil;

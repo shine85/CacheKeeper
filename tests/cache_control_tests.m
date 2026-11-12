@@ -781,6 +781,29 @@ int main(int argc, const char *argv[]) {
         require(!symlink(linkTarget.fileSystemRepresentation, finalLink.fileSystemRepresentation), @"建立末级链接");
         require(axs_cachekeeper_open_directory(finalLink) < 0, @"末级目标是符号链接仍拒绝打开");
 
+        // 枚举路径边界回归（0.7.2 真机 errno 22 全灭，49.1 验收截图 2026-11-12）：
+        // 反斜杠在 POSIX 文件名中是普通字符，枚举路径已由前缀核对限定在根内，
+        // 不应被通用相对路径检查误判越界；目录别名须含解析形态；单条越界只跳过该条。
+        NSString *aliasTarget = [fixture stringByAppendingPathComponent:@"alias-target"];
+        require([fm createDirectoryAtPath:aliasTarget withIntermediateDirectories:YES attributes:nil error:nil], @"别名夹具");
+        NSString *aliasLink = [fixture stringByAppendingPathComponent:@"alias-link"];
+        require(!symlink(aliasTarget.fileSystemRepresentation, aliasLink.fileSystemRepresentation), @"建立别名链接");
+        NSArray *linkAliases = axs_cachekeeper_directory_aliases(aliasLink);
+        require([linkAliases containsObject:aliasTarget], @"目录别名含解析后的真实路径");
+        NSString *viaLink = axs_cachekeeper_enumerated_path([aliasTarget stringByAppendingPathComponent:@"x.txt"], aliasLink, linkAliases);
+        require([viaLink isEqual:[aliasLink stringByAppendingPathComponent:@"x.txt"]], @"枚举路径经解析别名还原为根形态");
+        require(!axs_cachekeeper_enumerated_path(@"/etc/passwd", aliasLink, linkAliases), @"根外路径仍被边界核对拒绝");
+        NSString *backslashRoot = [fixture stringByAppendingPathComponent:@"backslash"];
+        require([fm createDirectoryAtPath:backslashRoot withIntermediateDirectories:YES attributes:nil error:nil], @"反斜杠夹具");
+        NSString *backslashFile = [backslashRoot stringByAppendingPathComponent:@"a\\b.txt"];
+        writeFile(backslashFile);
+        NSString *plainFile = [backslashRoot stringByAppendingPathComponent:@"plain.txt"];
+        writeFile(plainFile);
+        AxsCacheKeeperSweep *backslashSweep = [[AxsCacheKeeperSweep alloc] initWithRoot:backslashRoot fullClear:YES logMode:NO];
+        for (NSUInteger pass=0;!backslashSweep.complete && pass<100;pass++) [backslashSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(backslashSweep.complete && backslashSweep.failed == 0 && backslashSweep.removed == 2 &&
+            ![fm fileExistsAtPath:backslashFile] && ![fm fileExistsAtPath:plainFile], @"反斜杠文件名不终结整根清理");
+
         NSString *lockRoot = [fixture stringByAppendingPathComponent:@"lock-root"];
         NSString *lockSub = [lockRoot stringByAppendingPathComponent:@"sub"];
         require([fm createDirectoryAtPath:lockSub withIntermediateDirectories:YES attributes:nil error:nil], @"写锁夹具目录");

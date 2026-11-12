@@ -459,9 +459,12 @@
         }
         NSString *entry=axs_cachekeeper_enumerated_path(enumerated.path,self.root,self.rootAliases);
         if (!entry) {
-            self.failed++;[self.dataDirectories addObject:self.root];
+            // 单条枚举路径越界只跳过该条并计失败，不终结整根：一根内混入一条
+            // 形态异常的路径，不应导致整根数千文件无法清理（0.7.2 回归，真机 errno 22 全灭）。
+            // 被跳过的条目不触碰，安全边界不变；失败样本仍由 failure 助手记入回执。
+            self.failed++;
             [self axs_cachekeeper_failure:@"枚举路径边界" code:EINVAL path:enumerated.path detail:self.root];
-            self.complete=YES;self.entries=nil;return;
+            continue;
         }
         struct stat info;
         if (lstat(entry.fileSystemRepresentation, &info)) {
