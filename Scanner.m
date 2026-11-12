@@ -153,7 +153,7 @@ static AxsCacheKeeperExecState axs_cachekeeper_exec(NSString *bundle, NSString *
 static BOOL axs_cachekeeper_gate_open(NSString *bundle, NSString *jobInstance) {
     NSString *identity=nil;
     AxsCacheKeeperExecState exec=axs_cachekeeper_exec(bundle,&identity,NULL,NULL);
-    if (exec==AxsCacheKeeperExecAbsent) return YES;
+    if (exec==AxsCacheKeeperExecAbsent || exec==AxsCacheKeeperExecTerminated) return YES;
     if (exec!=AxsCacheKeeperExecSuspended || !identity.length) return NO;
     if (jobInstance.length && ![identity isEqual:jobInstance]) return NO;
     NSDictionary *record=axs_cachekeeper_suspended_since[bundle];
@@ -261,6 +261,8 @@ void CKApplyDirectorySwitches(void) {
         AxsCacheKeeperSignalConfidence confidence=AxsCacheKeeperSignalNone;
         NSString *instance=axs_cachekeeper_seen_instances[bundle] ?: @"";
         if (exec==AxsCacheKeeperExecAbsent) {
+            process=AxsCacheKeeperProcessStopped; confidence=AxsCacheKeeperSignalStrong;
+        } else if (exec==AxsCacheKeeperExecTerminated) {
             process=AxsCacheKeeperProcessStopped; confidence=AxsCacheKeeperSignalStrong;
         } else if (exec==AxsCacheKeeperExecExecuting) {
             process=AxsCacheKeeperProcessRunning; confidence=AxsCacheKeeperSignalStrong;

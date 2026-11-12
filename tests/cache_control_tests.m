@@ -90,6 +90,8 @@ int main(int argc, const char *argv[]) {
         require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecExecuting && rawTaskState==1, @"taskState=1 判为执行中");
         execState.taskState=2;
         require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecSuspended && execIdentity.length, @"taskState=2 判为已挂起且能取实例标识");
+        execState.taskState=3;
+        require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecTerminated && rawTaskState==3, @"taskState=3 判为已终止");
         execState.taskState=7;
         require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecUnknown, @"未知 taskState 一律不放行");
         application.state=nil;

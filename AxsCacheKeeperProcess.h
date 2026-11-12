@@ -93,15 +93,18 @@ static inline NSString *axs_cachekeeper_process_identity(id manager, NSString *b
 // 执行状态细分（2026-11-11 用户拍板 A 案）：进程记录存在不等于在执行——APP 被划掉后常被
 // 静默推送/后台刷新唤醒，干完活被系统挂起（suspended），记录在 FrontBoard 清单中长留数小时，
 // 「有记录即等待」的旧判定会让自动清理无限期停摆（真机抖音 Caches 满置 54 MB 无轮次可证）。
-// 本函数在完整清单校验（与状态判定同一套 fail-closed 前提）之上细分四态：
+// 本函数在完整清单校验（与状态判定同一套 fail-closed 前提）之上细分五态：
 //   Absent    清单中无记录（进程已消失）；
 //   Executing 进程状态 taskState=1（RBSProcessTaskStateRunning），正在执行，硬拦；
 //   Suspended taskState=2（RBSProcessTaskStateSuspended），内核已冻结、不能执行；
 //             是否放行由调用方按「同一实例持续挂起满 60 秒」另行判定，本函数只报事实；
+//   Terminated taskState=3（RBSProcessTaskStateTerminated），进程已终止、不能执行、不能恢复为同一实例；
+//             调用方可直接按已退出处理，无需 60 秒稳定等待（2026-11-12 真机抖音 taskState=3 实测，
+//             划掉约 50 分钟后由挂起转入该态；若为执行中，划掉后的 APP 不可能在后台执行这么久）；
 //   Unknown   接口缺失/清单无效/状态读不到/taskState 为其他值——一律不放行（fail-closed），
 //             reason 带 taskState 原始值供真机一击定位（-1 表示读不到状态对象）。
 typedef NS_ENUM(NSInteger, AxsCacheKeeperExecState) {
-    AxsCacheKeeperExecUnknown, AxsCacheKeeperExecAbsent, AxsCacheKeeperExecExecuting, AxsCacheKeeperExecSuspended
+    AxsCacheKeeperExecUnknown, AxsCacheKeeperExecAbsent, AxsCacheKeeperExecExecuting, AxsCacheKeeperExecSuspended, AxsCacheKeeperExecTerminated
 };
 static inline AxsCacheKeeperExecState axs_cachekeeper_process_exec_state(id manager, NSString *bundle, NSString **identity, NSInteger *taskState, NSString **reason) {
     if (identity) *identity = nil;
@@ -148,6 +151,10 @@ static inline AxsCacheKeeperExecState axs_cachekeeper_process_exec_state(id mana
         if (raw == 2) {
             if (reason) *reason=@"APP 进程已被系统挂起（未在执行）；持续挂起满 60 秒后自动清理";
             return AxsCacheKeeperExecSuspended;
+        }
+        if (raw == 3) {
+            if (reason) *reason=@"APP 进程已终止（taskState=3），按已退出处理";
+            return AxsCacheKeeperExecTerminated;
         }
         if (reason) *reason=[NSString stringWithFormat:@"FrontBoard 有此 APP 的进程记录，但执行状态无法确认（taskState=%ld），暂不删除", (long)raw];
         return AxsCacheKeeperExecUnknown;
