@@ -390,13 +390,16 @@
 - (void)advance:(NSUInteger)limit shouldContinue:(BOOL (^)(void))shouldContinue {
     if (self.complete || self.cancelled) return;
     self.checkedDirectories=[NSMutableSet new];
+    // 根路径的符号链接解析每调用一次即可：逐文件解析是单周期开销的主要来源之一；
+    // 根被替换仍由逐文件的 inode/设备核对捕获，解析比较只负责跨调用的指向变化。
+    NSString *resolvedRootPath = [NSURL fileURLWithPath:self.root].URLByResolvingSymlinksInPath.path;
     // 枚举器跨批次保留位置，避免每次超时都从头扫描。
     for (NSUInteger index = 0; index < limit; index++) {
         if (!shouldContinue()) { self.cancelled = YES; self.entries = nil; return; }
         struct stat rootInfo;
         if (lstat(self.root.fileSystemRepresentation, &rootInfo) || !S_ISDIR(rootInfo.st_mode) ||
             rootInfo.st_ino != self.inode || rootInfo.st_dev != self.device ||
-            ![self.root isEqual:[NSURL fileURLWithPath:self.root].URLByResolvingSymlinksInPath.path]) {
+            ![self.root isEqual:resolvedRootPath]) {
             self.failed++; self.error = @"扫描期间缓存目录已改变"; self.complete = YES; self.entries = nil; return;
         }
         NSURL *entry = self.entries.nextObject;

@@ -419,28 +419,29 @@ void CKApplyDirectorySwitches(void) {
                 jobs[bundle] = job;
             }
             NSString *jobInstance = job[@"instance"];
-            BOOL (^shouldContinue)(void) = ^BOOL {
-                __block BOOL allowed = NO;
-                dispatch_sync(dispatch_get_main_queue(), ^{
-                    NSDictionary *currentSelection = [NSDictionary dictionaryWithContentsOfFile:selectionFile];
-                    NSDictionary *currentStates = [NSDictionary dictionaryWithContentsOfFile:stateFile];
-                    BOOL readable = (currentSelection || ![NSFileManager.defaultManager fileExistsAtPath:selectionFile]) &&
-                        (currentStates || ![NSFileManager.defaultManager fileExistsAtPath:stateFile]);
-                    NSArray *currentPaths = axs_cachekeeper_effective_paths(currentSelection[bundle],currentStates[bundle],discovered);
-                    BOOL selected = [currentPaths isEqual:paths] && [axs_cachekeeper_mode(currentStates[bundle]) isEqual:mode] &&
-                        axs_cachekeeper_full_clear(currentStates[bundle]) == fullClear;
-                    // 未知目录候选集须同步复核：中途被定级为日志或手动排除的目录，本轮立即停手，下一轮改走日志模式。
-                    NSArray *currentPurgePaths = axs_cachekeeper_purge_paths(purgeCandidates, currentStates[bundle]);
-                    BOOL purgeOK = [currentPurgePaths isEqual:purgePaths];
-                    // 实例绑定：任务存续期间观测到不同实例运行过，说明目标缓存可能已被新实例接管，旧任务过期。
-                    NSString *seen = axs_cachekeeper_seen_instances[bundle];
-                    BOOL instanceOK = ![jobInstance length] || ![seen length] || [seen isEqual:jobInstance];
-                    // 仅清理未知目录的任务没有缓存根，currentPaths 为空是正常态：任一根存在即放行。
-                    allowed = readable && selected && (currentPaths.count || currentPurgePaths.count) && axs_cachekeeper_wants_cleanup(currentStates[bundle]) && [Container(bundle).path isEqual:target[@"home"]] &&
-                        axs_cachekeeper_gate_open(bundle, jobInstance) && instanceOK && purgeOK;
-                });
-                return allowed;
-            };
+            // 放行判定每周期采样一次：原先逐文件调用时每次都读两份配置并查询进程，
+            // 36 根 × 256 项的调用量把单周期拖到约 10 秒，抖音的预检因此撞上 120 秒上限无限重开（2026-11-12 实证）。
+            // 采样间隔即轮次周期（约 2 秒），重开 APP 至多下一周期停手；逐文件身份/年龄核对仍在 remove 内逐项执行。
+            __block BOOL cycleAllowed = NO;
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                NSDictionary *currentSelection = [NSDictionary dictionaryWithContentsOfFile:selectionFile];
+                NSDictionary *currentStates = [NSDictionary dictionaryWithContentsOfFile:stateFile];
+                BOOL readable = (currentSelection || ![NSFileManager.defaultManager fileExistsAtPath:selectionFile]) &&
+                    (currentStates || ![NSFileManager.defaultManager fileExistsAtPath:stateFile]);
+                NSArray *currentPaths = axs_cachekeeper_effective_paths(currentSelection[bundle],currentStates[bundle],discovered);
+                BOOL selected = [currentPaths isEqual:paths] && [axs_cachekeeper_mode(currentStates[bundle]) isEqual:mode] &&
+                    axs_cachekeeper_full_clear(currentStates[bundle]) == fullClear;
+                // 未知目录候选集须同步复核：中途被定级为日志或手动排除的目录，本轮立即停手，下一轮改走日志模式。
+                NSArray *currentPurgePaths = axs_cachekeeper_purge_paths(purgeCandidates, currentStates[bundle]);
+                BOOL purgeOK = [currentPurgePaths isEqual:purgePaths];
+                // 实例绑定：任务存续期间观测到不同实例运行过，说明目标缓存可能已被新实例接管，旧任务过期。
+                NSString *seen = axs_cachekeeper_seen_instances[bundle];
+                BOOL instanceOK = ![jobInstance length] || ![seen length] || [seen isEqual:jobInstance];
+                // 仅清理未知目录的任务没有缓存根，currentPaths 为空是正常态：任一根存在即放行。
+                cycleAllowed = readable && selected && (currentPaths.count || currentPurgePaths.count) && axs_cachekeeper_wants_cleanup(currentStates[bundle]) && [Container(bundle).path isEqual:target[@"home"]] &&
+                    axs_cachekeeper_gate_open(bundle, jobInstance) && instanceOK && purgeOK;
+            });
+            BOOL (^shouldContinue)(void) = ^BOOL { return cycleAllowed; };
             NSUInteger removed = 0, failures = 0, protectedCount = 0, recentCount = 0, inspected = 0, changedCount = 0;
             unsigned long long bytes = 0;
             BOOL complete = YES, cancelled = NO, checking = NO, hasMixedPurge = NO;
@@ -464,8 +465,10 @@ void CKApplyDirectorySwitches(void) {
             job[@"removed"] = @(removed); job[@"bytes"] = @(bytes);
             // 单轮硬上限（对照方案吸收并按本引擎分批模型适配）：单轮累计删除 2000 项或累计运行 120 秒即收尾，
             // 剩余内容顺延下轮重新预检后继续，限制单轮异常时的损害半径。
+            // 120 秒计时仅在预检完成后生效：预检不删任何文件，计入上限只会让大目录的轮次无限重开（抖音 2026-11-12 实证）；
+            // 2000 项删除上限不受影响（删除只发生在预检之后）。
             BOOL capHit = !complete && !cancelled &&
-                (removed >= 2000 || -[job[@"started"] timeIntervalSinceNow] >= 120);
+                (removed >= 2000 || (!checking && -[job[@"started"] timeIntervalSinceNow] >= 120));
             NSString *phase = @"cleaning", *message = @"正在分批清理；无需重新检测目录";
             if (checking) message=[NSString stringWithFormat:@"正在检查数据目录，已检查 %lu 项；预检完成后才删除",(unsigned long)inspected];
             if (cancelled) {
