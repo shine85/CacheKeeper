@@ -19,9 +19,11 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @end
 
 // 分类 Tab：0 已开启，1 用户应用（App Store），2 巨魔应用（TrollStore），3 收藏应用。
-// 系统应用不进缓存管家：只排除包体不在容器目录下的 System 应用——商店与巨魔应用一律在
-// /var/containers/Bundle/Application/ 下，系统应用从不在此（只看 /Applications/ 不够，时钟等
-// 在 /System/Applications/，#60 真机漏进列表）。
+// 系统应用不进缓存管家，分两层排除：①包体不在容器目录下的 System 应用（/Applications/、
+// /System/Applications/、/System/Library/、/var/jb/Applications/）；②bundle ID 以 com.apple. 开头
+// 且为 System 类型的——Apple 系统应用经 App Store 更新后包体也在容器目录下，仍报 System 类型，
+// 仅凭容器路径无法排除（#62 真机：备忘录/播客等 10 个系统应用仍在巨魔应用）。商店下载的 Apple
+// 应用（如 Apple Store、iMovie）报 User 类型，不受第②层影响。
 // 来源判据是 applicationType，不是收据：巨魔应用报 @"System"（CoreTrust 系统级信任），商店
 // 应用报 @"User"；解密的商店 IPA 包内常带原始 StoreKit 收据，收据判据会把巨魔应用误判为
 // 商店应用（#60 真机：轻悦时光落在用户应用）。
@@ -242,9 +244,11 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     for (id proxy in installed) {
         NSString *type=axs_cachekeeper_app_property(proxy,@"applicationType");
         NSURL *url=axs_cachekeeper_app_property(proxy,@"bundleURL");
+        NSString *bundleID=axs_cachekeeper_app_property(proxy,@"applicationIdentifier");
         BOOL isContainer=[url.path containsString:@"/containers/Bundle/Application/"];
         if ([type isEqual:@"System"] && !isContainer) continue;
-        NSDictionary *app=axs_cachekeeper_application_entry(axs_cachekeeper_app_property(proxy,@"applicationIdentifier"),
+        if ([type isEqual:@"System"] && [bundleID hasPrefix:@"com.apple."]) continue;
+        NSDictionary *app=axs_cachekeeper_application_entry(bundleID,
             axs_cachekeeper_app_property(proxy,@"localizedName"),type,url);
         if (!app) continue;
         NSString *name=app[@"name"];
