@@ -173,7 +173,9 @@ static inline BOOL axs_cachekeeper_container_bundle_path(NSString *path) {
     NSRange marker=[path rangeOfString:@"/containers/Bundle/Application/"];
     if (marker.location==NSNotFound) return NO;
     NSArray *parts=[[path substringFromIndex:NSMaxRange(marker)] pathComponents];
-    return parts.count==2 && [parts[1].lowercaseString hasSuffix:@".app"];
+    if (parts.count!=2) return NO;
+    NSString *leaf=parts[1];
+    return [leaf isKindOfClass:NSString.class] && [[leaf lowercaseString] hasSuffix:@".app"];
 }
 static inline BOOL axs_cachekeeper_app_enabled(id state) {
     if (!state) return NO;
