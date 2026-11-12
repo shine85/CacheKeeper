@@ -132,6 +132,14 @@ static inline AxsCacheKeeperExecState axs_cachekeeper_process_exec_state(id mana
         if (reason) *reason=@"FrontBoard 未返回有效进程清单；请提供 iOS 小版本排查";
         return AxsCacheKeeperExecUnknown;
     }
+    // 多记录汇总（审计第 5 项）：同一 APP 在清单中可能有不止一条记录（启动/退出过渡期），
+    // 取最保守态（执行中 > 已挂起 > 已终止 > 消失），身份与原因取最保守那条记录的；
+    // 任一记录状态读不到或 taskState 未知，仍立即判未知（fail-closed，最保守）。
+    AxsCacheKeeperExecState worst = AxsCacheKeeperExecAbsent;
+    NSInteger worstRank = 0;
+    NSString *worstIdentity = nil;
+    NSInteger worstTaskState = -1;
+    NSString *worstReason = @"";
     for (id item in processes) {
         SEL identifier=NSSelectorFromString(@"bundleIdentifier");
         id value=[item respondsToSelector:identifier] ? ((id(*)(id,SEL))objc_msgSend)(item,identifier) : nil;
@@ -140,7 +148,7 @@ static inline AxsCacheKeeperExecState axs_cachekeeper_process_exec_state(id mana
             return AxsCacheKeeperExecUnknown;
         }
         if (![value isEqual:bundle]) continue;
-        if (identity) *identity = axs_cachekeeper_identity_for_process(item);
+        NSString *itemIdentity = axs_cachekeeper_identity_for_process(item);
         SEL stateSelector=NSSelectorFromString(@"state");
         id state=[item respondsToSelector:stateSelector] ? ((id(*)(id,SEL))objc_msgSend)(item,stateSelector) : nil;
         SEL taskSelector=NSSelectorFromString(@"taskState");
@@ -149,22 +157,35 @@ static inline AxsCacheKeeperExecState axs_cachekeeper_process_exec_state(id mana
             return AxsCacheKeeperExecUnknown;
         }
         NSInteger raw=((NSInteger(*)(id,SEL))objc_msgSend)(state,taskSelector);
-        if (taskState) *taskState = raw;
+        AxsCacheKeeperExecState itemState;
+        NSString *itemReason;
         if (raw == 1) {
-            if (reason) *reason=@"FrontBoard 仍有此 APP 的进程记录（含启动、后台或退出中）；退出完成后自动重试";
-            return AxsCacheKeeperExecExecuting;
+            itemState=AxsCacheKeeperExecExecuting;
+            itemReason=@"FrontBoard 仍有此 APP 的进程记录（含启动、后台或退出中）；退出完成后自动重试";
+        } else if (raw == 2) {
+            itemState=AxsCacheKeeperExecSuspended;
+            itemReason=@"APP 进程已被系统挂起（未在执行）；持续挂起满 60 秒后自动清理";
+        } else if (raw == 3) {
+            itemState=AxsCacheKeeperExecTerminated;
+            itemReason=@"APP 进程已终止（taskState=3），按已退出处理";
+        } else {
+            if (reason) *reason=[NSString stringWithFormat:@"FrontBoard 有此 APP 的进程记录，但执行状态无法确认（taskState=%ld），暂不删除", (long)raw];
+            return AxsCacheKeeperExecUnknown;
         }
-        if (raw == 2) {
-            if (reason) *reason=@"APP 进程已被系统挂起（未在执行）；持续挂起满 60 秒后自动清理";
-            return AxsCacheKeeperExecSuspended;
+        NSInteger rank = 1;
+        if (itemState == AxsCacheKeeperExecExecuting) rank = 3;
+        else if (itemState == AxsCacheKeeperExecSuspended) rank = 2;
+        if (rank > worstRank) {
+            worst = itemState; worstRank = rank;
+            worstIdentity = itemIdentity; worstTaskState = raw; worstReason = itemReason;
         }
-        if (raw == 3) {
-            if (reason) *reason=@"APP 进程已终止（taskState=3），按已退出处理";
-            return AxsCacheKeeperExecTerminated;
-        }
-        if (reason) *reason=[NSString stringWithFormat:@"FrontBoard 有此 APP 的进程记录，但执行状态无法确认（taskState=%ld），暂不删除", (long)raw];
-        return AxsCacheKeeperExecUnknown;
     }
-    if (reason) *reason=@"FrontBoard 已就绪，应用进程清单中无此 APP";
-    return AxsCacheKeeperExecAbsent;
+    if (worst == AxsCacheKeeperExecAbsent) {
+        if (reason) *reason=@"FrontBoard 已就绪，应用进程清单中无此 APP";
+        return AxsCacheKeeperExecAbsent;
+    }
+    if (identity) *identity = worstIdentity;
+    if (taskState) *taskState = worstTaskState;
+    if (reason) *reason = worstReason;
+    return worst;
 }

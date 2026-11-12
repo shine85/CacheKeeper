@@ -128,6 +128,17 @@ int main(int argc, const char *argv[]) {
         require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecTerminated && rawTaskState==3, @"taskState=3 判为已终止");
         execState.taskState=7;
         require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecUnknown, @"未知 taskState 一律不放行");
+        // 多记录汇总（审计第 5 项）：同一 APP 多条记录时取最保守态，而非首条记录。
+        AxsTestProcess *second=[AxsTestProcess new];second.bundleIdentifier=bundle;second.pid=NSProcessInfo.processInfo.processIdentifier;
+        AxsTestProcessState *secondState=[AxsTestProcessState new];second.state=secondState;
+        application.state=execState;execState.taskState=3;secondState.taskState=2;
+        manager.allApplicationProcesses=@[application,second];
+        require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecSuspended && rawTaskState==2, @"已终止+已挂起两条记录时取最保守的已挂起");
+        execState.taskState=2;secondState.taskState=1;
+        require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecExecuting && rawTaskState==1, @"已挂起+执行中两条记录时取最保守的执行中");
+        execState.taskState=3;secondState.taskState=3;
+        require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecTerminated && rawTaskState==3, @"两条已终止记录仍判为已终止");
+        manager.allApplicationProcesses=@[application];
         application.state=nil;
         require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecUnknown, @"读不到进程状态对象时不放行");
         manager.allApplicationProcesses=@[];
