@@ -19,11 +19,14 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @end
 
 // 分类 Tab：0 已开启，1 用户应用（App Store），2 巨魔应用（无商店收据），3 收藏应用。
-// 系统应用不进缓存管家（加载时直接排除）。
-@interface CKSettings : PSViewController <UITableViewDataSource, UITableViewDelegate, UISearchResultsUpdating, UIContextMenuInteractionDelegate>
+// 系统应用不进缓存管家：只排除包体在 /Applications/ 下的真系统应用；巨魔安装的应用
+// applicationType 也是 @"System"，但包体在容器目录下，必须放行（#59 真机：旧的类型排除
+// 把全部巨魔应用都藏掉了）。
+@interface CKSettings : PSViewController <UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate, UIContextMenuInteractionDelegate>
 @property(nonatomic,strong) UITableView *table;
 @property(nonatomic,strong) UISegmentedControl *tabs;
 @property(nonatomic,strong) UIView *tabWrap;
+@property(nonatomic,strong) UISearchBar *searchBar;
 @property(nonatomic,assign) NSInteger selectedTab;
 @property(nonatomic,strong) NSArray *apps;
 @property(nonatomic,strong) NSArray *sections;
@@ -44,13 +47,14 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     self.favorites = [NSSet set];
     self.iconCache = [NSMutableDictionary new];
     self.selectedTab = 0;
-    UISearchController *search = [[UISearchController alloc] initWithSearchResultsController:nil];
-    search.searchResultsUpdater = self;
-    search.obscuresBackgroundDuringPresentation = NO;
-    search.searchBar.placeholder = @"搜索应用";
-    self.navigationItem.searchController = search;
-    self.navigationItem.hidesSearchBarWhenScrolling = NO;
-    self.definesPresentationContext = YES;
+    // 搜索栏用普通 UISearchBar 直接放进视图，不用 UISearchController：控制器激活后的
+    // 呈现层会挡住 Tab 条的点按（#59 真机：搜索后点不了顶栏）；普通搜索栏没有呈现行为，
+    // 搜索中切 Tab 照常过滤显示。外观位置不变，仍在 Tab 条上方。
+    self.searchBar = [[UISearchBar alloc] initWithFrame:CGRectZero];
+    self.searchBar.placeholder = @"搜索应用";
+    self.searchBar.delegate = self;
+    self.searchBar.searchBarStyle = UISearchBarStyleMinimal;
+    [self.view addSubview:self.searchBar];
     self.tabWrap = [[UIView alloc] initWithFrame:CGRectZero];
     self.tabWrap.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.tabWrap.autoresizingMask = UIViewAutoresizingFlexibleWidth;
@@ -74,10 +78,12 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     // 视图延伸到导航栏下方，Tab 条必须从安全区顶部（导航栏下沿）起算，不能从 y=0 起；
     // 否则会被状态栏/灵动岛盖住（#55 真机 bug）。每次布局都重算，旋转与导航栏变化时也正确。
     CGFloat top = self.view.safeAreaInsets.top;
+    CGFloat searchHeight = 56;
     CGFloat tabHeight = 46;
-    self.tabWrap.frame = CGRectMake(0, top, self.view.bounds.size.width, tabHeight);
+    self.searchBar.frame = CGRectMake(0, top, self.view.bounds.size.width, searchHeight);
+    self.tabWrap.frame = CGRectMake(0, top + searchHeight, self.view.bounds.size.width, tabHeight);
     self.tabs.frame = CGRectMake(16, 7, self.tabWrap.bounds.size.width - 32, 32);
-    self.table.frame = CGRectMake(0, top + tabHeight, self.view.bounds.size.width, self.view.bounds.size.height - top - tabHeight);
+    self.table.frame = CGRectMake(0, top + searchHeight + tabHeight, self.view.bounds.size.width, self.view.bounds.size.height - top - searchHeight - tabHeight);
 }
 - (void)tabChanged:(UISegmentedControl *)sender {
     self.selectedTab = sender.selectedSegmentIndex;
@@ -238,8 +244,8 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     NSMutableDictionary *apps=[NSMutableDictionary new];
     for (id proxy in installed) {
         NSString *type=axs_cachekeeper_app_property(proxy,@"applicationType");
-        if ([type isEqual:@"System"]) continue;
         NSURL *url=axs_cachekeeper_app_property(proxy,@"bundleURL");
+        if ([type isEqual:@"System"] && [url.path hasPrefix:@"/Applications/"]) continue;
         NSDictionary *app=axs_cachekeeper_application_entry(axs_cachekeeper_app_property(proxy,@"applicationIdentifier"),
             axs_cachekeeper_app_property(proxy,@"localizedName"),type,url);
         if (!app) continue;
@@ -270,14 +276,18 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     }
     [self updateBatch];
 }
-- (void)updateSearchResultsForSearchController:(UISearchController *)searchController { [self updateBatch]; }
+- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText { [self updateBatch]; }
+- (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar { [searchBar resignFirstResponder]; }
+- (void)searchBarTextDidBeginEditing:(UISearchBar *)searchBar { [searchBar setShowsCancelButton:YES animated:YES]; }
+- (void)searchBarTextDidEndEditing:(UISearchBar *)searchBar { [searchBar setShowsCancelButton:NO animated:YES]; }
+- (void)searchBarCancelButtonClicked:(UISearchBar *)searchBar { searchBar.text = @""; [searchBar resignFirstResponder]; [self updateBatch]; }
 - (void)updateBatch {
     NSDictionary *states = [NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")];
     self.statesSnapshot=states;
     self.directoriesSnapshot=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist")];
     NSArray *savedFavorites=[NSArray arrayWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/favorites.plist")];
     self.favorites=[NSSet setWithArray:[savedFavorites isKindOfClass:NSArray.class] ? savedFavorites : @[]];
-    NSString *query = self.navigationItem.searchController.searchBar.text;
+    NSString *query = self.searchBar.text;
     NSMutableArray *matches = [NSMutableArray new];
     for (NSDictionary *app in self.apps) {
         NSString *name = app[@"name"], *bundle = app[@"id"];
