@@ -233,7 +233,8 @@ static inline NSArray<NSString *> *axs_cachekeeper_log_paths(id state) {
         if (axs_cachekeeper_log_path_valid(path)) [valid addObject:path];
     return axs_cachekeeper_parent_paths(valid);
 }
-// B 案内容审查的证据口径（无数据证据即清的判定依据）：数据库与登录态类证据命中其一，整目录保留。
+// B 案内容审查的证据口径（无数据证据即清的判定依据）：数据库与登录态类证据命中其一，
+// 目录自动降级为日志门（仅删日志文件）；目录名命中仍整目录保留。
 // 配置类 .plist/.json 不算证据：它们是可再生的运行时配置（tma 含此类文件，仍可清）；
 // 凭证类 .key/.pem/.p12 算证据。目录名数据标记与数据库头另由 Sweep 预检复核。
 static inline BOOL axs_cachekeeper_purge_evidence_path(NSString *relative) {

@@ -22,6 +22,7 @@
 @property(nonatomic, readwrite) BOOL logMode;
 @property(nonatomic, readwrite) BOOL purgeMode;
 @property(nonatomic) BOOL purgeBlocked;
+@property(nonatomic) BOOL purgeMixed;
 @property(nonatomic, copy) NSString *purgeEvidence;
 @property(nonatomic) dev_t device;
 @property(nonatomic) ino_t inode;
@@ -127,15 +128,27 @@
     }
     return nil;
 }
-// B 案：全目录内容审查命中数据证据时整根出局（只记首条证据，回执据此定位；不计失败，
-// 这是正确拒绝而非故障）。预检未完成（读不到内容）同样视为证据：审不完的目录不删。
+// B 案：目录名命中数据证据时整根出局（只记首条证据，回执据此定位；不计失败，
+// 这是正确拒绝而非故障）。文件级证据改走混合降级（见 purge_mixed），不再整根出局。
 - (void)axs_cachekeeper_purge_hit:(NSString *)path {
     if (self.purgeBlocked) return;
     self.purgeBlocked = YES;
+    self.purgeMixed = NO;
     self.purgeEvidence = path;
     NSString *relative = [path hasPrefix:[self.root stringByAppendingString:@"/"]] ?
         [path substringFromIndex:self.root.length + 1] : path.lastPathComponent;
     self.error = [NSString stringWithFormat:@"检出数据证据，本目录不清理：%@", relative];
+}
+// B 案自动降级（2026-11-12 用户拍板：定级不手动开，插件自己定）：文件级数据证据
+// （数据标记名、受保护路径成分、数据库头、读不到内容）只把目录标记为混合，不整根出局；
+// 删除时改走日志门，仅删日志特征文件，数据与未知内容保留。首条证据记入回执。
+- (void)axs_cachekeeper_purge_mixed:(NSString *)path {
+    if (self.purgeMixed || self.purgeBlocked) return;
+    self.purgeMixed = YES;
+    self.purgeEvidence = path;
+    NSString *relative = [path hasPrefix:[self.root stringByAppendingString:@"/"]] ?
+        [path substringFromIndex:self.root.length + 1] : path.lastPathComponent;
+    self.error = [NSString stringWithFormat:@"检出数据证据，已自动仅清理其中的日志文件：%@", relative];
 }
 - (void)axs_cachekeeper_inspect:(NSURL *)entry info:(struct stat)info {
     if (S_ISDIR(info.st_mode)) {
@@ -158,12 +171,14 @@
     self.fileSnapshots[parent][entry.lastPathComponent]=[self axs_cachekeeper_snapshot:info];
     if (self.fullClear) return;
     if (self.purgeMode) {
-        // 全目录内容审查：数据标记名、受保护路径成分、数据库头三者任一命中即整根出局；
+        // 全目录内容审查：文件级数据证据（数据标记名、受保护路径成分、数据库头、
+        // 读不到内容）只把目录标记为混合，删除时自动降级为日志门，仅删日志特征文件，
+        // 数据与未知内容保留，无需手动定级；目录名命中仍整根出局（见上）。
         // 配置类 .plist/.json 不在证据口径内（见 axs_cachekeeper_purge_evidence_path）。
         NSString *relative=[entry.path hasPrefix:[self.root stringByAppendingString:@"/"]] ?
             [entry.path substringFromIndex:self.root.length + 1] : entry.lastPathComponent;
         if (axs_cachekeeper_data_marker(entry.lastPathComponent) || axs_cachekeeper_purge_evidence_path(relative)) {
-            [self axs_cachekeeper_purge_hit:entry.path]; return;
+            [self axs_cachekeeper_purge_mixed:entry.path]; return;
         }
         int directory=axs_cachekeeper_open_directory(parent);
         int file=directory>=0 ? openat(directory,entry.lastPathComponent.fileSystemRepresentation,O_RDONLY|O_NOFOLLOW|O_NONBLOCK) : -1;
@@ -173,7 +188,7 @@
         if (file>=0 && !fstat(file,&opened) && S_ISREG(opened.st_mode) && opened.st_ino==info.st_ino && opened.st_dev==info.st_dev)
             count=pread(file,signature,sizeof(signature),0);
         if (count<0 || (count>=15 && !memcmp(signature,"SQLite format 3",15)) || (count>=6 && !memcmp(signature,"bplist",6)))
-            [self axs_cachekeeper_purge_hit:entry.path];
+            [self axs_cachekeeper_purge_mixed:entry.path];
         if (file>=0) close(file);
         if (directory>=0) close(directory);
         return;
@@ -332,20 +347,25 @@
         axs_cachekeeper_old_enough(current, self.clock())) {
         // 全量清理只核对文件身份与年龄，不按内容分类；
         // 日志模式在数据库/bplist 门槛之上再加文件名日志特征门与数据标记名否决；
-        // 清理模式的证据审查已在预检完成（任一证据即整根出局），此处同样只核对身份与年龄；
+        // 清理模式无证据时证据审查已在预检完成，此处只核对身份与年龄；
+        // 检出证据的清理目录自动降级为日志门（仅删日志特征文件，无需手动定级）；
         // 标准模式保持媒体签名与数据库门槛。
-        BOOL contentOK = self.fullClear || self.purgeMode;
+        BOOL contentOK = self.fullClear || (self.purgeMode && !self.purgeMixed);
         if (!contentOK) {
             unsigned char signature[32] = {0};
             ssize_t readCount = pread(file, signature, sizeof(signature), 0);
             BOOL database = readCount >= 15 && !memcmp(signature, "SQLite format 3", 15);
             BOOL propertyList = readCount >= 6 && !memcmp(signature, "bplist", 6);
-            BOOL contentRejected = self.logMode ?
+            // 日志模式与混合清理同为文件级保护：数据文件只否决自身，不连坐同目录的日志文件
+            //（目录级连坐曾使热日志目录整轮删除 0；此处若把父目录记入数据目录，枚举顺序在后
+            // 的同目录日志会被整目录跳过，混合降级即失效——故文件级模式下不记目录）。
+            BOOL logGate = self.logMode || (self.purgeMode && self.purgeMixed);
+            BOOL contentRejected = logGate ?
                 (!axs_cachekeeper_log_file_name(entry.lastPathComponent) || axs_cachekeeper_data_marker(entry.lastPathComponent)) :
                 !axs_cachekeeper_media_signature(signature, (size_t)readCount);
             if (readCount < 0) { self.error = @"无法核对文件内容，保留文件"; }
             else if (database || propertyList || contentRejected) {
-                if (database || propertyList) [self.dataDirectories addObject:parent];
+                if ((database || propertyList) && !logGate) [self.dataDirectories addObject:parent];
                 self.protectedCount++; errno = EBUSY;
             }
             else contentOK = YES;
@@ -395,7 +415,8 @@
         // URL 枚举器不递归符号链接；对非目录调用 skipDescendants 会影响后续遍历。
         if (S_ISLNK(info.st_mode)) continue;
         if (self.checking) { self.inspected++;[self axs_cachekeeper_inspect:entry info:info]; continue; }
-        // 清理模式预检命中数据证据：整根出局，本轮逐项计保护、不删、不计失败；证据路径已记入 error。
+        // 清理模式目录名命中数据证据：整根出局，本轮逐项计保护、不删、不计失败；证据路径已记入 error。
+        // 文件级证据改走混合降级（purgeMixed），不经过此处，删除时按日志门逐文件判定。
         if (self.purgeMode && self.purgeBlocked) {
             self.protectedCount++;if (S_ISDIR(info.st_mode)) [self.entries skipDescendants];continue;
         }

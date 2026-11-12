@@ -499,9 +499,20 @@ int main(int argc, const char *argv[]) {
         require([@"SQLite format 3\0payload" writeToFile:[purgeDb stringByAppendingPathComponent:@"hidden.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"伪装数据库夹具");
         AxsCacheKeeperSweep *purgeDbSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeDb clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
         for (NSUInteger pass=0;!purgeDbSweep.complete && pass<100;pass++) [purgeDbSweep advance:64 shouldContinue:^BOOL{return YES;}];
-        require(purgeDbSweep.complete && purgeDbSweep.failed==0 && purgeDbSweep.removed==0 && purgeDbSweep.purgeBlocked &&
+        require(purgeDbSweep.complete && purgeDbSweep.failed==0 && purgeDbSweep.removed==0 && purgeDbSweep.purgeMixed && !purgeDbSweep.purgeBlocked &&
             [fm fileExistsAtPath:[purgeDb stringByAppendingPathComponent:@"thumb.png"]] &&
-            [fm fileExistsAtPath:[purgeDb stringByAppendingPathComponent:@"hidden.bin"]], @"伪装数据库整根出局、零删除零失败");
+            [fm fileExistsAtPath:[purgeDb stringByAppendingPathComponent:@"hidden.bin"]], @"伪装数据库自动降级为日志门、非日志文件零删除");
+        NSString *purgeMixedDir=[fixture stringByAppendingPathComponent:@"purge-mixed"];
+        require([fm createDirectoryAtPath:purgeMixedDir withIntermediateDirectories:YES attributes:nil error:nil], @"日志与数据混放的清理目录夹具");
+        writeFile([purgeMixedDir stringByAppendingPathComponent:@"app.log"]);
+        require([@"SQLite format 3\0payload" writeToFile:[purgeMixedDir stringByAppendingPathComponent:@"data.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"混放数据库夹具");
+        writeFile([purgeMixedDir stringByAppendingPathComponent:@"notes.txt"]);
+        AxsCacheKeeperSweep *purgeMixedSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeMixedDir clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!purgeMixedSweep.complete && pass<100;pass++) [purgeMixedSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(purgeMixedSweep.complete && purgeMixedSweep.failed==0 && purgeMixedSweep.removed==1 && purgeMixedSweep.purgeMixed && !purgeMixedSweep.purgeBlocked &&
+            ![fm fileExistsAtPath:[purgeMixedDir stringByAppendingPathComponent:@"app.log"]] &&
+            [fm fileExistsAtPath:[purgeMixedDir stringByAppendingPathComponent:@"data.bin"]] &&
+            [fm fileExistsAtPath:[purgeMixedDir stringByAppendingPathComponent:@"notes.txt"]], @"混放目录自动仅清理日志文件、数据与未知内容保留");
         NSString *purgeNamed=[fixture stringByAppendingPathComponent:@"purge-named"];
         require([fm createDirectoryAtPath:[purgeNamed stringByAppendingPathComponent:@"Preferences"] withIntermediateDirectories:YES attributes:nil error:nil], @"含受保护子目录的清理夹具");
         writeFile([purgeNamed stringByAppendingPathComponent:@"Preferences/a.txt"]);

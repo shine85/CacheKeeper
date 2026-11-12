@@ -443,12 +443,13 @@ void CKApplyDirectorySwitches(void) {
             };
             NSUInteger removed = 0, failures = 0, protectedCount = 0, recentCount = 0, inspected = 0, changedCount = 0;
             unsigned long long bytes = 0;
-            BOOL complete = YES, cancelled = NO, checking = NO;
+            BOOL complete = YES, cancelled = NO, checking = NO, hasMixedPurge = NO;
             NSString *error = @"";
             NSMutableDictionary *directoryReports=[NSMutableDictionary new];
             for (AxsCacheKeeperSweep *sweep in job[@"sweeps"]) {
                 if (!cancelled) [sweep advance:256 shouldContinue:shouldContinue];
                 removed += sweep.removed; bytes += sweep.bytes; failures += sweep.failed;
+                hasMixedPurge |= sweep.purgeMixed;
                 protectedCount += sweep.protectedCount; recentCount += sweep.recentCount;
                 inspected += sweep.inspected; checking |= sweep.checking && !sweep.complete;
                 changedCount += sweep.changedCount;
@@ -477,7 +478,8 @@ void CKApplyDirectorySwitches(void) {
                 if (changedCount) message=[message stringByAppendingFormat:@"；%lu 个目录在预检后变化，已跳过等待下轮",(unsigned long)changedCount];
                 if (fullClear) message=[message stringByAppendingString:@"\n全量清理开启：标准缓存目录内的文件按平台缓存契约处理，不按类型保留（60 秒内新文件除外）"];
                 if (hasLogRoot) message=[message stringByAppendingString:@"\n含用户定级的日志目录：仅清理日志特征文件（.log/.alog/.xlog)，数据与未知内容保留"];
-                if (hasPurgeRoot) message=[message stringByAppendingString:@"\n未知目录已按内容审查清理：无数据证据的目录退出后清理，检出数据证据的整目录保留"];
+                if (hasPurgeRoot) message=[message stringByAppendingString:@"\n未知目录已按内容审查清理：无数据证据的目录退出后清理，检出数据证据的目录自动仅清理其中的日志文件"];
+                if (hasMixedPurge) message=[message stringByAppendingString:@"\n本轮有未知目录检出数据证据，已自动仅清理其中的日志文件（数据与未知内容保留）"];
                 if ([mode isEqual:@"auto"] && axs_cachekeeper_url_cache_enabled(states[bundle])) message = [message stringByAppendingFormat:@"\n%@", axs_cachekeeper_network_status(bundle)];
                 finished[bundle] = @{@"signature":signature, @"time":NSDate.date};
                 [jobs removeObjectForKey:bundle];

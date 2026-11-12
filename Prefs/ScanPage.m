@@ -206,12 +206,12 @@
 }
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
     if (section==0) return @"一键开启 = 自动模式 + 网络磁盘缓存限制 + 新增缓存自动发现。可能增加流量和重复加载，网络选项可随时关闭。";
-    if (section==2) return self.unknownRows.count ? @"点击目录进入只读深度检测：类型组成、文件时间与最大文件。未知不等于必需，也不等于垃圾。退出后先做全目录内容审查：无数据证据的自动清理，检出数据证据的整目录保留。日志与数据混放的目录可在档案页定级为日志目录，只清日志文件；已定级的目录可在此关闭定级。每目录开关默认开启（自动审查）；关闭则保留该目录，不自动清理。" : nil;
+    if (section==2) return self.unknownRows.count ? @"点击目录进入只读深度检测：类型组成、文件时间与最大文件。未知不等于必需，也不等于垃圾。退出后先做全目录内容审查：无数据证据的自动清理，检出数据证据的自动仅清理其中的日志文件（数据与未知内容保留），无需手动定级。每目录开关默认开启（自动审查）；关闭则保留该目录，不自动清理。" : nil;
     if (section==3) return self.otherRows.count ? @"这些目录可能同时包含资源、业务状态或缓存，尚未逐项确认；不自动清理。已知敏感持久化目录已隐藏。" : nil;
     NSDictionary *footerStates=[self axs_cachekeeper_display:@"appEnabled.plist"];
     NSString *message=axs_cachekeeper_full_clear(footerStates[self.bundle]) ?
-        @"首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后处理。全量清理已开启：标准缓存目录内的全部文件都清空（含数据库与未知文件）；未知目录退出后先做全目录内容审查，无数据证据的自动清理，检出数据证据的整目录保留。已选目录内新增内容自动覆盖；手动关闭的目录保持排除。" :
-        @"首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后删除可识别媒体；未知目录退出后先做全目录内容审查，无数据证据的自动清理，检出数据证据的整目录保留。已选目录内新增内容自动覆盖；新增标准缓存根按自动发现选项纳入，手动关闭的目录保持排除。";
+        @"首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后处理。全量清理已开启：标准缓存目录内的全部文件都清空（含数据库与未知文件）；未知目录退出后先做全目录内容审查，无数据证据的自动清理，检出数据证据的自动仅清理其中的日志文件。已选目录内新增内容自动覆盖；手动关闭的目录保持排除。" :
+        @"首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后删除可识别媒体；未知目录退出后先做全目录内容审查，无数据证据的自动清理，检出数据证据的自动仅清理其中的日志文件。已选目录内新增内容自动覆盖；新增标准缓存根按自动发现选项纳入，手动关闭的目录保持排除。";
     return self.scanError.length ? [self.scanError stringByAppendingFormat:@"\n%@",message] : message;
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
