@@ -18,10 +18,13 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @property(nonatomic,copy) NSString *appName;
 @end
 
-// 分类 Tab：0 已开启，1 用户应用（App Store），2 巨魔应用（无商店收据），3 收藏应用。
-// 系统应用不进缓存管家：只排除包体在 /Applications/ 下的真系统应用；巨魔安装的应用
-// applicationType 也是 @"System"，但包体在容器目录下，必须放行（#59 真机：旧的类型排除
-// 把全部巨魔应用都藏掉了）。
+// 分类 Tab：0 已开启，1 用户应用（App Store），2 巨魔应用（TrollStore），3 收藏应用。
+// 系统应用不进缓存管家：只排除包体不在容器目录下的 System 应用——商店与巨魔应用一律在
+// /var/containers/Bundle/Application/ 下，系统应用从不在此（只看 /Applications/ 不够，时钟等
+// 在 /System/Applications/，#60 真机漏进列表）。
+// 来源判据是 applicationType，不是收据：巨魔应用报 @"System"（CoreTrust 系统级信任），商店
+// 应用报 @"User"；解密的商店 IPA 包内常带原始 StoreKit 收据，收据判据会把巨魔应用误判为
+// 商店应用（#60 真机：轻悦时光落在用户应用）。
 @interface CKSettings : PSViewController <UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate, UIContextMenuInteractionDelegate>
 @property(nonatomic,strong) UITableView *table;
 @property(nonatomic,strong) UISegmentedControl *tabs;
@@ -223,15 +226,8 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 }
 - (void)viewWillDisappear:(BOOL)animated { [super viewWillDisappear:animated];[self.batchTimer invalidate];self.batchTimer=nil; }
 - (void)dealloc { [self.batchTimer invalidate]; }
-- (NSString *)axs_cachekeeper_source_for_proxy:(id)proxy bundleURL:(NSURL *)url {
-    if (axs_cachekeeper_app_property(proxy,@"appStoreReceiptURL")) return @"user";
-    NSString *base = url.path;
-    if ([base isKindOfClass:NSString.class] && base.length) {
-        NSFileManager *files = NSFileManager.defaultManager;
-        if ([files fileExistsAtPath:[base stringByAppendingPathComponent:@"StoreKit/receipt"]] ||
-            [files fileExistsAtPath:[base stringByAppendingPathComponent:@"_MASReceipt/receipt"]]) return @"user";
-    }
-    return @"troll";
+- (NSString *)axs_cachekeeper_source_for_type:(NSString *)type {
+    return [type isEqual:@"System"] ? @"troll" : @"user";
 }
 - (void)axs_cachekeeper_reload_apps {
     id manager=axs_cachekeeper_app_property(NSClassFromString(@"LSApplicationWorkspace"),@"defaultWorkspace");
@@ -245,7 +241,8 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     for (id proxy in installed) {
         NSString *type=axs_cachekeeper_app_property(proxy,@"applicationType");
         NSURL *url=axs_cachekeeper_app_property(proxy,@"bundleURL");
-        if ([type isEqual:@"System"] && [url.path hasPrefix:@"/Applications/"]) continue;
+        BOOL isContainer=[url.path containsString:@"/containers/Bundle/Application/"];
+        if ([type isEqual:@"System"] && !isContainer) continue;
         NSDictionary *app=axs_cachekeeper_application_entry(axs_cachekeeper_app_property(proxy,@"applicationIdentifier"),
             axs_cachekeeper_app_property(proxy,@"localizedName"),type,url);
         if (!app) continue;
@@ -253,7 +250,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
         NSString *pinyin=[name stringByApplyingTransform:NSStringTransformMandarinToLatin reverse:NO] ?: name;
         pinyin=[pinyin stringByApplyingTransform:NSStringTransformStripCombiningMarks reverse:NO] ?: pinyin;
         NSMutableDictionary *entry=[app mutableCopy];
-        entry[@"source"]=[self axs_cachekeeper_source_for_proxy:proxy bundleURL:url];
+        entry[@"source"]=[self axs_cachekeeper_source_for_type:type];
         NSString *version=axs_cachekeeper_app_property(proxy,@"shortVersionString");
         if ([version isKindOfClass:NSString.class] && version.length) entry[@"version"]=version;
         entry[@"pinyin"]=pinyin;
