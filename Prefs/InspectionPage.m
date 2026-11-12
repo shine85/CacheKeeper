@@ -93,6 +93,8 @@
     else [text appendString:@"本目录尚无清理回执；占用减少不能据此归因于插件。\n\n"];
     if ([cleanup[@"purgeClassification"] isEqual:@"blocked"]) [text appendFormat:@"内容审查：整根保留，检出数据证据于 %@。\n\n",cleanup[@"purgeEvidence"] ?: @""];
     else if ([cleanup[@"purgeClassification"] isEqual:@"mixed"]) [text appendFormat:@"内容审查：混合目录，仅清理日志文件；首条证据 %@。\n\n",cleanup[@"purgeEvidence"] ?: @""];
+    else if ([cleanup[@"purgeClassification"] isEqual:@"invalid"]) [text appendFormat:@"内容审查：分类已失效，预检后内容变化，本轮延期，下轮重新预检；触发条目 %@。\n\n",cleanup[@"purgeEvidence"] ?: @""];
+    else if ([cleanup[@"purgeClassification"] isEqual:@"paused"]) [text appendString:@"内容审查：未知内容待识别，暂不自动清理；专属识别规则后续按占用补充。\n\n"];
     else if ([cleanup[@"purgeClassification"] isEqual:@"clean"]) [text appendString:@"内容审查：无数据证据。\n\n"];
     if ([self axs_cachekeeper_judged]) [text appendString:@"本目录已定级为日志目录：该 APP 完全退出后，仅清理本目录内的日志特征文件（.log/.alog/.xlog），数据与未知内容保留；可在本页取消定级。\n\n"];
     for (NSDictionary *failure in cleanup[@"failureDetails"]) [text appendFormat:@"失败样本：%@ · errno %@\n%@\n%@\n\n",failure[@"stage"],failure[@"code"],failure[@"path"],failure[@"detail"]];

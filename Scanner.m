@@ -523,6 +523,8 @@ void CKApplyDirectorySwitches(void) {
                 NSString *purgeClassification = @"";
                 if (sweep.purgeBlocked) purgeClassification = @"blocked";
                 else if (sweep.purgeMixed) purgeClassification = @"mixed";
+                else if (sweep.purgeInvalid) purgeClassification = @"invalid";
+                else if (sweep.purgePaused) purgeClassification = @"paused";
                 else if (sweep.purgeMode) purgeClassification = @"clean";
                 directoryReports[relative]=@{@"updated":NSDate.date,@"complete":@(sweep.complete),@"checking":@(sweep.checking),@"cancelled":@(sweep.cancelled),
                     @"removed":@(sweep.removed),@"bytes":@(sweep.bytes),@"protected":@(sweep.protectedCount),@"recent":@(sweep.recentCount),@"changed":@(sweep.changedCount),@"failed":@(sweep.failed),@"error":sweep.error ?: @"",@"failureDetails":sweep.failureDetails ?: @[],@"purgeClassification":purgeClassification,@"purgeEvidence":sweep.purgeEvidence ?: @""};

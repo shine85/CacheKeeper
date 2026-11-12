@@ -24,6 +24,11 @@
 @property(nonatomic, readwrite) BOOL purgeMode;
 @property(nonatomic) BOOL purgeBlocked;
 @property(nonatomic) BOOL purgeMixed;
+@property(nonatomic) BOOL purgeInvalid;
+@property(nonatomic) BOOL purgePaused;
+@property(nonatomic, readwrite) BOOL verifying;
+@property(nonatomic,strong) NSMutableSet<NSString *> *verifiedSeen;
+@property(nonatomic) BOOL verifyIncomplete;
 @property(nonatomic, readwrite, copy) NSString *purgeEvidence;
 @property(nonatomic) dev_t device;
 @property(nonatomic) ino_t inode;
@@ -103,7 +108,7 @@
 }
 - (NSArray *)axs_cachekeeper_snapshot:(struct stat)info {
     return @[@(info.st_ino),@(info.st_dev),@(info.st_mtimespec.tv_sec),@(info.st_mtimespec.tv_nsec),
-        @(info.st_ctimespec.tv_sec),@(info.st_ctimespec.tv_nsec)];
+        @(info.st_ctimespec.tv_sec),@(info.st_ctimespec.tv_nsec),@(info.st_size)];
 }
 // 目录快照的记录键统一标准化：枚举器给出的目录路径形态（尾随斜杠等）与删除时构造/剥离的形态
 // 在真机上可能不一致，键不统一会让复核全灭（31.1 真机 alog 身份核对失败、删除 0）。
@@ -116,6 +121,7 @@
         includingPropertiesForKeys:nil options:0 errorHandler:^BOOL(NSURL *url, NSError *error) {
             typeof(self) strong = weak;
             strong.failed++;
+            if (strong.verifying) strong.verifyIncomplete = YES;
             [strong.dataDirectories addObject:strong.root];
             strong.error = [NSString stringWithFormat:@"无法遍历 %@：%@", url.lastPathComponent, error.localizedDescription];
             return YES;
@@ -159,6 +165,107 @@
     // 首条证据存相对路径，随分目录回执落盘（审计第 10 项）；error 会被后续失败覆盖，不能作为证据载体。
     self.purgeEvidence = relative;
     self.error = [NSString stringWithFormat:@"检出数据证据，已自动仅清理其中的日志文件：%@", relative];
+}
+// 分类失效（方案任务 1，P1-1）：零证据分类只在完整且仍有效时授权全根删除。
+// 预检后内容集合/证据变化（新增条目、缺失条目、原地改写、读取不完整）使分类失效：
+// 本轮立即延期，尚未执行的旧计划全部失效；保留已删计数，下轮重新预检。
+// 不静默回退为仅跳过变化项（那会让旧普通文件继续按过期分类删除）。
+// 证据判断不受年龄/nlink/删除资格过滤：近期文件、硬链接、新目录中的证据同样生效。
+- (BOOL)axs_cachekeeper_entry_has_evidence:(NSString *)entry info:(struct stat)info {
+    NSString *relative=[entry hasPrefix:[self.root stringByAppendingString:@"/"]] ?
+        [entry substringFromIndex:self.root.length + 1] : entry.lastPathComponent;
+    if (S_ISDIR(info.st_mode))
+        return axs_cachekeeper_data_marker(entry.lastPathComponent) || axs_cachekeeper_protected_path(relative);
+    if (axs_cachekeeper_data_marker(entry.lastPathComponent) || axs_cachekeeper_purge_evidence_path(relative)) return YES;
+    NSString *parent=entry.stringByDeletingLastPathComponent;
+    int directory=axs_cachekeeper_open_directory(parent);
+    if (directory<0) return errno!=ENOENT;
+    int file=openat(directory,entry.lastPathComponent.fileSystemRepresentation,O_RDONLY|O_NOFOLLOW|O_NONBLOCK);
+    if (file<0) { int code=errno; close(directory); return code!=ENOENT; }
+    struct stat opened;
+    unsigned char signature[16]={0};
+    ssize_t count=-1;
+    BOOL identityOK=NO;
+    if (!fstat(file,&opened) && S_ISREG(opened.st_mode) && opened.st_ino==info.st_ino && opened.st_dev==info.st_dev) {
+        identityOK=YES;
+        count=pread(file,signature,sizeof(signature),0);
+    }
+    int code=errno;
+    close(file); close(directory);
+    if (!identityOK) return YES;
+    if (count<0) return code!=ENOENT;
+    BOOL shortRead = count < MIN((ssize_t)sizeof(signature), (ssize_t)opened.st_size);
+    if (shortRead) return YES;
+    return (count>=15 && !memcmp(signature,"SQLite format 3",15)) || (count>=6 && !memcmp(signature,"bplist",6));
+}
+- (void)axs_cachekeeper_invalidate:(NSString *)entry kind:(NSString *)kind evidence:(BOOL)evidence {
+    if (self.purgeInvalid) return;
+    self.purgeInvalid = YES;
+    self.changedCount++;
+    NSString *relative=[entry hasPrefix:[self.root stringByAppendingString:@"/"]] ?
+        [entry substringFromIndex:self.root.length + 1] : entry.lastPathComponent;
+    self.purgeEvidence = relative;
+    self.error = evidence ?
+        [NSString stringWithFormat:@"分类已失效：预检后检出新数据证据（%@），本轮延期，下轮重新预检", relative] :
+        [NSString stringWithFormat:@"分类已失效：预检后%@（%@），本轮延期，下轮重新预检", kind, relative];
+}
+// 验证阶段入口：仅零证据清理根（预检未检出任何证据）需要；混合/整根保留的根
+// 已走保守策略，分类变化不改变其删除策略，无需验证。
+- (BOOL)axs_cachekeeper_begin_verify {
+    if (!self.purgeMode || self.purgeBlocked || self.purgeMixed) return NO;
+    self.verifying = YES;
+    self.verifyIncomplete = NO;
+    self.verifiedSeen = [NSMutableSet new];
+    // 根目录本身不在枚举输出中，预先标记为已见，避免收尾时误判缺失。
+    [self.verifiedSeen addObject:[@"d:" stringByAppendingString:[self axs_cachekeeper_directory_key:self.root]]];
+    [self axs_cachekeeper_open_enumerator];
+    return YES;
+}
+- (void)axs_cachekeeper_verify_entry:(NSString *)entry info:(struct stat)info {
+    if (S_ISDIR(info.st_mode)) {
+        NSString *key=[self axs_cachekeeper_directory_key:entry];
+        if (!self.directorySnapshots[key]) {
+            [self axs_cachekeeper_invalidate:entry kind:@"新增目录" evidence:[self axs_cachekeeper_entry_has_evidence:entry info:info]];
+            return;
+        }
+        [self.verifiedSeen addObject:[@"d:" stringByAppendingString:key]];
+        if (![[self axs_cachekeeper_snapshot:info] isEqual:self.directorySnapshots[key]])
+            [self axs_cachekeeper_invalidate:entry kind:@"目录内容变化" evidence:NO];
+        return;
+    }
+    if (!S_ISREG(info.st_mode)) return;
+    NSString *parent=entry.stringByDeletingLastPathComponent;
+    NSArray *record=self.fileSnapshots[parent][entry.lastPathComponent];
+    if (!record) {
+        [self axs_cachekeeper_invalidate:entry kind:@"新增文件" evidence:[self axs_cachekeeper_entry_has_evidence:entry info:info]];
+        return;
+    }
+    [self.verifiedSeen addObject:[@"f:" stringByAppendingString:[parent stringByAppendingPathComponent:entry.lastPathComponent]]];
+    if (![[self axs_cachekeeper_snapshot:info] isEqual:record])
+        [self axs_cachekeeper_invalidate:entry kind:@"文件内容变化" evidence:[self axs_cachekeeper_entry_has_evidence:entry info:info]];
+}
+// 验证枚举结束：核对快照条目是否全部见过；缺失条目（预检后被删）同样使分类失效。
+// 返回 YES 表示验证通过，可进入删除；NO 表示已失效，调用方收尾。
+- (BOOL)axs_cachekeeper_verify_complete {
+    if (self.verifyIncomplete) {
+        [self axs_cachekeeper_invalidate:self.root kind:@"读取不完整" evidence:NO];
+        return NO;
+    }
+    for (NSString *key in self.directorySnapshots) {
+        if (![self.verifiedSeen containsObject:[@"d:" stringByAppendingString:key]]) {
+            [self axs_cachekeeper_invalidate:key kind:@"目录缺失" evidence:NO];
+            return NO;
+        }
+    }
+    for (NSString *parent in self.fileSnapshots) {
+        for (NSString *name in self.fileSnapshots[parent]) {
+            if (![self.verifiedSeen containsObject:[@"f:" stringByAppendingString:[parent stringByAppendingPathComponent:name]]]) {
+                [self axs_cachekeeper_invalidate:[parent stringByAppendingPathComponent:name] kind:@"文件缺失" evidence:NO];
+                return NO;
+            }
+        }
+    }
+    return YES;
 }
 - (void)axs_cachekeeper_inspect:(NSString *)entry info:(struct stat)info {
     if (S_ISDIR(info.st_mode)) {
@@ -451,7 +558,16 @@
         }
         NSURL *enumerated = self.entries.nextObject;
         if (!enumerated) {
+            if (self.checking && self.verifying) {
+                // 验证枚举结束：核对快照全覆盖；通过则进入删除，未通过已失效、收尾。
+                if ([self axs_cachekeeper_verify_complete]) {
+                    self.checking=NO; self.verifying=NO; [self axs_cachekeeper_open_enumerator]; continue;
+                }
+                self.complete=YES; self.entries=nil; return;
+            }
             if (self.checking && ![self axs_cachekeeper_is_data_directory:self.root]) {
+                // 零证据清理根：预检完成后先验证分类仍有效，再删除（方案任务 1）。
+                if ([self axs_cachekeeper_begin_verify]) continue;
                 self.checking=NO;[self axs_cachekeeper_open_enumerator];continue;
             }
             if (self.checking) self.protectedCount++;
@@ -473,6 +589,11 @@
         }
         // URL 枚举器不递归符号链接；对非目录调用 skipDescendants 会影响后续遍历。
         if (S_ISLNK(info.st_mode)) continue;
+        if (self.checking && self.verifying) {
+            [self axs_cachekeeper_verify_entry:entry info:info];
+            if (self.purgeInvalid) { self.complete=YES; self.entries=nil; return; }
+            continue;
+        }
         if (self.checking) { self.inspected++;[self axs_cachekeeper_inspect:entry info:info]; continue; }
         // 清理模式目录名命中数据证据：整根出局，本轮逐项计保护、不删、不计失败；证据路径已记入 error。
         // 文件级证据改走混合降级（purgeMixed），不经过此处，删除时按日志门逐文件判定。
@@ -485,8 +606,40 @@
         // 日志模式的文件级数据保护：预检已标记的数据文件只跳过自身（同目录日志不受影响）。
         if ((self.logMode || self.purgeMode) && [self.dataFiles containsObject:entry]) { self.protectedCount++; continue; }
         NSString *relative = [entry substringFromIndex:self.root.length + 1];
+        // 零证据清理根：删除枚举中遇到的新条目（预检后出现）须做证据判断，不受
+        // 年龄/nlink/删除资格过滤；带证据的新条目使分类失效，本轮立即延期
+        //（方案任务 1：后续批次重验的实际形态——删除枚举本身就是持续核验）。
+        if (self.purgeMode && !self.purgeBlocked && !self.purgeMixed && !self.purgeInvalid) {
+            if (S_ISDIR(info.st_mode)) {
+                if (!self.directorySnapshots[[self axs_cachekeeper_directory_key:entry]] &&
+                    [self axs_cachekeeper_entry_has_evidence:entry info:info]) {
+                    [self axs_cachekeeper_invalidate:entry kind:@"新增目录" evidence:YES];
+                    self.complete=YES; self.entries=nil; return;
+                }
+            } else if (S_ISREG(info.st_mode)) {
+                NSString *verifyParent=entry.stringByDeletingLastPathComponent;
+                if (!self.fileSnapshots[verifyParent][entry.lastPathComponent]) {
+                    if ([self axs_cachekeeper_entry_has_evidence:entry info:info]) {
+                        [self axs_cachekeeper_invalidate:entry kind:@"新增文件" evidence:YES];
+                        self.complete=YES; self.entries=nil; return;
+                    }
+                    // 无证据的新文件：本轮不删（无预检记录），计变化后跳过。
+                    self.changedCount++; continue;
+                }
+            }
+        }
         // 全量清理的根已由策略层限定为平台缓存契约目录，根内不再按受保护名拦截；清理模式的
         // 证据审查已在预检完成（口径见 purge_evidence_path，配置类 .plist/.json 不算证据），此处同样放行；其余模式不变。
+        // 过渡期零证据暂停（用户 2026-11-12 22:43 定）：零证据清理根暂不自动删除——
+        // 仅凭“没检出证据”不能证明内容可恢复；已确认可丢弃的内容（标准缓存根、日志定级、
+        // 混合目录日志门）继续清理。专属 APP 识别规则后续按占用逐个设计，不以暂停为永久理由。
+        if (self.purgeMode && !self.purgeBlocked && !self.purgeMixed && !self.purgeInvalid) {
+            if (!self.purgePaused) {
+                self.purgePaused = YES;
+                self.error = @"未知内容待识别，暂不自动清理（过渡期：仅凭零证据不删除）";
+            }
+            self.protectedCount++;if (S_ISDIR(info.st_mode)) [self.entries skipDescendants];continue;
+        }
         if (!self.fullClear && !self.purgeMode && axs_cachekeeper_protected_path(relative)) {
             self.protectedCount++;
             if (S_ISDIR(info.st_mode)) [self.entries skipDescendants];

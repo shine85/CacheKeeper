@@ -649,12 +649,12 @@ int main(int argc, const char *argv[]) {
         writeFile([purgeRoot stringByAppendingPathComponent:@"top.txt"]);
         AxsCacheKeeperSweep *purgeClean=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
         for (NSUInteger pass=0;!purgeClean.complete && pass<100;pass++) [purgeClean advance:64 shouldContinue:^BOOL{return YES;}];
-        require(purgeClean.complete && purgeClean.failed==0 && purgeClean.removed==4 && !purgeClean.purgeBlocked && !purgeClean.purgeEvidence,
-            [NSString stringWithFormat:@"无数据证据的未知目录全清（removed=%lu failed=%lu error=%@）",(unsigned long)purgeClean.removed,(unsigned long)purgeClean.failed,purgeClean.error]);
-        require(![fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime/model.bin"]] &&
-            ![fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime/config.json"]] &&
-            ![fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime/settings.plist"]] &&
-            ![fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"top.txt"]], @"运行时文件与配置类文件随目录清理");
+        require(purgeClean.complete && purgeClean.failed==0 && purgeClean.removed==0 && purgeClean.purgePaused && !purgeClean.purgeBlocked && !purgeClean.purgeEvidence,
+            [NSString stringWithFormat:@"过渡期零证据暂停：不自动删除（removed=%lu failed=%lu error=%@）",(unsigned long)purgeClean.removed,(unsigned long)purgeClean.failed,purgeClean.error]);
+        require([fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime/model.bin"]] &&
+            [fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime/config.json"]] &&
+            [fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime/settings.plist"]] &&
+            [fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"top.txt"]], @"过渡期零证据根文件全部保留，待专属识别规则");
         NSString *purgeDb=[fixture stringByAppendingPathComponent:@"purge-db"];
         require([fm createDirectoryAtPath:purgeDb withIntermediateDirectories:YES attributes:nil error:nil], @"含数据库的清理目录夹具");
         writeMedia([purgeDb stringByAppendingPathComponent:@"thumb.png"]);
@@ -754,19 +754,133 @@ int main(int argc, const char *argv[]) {
             ![fm fileExistsAtPath:[staleDir stringByAppendingPathComponent:@"other.log"]], @"删除阶段检出新数据证据重标混合：数据库保留、同目录日志仍可删");
         NSString *hotPurgeRoot=[fixture stringByAppendingPathComponent:@"hot-purge"];
         require([fm createDirectoryAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready"] withIntermediateDirectories:YES attributes:nil error:nil], @"热清理目录夹具");
-        writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-one.bin"]);
-        writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-two.txt"]);
-        writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/keep-changing.bin"]);
+        writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-one.log"]);
+        writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-two.log"]);
+        writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/keep-changing.log"]);
+        require([@"SQLite format 3\\0payload" writeToFile:[hotPurgeRoot stringByAppendingPathComponent:@"ready/data.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"热清理混合证据");
         AxsCacheKeeperSweep *hotPurge=[[AxsCacheKeeperSweep alloc] initWithRoot:hotPurgeRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
         for (NSUInteger pass=0;hotPurge.checking && !hotPurge.complete && pass<100;pass++) [hotPurge advance:1 shouldContinue:^BOOL{return YES;}];
         require(!hotPurge.checking && hotPurge.removed==0, @"清理模式预检阶段不删除");
-        writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/keep-changing.bin"]);
+        writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/keep-changing.log"]);
         for (NSUInteger pass=0;!hotPurge.complete && pass<100;pass++) [hotPurge advance:64 shouldContinue:^BOOL{return YES;}];
-        require(hotPurge.complete && hotPurge.failed==0 && hotPurge.removed==2 && hotPurge.changedCount>0,
+        require(hotPurge.complete && hotPurge.failed==0 && hotPurge.removed==2 && hotPurge.changedCount>0 && hotPurge.purgeMixed,
             [NSString stringWithFormat:@"清理模式文件级稳定性门：兄弟变化只跳过自身（removed=%lu failed=%lu changed=%lu error=%@）",(unsigned long)hotPurge.removed,(unsigned long)hotPurge.failed,(unsigned long)hotPurge.changedCount,hotPurge.error]);
-        require(![fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-one.bin"]] &&
-            ![fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-two.txt"]] &&
-            [fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/keep-changing.bin"]], @"变化文件保留、稳定文件删除");
+        require(![fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-one.log"]] &&
+            ![fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-two.log"]] &&
+            [fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/keep-changing.log"]] &&
+            [fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/data.bin"]], @"变化文件保留、稳定日志删除、数据库保留");
+        // 方案任务 1（P1-1）：根分类失效黑盒测试。预检后内容变化（新增数据库、原地改写、
+        // 新增受保护子树、新增近期/硬链接证据、条目缺失、读失败）须使零证据分类失效，
+        // 本轮延期、稳定文件保留；自身删除不误判。测试只通过 advance 推进与文件操作，
+        // 不碰私有 fileSnapshots（已有白盒 stale 测试保留为窄分支测试）。
+        NSString *invalNewDb=[fixture stringByAppendingPathComponent:@"inval-newdb"];
+        require([fm createDirectoryAtPath:invalNewDb withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效新数据库夹具");
+        writeMedia([invalNewDb stringByAppendingPathComponent:@"victim.bin"]);
+        writeFile([invalNewDb stringByAppendingPathComponent:@"other.log"]);
+        AxsCacheKeeperSweep *invalDb=[[AxsCacheKeeperSweep alloc] initWithRoot:invalNewDb clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!invalDb.verifying && !invalDb.complete && pass<100;pass++) [invalDb advance:1 shouldContinue:^BOOL{return YES;}];
+        require(invalDb.verifying, @"预检完成进入验证阶段");
+        require([@"SQLite format 3\\0payload" writeToFile:[invalNewDb stringByAppendingPathComponent:@"state.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"验证中新增伪装数据库");
+        for (NSUInteger pass=0;!invalDb.complete && pass<100;pass++) [invalDb advance:64 shouldContinue:^BOOL{return YES;}];
+        require(invalDb.complete && invalDb.purgeInvalid && invalDb.removed==0 && [invalDb.purgeEvidence isEqual:@"state.bin"] &&
+            [fm fileExistsAtPath:[invalNewDb stringByAppendingPathComponent:@"victim.bin"]] &&
+            [fm fileExistsAtPath:[invalNewDb stringByAppendingPathComponent:@"other.log"]], @"预检后新增数据库使分类失效：本轮延期、稳定文件保留");
+        // 枚举顺序调换：创建顺序相反，同一断言。
+        NSString *invalNewDbRev=[fixture stringByAppendingPathComponent:@"inval-newdb-rev"];
+        require([fm createDirectoryAtPath:invalNewDbRev withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效顺序夹具");
+        writeFile([invalNewDbRev stringByAppendingPathComponent:@"other.log"]);
+        writeMedia([invalNewDbRev stringByAppendingPathComponent:@"victim.bin"]);
+        AxsCacheKeeperSweep *invalDbRev=[[AxsCacheKeeperSweep alloc] initWithRoot:invalNewDbRev clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!invalDbRev.verifying && !invalDbRev.complete && pass<100;pass++) [invalDbRev advance:1 shouldContinue:^BOOL{return YES;}];
+        require(invalDbRev.verifying, @"顺序夹具进入验证阶段");
+        require([@"SQLite format 3\\0payload" writeToFile:[invalNewDbRev stringByAppendingPathComponent:@"state.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"顺序夹具新增数据库");
+        for (NSUInteger pass=0;!invalDbRev.complete && pass<100;pass++) [invalDbRev advance:64 shouldContinue:^BOOL{return YES;}];
+        require(invalDbRev.complete && invalDbRev.purgeInvalid && invalDbRev.removed==0 &&
+            [fm fileExistsAtPath:[invalNewDbRev stringByAppendingPathComponent:@"victim.bin"]] &&
+            [fm fileExistsAtPath:[invalNewDbRev stringByAppendingPathComponent:@"other.log"]], @"调换创建顺序后新增数据库仍使分类失效");
+        NSString *invalRewrite=[fixture stringByAppendingPathComponent:@"inval-rewrite"];
+        require([fm createDirectoryAtPath:invalRewrite withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效改写夹具");
+        NSString *rewriteVictim=[invalRewrite stringByAppendingPathComponent:@"victim.bin"];
+        writeMedia(rewriteVictim);
+        writeFile([invalRewrite stringByAppendingPathComponent:@"other.log"]);
+        AxsCacheKeeperSweep *invalRw=[[AxsCacheKeeperSweep alloc] initWithRoot:invalRewrite clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!invalRw.verifying && !invalRw.complete && pass<100;pass++) [invalRw advance:1 shouldContinue:^BOOL{return YES;}];
+        require(invalRw.verifying, @"改写夹具进入验证阶段");
+        NSFileHandle *rewriteWriter=[NSFileHandle fileHandleForWritingAtPath:rewriteVictim];
+        [rewriteWriter writeData:[@"SQLite format 3\\0payload" dataUsingEncoding:NSUTF8StringEncoding]];
+        [rewriteWriter closeFile];
+        for (NSUInteger pass=0;!invalRw.complete && pass<100;pass++) [invalRw advance:64 shouldContinue:^BOOL{return YES;}];
+        require(invalRw.complete && invalRw.purgeInvalid && invalRw.removed==0 && [invalRw.purgeEvidence isEqual:@"victim.bin"] &&
+            [fm fileExistsAtPath:rewriteVictim] &&
+            [fm fileExistsAtPath:[invalRewrite stringByAppendingPathComponent:@"other.log"]], @"原地改写为数据库使分类失效：改写文件与稳定文件均保留");
+        NSString *invalPrefs=[fixture stringByAppendingPathComponent:@"inval-prefs"];
+        require([fm createDirectoryAtPath:invalPrefs withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效受保护子树夹具");
+        writeFile([invalPrefs stringByAppendingPathComponent:@"plain.txt"]);
+        AxsCacheKeeperSweep *invalPf=[[AxsCacheKeeperSweep alloc] initWithRoot:invalPrefs clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!invalPf.verifying && !invalPf.complete && pass<100;pass++) [invalPf advance:1 shouldContinue:^BOOL{return YES;}];
+        require(invalPf.verifying, @"受保护子树夹具进入验证阶段");
+        require([fm createDirectoryAtPath:[invalPrefs stringByAppendingPathComponent:@"Preferences"] withIntermediateDirectories:YES attributes:nil error:nil], @"验证中新增 Preferences 子树");
+        writeFile([invalPrefs stringByAppendingPathComponent:@"Preferences/a.txt"]);
+        for (NSUInteger pass=0;!invalPf.complete && pass<100;pass++) [invalPf advance:64 shouldContinue:^BOOL{return YES;}];
+        require(invalPf.complete && invalPf.purgeInvalid && invalPf.removed==0 &&
+            [fm fileExistsAtPath:[invalPrefs stringByAppendingPathComponent:@"plain.txt"]], @"新增受保护子树使分类失效");
+        NSString *invalRecent=[fixture stringByAppendingPathComponent:@"inval-recent"];
+        require([fm createDirectoryAtPath:invalRecent withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效近期证据夹具");
+        writeMedia([invalRecent stringByAppendingPathComponent:@"stable.bin"]);
+        AxsCacheKeeperSweep *invalRc=[[AxsCacheKeeperSweep alloc] initWithRoot:invalRecent clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!invalRc.verifying && !invalRc.complete && pass<100;pass++) [invalRc advance:1 shouldContinue:^BOOL{return YES;}];
+        require(invalRc.verifying, @"近期证据夹具进入验证阶段");
+        NSString *recentDb=[invalRecent stringByAppendingPathComponent:@"session.db"];
+        writeFile(recentDb);
+        require([fm setAttributes:@{NSFileModificationDate:[NSDate dateWithTimeIntervalSince1970:future-30]} ofItemAtPath:recentDb error:nil], @"近期证据改时间戳");
+        for (NSUInteger pass=0;!invalRc.complete && pass<100;pass++) [invalRc advance:64 shouldContinue:^BOOL{return YES;}];
+        require(invalRc.complete && invalRc.purgeInvalid && invalRc.removed==0 &&
+            [fm fileExistsAtPath:[invalRecent stringByAppendingPathComponent:@"stable.bin"]], @"近期文件的数据证据不受年龄过滤：仍使分类失效");
+        NSString *invalHardlink=[fixture stringByAppendingPathComponent:@"inval-hardlink"];
+        require([fm createDirectoryAtPath:invalHardlink withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效硬链接夹具");
+        writeMedia([invalHardlink stringByAppendingPathComponent:@"stable.bin"]);
+        NSString *hardlinkSource=[fixture stringByAppendingPathComponent:@"inval-hardlink-source.bin"];
+        require([@"SQLite format 3\\0payload" writeToFile:hardlinkSource atomically:YES encoding:NSUTF8StringEncoding error:nil], @"硬链接源文件");
+        AxsCacheKeeperSweep *invalHl=[[AxsCacheKeeperSweep alloc] initWithRoot:invalHardlink clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!invalHl.verifying && !invalHl.complete && pass<100;pass++) [invalHl advance:1 shouldContinue:^BOOL{return YES;}];
+        require(invalHl.verifying, @"硬链接夹具进入验证阶段");
+        require(!link(hardlinkSource.fileSystemRepresentation,[invalHardlink stringByAppendingPathComponent:@"linked.bin"].fileSystemRepresentation), @"验证中新增硬链接数据库");
+        for (NSUInteger pass=0;!invalHl.complete && pass<100;pass++) [invalHl advance:64 shouldContinue:^BOOL{return YES;}];
+        require(invalHl.complete && invalHl.purgeInvalid && invalHl.removed==0 &&
+            [fm fileExistsAtPath:[invalHardlink stringByAppendingPathComponent:@"stable.bin"]], @"硬链接的数据证据不受 nlink 过滤：仍使分类失效");
+        NSString *invalMissing=[fixture stringByAppendingPathComponent:@"inval-missing"];
+        require([fm createDirectoryAtPath:invalMissing withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效缺失夹具");
+        writeMedia([invalMissing stringByAppendingPathComponent:@"a.bin"]);
+        writeFile([invalMissing stringByAppendingPathComponent:@"b.bin"]);
+        AxsCacheKeeperSweep *invalMs=[[AxsCacheKeeperSweep alloc] initWithRoot:invalMissing clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!invalMs.verifying && !invalMs.complete && pass<100;pass++) [invalMs advance:1 shouldContinue:^BOOL{return YES;}];
+        require(invalMs.verifying, @"缺失夹具进入验证阶段");
+        require([fm removeItemAtPath:[invalMissing stringByAppendingPathComponent:@"b.bin"] error:nil], @"验证中删除快照文件");
+        for (NSUInteger pass=0;!invalMs.complete && pass<100;pass++) [invalMs advance:64 shouldContinue:^BOOL{return YES;}];
+        require(invalMs.complete && invalMs.purgeInvalid && invalMs.removed==0 &&
+            [fm fileExistsAtPath:[invalMissing stringByAppendingPathComponent:@"a.bin"]], @"预检后条目缺失使分类失效");
+        NSString *invalUnreadable=[fixture stringByAppendingPathComponent:@"inval-unreadable"];
+        require([fm createDirectoryAtPath:invalUnreadable withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效读失败夹具");
+        writeMedia([invalUnreadable stringByAppendingPathComponent:@"stable.bin"]);
+        AxsCacheKeeperSweep *invalUr=[[AxsCacheKeeperSweep alloc] initWithRoot:invalUnreadable clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!invalUr.verifying && !invalUr.complete && pass<100;pass++) [invalUr advance:1 shouldContinue:^BOOL{return YES;}];
+        require(invalUr.verifying, @"读失败夹具进入验证阶段");
+        NSString *unreadableNew=[invalUnreadable stringByAppendingPathComponent:@"secret2.bin"];
+        require([@"SQLite format 3\\0payload" writeToFile:unreadableNew atomically:YES encoding:NSUTF8StringEncoding error:nil], @"验证中新增不可读文件");
+        require(!chmod(unreadableNew.fileSystemRepresentation, 0000), @"不可读文件改权限");
+        for (NSUInteger pass=0;!invalUr.complete && pass<100;pass++) [invalUr advance:64 shouldContinue:^BOOL{return YES;}];
+        chmod(unreadableNew.fileSystemRepresentation, 0644);
+        require(invalUr.complete && invalUr.purgeInvalid && invalUr.removed==0 &&
+            [fm fileExistsAtPath:[invalUnreadable stringByAppendingPathComponent:@"stable.bin"]], @"读失败按不完整处理：仍使分类失效");
+        NSString *invalOwn=[fixture stringByAppendingPathComponent:@"inval-own"];
+        require([fm createDirectoryAtPath:invalOwn withIntermediateDirectories:YES attributes:nil error:nil], @"自身删除不误判夹具");
+        writeMedia([invalOwn stringByAppendingPathComponent:@"a.bin"]);
+        writeFile([invalOwn stringByAppendingPathComponent:@"b.bin"]);
+        AxsCacheKeeperSweep *invalOw=[[AxsCacheKeeperSweep alloc] initWithRoot:invalOwn clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!invalOw.complete && pass<100;pass++) [invalOw advance:64 shouldContinue:^BOOL{return YES;}];
+        require(invalOw.complete && !invalOw.purgeInvalid && invalOw.purgePaused && invalOw.removed==0 && invalOw.failed==0 &&
+            [fm fileExistsAtPath:[invalOwn stringByAppendingPathComponent:@"a.bin"]] &&
+            [fm fileExistsAtPath:[invalOwn stringByAppendingPathComponent:@"b.bin"]], @"无外部变化时不误判失效；过渡期零证据暂停，不删除");
         NSString *lateDir=[fixture stringByAppendingPathComponent:@"late-database"];
         require([fm createDirectoryAtPath:lateDir withIntermediateDirectories:YES attributes:nil error:nil], @"延迟发现数据库夹具");
         writeMedia([lateDir stringByAppendingPathComponent:@"a.png"]);
