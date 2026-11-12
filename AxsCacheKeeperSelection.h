@@ -136,7 +136,8 @@ static inline NSString *axs_cachekeeper_set_excluded_path(NSString *folder, NSSt
     NSMutableDictionary *states=axs_cachekeeper_edit_configuration(stateFile);
     if (!states) return @"原配置不可读或损坏，已停止保存。";
     NSMutableDictionary *state=axs_cachekeeper_app_state(states[bundle],axs_cachekeeper_app_enabled(states[bundle]));
-    NSMutableArray *list=[[axs_cachekeeper_exclusions(states[bundle]) mutableCopy] ?: [NSMutableArray new]];
+    NSMutableArray *list=[axs_cachekeeper_exclusions(states[bundle]) mutableCopy];
+    if (!list) list=[NSMutableArray new];
     [list removeObject:path];
     if (exclude) [list addObject:path];
     state[@"excludedPaths"]=axs_cachekeeper_parent_paths(list);
