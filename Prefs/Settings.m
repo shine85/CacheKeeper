@@ -79,6 +79,15 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     self.table.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.table.dataSource = self; self.table.delegate = self;
     [self.view addSubview:self.table];
+    // 左右滑动切换分组（与点 Tab 等价）：左滑下一组，右滑上一组，两端不循环。
+    // 挂在 self.view 上，列表、Tab 条、搜索栏区域的滑动都生效；竖滑滚动由表格的
+    // pan 手势处理，与横向滑动手势不冲突。
+    UISwipeGestureRecognizer *swipeLeft=[[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(swipeTab:)];
+    swipeLeft.direction=UISwipeGestureRecognizerDirectionLeft;
+    [self.view addGestureRecognizer:swipeLeft];
+    UISwipeGestureRecognizer *swipeRight=[[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(swipeTab:)];
+    swipeRight.direction=UISwipeGestureRecognizerDirectionRight;
+    [self.view addGestureRecognizer:swipeRight];
     self.navigationItem.rightBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"检测全部" style:UIBarButtonItemStylePlain target:self action:@selector(scanAll)];
 }
 - (void)viewDidLayoutSubviews {
@@ -95,6 +104,14 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 }
 - (void)tabChanged:(UISegmentedControl *)sender {
     self.selectedTab = sender.selectedSegmentIndex;
+    [self updateBatch];
+    [self.table setContentOffset:CGPointZero animated:NO];
+}
+- (void)swipeTab:(UISwipeGestureRecognizer *)gesture {
+    NSInteger next=self.selectedTab + (gesture.direction==UISwipeGestureRecognizerDirectionLeft ? 1 : -1);
+    if (next<0 || next>3) return;
+    self.selectedTab=next;
+    self.tabs.selectedSegmentIndex=next;
     [self updateBatch];
     [self.table setContentOffset:CGPointZero animated:NO];
 }
