@@ -270,7 +270,15 @@
         cell.textLabel.text=@"此 APP 缓存控制";
         NSDictionary *report = [self axs_cachekeeper_display:[@"Status/" stringByAppendingFormat:@"%@.auto.plist",self.bundle]];
         cell.detailTextLabel.numberOfLines = 0;
-        cell.detailTextLabel.text = axs_cachekeeper_summary(nil,report);
+        NSString *summaryText = axs_cachekeeper_summary(nil,report);
+        NSMutableAttributedString *summaryStyled = [[NSMutableAttributedString alloc] initWithString:summaryText];
+        NSRange lastLine = [summaryText rangeOfString:@"上次清理："];
+        if (lastLine.location != NSNotFound) {
+            NSUInteger lineEnd = lastLine.location;
+            while (lineEnd < summaryText.length && [summaryText characterAtIndex:lineEnd] != '\n') lineEnd++;
+            [summaryStyled addAttribute:NSForegroundColorAttributeName value:UIColor.systemRedColor range:NSMakeRange(lastLine.location, lineEnd - lastLine.location)];
+        }
+        cell.detailTextLabel.attributedText = summaryStyled;
         NSDictionary *states=[self axs_cachekeeper_display:@"appEnabled.plist"];
         NSDictionary *selected=[self axs_cachekeeper_display:@"directories.plist"];
         UISwitch *toggle=[UISwitch new];

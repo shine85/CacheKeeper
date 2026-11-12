@@ -214,6 +214,12 @@ int main(int argc, const char *argv[]) {
         NSString *summary = axs_cachekeeper_summary(@{@"rows":@[@{}]}, @{@"phase":@"auto", @"message":@"限写失败",
             @"removed":@3, @"bytes":@1048576, @"failed":@1});
         require([summary containsString:@"1 个"] && [summary containsString:@"3 个"] && [summary containsString:@"限写失败"], @"检测与清理结果同时可见");
+        NSString *lastSummary = axs_cachekeeper_summary(nil, @{@"removed":@5103, @"bytes":@0, @"lastRemoved":@294, @"lastBytes":@66846720});
+        require([lastSummary containsString:@"上次清理：63.75 MB"] && [lastSummary rangeOfString:@"上次清理："].location > [lastSummary rangeOfString:@"累计清理"].location, @"上次清理行紧跟累计清理并显示上轮 MB 数");
+        NSString *noLastSummary = axs_cachekeeper_summary(nil, @{@"removed":@5103, @"bytes":@0});
+        require(![noLastSummary containsString:@"上次清理"], @"未记录上轮时不显示上次清理行");
+        NSString *zeroLastSummary = axs_cachekeeper_summary(nil, @{@"removed":@5103, @"bytes":@0, @"lastRemoved":@0, @"lastBytes":@0});
+        require([zeroLastSummary containsString:@"上次清理：0.00 MB"], @"上轮零删除时显示 0.00 MB 而非缺行");
         NSTimeZone *previousZone=NSTimeZone.defaultTimeZone;
         [NSTimeZone setDefaultTimeZone:[NSTimeZone timeZoneWithName:@"Asia/Shanghai"]];
         NSDate *epoch=[NSDate dateWithTimeIntervalSince1970:0];

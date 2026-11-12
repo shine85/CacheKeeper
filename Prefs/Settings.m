@@ -55,7 +55,15 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     cell.textLabel.text = app[@"name"]; NSDictionary *status = [NSDictionary dictionaryWithContentsOfFile:[jbroot(@"/var/mobile/Library/CacheKeeper/Status") stringByAppendingPathComponent:[app[@"id"] stringByAppendingString:@".auto.plist"]]];
     cell.detailTextLabel.numberOfLines = 0;
     NSDictionary *scan=self.scanHistory[app[@"id"]];
-    cell.detailTextLabel.text=axs_cachekeeper_summary(scan,status);
+    NSString *summaryText=axs_cachekeeper_summary(scan,status);
+    NSMutableAttributedString *summaryStyled=[[NSMutableAttributedString alloc] initWithString:summaryText];
+    NSRange lastLine=[summaryText rangeOfString:@"上次清理："];
+    if (lastLine.location != NSNotFound) {
+        NSUInteger lineEnd=lastLine.location;
+        while (lineEnd < summaryText.length && [summaryText characterAtIndex:lineEnd] != '\n') lineEnd++;
+        [summaryStyled addAttribute:NSForegroundColorAttributeName value:UIColor.systemRedColor range:NSMakeRange(lastLine.location, lineEnd-lastLine.location)];
+    }
+    cell.detailTextLabel.attributedText=summaryStyled;
     UISwitch *toggle = [UISwitch new]; toggle.accessibilityIdentifier = app[@"id"];
     NSDictionary *directories=self.directoriesSnapshot;
     NSDictionary *states=self.statesSnapshot;

@@ -340,6 +340,7 @@ static inline NSString *axs_cachekeeper_summary(NSDictionary *scan, NSDictionary
         NSString *message = report[@"message"];
         if ([message isKindOfClass:NSString.class] && message.length) [parts addObject:message];
         [parts addObject:[NSString stringWithFormat:@"累计清理 %lu 个 · %.2f MB", (unsigned long)[report[@"removed"] unsignedIntegerValue], [report[@"bytes"] doubleValue] / 1048576.0]];
+        if (report[@"lastBytes"]) [parts addObject:[NSString stringWithFormat:@"上次清理：%.2f MB", [report[@"lastBytes"] doubleValue] / 1048576.0]];
         if ([report[@"failed"] unsignedIntegerValue]) [parts addObject:[NSString stringWithFormat:@"本轮失败 %@ 项", report[@"failed"]]];
         if (report[@"updated"]) [parts addObject:[NSString stringWithFormat:@"最近检查 %@", axs_cachekeeper_time_string(report[@"updated"])]];
     }
