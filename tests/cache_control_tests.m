@@ -818,6 +818,49 @@ int main(int argc, const char *argv[]) {
             !lstat([lockSub stringByAppendingPathComponent:@"b.txt"].fileSystemRepresentation, &lockInfo) && (lockInfo.st_mode & 0777) == 0600 &&
             ![NSDictionary dictionaryWithContentsOfFile:lockJournal].count, @"按记录精确恢复目录与文件权限并清空记录");
 
+        // 写锁硬链接保护（审计第 7 项）：硬链接文件与根外路径共享同一 inode，上锁会波及根外，必须跳过。
+        NSString *hardRoot = [fixture stringByAppendingPathComponent:@"lock-hard"];
+        NSString *hardFile = [hardRoot stringByAppendingPathComponent:@"shared.txt"];
+        NSString *hardOutside = [fixture stringByAppendingPathComponent:@"lock-hard-outside"];
+        require([fm createDirectoryAtPath:hardRoot withIntermediateDirectories:YES attributes:nil error:nil], @"硬链接写锁夹具");
+        writeFile(hardFile);
+        chmod(hardFile.fileSystemRepresentation, 0644);
+        require(!link(hardFile.fileSystemRepresentation, hardOutside.fileSystemRepresentation), @"建立硬链接");
+        NSString *hardJournal = [fixture stringByAppendingPathComponent:@"lock-hard-permissions.plist"];
+        NSDictionary *hardResult = axs_cachekeeper_lock_paths(@[hardRoot], hardJournal);
+        require([hardResult[@"failed"] unsignedIntegerValue] == 0 && [hardResult[@"locked"] unsignedIntegerValue] == 1 &&
+            !lstat(hardFile.fileSystemRepresentation, &lockInfo) && (lockInfo.st_mode & 0777) == 0644 &&
+            !lstat(hardOutside.fileSystemRepresentation, &lockInfo) && (lockInfo.st_mode & 0777) == 0644 &&
+            ![NSDictionary dictionaryWithContentsOfFile:hardJournal][hardFile], @"硬链接文件不被锁定、不入记录，根目录仍锁定");
+        NSDictionary *hardUnlock = axs_cachekeeper_restore_paths(nil, hardJournal);
+        require([hardUnlock[@"failed"] unsignedIntegerValue] == 0 &&
+            !lstat(hardRoot.fileSystemRepresentation, &lockInfo) && (lockInfo.st_mode & 0777) == 0755, @"硬链接测试后恢复根目录权限");
+
+        // 写锁记录身份刷新（审计第 7 项）：文件被重建（新 inode）后再次锁定，记录须刷新为新身份，
+        // 否则恢复时身份核对失败会删记录却不恢复，新文件永久锁定。
+        NSString *rebuildRoot = [fixture stringByAppendingPathComponent:@"lock-rebuild"];
+        NSString *rebuildFile = [rebuildRoot stringByAppendingPathComponent:@"rebuilt.txt"];
+        require([fm createDirectoryAtPath:rebuildRoot withIntermediateDirectories:YES attributes:nil error:nil], @"重建写锁夹具");
+        writeFile(rebuildFile);
+        chmod(rebuildFile.fileSystemRepresentation, 0644);
+        NSString *rebuildJournal = [fixture stringByAppendingPathComponent:@"lock-rebuild-permissions.plist"];
+        NSDictionary *firstLock = axs_cachekeeper_lock_paths(@[rebuildRoot], rebuildJournal);
+        require([firstLock[@"failed"] unsignedIntegerValue] == 0, @"首次锁定成功");
+        struct stat oldInfo;
+        require(!lstat(rebuildFile.fileSystemRepresentation, &oldInfo) && (oldInfo.st_mode & 0222) == 0, @"首次锁定后文件不可写");
+        chmod(rebuildRoot.fileSystemRepresentation, 0755);
+        require([fm removeItemAtPath:rebuildFile error:nil], @"删除旧文件");
+        writeFile(rebuildFile);
+        chmod(rebuildFile.fileSystemRepresentation, 0644);
+        struct stat newInfo;
+        require(!lstat(rebuildFile.fileSystemRepresentation, &newInfo) && newInfo.st_ino != oldInfo.st_ino, @"重建文件获得新 inode");
+        NSDictionary *secondLock = axs_cachekeeper_lock_paths(@[rebuildRoot], rebuildJournal);
+        require([secondLock[@"failed"] unsignedIntegerValue] == 0 &&
+            [[NSDictionary dictionaryWithContentsOfFile:rebuildJournal][rebuildFile][@"inode"] unsignedLongLongValue] == newInfo.st_ino, @"重建后再次锁定刷新记录为新身份");
+        NSDictionary *rebuildUnlock = axs_cachekeeper_restore_paths(nil, rebuildJournal);
+        require([rebuildUnlock[@"failed"] unsignedIntegerValue] == 0 &&
+            !lstat(rebuildFile.fileSystemRepresentation, &lockInfo) && (lockInfo.st_mode & 0777) == 0644, @"刷新记录后恢复新文件权限，不永久锁定");
+
         NSString *inspectionRoot=[fixture stringByAppendingPathComponent:@"inspection"];
         require([fm createDirectoryAtPath:inspectionRoot withIntermediateDirectories:YES attributes:nil error:nil], @"建立深度检测目录");
         for (NSUInteger i=0;i<600;i++) writeMedia([inspectionRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"%lu.bin",(unsigned long)i]]);

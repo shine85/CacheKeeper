@@ -339,6 +339,7 @@ void CKApplyDirectorySwitches(void) {
                 [jobs removeObjectForKey:bundle]; [finished removeObjectForKey:bundle];
                 NSString *network=axs_cachekeeper_url_cache_enabled(states[bundle]) ? axs_cachekeeper_network_status(bundle) : @"网络缓存开关已关闭，当前不执行缓存干预";
                 NSString *lockMessage;
+                NSUInteger lockFailed = 0;
                 if ([target[@"process"] integerValue] != AxsCacheKeeperProcessStopped) {
                     lockMessage = @"只禁止模式：限制网络缓存并锁定已选缓存目录写入；APP 未完全退出，上锁将在退出后自动执行。";
                 } else if (!roots.count) {
@@ -351,11 +352,12 @@ void CKApplyDirectorySwitches(void) {
                         result = axs_cachekeeper_lock_paths(roots, journal);
                         lockChecks[bundle] = @{@"signature":signature, @"time":NSDate.date, @"result":result};
                     }
-                    lockMessage = [result[@"failed"] unsignedIntegerValue] ?
+                    lockFailed = [result[@"failed"] unsignedIntegerValue];
+                    lockMessage = lockFailed ?
                         [NSString stringWithFormat:@"只禁止模式：目录写入锁定失败：%@；网络缓存限制照常执行。", result[@"error"]] :
-                        [NSString stringWithFormat:@"只禁止模式：已锁定 %lu 个缓存目录的写入（可读取、不可新建或修改），不删除已有文件。", (unsigned long)roots.count];
+                        [NSString stringWithFormat:@"只禁止模式：已锁定 %lu 个缓存目录的写入（新打开不可写，已打开的句柄仍可写），不删除已有文件。", (unsigned long)roots.count];
                 }
-                axs_cachekeeper_report(bundle, @"prevent", [lockMessage stringByAppendingFormat:@"\n%@", network], 0, 0, 0, paths, nil, nil);
+                axs_cachekeeper_report(bundle, @"prevent", [lockMessage stringByAppendingFormat:@"\n%@", network], 0, 0, lockFailed, paths, nil, nil);
                 if (manual) dispatch_async(dispatch_get_main_queue(), ^{ [axs_cachekeeper_manual removeObject:bundle]; });
                 continue;
             }

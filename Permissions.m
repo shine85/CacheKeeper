@@ -91,6 +91,8 @@ NSDictionary *axs_cachekeeper_lock_paths(NSArray *roots, NSString *file) {
             if (lstat(path.fileSystemRepresentation, &current))
                 return @{@"failed":@1, @"locked":@0, @"error":@"锁定前文件状态变化，未锁定"};
             if ((current.st_mode & 0222) == 0) continue;
+            // 硬链接文件与根外路径共享同一 inode，上锁会波及根外；目录的链接数恒 ≥2（子目录计数），只对普通文件判定（审计第 7 项）。
+            if (S_ISREG(current.st_mode) && current.st_nlink != 1) continue;
             [targets addObject:@{@"path":path, @"mode":@(current.st_mode & 07777),
                 @"inode":@(current.st_ino), @"device":@(current.st_dev)}];
         }
@@ -98,7 +100,11 @@ NSDictionary *axs_cachekeeper_lock_paths(NSArray *roots, NSString *file) {
     if (!targets.count) return @{@"failed":@0, @"locked":@0, @"error":@""};
     BOOL journalChanged = NO;
     for (NSDictionary *target in targets) {
-        if (!records[target[@"path"]]) {
+        NSDictionary *saved = records[target[@"path"]];
+        // 身份不符时刷新记录：路径被重建（新 inode）后旧记录永远无法恢复新对象，
+        // 不刷新则新对象被锁后永久无法恢复；身份相符时保留旧记录（其 mode 是首次锁定前的原始权限）。
+        if (!saved || [saved[@"inode"] unsignedLongLongValue] != [target[@"inode"] unsignedLongLongValue] ||
+            [saved[@"device"] unsignedLongLongValue] != [target[@"device"] unsignedLongLongValue]) {
             records[target[@"path"]] = @{@"inode":target[@"inode"], @"device":target[@"device"], @"mode":target[@"mode"]};
             journalChanged = YES;
         }
@@ -111,17 +117,22 @@ NSDictionary *axs_cachekeeper_lock_paths(NSArray *roots, NSString *file) {
         int fd = axs_cachekeeper_open_directory(path);
         if (fd < 0 && errno == ENOTDIR) fd = axs_cachekeeper_open_regular_file(path);
         struct stat current;
-        BOOL ok = fd >= 0 && !fstat(fd, &current) &&
+        BOOL identityOK = fd >= 0 && !fstat(fd, &current) &&
             current.st_ino == [target[@"inode"] unsignedLongLongValue] &&
-            current.st_dev == [target[@"device"] unsignedLongLongValue] &&
-            !fchmod(fd, (mode_t)([target[@"mode"] unsignedIntValue] & ~0222)) &&
-            !fstat(fd, &current) && (current.st_mode & 0222) == 0;
+            current.st_dev == [target[@"device"] unsignedLongLongValue];
+        BOOL chmodOK = identityOK && !fchmod(fd, (mode_t)([target[@"mode"] unsignedIntValue] & ~0222));
+        // fchmod 已生效即纳入回滚集：核对失败时该项已被锁定，不纳入则回滚漏掉它（审计第 7 项）。
+        if (chmodOK) [changed addObject:path];
+        BOOL verified = chmodOK && !fstat(fd, &current) && (current.st_mode & 0222) == 0;
         if (fd >= 0) close(fd);
-        if (!ok) {
-            axs_cachekeeper_restore_paths(changed, file);
-            return @{@"failed":@1, @"locked":@0, @"error":@"锁定中途失败，已回滚本轮改动"};
+        if (!verified) {
+            NSDictionary *rollback = axs_cachekeeper_restore_paths(changed, file);
+            // 回滚结果如实报告：未完全成功时明确说清，不谎称已回滚；locked 报回滚后仍锁定的余数。
+            NSString *error = [rollback[@"failed"] unsignedIntegerValue] ?
+                @"锁定中途失败，回滚未完全成功，请检查权限记录" :
+                @"锁定中途失败，已回滚本轮改动";
+            return @{@"failed":@1, @"locked":@(changed.count - [rollback[@"applied"] unsignedIntegerValue]), @"error":error};
         }
-        [changed addObject:path];
     }
     return @{@"failed":@0, @"locked":@(changed.count), @"error":@""};
 }

@@ -291,7 +291,7 @@
         control.accessibilityLabel=@"缓存控制模式，三选一";
         [control addTarget:self action:@selector(axs_cachekeeper_mode_changed:) forControlEvents:UIControlEventValueChanged];
         UILabel *detail=[UILabel new];detail.numberOfLines=0;detail.font=[UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];detail.textColor=UIColor.secondaryLabelColor;detail.adjustsFontForContentSizeCategory=YES;
-        detail.text=@"自动：网络限制 + 退出后清理\n只禁止：限制网络缓存 + 锁定已选缓存目录写入（可读不可写），不删除已有文件；APP 完全退出后上锁，切换模式或关闭总开关后解锁\n只清理：允许网络缓存，仅退出后清理";
+        detail.text=@"自动：网络限制 + 退出后清理\n只禁止：限制网络缓存 + 锁定已选缓存目录写入（新打开不可写；已打开的句柄仍可写），不删除已有文件；APP 完全退出后上锁，切换模式或关闭总开关后解锁\n只清理：允许网络缓存，仅退出后清理";
         UIStackView *stack=[[UIStackView alloc] initWithArrangedSubviews:@[label,control,detail]];
         stack.axis=UILayoutConstraintAxisVertical;stack.spacing=10;stack.translatesAutoresizingMaskIntoConstraints=NO;
         [cell.contentView addSubview:stack];
