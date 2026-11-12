@@ -519,9 +519,18 @@ int main(int argc, const char *argv[]) {
         writeFile([purgeNamed stringByAppendingPathComponent:@"plain.txt"]);
         AxsCacheKeeperSweep *purgeNamedSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeNamed clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
         for (NSUInteger pass=0;!purgeNamedSweep.complete && pass<100;pass++) [purgeNamedSweep advance:64 shouldContinue:^BOOL{return YES;}];
-        require(purgeNamedSweep.complete && purgeNamedSweep.removed==0 && purgeNamedSweep.purgeBlocked &&
+        require(purgeNamedSweep.complete && purgeNamedSweep.removed==0 && purgeNamedSweep.purgeMixed && !purgeNamedSweep.purgeBlocked &&
             [fm fileExistsAtPath:[purgeNamed stringByAppendingPathComponent:@"Preferences/a.txt"]] &&
-            [fm fileExistsAtPath:[purgeNamed stringByAppendingPathComponent:@"plain.txt"]], @"受保护子目录整根出局");
+            [fm fileExistsAtPath:[purgeNamed stringByAppendingPathComponent:@"plain.txt"]], @"受保护子目录自动降级为日志门、非日志文件零删除");
+        NSString *purgeDirNamed=[fixture stringByAppendingPathComponent:@"purge-dirnamed"];
+        require([fm createDirectoryAtPath:[purgeDirNamed stringByAppendingPathComponent:@"session-cache"] withIntermediateDirectories:YES attributes:nil error:nil], @"含数据标记子目录的清理夹具");
+        writeFile([purgeDirNamed stringByAppendingPathComponent:@"session-cache/a.txt"]);
+        writeFile([purgeDirNamed stringByAppendingPathComponent:@"run.log"]);
+        AxsCacheKeeperSweep *purgeDirNamedSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeDirNamed clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!purgeDirNamedSweep.complete && pass<100;pass++) [purgeDirNamedSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(purgeDirNamedSweep.complete && purgeDirNamedSweep.failed==0 && purgeDirNamedSweep.removed==0 && purgeDirNamedSweep.purgeBlocked && !purgeDirNamedSweep.purgeMixed &&
+            [fm fileExistsAtPath:[purgeDirNamed stringByAppendingPathComponent:@"session-cache/a.txt"]] &&
+            [fm fileExistsAtPath:[purgeDirNamed stringByAppendingPathComponent:@"run.log"]], @"数据标记子目录名整根出局、连日志也不删");
         NSString *hotPurgeRoot=[fixture stringByAppendingPathComponent:@"hot-purge"];
         require([fm createDirectoryAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready"] withIntermediateDirectories:YES attributes:nil error:nil], @"热清理目录夹具");
         writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-one.bin"]);
