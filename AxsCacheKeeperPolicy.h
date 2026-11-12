@@ -249,6 +249,14 @@ static inline BOOL axs_cachekeeper_purge_evidence_path(NSString *relative) {
     }
     return NO;
 }
+static inline NSArray<NSString *> *axs_cachekeeper_exclusions(id state) {
+    return [state isKindOfClass:NSDictionary.class] ? axs_cachekeeper_cache_paths(state[@"excludedPaths"]) : @[];
+}
+static inline BOOL axs_cachekeeper_paths_overlap(NSString *left, NSString *right) {
+    return [left isEqual:right] || [left hasPrefix:[right stringByAppendingString:@"/"]] ||
+        [right hasPrefix:[left stringByAppendingString:@"/"]];
+}
+// 须置于 exclusions/paths_overlap 定义之后：C 不允许先用后定义（#34 即因此编译失败）。
 static inline NSArray<NSString *> *axs_cachekeeper_purge_paths(NSArray *candidates, id state) {
     // 未知目录自动清理候选集：用途未知类、未定级为日志、未被手动排除；父目录优先去重。
     NSMutableArray *paths=[NSMutableArray new];
@@ -262,13 +270,6 @@ static inline NSArray<NSString *> *axs_cachekeeper_purge_paths(NSArray *candidat
         if (!hit) [paths addObject:path];
     }
     return axs_cachekeeper_parent_paths(paths);
-}
-static inline NSArray<NSString *> *axs_cachekeeper_exclusions(id state) {
-    return [state isKindOfClass:NSDictionary.class] ? axs_cachekeeper_cache_paths(state[@"excludedPaths"]) : @[];
-}
-static inline BOOL axs_cachekeeper_paths_overlap(NSString *left, NSString *right) {
-    return [left isEqual:right] || [left hasPrefix:[right stringByAppendingString:@"/"]] ||
-        [right hasPrefix:[left stringByAppendingString:@"/"]];
 }
 static inline NSArray<NSString *> *axs_cachekeeper_effective_paths(NSArray *selected, id state, NSArray *discovered) {
     if (!axs_cachekeeper_app_enabled(state)) return @[];
