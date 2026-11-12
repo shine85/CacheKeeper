@@ -792,6 +792,12 @@ int main(int argc, const char *argv[]) {
         require([linkAliases containsObject:aliasTarget], @"目录别名含解析后的真实路径");
         NSString *viaLink = axs_cachekeeper_enumerated_path([aliasTarget stringByAppendingPathComponent:@"x.txt"], aliasLink, linkAliases);
         require([viaLink isEqual:[aliasLink stringByAppendingPathComponent:@"x.txt"]], @"枚举路径经解析别名还原为根形态");
+        // 反方向：枚举路径走未解析形态（经链接），根为解析后形态；字符串前缀全未命中，
+        // 必须靠两侧解析兜底（51.1 真机：抖音单轮失败 9215 项、零删除，证实此方向真实存在）。
+        writeFile([aliasTarget stringByAppendingPathComponent:@"y.txt"]);
+        NSArray *targetAliases = axs_cachekeeper_directory_aliases(aliasTarget);
+        NSString *viaUnresolved = axs_cachekeeper_enumerated_path([aliasLink stringByAppendingPathComponent:@"y.txt"], aliasTarget, targetAliases);
+        require([viaUnresolved isEqual:[aliasTarget stringByAppendingPathComponent:@"y.txt"]], @"枚举路径经解析兜底还原为根形态");
         require(!axs_cachekeeper_enumerated_path(@"/etc/passwd", aliasLink, linkAliases), @"根外路径仍被边界核对拒绝");
         NSString *backslashRoot = [fixture stringByAppendingPathComponent:@"backslash"];
         require([fm createDirectoryAtPath:backslashRoot withIntermediateDirectories:YES attributes:nil error:nil], @"反斜杠夹具");

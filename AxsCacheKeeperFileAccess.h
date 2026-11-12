@@ -22,6 +22,15 @@ static inline NSArray<NSString *> *axs_cachekeeper_directory_aliases(NSString *r
     if (resolvedStandard.length && ![aliases containsObject:resolvedStandard]) [aliases addObject:resolvedStandard];
     return aliases;
 }
+// 枚举路径的相对部分只需排除空/“.”/“..”分量；反斜杠在 POSIX 文件名中是普通字符
+// （抖音等缓存确有此类文件名），不得沿用通用相对路径检查（0.7.2 回归，真机 errno 22 全灭）。
+static inline BOOL axs_cachekeeper_enumerated_relative_ok(NSString *relative) {
+    if (!relative.length) return NO;
+    for (NSString *part in [relative componentsSeparatedByString:@"/"]) {
+        if (!part.length || [part isEqual:@"."] || [part isEqual:@".."]) return NO;
+    }
+    return YES;
+}
 static inline NSString *axs_cachekeeper_enumerated_path(NSString *path, NSString *root, NSArray<NSString *> *aliases) {
     if (![path isKindOfClass:NSString.class]) return nil;
     NSString *trimmed=path;
@@ -30,15 +39,23 @@ static inline NSString *axs_cachekeeper_enumerated_path(NSString *path, NSString
         NSString *prefix=[alias stringByAppendingString:@"/"];
         if (![trimmed hasPrefix:prefix]) continue;
         NSString *relative=[trimmed substringFromIndex:prefix.length];
-        // 枚举路径已由前缀核对限定在根内，相对部分只需排除空/“.”/“..”分量；
-        // 反斜杠在 POSIX 文件名中是普通字符（抖音等缓存确有此类文件名），
-        // 沿用通用相对路径检查会把整根误判越界（0.7.2 回归，真机 errno 22 全灭）。
-        BOOL relativeOK=relative.length>0;
-        for (NSString *part in [relative componentsSeparatedByString:@"/"]) {
-            if (!part.length || [part isEqual:@"."] || [part isEqual:@".."]) { relativeOK=NO;break; }
-        }
-        if (!relativeOK) return nil;
+        if (!axs_cachekeeper_enumerated_relative_ok(relative)) return nil;
         return [root stringByAppendingFormat:@"/%@",relative];
+    }
+    // 形态兜底：字符串前缀全未命中时，以解析后的规范形态重新核对。真机上枚举器
+    // 给出的路径形态与根不一致（/var 与 /private/var 任一方向），51.1 验收证实
+    // 几乎所有条目都倒在字符串核对上（抖音单轮失败 9215 项、零删除）；只解析
+    // 枚举路径或只补根别名都覆盖不了两个方向，必须两侧同时解析再比前缀。
+    // 解析失败或解析后仍无前缀时返回 nil（调用方跳过该条），安全边界不变。
+    NSString *resolvedPath=[NSURL fileURLWithPath:trimmed].URLByResolvingSymlinksInPath.path;
+    NSString *resolvedRoot=[NSURL fileURLWithPath:root].URLByResolvingSymlinksInPath.path;
+    if (resolvedPath.length && resolvedRoot.length) {
+        NSString *resolvedPrefix=[resolvedRoot stringByAppendingString:@"/"];
+        if ([resolvedPath hasPrefix:resolvedPrefix]) {
+            NSString *resolvedRelative=[resolvedPath substringFromIndex:resolvedPrefix.length];
+            if (axs_cachekeeper_enumerated_relative_ok(resolvedRelative))
+                return [root stringByAppendingFormat:@"/%@",resolvedRelative];
+        }
     }
     return nil;
 }
