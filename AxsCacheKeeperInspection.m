@@ -19,7 +19,28 @@
 @property(nonatomic,strong) NSMutableArray *largest;
 @property(nonatomic,copy) NSString *error;
 @property(nonatomic,strong) NSDate *started;
+// 硬链接孪生定位：主枚举只记身份（设备+inode），枚举完成后分批扫搜索根找孪生。
+@property(nonatomic,copy) NSArray<NSDictionary *> *searchRoots;
+@property(nonatomic,strong) NSMutableArray *linkFiles;
+@property(nonatomic,strong) NSMutableDictionary *linkIndex;
+@property(nonatomic) NSUInteger hardLinks;
+@property(nonatomic) NSUInteger symlinks;
+@property(nonatomic) BOOL linkFilesTruncated;
+@property(nonatomic) BOOL twinPhase;
+@property(nonatomic) NSUInteger searchIndex;
+@property(nonatomic,strong) NSDictionary *searchCurrent;
+@property(nonatomic,strong) NSDirectoryEnumerator *searchEntries;
+@property(nonatomic,strong) NSMutableArray *twinEntries;
+@property(nonatomic,strong) NSMutableSet *twinnedKeys;
+@property(nonatomic) unsigned long long twinBytes;
+@property(nonatomic) NSUInteger twinScanned;
+@property(nonatomic) BOOL twinTruncated;
+@property(nonatomic) NSUInteger twinSkipped;
 @end
+
+static NSString *axs_cachekeeper_inode_key(dev_t device, ino_t inode) {
+    return [NSString stringWithFormat:@"%llu:%llu",(unsigned long long)device,(unsigned long long)inode];
+}
 
 static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteger length, off_t size) {
     if (!size) return @"空文件";
@@ -38,8 +59,13 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
 
 @implementation AxsCacheKeeperInspection
 - (instancetype)initWithRoot:(NSString *)root {
+    return [self initWithRoot:root searchRoots:@[@{@"path":root ?: @"",@"label":@"本目录"}]];
+}
+- (instancetype)initWithRoot:(NSString *)root searchRoots:(NSArray<NSDictionary *> *)searchRoots {
     self=[super init];if (!self) return nil;
     _root=[root copy];_types=[NSMutableDictionary new];_ages=[NSMutableDictionary new];_largest=[NSMutableArray new];_started=NSDate.date;
+    _searchRoots=[searchRoots count] ? [searchRoots copy] : @[@{@"path":root ?: @"",@"label":@"本目录"}];
+    _linkFiles=[NSMutableArray new];_twinEntries=[NSMutableArray new];_twinnedKeys=[NSMutableSet new];
     int fd=axs_cachekeeper_open_directory(root);
     if (fd<0) { _complete=YES;_failures=1;_error=[NSString stringWithFormat:@"目录无法读取：errno %d",errno];return self; }
     close(fd);
@@ -54,14 +80,24 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
 - (void)advance:(NSUInteger)limit {
     for (NSUInteger index=0;index<limit && !self.complete;index++) {
         @autoreleasepool {
+            if (self.twinPhase) { [self axs_cachekeeper_advance_twin];continue; }
             NSURL *enumerated=[self.entries nextObject];
-            if (!enumerated) { self.complete=YES;break; }
+            if (!enumerated) {
+                if (self.linkFiles.count && self.searchRoots.count) { [self axs_cachekeeper_begin_twin];continue; }
+                self.complete=YES;break;
+            }
             NSString *entry=axs_cachekeeper_enumerated_path(enumerated.path,self.root,self.rootAliases);
             if (!entry) { self.failures++;self.error=@"枚举路径不属于已核验目录，已停止读取";self.complete=YES;break; }
             NSString *relative=[entry substringFromIndex:self.root.length+1];
             struct stat info;
             if (lstat(entry.fileSystemRepresentation,&info)) { self.failures++;self.error=[NSString stringWithFormat:@"无法读取文件属性：errno %d",errno];continue; }
-            if (S_ISLNK(info.st_mode) || (S_ISREG(info.st_mode) && info.st_nlink!=1)) { self.links++;continue; }
+            if (S_ISLNK(info.st_mode)) { self.links++;self.symlinks++;continue; }
+            if (S_ISREG(info.st_mode) && info.st_nlink!=1) {
+                self.links++;self.hardLinks++;
+                if (self.linkFiles.count<100) [self.linkFiles addObject:@{@"path":relative,@"device":@(info.st_dev),@"inode":@(info.st_ino),@"nlink":@(info.st_nlink),@"bytes":@(info.st_size)}];
+                else self.linkFilesTruncated=YES;
+                continue;
+            }
             if (axs_cachekeeper_hidden_directory(relative)) { self.hidden++;if (S_ISDIR(info.st_mode)) [self.entries skipDescendants];continue; }
             if (S_ISDIR(info.st_mode)) {
                 if (axs_cachekeeper_data_marker(entry.lastPathComponent)) self.markers++;
@@ -95,6 +131,54 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
         }
     }
 }
+- (void)axs_cachekeeper_begin_twin {
+    self.twinPhase=YES;
+    self.linkIndex=[NSMutableDictionary new];
+    for (NSDictionary *record in self.linkFiles)
+        self.linkIndex[axs_cachekeeper_inode_key([record[@"device"] unsignedLongLongValue],[record[@"inode"] unsignedLongLongValue])]=record;
+    self.searchIndex=0;
+    [self axs_cachekeeper_open_search_root];
+    if (!self.searchEntries) self.complete=YES;
+}
+- (void)axs_cachekeeper_open_search_root {
+    self.searchEntries=nil;self.searchCurrent=nil;
+    while (self.searchIndex<self.searchRoots.count) {
+        NSDictionary *candidate=self.searchRoots[self.searchIndex];
+        self.searchIndex++;
+        NSString *path=candidate[@"path"];
+        if (![path isKindOfClass:NSString.class] || !path.length) { self.twinSkipped++;continue; }
+        __weak typeof(self) weak=self;
+        NSDirectoryEnumerator *entries=[NSFileManager.defaultManager enumeratorAtURL:[NSURL fileURLWithPath:path] includingPropertiesForKeys:nil options:0 errorHandler:^BOOL(NSURL *url,NSError *error) { weak.twinSkipped++;return YES; }];
+        if (entries) { self.searchEntries=entries;self.searchCurrent=candidate;return; }
+        self.twinSkipped++;
+    }
+}
+- (void)axs_cachekeeper_advance_twin {
+    if (self.twinScanned>=100000) { self.twinTruncated=YES;self.complete=YES;return; }
+    NSURL *enumerated=[self.searchEntries nextObject];
+    if (!enumerated) { [self axs_cachekeeper_open_search_root];if (!self.searchEntries) self.complete=YES;return; }
+    self.twinScanned++;
+    struct stat info;
+    if (lstat(enumerated.path.fileSystemRepresentation,&info)) return;
+    if (!S_ISREG(info.st_mode) || info.st_nlink==1) return;
+    NSString *key=axs_cachekeeper_inode_key(info.st_dev,info.st_ino);
+    NSDictionary *source=self.linkIndex[key];
+    if (!source) return;
+    NSString *sourceFull=[self.root stringByAppendingPathComponent:source[@"path"]];
+    NSString *twinResolved=[NSURL fileURLWithPath:enumerated.path].URLByResolvingSymlinksInPath.path;
+    NSString *sourceResolved=[NSURL fileURLWithPath:sourceFull].URLByResolvingSymlinksInPath.path;
+    if ([twinResolved isEqual:sourceResolved]) return;
+    NSUInteger existing=0;
+    for (NSDictionary *twin in self.twinEntries) if ([twin[@"source"] isEqual:source[@"path"]]) existing++;
+    if (existing>=3 || self.twinEntries.count>=50) return;
+    NSString *base=self.searchCurrent[@"path"];
+    NSString *label=self.searchCurrent[@"label"] ?: @"";
+    NSString *shown=[enumerated.path hasPrefix:[base stringByAppendingString:@"/"]] ?
+        [NSString stringWithFormat:@"%@/%@",label,[enumerated.path substringFromIndex:base.length+1]] :
+        [NSString stringWithFormat:@"%@/%@",label,enumerated.path.lastPathComponent];
+    [self.twinEntries addObject:@{@"source":source[@"path"],@"twin":shown,@"bytes":source[@"bytes"]}];
+    if (![self.twinnedKeys containsObject:key]) { [self.twinnedKeys addObject:key];self.twinBytes+=[source[@"bytes"] unsignedLongLongValue]; }
+}
 - (NSDictionary *)report {
     BOOL covered=self.complete && !self.failures && !self.changed;
     NSString *evidence=@"用途仍未确认；请结合文件类型与实际功能继续核查";
@@ -104,6 +188,8 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
         evidence=@"已读取的文件全部具有媒体头特征；媒体也可能是下载或用户内容，未证明可删";
     return @{@"complete":@(self.complete),@"coverageComplete":@(covered),@"files":@(self.files),@"bytes":@(self.bytes),
         @"failures":@(self.failures),@"changed":@(self.changed),@"links":@(self.links),@"hidden":@(self.hidden),
+        @"hardLinks":@(self.hardLinks),@"symlinks":@(self.symlinks),@"linkTwins":[self.twinEntries copy],@"twinBytes":@(self.twinBytes),
+        @"twinScanTruncated":@(self.twinTruncated),@"linkFilesTruncated":@(self.linkFilesTruncated),@"twinScanned":@(self.twinScanned),
         @"types":[self.types copy],@"ages":[self.ages copy],@"largest":[self.largest copy],@"evidence":evidence,
         @"error":self.error ?: @"",@"started":self.started,@"updated":NSDate.date};
 }

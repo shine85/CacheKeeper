@@ -119,7 +119,17 @@ void CKInspectRequests(void) {
         NSError *error=nil;NSURL *root=nil;
         for (NSDictionary *target in ([request[@"cancel"] boolValue] ? @[] : axs_cachekeeper_scan_targets(home,groups,&error)))
             if ([target[@"path"] isEqual:relative]) { root=target[@"root"];break; }
-        AxsCacheKeeperInspection *inspection=root ? [[AxsCacheKeeperInspection alloc] initWithRoot:root.path] : nil;
+        NSMutableArray *searchRoots=[NSMutableArray new];
+        if (home.path.length) [searchRoots addObject:@{@"path":home.path,@"label":@"容器"}];
+        for (NSString *groupID in groups) {
+            NSURL *groupHome=groups[groupID];
+            if ([groupHome isKindOfClass:NSURL.class] && groupHome.path.length)
+                [searchRoots addObject:@{@"path":groupHome.path,@"label":[NSString stringWithFormat:@"Group:%@",groupID]}];
+        }
+        NSURL *bundleURL=SRead(app,@"bundleURL");
+        if ([bundleURL isKindOfClass:NSURL.class] && bundleURL.path.length)
+            [searchRoots addObject:@{@"path":bundleURL.path,@"label":@"安装包"}];
+        AxsCacheKeeperInspection *inspection=root ? [[AxsCacheKeeperInspection alloc] initWithRoot:root.path searchRoots:searchRoots] : nil;
         NSTimeInterval written=0;
         while (YES) {
             @autoreleasepool {

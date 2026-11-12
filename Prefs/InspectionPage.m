@@ -104,7 +104,20 @@
     BOOL complete=[report[@"complete"] boolValue],cancelled=[report[@"cancelled"] boolValue];
     [text appendFormat:@"%@ · %@\n读取 %lu 个普通文件，%.2f MB\n%@\n\n",cancelled ? @"已停止（部分结果）" : complete ? ([report[@"coverageComplete"] boolValue] ? @"枚举完成" : @"结束但未完整读取") : @"正在分批读取",axs_cachekeeper_time_string(report[@"updated"]),(unsigned long)[report[@"files"] unsignedIntegerValue],[report[@"bytes"] doubleValue]/1048576,report[@"evidence"] ?: @""];
     if (!complete && !cancelled && -[report[@"updated"] timeIntervalSinceNow]>30) [text appendString:@"进度超过 30 秒未更新；可以停止后重检，当前不能判定已完成。\n"];
-    [text appendFormat:@"读取失败 %@ 项；扫描中变化 %@ 项；跳过链接 %@ 项、敏感目录 %@ 项。\n%@\n\n文件类型组成：\n",report[@"failures"] ?: @0,report[@"changed"] ?: @0,report[@"links"] ?: @0,report[@"hidden"] ?: @0,report[@"error"] ?: @""];
+    NSString *linkDetail=report[@"hardLinks"] ? [NSString stringWithFormat:@"跳过链接 %@ 项（硬链接 %@ 项、符号链接 %@ 项）",report[@"links"] ?: @0,report[@"hardLinks"] ?: @0,report[@"symlinks"] ?: @0] : [NSString stringWithFormat:@"跳过链接 %@ 项",report[@"links"] ?: @0];
+    [text appendFormat:@"读取失败 %@ 项；扫描中变化 %@ 项；%@、敏感目录 %@ 项。\n%@\n",report[@"failures"] ?: @0,report[@"changed"] ?: @0,linkDetail,report[@"hidden"] ?: @0,report[@"error"] ?: @""];
+    NSArray *twins=report[@"linkTwins"];
+    if ([twins isKindOfClass:NSArray.class] && twins.count) {
+        [text appendFormat:@"\n硬链接孪生：%lu 处，涉及 %.2f MB（只删本目录这边不释放空间）：\n",(unsigned long)twins.count,[report[@"twinBytes"] doubleValue]/1048576];
+        NSUInteger shown=MIN(twins.count,(NSUInteger)20);
+        for (NSUInteger i=0;i<shown;i++) [text appendFormat:@"%@ → %@\n",twins[i][@"source"],twins[i][@"twin"]];
+        if (twins.count>shown) [text appendFormat:@"…等 %lu 处\n",(unsigned long)(twins.count-shown)];
+        if ([report[@"twinScanTruncated"] boolValue]) [text appendString:@"孪生扫描达到上限，未完全覆盖。\n"];
+        [text appendString:@"\n"];
+    } else if ([report[@"hardLinks"] unsignedIntegerValue]) {
+        [text appendString:@"硬链接文件未在其余位置找到孪生：可能孪生已被删除，或位于本次未覆盖的位置。\n\n"];
+    }
+    [text appendString:@"\n文件类型组成：\n"];
     for (NSString *kind in [report[@"types"] allKeys]) [text appendFormat:@"%@：%@ 个 · %.2f MB\n",kind,report[@"types"][kind][@"count"],[report[@"types"][kind][@"bytes"] doubleValue]/1048576];
     [text appendString:@"\n文件时间（取创建、修改和状态变更中最近时间）：\n"];
     for (NSString *age in @[@"不足 60 秒",@"60 秒至 1 天",@"1 至 30 天",@"30 天以上"]) [text appendFormat:@"%@：%@ 个\n",age,report[@"ages"][age] ?: @0];

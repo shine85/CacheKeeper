@@ -2,9 +2,12 @@
 #import <Foundation/Foundation.h>
 
 // 只读档案；识别文件格式不等于证明可以删除。
+// searchRoots：孪生扫描的搜索根，每项 @{@"path": 绝对路径, @"label": 显示名}；
+// 深度检测发现硬链接文件后，按设备+inode 在这些根中找孪生并记入报告。
 @interface AxsCacheKeeperInspection : NSObject
 @property(nonatomic,readonly) BOOL complete;
 - (instancetype)initWithRoot:(NSString *)root;
+- (instancetype)initWithRoot:(NSString *)root searchRoots:(NSArray<NSDictionary *> *)searchRoots;
 - (void)advance:(NSUInteger)limit;
 - (NSDictionary *)report;
 @end

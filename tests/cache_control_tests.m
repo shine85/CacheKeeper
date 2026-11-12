@@ -916,6 +916,29 @@ int main(int argc, const char *argv[]) {
             [profile[@"types"][@"文本头特征（用途未定）"][@"count"] unsignedIntegerValue]==1, @"JSON、压缩和文本识别只形成证据");
         require([profile[@"largest"] count]==10 && [profile[@"links"] unsignedIntegerValue]==1 &&
             [fm fileExistsAtPath:[inspectionRoot stringByAppendingPathComponent:@"599.bin"]], @"档案只读，最大文件列表有界，链接不跟随");
+        NSString *twinRoot=[fixture stringByAppendingPathComponent:@"twin-inspect"];
+        NSString *twinOther=[fixture stringByAppendingPathComponent:@"twin-other"];
+        require([fm createDirectoryAtPath:twinRoot withIntermediateDirectories:YES attributes:nil error:nil] &&
+            [fm createDirectoryAtPath:twinOther withIntermediateDirectories:YES attributes:nil error:nil], @"孪生定位夹具目录");
+        NSString *twinFile=[twinRoot stringByAppendingPathComponent:@"shared.bin"];
+        writeMedia(twinFile);
+        require(!link(twinFile.fileSystemRepresentation, [[twinOther stringByAppendingPathComponent:@"copy.bin"] fileSystemRepresentation]), @"建立跨目录硬链接夹具");
+        NSString *innerFile=[twinRoot stringByAppendingPathComponent:@"inner.bin"];
+        writeMedia(innerFile);
+        require(!link(innerFile.fileSystemRepresentation, [[twinRoot stringByAppendingPathComponent:@"inner-copy.bin"] fileSystemRepresentation]), @"建立同目录硬链接夹具");
+        require(!symlink(twinFile.fileSystemRepresentation, [[twinRoot stringByAppendingPathComponent:@"alias"] fileSystemRepresentation]), @"建立符号链接对照夹具");
+        AxsCacheKeeperInspection *twinInspection=[[AxsCacheKeeperInspection alloc] initWithRoot:twinRoot searchRoots:@[@{@"path":twinRoot,@"label":@"本目录"},@{@"path":twinOther,@"label":@"别处"}]];
+        for (NSUInteger pass=0;!twinInspection.complete && pass<100;pass++) [twinInspection advance:32];
+        NSDictionary *twinProfile=[twinInspection report];
+        require(twinInspection.complete && [twinProfile[@"hardLinks"] unsignedIntegerValue]==3 && [twinProfile[@"symlinks"] unsignedIntegerValue]==1 && [twinProfile[@"links"] unsignedIntegerValue]==4, @"硬链接与符号链接分别计数");
+        require([twinProfile[@"linkTwins"] count]==3, @"跨目录与同目录孪生全部找到");
+        NSUInteger crossTwins=0,innerTwins=0;
+        for (NSDictionary *twin in twinProfile[@"linkTwins"]) {
+            if ([twin[@"twin"] containsString:@"别处/copy.bin"]) crossTwins++;
+            if ([twin[@"twin"] containsString:@"本目录/"]) innerTwins++;
+        }
+        require(crossTwins==1 && innerTwins==2, @"孪生位置按搜索根标注");
+        require([twinProfile[@"twinBytes"] unsignedLongLongValue]==36, @"孪生涉及字节按有孪生的源文件计");
         NSDictionary *h1=@{@"updated":NSDate.date,@"home":@"same",@"rows":@[@{@"path":@"tmp",@"bytes":@1,@"complete":@YES}]};
         NSDictionary *h2=@{@"updated":NSDate.date,@"home":@"same",@"rows":@[@{@"path":@"tmp",@"bytes":@2,@"complete":@YES}]};
         NSDictionary *h3=@{@"updated":NSDate.date,@"home":@"same",@"rows":@[@{@"path":@"tmp",@"bytes":@3,@"complete":@YES}]};
