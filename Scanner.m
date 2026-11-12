@@ -169,13 +169,30 @@ static double axs_cachekeeper_monotonic_seconds(void) {
     return (double)now.tv_sec + (double)now.tv_nsec / 1000000000.0;
 }
 // 清理放行判定（主线程调用）：进程消失可清理；进程被挂起时须为任务所绑定的同一实例且已持续挂起满 60 秒。
+// 进程观测统一更新（审查 P1-2）：所有采样点（定时观测、门控、目标构建）共用。
+// 挂起观测维持连续计时（同一实例继续计时，新实例重新计时）；任何非挂起观测
+// （执行/消失/终止/未知）立即清除连续计时。门控采样到执行却不清除旧计时，
+// 下次定时观测同实例挂起会立即放行，破坏“持续挂起满 60 秒”的前提——
+// 已看到恢复执行，必须使旧证据失效。读写加锁：定时观测在主线程，门控在清理队列。
+static void axs_cachekeeper_observe_process(NSString *bundle, AxsCacheKeeperExecState exec, NSString *identity) {
+    @synchronized (AxsCacheKeeperSweep.class) {
+        if (!axs_cachekeeper_suspended_since) axs_cachekeeper_suspended_since = [NSMutableDictionary new];
+        if (exec==AxsCacheKeeperExecSuspended && identity.length) {
+            NSDictionary *record=axs_cachekeeper_suspended_since[bundle];
+            if (![record[@"identity"] isEqual:identity])
+                axs_cachekeeper_suspended_since[bundle]=@{@"identity":identity,@"since":@(axs_cachekeeper_monotonic_seconds())};
+        } else [axs_cachekeeper_suspended_since removeObjectForKey:bundle];
+    }
+}
 static BOOL axs_cachekeeper_gate_open(NSString *bundle, NSString *jobInstance) {
     NSString *identity=nil;
     AxsCacheKeeperExecState exec=axs_cachekeeper_exec(bundle,&identity,NULL,NULL);
+    axs_cachekeeper_observe_process(bundle,exec,identity);
     if (exec==AxsCacheKeeperExecAbsent || exec==AxsCacheKeeperExecTerminated) return YES;
     if (exec!=AxsCacheKeeperExecSuspended || !identity.length) return NO;
     if (jobInstance.length && ![identity isEqual:jobInstance]) return NO;
-    NSDictionary *record=axs_cachekeeper_suspended_since[bundle];
+    NSDictionary *record=nil;
+    @synchronized (AxsCacheKeeperSweep.class) { record=axs_cachekeeper_suspended_since[bundle]; }
     return [record[@"identity"] isEqual:identity] && axs_cachekeeper_monotonic_seconds() - [record[@"since"] doubleValue] >= 60;
 }
 static NSString *axs_cachekeeper_folder(void) { return jbroot(@"/var/mobile/Library/CacheKeeper"); }
@@ -249,11 +266,7 @@ void CKApplyDirectorySwitches(void) {
         NSString *identity=nil;
         AxsCacheKeeperExecState exec=axs_cachekeeper_exec(bundle,&identity,NULL,NULL);
         if (exec==AxsCacheKeeperExecExecuting && identity) axs_cachekeeper_seen_instances[bundle]=identity;
-        if (exec==AxsCacheKeeperExecSuspended && identity) {
-            NSDictionary *record=axs_cachekeeper_suspended_since[bundle];
-            if (![record[@"identity"] isEqual:identity])
-                axs_cachekeeper_suspended_since[bundle]=@{@"identity":identity,@"since":@(axs_cachekeeper_monotonic_seconds())};
-        } else [axs_cachekeeper_suspended_since removeObjectForKey:bundle];
+        axs_cachekeeper_observe_process(bundle,exec,identity);
     }
     if (busy) return;
     if (!queue) {
@@ -285,6 +298,7 @@ void CKApplyDirectorySwitches(void) {
         if (home) for (NSString *relative in paths) [roots addObject:[home.path stringByAppendingPathComponent:relative]];
         NSString *reason=nil, *execIdentity=nil;
         AxsCacheKeeperExecState exec=axs_cachekeeper_exec(bundle,&execIdentity,NULL,&reason);
+        axs_cachekeeper_observe_process(bundle,exec,execIdentity);
         AxsCacheKeeperProcessState process=AxsCacheKeeperProcessUnknown;
         AxsCacheKeeperSignalConfidence confidence=AxsCacheKeeperSignalNone;
         NSString *instance=axs_cachekeeper_seen_instances[bundle] ?: @"";
@@ -298,7 +312,8 @@ void CKApplyDirectorySwitches(void) {
         } else if (exec==AxsCacheKeeperExecSuspended) {
             confidence=AxsCacheKeeperSignalStrong;
             if (execIdentity) instance=execIdentity;
-            NSDictionary *suspendRecord=axs_cachekeeper_suspended_since[bundle];
+            NSDictionary *suspendRecord=nil;
+            @synchronized (AxsCacheKeeperSweep.class) { suspendRecord=axs_cachekeeper_suspended_since[bundle]; }
             if (execIdentity && [suspendRecord[@"identity"] isEqual:execIdentity] &&
                 axs_cachekeeper_monotonic_seconds() - [suspendRecord[@"since"] doubleValue] >= 60) {
                 process=AxsCacheKeeperProcessStopped;
