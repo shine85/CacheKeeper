@@ -518,6 +518,17 @@
             }
         }
         if (contentOK) {
+            // 过渡期零证据暂停（用户 2026-11-12 22:43 定）：零证据清理根只做证据复核、
+            // 不执行删除。暂停点在内容复核之后、unlink 之前：删除阶段检出的新证据仍须
+            // 重标混合（审计第 2 项），不能被暂停掩盖；已确认可丢弃的内容（标准根、日志
+            // 定级、混合目录日志门）继续清理。专属 APP 识别规则后续按占用逐个设计。
+            if (self.purgeMode && !self.purgeBlocked && !self.purgeMixed && !self.purgeInvalid) {
+                if (!self.purgePaused) {
+                    self.purgePaused = YES;
+                    self.error = @"未知内容待识别，暂不自动清理（过渡期：仅凭零证据不删除）";
+                }
+                self.protectedCount++; errno = EBUSY;
+            } else {
             struct stat final;
             if (fstatat(fd,name,&final,AT_SYMLINK_NOFOLLOW)) {
                 int code=errno;[self axs_cachekeeper_failure:@"fstatat-final" code:code path:entry detail:@""];
@@ -526,6 +537,7 @@
                 removed=result==0;
                 if (!removed) [self axs_cachekeeper_failure:@"unlinkat" code:code path:entry detail:@"flags=0"];
             } else [self axs_cachekeeper_failure:@"删除前身份/时间核对" code:ESTALE path:entry detail:@""];
+            }
         }
     } else [self axs_cachekeeper_failure:@"打开文件身份/时间核对" code:ESTALE path:entry detail:@""];
     int savedError = errno;
@@ -630,16 +642,6 @@
         }
         // 全量清理的根已由策略层限定为平台缓存契约目录，根内不再按受保护名拦截；清理模式的
         // 证据审查已在预检完成（口径见 purge_evidence_path，配置类 .plist/.json 不算证据），此处同样放行；其余模式不变。
-        // 过渡期零证据暂停（用户 2026-11-12 22:43 定）：零证据清理根暂不自动删除——
-        // 仅凭“没检出证据”不能证明内容可恢复；已确认可丢弃的内容（标准缓存根、日志定级、
-        // 混合目录日志门）继续清理。专属 APP 识别规则后续按占用逐个设计，不以暂停为永久理由。
-        if (self.purgeMode && !self.purgeBlocked && !self.purgeMixed && !self.purgeInvalid) {
-            if (!self.purgePaused) {
-                self.purgePaused = YES;
-                self.error = @"未知内容待识别，暂不自动清理（过渡期：仅凭零证据不删除）";
-            }
-            self.protectedCount++;if (S_ISDIR(info.st_mode)) [self.entries skipDescendants];continue;
-        }
         if (!self.fullClear && !self.purgeMode && axs_cachekeeper_protected_path(relative)) {
             self.protectedCount++;
             if (S_ISDIR(info.st_mode)) [self.entries skipDescendants];

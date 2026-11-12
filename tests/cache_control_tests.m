@@ -749,9 +749,12 @@ int main(int argc, const char *argv[]) {
         require(!stat(victim.fileSystemRepresentation,&victimStat), @"读取改写后文件状态");
         stale.fileSnapshots[staleDir][@"victim.bin"]=[stale axs_cachekeeper_snapshot:victimStat];
         for (NSUInteger pass=0;!stale.complete && pass<100;pass++) [stale advance:64 shouldContinue:^BOOL{return YES;}];
-        require(stale.complete && stale.purgeMixed && stale.removed==1 && [stale.purgeEvidence isEqual:@"victim.bin"] &&
+        // 过渡期暂停下 removed 取决于枚举顺序：other.log 在重标前处理则本轮暂停（下轮以
+        // 混合根删除），在重标后处理则当即删除；0 或 1 均可接受。重标本身是本测试的断言核心，
+        // 混合根日志门由 hotPurge 测试确定性覆盖（removed==2）。
+        require(stale.complete && stale.purgeMixed && stale.removed<=1 && [stale.purgeEvidence isEqual:@"victim.bin"] &&
             [fm fileExistsAtPath:victim] &&
-            ![fm fileExistsAtPath:[staleDir stringByAppendingPathComponent:@"other.log"]], @"删除阶段检出新数据证据重标混合：数据库保留、同目录日志仍可删");
+            (stale.removed==1 ? ![fm fileExistsAtPath:[staleDir stringByAppendingPathComponent:@"other.log"]] : [fm fileExistsAtPath:[staleDir stringByAppendingPathComponent:@"other.log"]]), @"删除阶段检出新数据证据重标混合：数据库保留、同目录日志仍可删");
         NSString *hotPurgeRoot=[fixture stringByAppendingPathComponent:@"hot-purge"];
         require([fm createDirectoryAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready"] withIntermediateDirectories:YES attributes:nil error:nil], @"热清理目录夹具");
         writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-one.log"]);
