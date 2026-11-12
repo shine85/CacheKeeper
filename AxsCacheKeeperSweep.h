@@ -8,6 +8,7 @@
 @property(nonatomic, readonly) BOOL purgeMode;
 @property(nonatomic, readonly) BOOL purgeBlocked;
 @property(nonatomic, readonly) BOOL purgeMixed;
+@property(nonatomic, readonly, copy) NSString *purgeEvidence;
 @property(nonatomic, readonly) BOOL complete;
 @property(nonatomic, readonly) BOOL cancelled;
 @property(nonatomic, readonly) NSUInteger removed;

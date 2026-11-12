@@ -24,7 +24,7 @@
 @property(nonatomic, readwrite) BOOL purgeMode;
 @property(nonatomic) BOOL purgeBlocked;
 @property(nonatomic) BOOL purgeMixed;
-@property(nonatomic, copy) NSString *purgeEvidence;
+@property(nonatomic, readwrite, copy) NSString *purgeEvidence;
 @property(nonatomic) dev_t device;
 @property(nonatomic) ino_t inode;
 @property(nonatomic, strong) NSDirectoryEnumerator *entries;
@@ -142,9 +142,10 @@
     if (self.purgeBlocked) return;
     self.purgeBlocked = YES;
     self.purgeMixed = NO;
-    self.purgeEvidence = path;
     NSString *relative = [path hasPrefix:[self.root stringByAppendingString:@"/"]] ?
         [path substringFromIndex:self.root.length + 1] : path.lastPathComponent;
+    // 首条证据存相对路径，随分目录回执落盘（审计第 10 项）；error 会被后续失败覆盖，不能作为证据载体。
+    self.purgeEvidence = relative;
     self.error = [NSString stringWithFormat:@"检出数据证据，本目录不清理：%@", relative];
 }
 // B 案自动降级（2026-11-12 用户拍板：定级不手动开，插件自己定）：文件级数据证据
@@ -153,9 +154,10 @@
 - (void)axs_cachekeeper_purge_mixed:(NSString *)path {
     if (self.purgeMixed || self.purgeBlocked) return;
     self.purgeMixed = YES;
-    self.purgeEvidence = path;
     NSString *relative = [path hasPrefix:[self.root stringByAppendingString:@"/"]] ?
         [path substringFromIndex:self.root.length + 1] : path.lastPathComponent;
+    // 首条证据存相对路径，随分目录回执落盘（审计第 10 项）；error 会被后续失败覆盖，不能作为证据载体。
+    self.purgeEvidence = relative;
     self.error = [NSString stringWithFormat:@"检出数据证据，已自动仅清理其中的日志文件：%@", relative];
 }
 - (void)axs_cachekeeper_inspect:(NSString *)entry info:(struct stat)info {

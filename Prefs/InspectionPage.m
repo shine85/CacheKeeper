@@ -91,6 +91,9 @@
     NSDictionary *cleanup=[NSDictionary dictionaryWithContentsOfFile:[self axs_cachekeeper_file:[NSString stringWithFormat:@"Status/%@.auto.plist",self.bundle]]][@"directories"][self.relative];
     if (cleanup) [text appendFormat:@"最近一轮清理记录（%@）：%@\n删除 %@ 个文件 · %.2f MB；保留受保护／未知 %@ 项、近期文件 %@ 项，变化目录 %@ 项，失败 %@ 项。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),[cleanup[@"cancelled"] boolValue] ? @"已中止" : [cleanup[@"complete"] boolValue] ? @"检查完成" : @"尚未完成",cleanup[@"removed"],[cleanup[@"bytes"] doubleValue]/1048576,cleanup[@"protected"],cleanup[@"recent"],cleanup[@"changed"],cleanup[@"failed"],cleanup[@"error"] ?: @""];
     else [text appendString:@"本目录尚无清理回执；占用减少不能据此归因于插件。\n\n"];
+    if ([cleanup[@"purgeClassification"] isEqual:@"blocked"]) [text appendFormat:@"内容审查：整根保留，检出数据证据于 %@。\n\n",cleanup[@"purgeEvidence"] ?: @""];
+    else if ([cleanup[@"purgeClassification"] isEqual:@"mixed"]) [text appendFormat:@"内容审查：混合目录，仅清理日志文件；首条证据 %@。\n\n",cleanup[@"purgeEvidence"] ?: @""];
+    else if ([cleanup[@"purgeClassification"] isEqual:@"clean"]) [text appendString:@"内容审查：无数据证据。\n\n"];
     if ([self axs_cachekeeper_judged]) [text appendString:@"本目录已定级为日志目录：该 APP 完全退出后，仅清理本目录内的日志特征文件（.log/.alog/.xlog），数据与未知内容保留；可在本页取消定级。\n\n"];
     for (NSDictionary *failure in cleanup[@"failureDetails"]) [text appendFormat:@"失败样本：%@ · errno %@\n%@\n%@\n\n",failure[@"stage"],failure[@"code"],failure[@"path"],failure[@"detail"]];
     if (![report[@"path"] isEqual:self.relative] || (self.token && ![report[@"token"] isEqual:self.token])) {
