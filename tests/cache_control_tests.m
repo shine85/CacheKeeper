@@ -9,6 +9,7 @@
 #import "../AxsCacheKeeperSelection.h"
 #import "../AxsCacheKeeperFilza.h"
 #import "../AxsCacheKeeperProcess.h"
+#import "../AxsCacheKeeperProcessObservation.h"
 #import "../AxsCacheKeeperInspection.h"
 #import "../AxsCacheKeeperProbe.h"
 #import "../AxsCacheKeeperFileAccess.h"
@@ -144,6 +145,28 @@ int main(int argc, const char *argv[]) {
         manager.allApplicationProcesses=@[];
         require(axs_cachekeeper_process_exec_state(manager,bundle,&execIdentity,&rawTaskState,&reason)==AxsCacheKeeperExecAbsent, @"完整清单中无记录判为进程消失");
         manager.allApplicationProcesses=@[application];
+        // 进程观测统一记录（审查 P1-2，方案任务 2）：真实生产模块驱动，注入单调时钟。
+        NSString *obsBundle=@"com.example.obs";
+        [AxsCacheKeeperProcessObservation observeBundle:obsBundle state:AxsCacheKeeperExecSuspended identity:@"1:100.000000" atMonotonicTime:0];
+        require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:obsBundle identity:@"1:100.000000" atMonotonicTime:59], @"挂起未满 60 秒不放行");
+        [AxsCacheKeeperProcessObservation observeBundle:obsBundle state:AxsCacheKeeperExecSuspended identity:@"1:100.000000" atMonotonicTime:61];
+        require([AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:obsBundle identity:@"1:100.000000" atMonotonicTime:61], @"同实例挂起满 60 秒放行");
+        [AxsCacheKeeperProcessObservation observeBundle:obsBundle state:AxsCacheKeeperExecExecuting identity:@"1:100.000000" atMonotonicTime:61.1];
+        require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:obsBundle identity:@"1:100.000000" atMonotonicTime:61.2], @"看到执行后旧窗口立即失效");
+        [AxsCacheKeeperProcessObservation observeBundle:obsBundle state:AxsCacheKeeperExecSuspended identity:@"1:100.000000" atMonotonicTime:61.2];
+        require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:obsBundle identity:@"1:100.000000" atMonotonicTime:120], @"新窗口未满 60 秒不放行");
+        require([AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:obsBundle identity:@"1:100.000000" atMonotonicTime:121.3], @"新窗口满 60 秒放行");
+        [AxsCacheKeeperProcessObservation observeBundle:obsBundle state:AxsCacheKeeperExecUnknown identity:nil atMonotonicTime:122];
+        require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:obsBundle identity:@"1:100.000000" atMonotonicTime:200], @"Unknown 观测清除窗口");
+        [AxsCacheKeeperProcessObservation observeBundle:obsBundle state:AxsCacheKeeperExecSuspended identity:@"1:100.000000" atMonotonicTime:200];
+        [AxsCacheKeeperProcessObservation observeBundle:obsBundle state:AxsCacheKeeperExecSuspended identity:@"1:200.000000" atMonotonicTime:201];
+        require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:obsBundle identity:@"1:200.000000" atMonotonicTime:260], @"实例变化（PID 复用/启动时间改变）重新计时");
+        require([AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:obsBundle identity:@"1:200.000000" atMonotonicTime:261], @"新实例满 60 秒放行");
+        [AxsCacheKeeperProcessObservation observeBundle:obsBundle state:AxsCacheKeeperExecSuspended identity:nil atMonotonicTime:262];
+        require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:obsBundle identity:@"1:200.000000" atMonotonicTime:400], @"身份缺失的挂起观测不继承窗口");
+        [AxsCacheKeeperProcessObservation observeBundle:obsBundle state:AxsCacheKeeperExecSuspended identity:@"1:200.000000" atMonotonicTime:400];
+        [AxsCacheKeeperProcessObservation observeBundle:obsBundle state:AxsCacheKeeperExecAbsent identity:nil atMonotonicTime:401];
+        require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:obsBundle identity:@"1:200.000000" atMonotonicTime:500], @"消失观测清除窗口，不借旧窗口");
         NSDictionary *selection = @{bundle:@[@"Library/Caches/a", @"Library/Caches", @"Library/Caches/a",
             @"Library/Application Support", @"Library/Caches/../Preferences", @"Library/CachesOther"]};
         require([axs_cachekeeper_selected_paths(selection, @{bundle:@YES}, bundle) isEqual:@[@"Library/Caches"]], @"过滤保护目录并去掉父子重复选择");

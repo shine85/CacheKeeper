@@ -19,6 +19,7 @@ try:
                     str(root / "Permissions.m"), str(root / "AxsCacheKeeperNetworkCache.m"),
                     str(root / "AxsCacheKeeperDirectories.m"),
                     str(root / "AxsCacheKeeperInspection.m"),
+                    str(root / "AxsCacheKeeperProcessObservation.m"),
                     "-o", str(output / "cache-tests")], check=True, timeout=60)
     subprocess.run([str(output / "cache-tests"), str(output / "fixtures")], check=True, timeout=60)
 finally:

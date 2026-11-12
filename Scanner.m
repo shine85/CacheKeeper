@@ -9,6 +9,7 @@
 #import "AxsCacheKeeperSweep.h"
 #import "AxsCacheKeeperDirectories.h"
 #import "AxsCacheKeeperProcess.h"
+#import "AxsCacheKeeperProcessObservation.h"
 #import "AxsCacheKeeperInspection.h"
 static id SRead(id target,NSString *name) { SEL s=NSSelectorFromString(name);return [target respondsToSelector:s]?((id(*)(id,SEL))objc_msgSend)(target,s):nil; }
 static NSURL *Container(NSString *bundle) {
@@ -152,10 +153,8 @@ void CKInspectRequests(void) {
     });
 }
 static NSMutableSet<NSString *> *axs_cachekeeper_manual;
-// 最近一次观测到的运行实例标识（仅主线程读写：CKApply 入口观测、目标构建与 shouldContinue 均在主线程）。
+// 最近一次观测到的运行实例标识（仅主线程读写：CKApply 入口观测、目标构建与门控采样均在主线程——门控经 dispatch_sync 回主队列执行；shouldContinue 在清理队列执行，但只读局部的 sweepAllowed，不碰本字典）。
 static NSMutableDictionary<NSString *, NSString *> *axs_cachekeeper_seen_instances;
-// 挂起稳定跟踪（仅主线程读写）：bundle → {identity, since}；同一实例持续挂起满 60 秒才放行清理。
-static NSMutableDictionary<NSString *, NSDictionary *> *axs_cachekeeper_suspended_since;
 static AxsCacheKeeperExecState axs_cachekeeper_exec(NSString *bundle, NSString **identity, NSInteger *taskState, NSString **reason) {
     id manager = SRead(NSClassFromString(@"FBProcessManager"), @"sharedInstance");
     return axs_cachekeeper_process_exec_state(manager,bundle,identity,taskState,reason);
@@ -169,31 +168,14 @@ static double axs_cachekeeper_monotonic_seconds(void) {
     return (double)now.tv_sec + (double)now.tv_nsec / 1000000000.0;
 }
 // 清理放行判定（主线程调用）：进程消失可清理；进程被挂起时须为任务所绑定的同一实例且已持续挂起满 60 秒。
-// 进程观测统一更新（审查 P1-2）：所有采样点（定时观测、门控、目标构建）共用。
-// 挂起观测维持连续计时（同一实例继续计时，新实例重新计时）；任何非挂起观测
-// （执行/消失/终止/未知）立即清除连续计时。门控采样到执行却不清除旧计时，
-// 下次定时观测同实例挂起会立即放行，破坏“持续挂起满 60 秒”的前提——
-// 已看到恢复执行，必须使旧证据失效。读写加锁：定时观测在主线程，门控在清理队列。
-static void axs_cachekeeper_observe_process(NSString *bundle, AxsCacheKeeperExecState exec, NSString *identity) {
-    @synchronized (AxsCacheKeeperSweep.class) {
-        if (!axs_cachekeeper_suspended_since) axs_cachekeeper_suspended_since = [NSMutableDictionary new];
-        if (exec==AxsCacheKeeperExecSuspended && identity.length) {
-            NSDictionary *record=axs_cachekeeper_suspended_since[bundle];
-            if (![record[@"identity"] isEqual:identity])
-                axs_cachekeeper_suspended_since[bundle]=@{@"identity":identity,@"since":@(axs_cachekeeper_monotonic_seconds())};
-        } else [axs_cachekeeper_suspended_since removeObjectForKey:bundle];
-    }
-}
 static BOOL axs_cachekeeper_gate_open(NSString *bundle, NSString *jobInstance) {
     NSString *identity=nil;
     AxsCacheKeeperExecState exec=axs_cachekeeper_exec(bundle,&identity,NULL,NULL);
-    axs_cachekeeper_observe_process(bundle,exec,identity);
+    [AxsCacheKeeperProcessObservation observeBundle:bundle state:exec identity:identity atMonotonicTime:axs_cachekeeper_monotonic_seconds()];
     if (exec==AxsCacheKeeperExecAbsent || exec==AxsCacheKeeperExecTerminated) return YES;
     if (exec!=AxsCacheKeeperExecSuspended || !identity.length) return NO;
     if (jobInstance.length && ![identity isEqual:jobInstance]) return NO;
-    NSDictionary *record=nil;
-    @synchronized (AxsCacheKeeperSweep.class) { record=axs_cachekeeper_suspended_since[bundle]; }
-    return [record[@"identity"] isEqual:identity] && axs_cachekeeper_monotonic_seconds() - [record[@"since"] doubleValue] >= 60;
+    return [AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:bundle identity:identity atMonotonicTime:axs_cachekeeper_monotonic_seconds()];
 }
 static NSString *axs_cachekeeper_folder(void) { return jbroot(@"/var/mobile/Library/CacheKeeper"); }
 static BOOL axs_cachekeeper_report(NSString *bundle, NSString *phase, NSString *message,
@@ -258,7 +240,6 @@ void CKApplyDirectorySwitches(void) {
     // 使长任务存续期间发生的新实例启停也能被 shouldContinue 的绑定比对发现；
     // 同时维护挂起稳定跟踪（同一实例被系统挂起的起始时刻），供放行判定使用。
     if (!axs_cachekeeper_seen_instances) axs_cachekeeper_seen_instances = [NSMutableDictionary new];
-    if (!axs_cachekeeper_suspended_since) axs_cachekeeper_suspended_since = [NSMutableDictionary new];
     NSDictionary *observedStates = [NSDictionary dictionaryWithContentsOfFile:
         [axs_cachekeeper_folder() stringByAppendingPathComponent:@"appEnabled.plist"]];
     for (NSString *bundle in observedStates) {
@@ -266,7 +247,7 @@ void CKApplyDirectorySwitches(void) {
         NSString *identity=nil;
         AxsCacheKeeperExecState exec=axs_cachekeeper_exec(bundle,&identity,NULL,NULL);
         if (exec==AxsCacheKeeperExecExecuting && identity) axs_cachekeeper_seen_instances[bundle]=identity;
-        axs_cachekeeper_observe_process(bundle,exec,identity);
+        [AxsCacheKeeperProcessObservation observeBundle:bundle state:exec identity:identity atMonotonicTime:axs_cachekeeper_monotonic_seconds()];
     }
     if (busy) return;
     if (!queue) {
@@ -298,7 +279,7 @@ void CKApplyDirectorySwitches(void) {
         if (home) for (NSString *relative in paths) [roots addObject:[home.path stringByAppendingPathComponent:relative]];
         NSString *reason=nil, *execIdentity=nil;
         AxsCacheKeeperExecState exec=axs_cachekeeper_exec(bundle,&execIdentity,NULL,&reason);
-        axs_cachekeeper_observe_process(bundle,exec,execIdentity);
+        [AxsCacheKeeperProcessObservation observeBundle:bundle state:exec identity:execIdentity atMonotonicTime:axs_cachekeeper_monotonic_seconds()];
         AxsCacheKeeperProcessState process=AxsCacheKeeperProcessUnknown;
         AxsCacheKeeperSignalConfidence confidence=AxsCacheKeeperSignalNone;
         NSString *instance=axs_cachekeeper_seen_instances[bundle] ?: @"";
@@ -312,10 +293,7 @@ void CKApplyDirectorySwitches(void) {
         } else if (exec==AxsCacheKeeperExecSuspended) {
             confidence=AxsCacheKeeperSignalStrong;
             if (execIdentity) instance=execIdentity;
-            NSDictionary *suspendRecord=nil;
-            @synchronized (AxsCacheKeeperSweep.class) { suspendRecord=axs_cachekeeper_suspended_since[bundle]; }
-            if (execIdentity && [suspendRecord[@"identity"] isEqual:execIdentity] &&
-                axs_cachekeeper_monotonic_seconds() - [suspendRecord[@"since"] doubleValue] >= 60) {
+            if ([AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:bundle identity:execIdentity atMonotonicTime:axs_cachekeeper_monotonic_seconds()]) {
                 process=AxsCacheKeeperProcessStopped;
                 reason=@"APP 进程已被系统挂起且持续满 60 秒（未在执行），按已退出处理";
             } else {
