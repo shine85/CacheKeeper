@@ -207,11 +207,11 @@
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
     if (section==0) return @"一键开启 = 自动模式 + 网络磁盘缓存限制 + 新增缓存自动发现。可能增加流量和重复加载，网络选项可随时关闭。";
     if (section==2) return self.otherRows.count ? @"这些目录可能同时包含资源、业务状态或缓存，尚未逐项确认；不自动清理。已知敏感持久化目录已隐藏。" : nil;
-    if (section==3) return self.unknownRows.count ? @"点击目录进入只读深度检测：类型组成、文件时间与最大文件。未知不等于必需，也不等于垃圾；不参加一键开启。在档案页看过证据后，可把目录定级为日志目录，按日志规则清理；已定级的目录可在此关闭定级。" : nil;
+    if (section==3) return self.unknownRows.count ? @"点击目录进入只读深度检测：类型组成、文件时间与最大文件。未知不等于必需，也不等于垃圾。退出后先做全目录内容审查：无数据证据的自动清理，检出数据证据的整目录保留。日志与数据混放的目录可在档案页定级为日志目录，只清日志文件；已定级的目录可在此关闭定级。" : nil;
     NSDictionary *footerStates=[self axs_cachekeeper_display:@"appEnabled.plist"];
     NSString *message=axs_cachekeeper_full_clear(footerStates[self.bundle]) ?
-        @"首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后处理。全量清理已开启：标准缓存目录内的全部文件都清空（含数据库与未知文件）；其他目录仍只删除可识别媒体。已选目录内新增内容自动覆盖；手动关闭的目录保持排除。" :
-        @"首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后删除可识别媒体。已选目录内新增内容自动覆盖；新增标准缓存根按自动发现选项纳入，手动关闭的目录保持排除。";
+        @"首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后处理。全量清理已开启：标准缓存目录内的全部文件都清空（含数据库与未知文件）；未知目录退出后先做全目录内容审查，无数据证据的自动清理，检出数据证据的整目录保留。已选目录内新增内容自动覆盖；手动关闭的目录保持排除。" :
+        @"首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后删除可识别媒体；未知目录退出后先做全目录内容审查，无数据证据的自动清理，检出数据证据的整目录保留。已选目录内新增内容自动覆盖；新增标准缓存根按自动发现选项纳入，手动关闭的目录保持排除。";
     return self.scanError.length ? [self.scanError stringByAppendingFormat:@"\n%@",message] : message;
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
@@ -288,7 +288,7 @@
         for (NSDictionary *row in items) {bytes+=[row[@"bytes"] unsignedLongLongValue];complete&=[row[@"complete"] boolValue];}
         cell.textLabel.text=[NSString stringWithFormat:@"%@%lu 项%@",expanded ? @"收起 " : @"展开 ",(unsigned long)items.count,unknown ? @"用途未知目录" : @"混合／共享数据"];
         cell.textLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];cell.textLabel.textColor=UIColor.systemBlueColor;
-        cell.detailTextLabel.text=[NSString stringWithFormat:@"已统计 %.2f MB%@ · 不自动处理",bytes/1048576.0,complete ? @"" : @"（未统计完整）"];cell.detailTextLabel.numberOfLines=0;
+        cell.detailTextLabel.text=[NSString stringWithFormat:@"已统计 %.2f MB%@ · %@",bytes/1048576.0,complete ? @"" : @"（未统计完整）",unknown ? @"退出后内容审查，无数据证据即自动清理" : @"不自动处理"];cell.detailTextLabel.numberOfLines=0;
         cell.imageView.image=[UIImage systemImageNamed:unknown ? @"questionmark.folder" : @"folder"];
         cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;cell.accessibilityValue=expanded ? @"已展开" : @"已折叠";return cell;
     }
@@ -414,7 +414,7 @@
     if (self.timer) { [self axs_cachekeeper_reload];return; }
     NSString *error=axs_cachekeeper_set_log_path(jbroot(@"/var/mobile/Library/CacheKeeper"),self.bundle,toggle.accessibilityIdentifier,toggle.on);
     if (error) [self message:error]; else axs_cachekeeper_notify_preferences();
-    self.actionStatus=error ?: (toggle.on ? @"已定级为日志目录；完全退出后按日志规则清理" : @"已取消日志目录定级；恢复为用途未知、不处理");
+    self.actionStatus=error ?: (toggle.on ? @"已定级为日志目录；完全退出后按日志规则清理" : @"已取消日志目录定级；恢复为用途未知，按内容审查处理");
     [self axs_cachekeeper_reload];
 }
 - (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {

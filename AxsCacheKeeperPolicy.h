@@ -100,7 +100,7 @@ static inline NSString *axs_cachekeeper_directory_description(NSString *path) {
         @"Inbox":@"导入或共享接收的用户文件；仅查看"
     };
     if (descriptions[path]) return descriptions[path];
-    return axs_cachekeeper_cache_path(path) ? @"缓存目录；仅清理可识别的普通媒体，其他内容保留" : @"用途未确认：尚无证据证明是缓存或必需数据；不自动处理";
+    return axs_cachekeeper_cache_path(path) ? @"缓存目录；仅清理可识别的普通媒体，其他内容保留" : @"用途未确认：尚无证据证明是缓存或必需数据；退出后做全目录内容审查，无数据证据即自动清理";
 }
 static inline BOOL axs_cachekeeper_ordinary_cache_file(NSString *relative) {
     return !axs_cachekeeper_protected_path(relative);
@@ -190,7 +190,11 @@ static inline BOOL axs_cachekeeper_should_prevent(id state) {
     return axs_cachekeeper_app_enabled(state) && axs_cachekeeper_wants_restriction(state) && axs_cachekeeper_url_cache_enabled(state);
 }
 static inline BOOL axs_cachekeeper_auto_discover(id state) {
-    return [state isKindOfClass:NSDictionary.class] && [state[@"autoDiscover"] isKindOfClass:NSNumber.class] && [state[@"autoDiscover"] boolValue];
+    // 全新 APP 默认自动发现开启：只开总开关即全自动（标准缓存根自动纳入，未知目录内容审查自动清理）；
+    // 已明确关闭的（键为 @NO）保持关闭；手动排除始终有效。2026-11-12 用户要求：分目录不用逐个管。
+    if ([state isKindOfClass:NSDictionary.class] && [state[@"autoDiscover"] isKindOfClass:NSNumber.class])
+        return [state[@"autoDiscover"] boolValue];
+    return YES;
 }
 // 标准缓存全量清理（按 APP 开关，默认关闭）：开启后该 APP 的平台缓存契约目录在完全退出后清空全部文件。
 // 一键开启与模式切换不写此键，只能由用户在详情页逐个 APP 打开。
@@ -228,6 +232,36 @@ static inline NSArray<NSString *> *axs_cachekeeper_log_paths(id state) {
     if ([state[@"logPaths"] isKindOfClass:NSArray.class]) for (id path in state[@"logPaths"])
         if (axs_cachekeeper_log_path_valid(path)) [valid addObject:path];
     return axs_cachekeeper_parent_paths(valid);
+}
+// B 案内容审查的证据口径（无数据证据即清的判定依据）：数据库与登录态类证据命中其一，整目录保留。
+// 配置类 .plist/.json 不算证据：它们是可再生的运行时配置（tma 含此类文件，仍可清）；
+// 凭证类 .key/.pem/.p12 算证据。目录名数据标记与数据库头另由 Sweep 预检复核。
+static inline BOOL axs_cachekeeper_purge_evidence_path(NSString *relative) {
+    if (!axs_cachekeeper_relative_path(relative)) return YES;
+    for (NSString *part in [relative.lowercaseString componentsSeparatedByString:@"/"]) {
+        for (NSString *word in @[@"documents", @"preferences", @"webkit", @"cookie", @"database", @"sqlite",
+            @"realm", @"keychain", @"credential", @"login", @"account", @"auth", @"session", @"token",
+            @"downloads", @"offline", @"inbox"]) {
+            if ([part containsString:word]) return YES;
+        }
+        if ([part isEqual:@"db"] || [part hasSuffix:@".db"] || [part containsString:@".db-"] ||
+            [part hasSuffix:@".key"] || [part hasSuffix:@".pem"] || [part hasSuffix:@".p12"]) return YES;
+    }
+    return NO;
+}
+static inline NSArray<NSString *> *axs_cachekeeper_purge_paths(NSArray *candidates, id state) {
+    // 未知目录自动清理候选集：用途未知类、未定级为日志、未被手动排除；父目录优先去重。
+    NSMutableArray *paths=[NSMutableArray new];
+    NSArray *logs=axs_cachekeeper_log_paths(state);
+    NSArray *excluded=axs_cachekeeper_exclusions(state);
+    for (NSString *path in candidates) {
+        if (!axs_cachekeeper_log_path_valid(path)) continue;
+        if ([logs containsObject:path]) continue;
+        BOOL hit=NO;
+        for (NSString *ex in excluded) if (axs_cachekeeper_paths_overlap(path,ex)) { hit=YES; break; }
+        if (!hit) [paths addObject:path];
+    }
+    return axs_cachekeeper_parent_paths(paths);
 }
 static inline NSArray<NSString *> *axs_cachekeeper_exclusions(id state) {
     return [state isKindOfClass:NSDictionary.class] ? axs_cachekeeper_cache_paths(state[@"excludedPaths"]) : @[];

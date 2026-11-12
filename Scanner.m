@@ -208,7 +208,7 @@ void axs_cachekeeper_request_cleanup(NSString *bundle) {
 void CKApplyDirectorySwitches(void) {
     static BOOL busy;
     static dispatch_queue_t queue;
-    static NSMutableDictionary *jobs, *finished, *discovery, *lockChecks;
+    static NSMutableDictionary *jobs, *finished, *discovery, *lockChecks, *purgeDiscovery;
     // 实例观测独立于清理忙碌状态：每轮入口先记录各已启用 APP 当前运行实例，
     // 使长任务存续期间发生的新实例启停也能被 shouldContinue 的绑定比对发现；
     // 同时维护挂起稳定跟踪（同一实例被系统挂起的起始时刻），供放行判定使用。
@@ -230,7 +230,7 @@ void CKApplyDirectorySwitches(void) {
     if (busy) return;
     if (!queue) {
         queue = dispatch_queue_create("dev.local.cachekeeper.cleanup", DISPATCH_QUEUE_SERIAL);
-        jobs = [NSMutableDictionary new]; finished = [NSMutableDictionary new]; discovery = [NSMutableDictionary new]; lockChecks = [NSMutableDictionary new];
+        jobs = [NSMutableDictionary new]; finished = [NSMutableDictionary new]; discovery = [NSMutableDictionary new]; lockChecks = [NSMutableDictionary new]; purgeDiscovery = [NSMutableDictionary new];
     }
     NSString *folder = axs_cachekeeper_folder();
     NSString *selectionFile = [folder stringByAppendingPathComponent:@"directories.plist"];
@@ -308,6 +308,7 @@ void CKApplyDirectorySwitches(void) {
         for (NSString *bundle in jobs.allKeys) if (!targets[bundle]) [jobs removeObjectForKey:bundle];
         for (NSString *bundle in finished.allKeys) if (!targets[bundle]) [finished removeObjectForKey:bundle];
         for (NSString *bundle in discovery.allKeys) if (!targets[bundle]) [discovery removeObjectForKey:bundle];
+        for (NSString *bundle in purgeDiscovery.allKeys) if (!targets[bundle]) [purgeDiscovery removeObjectForKey:bundle];
         for (NSString *bundle in targets) {
             NSDictionary *target = targets[bundle];
             NSArray *roots = target[@"roots"], *paths = target[@"paths"];
@@ -366,7 +367,23 @@ void CKApplyDirectorySwitches(void) {
             NSMutableArray *effectiveRoots=[NSMutableArray new];
             for (NSString *relative in paths) [effectiveRoots addObject:[target[@"home"] stringByAppendingPathComponent:relative]];
             roots=effectiveRoots;
-            if (!paths.count) {
+            // 未知目录自动清理（B 案）：候选集来自目录扫描（30 秒缓存，与缓存根发现同节奏，不传 Group——
+            // Group 候选只读，本就不入选）；内容审查在 Sweep 预检内完成，此处只决定候选集
+            //（用途未知类、未定级为日志、未被手动排除）。只开总开关即全自动：候选发现不依赖自动发现开关。
+            NSArray *purgeCandidates=@[];
+            NSError *purgeError=nil;
+            NSDictionary *knownPurge=purgeDiscovery[bundle];
+            NSTimeInterval nowPurge=NSProcessInfo.processInfo.systemUptime;
+            if (![knownPurge[@"home"] isEqual:target[@"home"]] || nowPurge-[knownPurge[@"time"] doubleValue]>=30) {
+                NSArray *found=axs_cachekeeper_scan_targets([NSURL fileURLWithPath:target[@"home"]], nil, &purgeError);
+                NSMutableArray *raw=[NSMutableArray new];
+                for (NSDictionary *candidate in found) if (![candidate[@"readOnly"] boolValue]) [raw addObject:candidate[@"path"]];
+                knownPurge=@{@"home":target[@"home"],@"time":@(nowPurge),@"paths":raw,@"error":purgeError.localizedDescription ?: @""};
+                purgeDiscovery[bundle]=knownPurge;
+            }
+            purgeCandidates=knownPurge[@"paths"];
+            NSArray *purgePaths=axs_cachekeeper_purge_paths(purgeCandidates, states[bundle]);
+            if (!paths.count && !purgePaths.count) {
                 [jobs removeObjectForKey:bundle];[finished removeObjectForKey:bundle];
                 NSString *message=discoveryError.length ? discoveryError : @"没有可处理的缓存目录；已尊重手动排除，网络限制按独立选项执行";
                 axs_cachekeeper_report(bundle,@"waiting",message,0,0,discoveryError.length ? 1 : 0,@[],axs_cachekeeper_auto_discover(states[bundle]) ? discovered : nil,nil);continue;
@@ -374,7 +391,8 @@ void CKApplyDirectorySwitches(void) {
             BOOL fullClear = axs_cachekeeper_full_clear(states[bundle]);
             BOOL hasLogRoot = NO;
             for (NSString *path in paths) if ([axs_cachekeeper_log_paths(states[bundle]) containsObject:path]) { hasLogRoot = YES; break; }
-            NSString *signature = [NSString stringWithFormat:@"%@\n%@\n%@\n%@", [roots componentsJoinedByString:@"\n"], mode, fullClear ? @"full" : @"media", target[@"instance"]];
+            BOOL hasPurgeRoot = purgePaths.count > 0;
+            NSString *signature = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\n%@", [roots componentsJoinedByString:@"\n"], mode, fullClear ? @"full" : @"media", target[@"instance"], [purgePaths componentsJoinedByString:@"\n"]];
             NSDictionary *done = finished[bundle];
             if (!manual && [done[@"signature"] isEqual:signature] && -[done[@"time"] timeIntervalSinceNow] < 30) continue;
             NSMutableDictionary *job = jobs[bundle];
@@ -387,6 +405,12 @@ void CKApplyDirectorySwitches(void) {
                     BOOL rootFullClear = index < paths.count && axs_cachekeeper_full_clear_path(states[bundle], paths[index]);
                     BOOL rootLog = index < paths.count && [axs_cachekeeper_log_paths(states[bundle]) containsObject:paths[index]];
                     [sweeps addObject:[[AxsCacheKeeperSweep alloc] initWithRoot:root fullClear:rootFullClear logMode:rootLog]];
+                }
+                for (NSString *relative in purgePaths) {
+                    NSString *purgeRoot=[target[@"home"] stringByAppendingPathComponent:relative];
+                    struct stat info;
+                    if (lstat(purgeRoot.fileSystemRepresentation, &info) && errno == ENOENT) continue;
+                    [sweeps addObject:[[AxsCacheKeeperSweep alloc] initWithRoot:purgeRoot fullClear:NO logMode:NO purgeMode:YES]];
                 }
                 job = [@{@"signature":signature, @"sweeps":sweeps, @"removed":@0, @"bytes":@0,
                     @"instance":target[@"instance"] ?: @"", @"started":NSDate.date} mutableCopy];
@@ -403,11 +427,15 @@ void CKApplyDirectorySwitches(void) {
                     NSArray *currentPaths = axs_cachekeeper_effective_paths(currentSelection[bundle],currentStates[bundle],discovered);
                     BOOL selected = [currentPaths isEqual:paths] && [axs_cachekeeper_mode(currentStates[bundle]) isEqual:mode] &&
                         axs_cachekeeper_full_clear(currentStates[bundle]) == fullClear;
+                    // 未知目录候选集须同步复核：中途被定级为日志或手动排除的目录，本轮立即停手，下一轮改走日志模式。
+                    NSArray *currentPurgePaths = axs_cachekeeper_purge_paths(purgeCandidates, currentStates[bundle]);
+                    BOOL purgeOK = [currentPurgePaths isEqual:purgePaths];
                     // 实例绑定：任务存续期间观测到不同实例运行过，说明目标缓存可能已被新实例接管，旧任务过期。
                     NSString *seen = axs_cachekeeper_seen_instances[bundle];
                     BOOL instanceOK = ![jobInstance length] || ![seen length] || [seen isEqual:jobInstance];
-                    allowed = readable && selected && currentPaths.count && axs_cachekeeper_wants_cleanup(currentStates[bundle]) && [Container(bundle).path isEqual:target[@"home"]] &&
-                        axs_cachekeeper_gate_open(bundle, jobInstance) && instanceOK;
+                    // 仅清理未知目录的任务没有缓存根，currentPaths 为空是正常态：任一根存在即放行。
+                    allowed = readable && selected && (currentPaths.count || currentPurgePaths.count) && axs_cachekeeper_wants_cleanup(currentStates[bundle]) && [Container(bundle).path isEqual:target[@"home"]] &&
+                        axs_cachekeeper_gate_open(bundle, jobInstance) && instanceOK && purgeOK;
                 });
                 return allowed;
             };
@@ -447,6 +475,7 @@ void CKApplyDirectorySwitches(void) {
                 if (changedCount) message=[message stringByAppendingFormat:@"；%lu 个目录在预检后变化，已跳过等待下轮",(unsigned long)changedCount];
                 if (fullClear) message=[message stringByAppendingString:@"\n全量清理开启：标准缓存目录内的文件按平台缓存契约处理，不按类型保留（60 秒内新文件除外）"];
                 if (hasLogRoot) message=[message stringByAppendingString:@"\n含用户定级的日志目录：仅清理日志特征文件（.log/.alog/.xlog)，数据与未知内容保留"];
+                if (hasPurgeRoot) message=[message stringByAppendingString:@"\n未知目录已按内容审查清理：无数据证据的目录退出后清理，检出数据证据的整目录保留"];
                 if ([mode isEqual:@"auto"] && axs_cachekeeper_url_cache_enabled(states[bundle])) message = [message stringByAppendingFormat:@"\n%@", axs_cachekeeper_network_status(bundle)];
                 finished[bundle] = @{@"signature":signature, @"time":NSDate.date};
                 [jobs removeObjectForKey:bundle];

@@ -453,6 +453,60 @@ int main(int argc, const char *argv[]) {
         for (NSUInteger pass=0;!hotFull.complete && pass<100;pass++) [hotFull advance:64 shouldContinue:^BOOL{return YES;}];
         require(hotFull.complete && hotFull.removed==0 &&
             [fm fileExistsAtPath:[hotRoot2 stringByAppendingPathComponent:@"ready/stable-one.alog"]], @"对照：目录级稳定性门下兄弟变化整目录保留");
+        // 未知目录自动清理（B 案，2026-11-12）：预检即全目录内容审查，任一数据证据整根出局；
+        // 零证据的目录按文件级稳定性门全清（含媒体、文本、运行时文件与配置类 .plist/.json）；
+        // 全新 APP 默认自动发现开启，只开总开关即全自动。
+        require(axs_cachekeeper_auto_discover(nil) && axs_cachekeeper_auto_discover(@{@"enabled":@YES}), @"全新 APP 默认自动发现开启");
+        require(!axs_cachekeeper_auto_discover(@{@"autoDiscover":@NO}), @"已明确关闭自动发现的保持关闭");
+        require([axs_cachekeeper_app_state(nil,YES)[@"autoDiscover"] boolValue], @"全新 APP 状态保存默认自动发现开启");
+        require([axs_cachekeeper_purge_paths(@[@"Library/tma",@"Library/alog",@"Library/Caches",@"Library/Preferences"],@{@"enabled":@YES,@"logPaths":@[@"Library/alog"]}) isEqual:@[@"Library/tma"]], @"清理候选集只取未定级未知目录");
+        NSString *purgeRoot=[fixture stringByAppendingPathComponent:@"purge-clean"];
+        require([fm createDirectoryAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime"] withIntermediateDirectories:YES attributes:nil error:nil], @"清理目录夹具");
+        writeMedia([purgeRoot stringByAppendingPathComponent:@"runtime/model.bin"]);
+        writeFile([purgeRoot stringByAppendingPathComponent:@"runtime/config.json"]);
+        writeFile([purgeRoot stringByAppendingPathComponent:@"runtime/settings.plist"]);
+        writeFile([purgeRoot stringByAppendingPathComponent:@"top.txt"]);
+        AxsCacheKeeperSweep *purgeClean=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!purgeClean.complete && pass<100;pass++) [purgeClean advance:64 shouldContinue:^BOOL{return YES;}];
+        require(purgeClean.complete && purgeClean.failed==0 && purgeClean.removed==4 && !purgeClean.purgeBlocked,
+            [NSString stringWithFormat:@"无数据证据的未知目录全清（removed=%lu failed=%lu error=%@）",(unsigned long)purgeClean.removed,(unsigned long)purgeClean.failed,purgeClean.error]);
+        require(![fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime/model.bin"]] &&
+            ![fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime/config.json"]] &&
+            ![fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime/settings.plist"]] &&
+            ![fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"top.txt"]], @"运行时文件与配置类文件随目录清理");
+        NSString *purgeDb=[fixture stringByAppendingPathComponent:@"purge-db"];
+        require([fm createDirectoryAtPath:purgeDb withIntermediateDirectories:YES attributes:nil error:nil], @"含数据库的清理目录夹具");
+        writeMedia([purgeDb stringByAppendingPathComponent:@"thumb.png"]);
+        require([@"SQLite format 3\0payload" writeToFile:[purgeDb stringByAppendingPathComponent:@"hidden.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"伪装数据库夹具");
+        AxsCacheKeeperSweep *purgeDbSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeDb clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!purgeDbSweep.complete && pass<100;pass++) [purgeDbSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(purgeDbSweep.complete && purgeDbSweep.failed==0 && purgeDbSweep.removed==0 && purgeDbSweep.purgeBlocked &&
+            [fm fileExistsAtPath:[purgeDb stringByAppendingPathComponent:@"thumb.png"]] &&
+            [fm fileExistsAtPath:[purgeDb stringByAppendingPathComponent:@"hidden.bin"]], @"伪装数据库整根出局、零删除零失败");
+        NSString *purgeNamed=[fixture stringByAppendingPathComponent:@"purge-named"];
+        require([fm createDirectoryAtPath:[purgeNamed stringByAppendingPathComponent:@"Preferences"] withIntermediateDirectories:YES attributes:nil error:nil], @"含受保护子目录的清理夹具");
+        writeFile([purgeNamed stringByAppendingPathComponent:@"Preferences/a.txt"]);
+        writeFile([purgeNamed stringByAppendingPathComponent:@"plain.txt"]);
+        AxsCacheKeeperSweep *purgeNamedSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeNamed clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!purgeNamedSweep.complete && pass<100;pass++) [purgeNamedSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(purgeNamedSweep.complete && purgeNamedSweep.removed==0 && purgeNamedSweep.purgeBlocked &&
+            [fm fileExistsAtPath:[purgeNamed stringByAppendingPathComponent:@"Preferences/a.txt"]] &&
+            [fm fileExistsAtPath:[purgeNamed stringByAppendingPathComponent:@"plain.txt"]], @"受保护子目录整根出局");
+        NSString *hotPurgeRoot=[fixture stringByAppendingPathComponent:@"hot-purge"];
+        require([fm createDirectoryAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready"] withIntermediateDirectories:YES attributes:nil error:nil], @"热清理目录夹具");
+        writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-one.bin"]);
+        writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-two.txt"]);
+        writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/keep-changing.bin"]);
+        AxsCacheKeeperSweep *hotPurge=[[AxsCacheKeeperSweep alloc] initWithRoot:hotPurgeRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;hotPurge.checking && !hotPurge.complete && pass<100;pass++) [hotPurge advance:1 shouldContinue:^BOOL{return YES;}];
+        require(!hotPurge.checking && hotPurge.removed==0, @"清理模式预检阶段不删除");
+        writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/keep-changing.bin"]);
+        for (NSUInteger pass=0;!hotPurge.complete && pass<100;pass++) [hotPurge advance:64 shouldContinue:^BOOL{return YES;}];
+        require(hotPurge.complete && hotPurge.failed==0 && hotPurge.removed==2 && hotPurge.changedCount>0,
+            [NSString stringWithFormat:@"清理模式文件级稳定性门：兄弟变化只跳过自身（removed=%lu failed=%lu changed=%lu error=%@）",(unsigned long)hotPurge.removed,(unsigned long)hotPurge.failed,(unsigned long)hotPurge.changedCount,hotPurge.error]);
+        require(![fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-one.bin"]] &&
+            ![fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-two.txt"]] &&
+            [fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/keep-changing.bin"]], @"变化文件保留、稳定文件删除");
         NSString *lateDir=[fixture stringByAppendingPathComponent:@"late-database"];
         require([fm createDirectoryAtPath:lateDir withIntermediateDirectories:YES attributes:nil error:nil], @"延迟发现数据库夹具");
         writeMedia([lateDir stringByAppendingPathComponent:@"a.png"]);
