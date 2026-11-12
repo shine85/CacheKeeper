@@ -426,7 +426,12 @@ void CKApplyDirectorySwitches(void) {
             BOOL hasPurgeRoot = purgePaths.count > 0;
             NSString *signature = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\n%@", [roots componentsJoinedByString:@"\n"], mode, fullClear ? @"full" : @"media", target[@"instance"], [purgePaths componentsJoinedByString:@"\n"]];
             NSDictionary *done = finished[bundle];
-            if (!manual && [done[@"signature"] isEqual:signature] && -[done[@"time"] timeIntervalSinceNow] < 30) continue;
+            // 静默期：干净的 0 删除轮（无删除、无失败、预检中无目录变化）说明该 APP 已到稳态，
+            // 30 秒后重开只会反复空转预检（#63 真机：极速版等反复检测、完成也是 0）；同签名下一次
+            // 轮次延至 30 分钟后。有删除、有失败或有目录变化的轮次仍按 30 秒重试；APP 再次运行
+            // （新实例→签名变化）或配置改变时不受限；手动清理不受限。
+            NSTimeInterval quiet = (done && [done[@"removed"] unsignedIntegerValue] == 0 && [done[@"failed"] unsignedIntegerValue] == 0 && [done[@"changed"] unsignedIntegerValue] == 0) ? 1800 : 30;
+            if (!manual && [done[@"signature"] isEqual:signature] && -[done[@"time"] timeIntervalSinceNow] < quiet) continue;
             NSMutableDictionary *job = jobs[bundle];
             if (![job[@"signature"] isEqual:signature]) {
                 NSMutableArray *sweeps = [NSMutableArray new];
@@ -557,7 +562,7 @@ void CKApplyDirectorySwitches(void) {
             if (reported) {
                 job[@"removed"] = @(removed); job[@"bytes"] = @(bytes);
                 if (cancelled || complete || capHit) {
-                    if (complete || capHit) finished[bundle] = @{@"signature":signature, @"time":NSDate.date};
+                    if (complete || capHit) finished[bundle] = @{@"signature":signature, @"time":NSDate.date, @"removed":@(removed), @"failed":@(failures), @"changed":@(changedCount)};
                     [jobs removeObjectForKey:bundle];
                     if (manual && (complete || cancelled)) dispatch_async(dispatch_get_main_queue(), ^{ [axs_cachekeeper_manual removeObject:bundle]; });
                 }
