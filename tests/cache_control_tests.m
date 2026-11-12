@@ -10,6 +10,8 @@
 #import "../AxsCacheKeeperFilza.h"
 #import "../AxsCacheKeeperProcess.h"
 #import "../AxsCacheKeeperInspection.h"
+#import "../AxsCacheKeeperProbe.h"
+#import "../AxsCacheKeeperFileAccess.h"
 #import <objc/runtime.h>
 
 static void require(BOOL condition, NSString *message) {
@@ -36,12 +38,17 @@ static void writeMedia(NSString *path) {
 @interface AxsTestProcess : NSObject
 @property(nonatomic,copy) NSString *bundleIdentifier;
 @property(nonatomic) BOOL running;
-@property(nonatomic,strong) AxsTestProcessState *state;
+@property(nonatomic,strong) id state;
 @property(nonatomic) int pid;
 - (BOOL)isRunning;
 @end
 @implementation AxsTestProcess
 - (BOOL)isRunning { return self.running; }
+@end
+@interface AxsTestTaskState : NSObject
+@property(nonatomic) NSInteger taskState;
+@end
+@implementation AxsTestTaskState
 @end
 @interface AxsTestProcessManager : NSObject
 @property(nonatomic,strong) id allApplicationProcesses;
@@ -69,6 +76,20 @@ int main(int argc, const char *argv[]) {
         require(![fm fileExistsAtPath:fixture], @"测试目录必须是新目录");
         require([fm createDirectoryAtPath:fixture withIntermediateDirectories:YES attributes:nil error:nil], @"创建测试目录");
         NSString *bundle = @"test.cache.app";
+        uint64_t probeRequest=axs_cachekeeper_probe_request(123,1000);
+        require(axs_cachekeeper_probe_fresh(probeRequest,1000) && axs_cachekeeper_probe_fresh(probeRequest,1300) &&
+            !axs_cachekeeper_probe_fresh(probeRequest,1301) && !axs_cachekeeper_probe_fresh(probeRequest,999) &&
+            !axs_cachekeeper_probe_fresh(axs_cachekeeper_probe_request(0,1000),1000), @"诊断请求必须带有效随机标识且五分钟内有效");
+        require([axs_cachekeeper_probe_description(axs_cachekeeper_probe_result(1,2)) containsString:@"授权失败"] &&
+            [axs_cachekeeper_probe_description(axs_cachekeeper_probe_result(2,257)) containsString:@"配置读取失败"] &&
+            [axs_cachekeeper_probe_description(axs_cachekeeper_probe_result(7,0)) containsString:@"写入失败"], @"注入、配置、容量和文件回执不混为同一状态");
+        NSString *probeName=axs_cachekeeper_probe_name(NSUUID.UUID.UUIDString,NO);
+        int sender=-1,receiver=-1;uint64_t observed=0;
+        require(notify_register_check(probeName.UTF8String,&sender)==NOTIFY_STATUS_OK &&
+            notify_register_check(probeName.UTF8String,&receiver)==NOTIFY_STATUS_OK &&
+            notify_set_state(sender,probeRequest)==NOTIFY_STATUS_OK && notify_get_state(receiver,&observed)==NOTIFY_STATUS_OK &&
+            observed==probeRequest, @"实际 Darwin state API 的多个注册可以读取同一诊断请求");
+        notify_cancel(sender);notify_cancel(receiver);
         NSString *reason=nil;
         require(axs_cachekeeper_process_state(nil,bundle,&reason)==AxsCacheKeeperProcessUnknown && reason.length, @"缺少进程接口不能判断已退出");
         AxsTestProcessManager *manager=[AxsTestProcessManager new];manager.allApplicationProcesses=@[];
@@ -79,6 +100,12 @@ int main(int argc, const char *argv[]) {
         require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessUnknown, @"nil 清单不能模拟空数组成功");
         AxsTestProcess *application=[AxsTestProcess new];application.bundleIdentifier=bundle;manager.allApplicationProcesses=@[application];
         require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessRunning, @"保留启动或退出中的进程记录，不依赖瞬时 isRunning");
+        AxsTestTaskState *task=[AxsTestTaskState new];task.taskState=2;application.state=task;
+        require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessRunning &&
+            [reason containsString:@"taskState=2"], @"有进程记录时仍禁止清理，并保留执行状态原始值供诊断");
+        application.state=nil;
+        require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessRunning &&
+            [reason containsString:@"taskState=不可读"], @"执行状态接口缺失只能报告不可读，不能模拟退出");
         manager.allApplicationProcesses=@[[NSObject new]];
         require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessUnknown, @"不完整的进程记录不得授权删除");
         AxsTestProcessState *execState=[AxsTestProcessState new];
@@ -168,6 +195,27 @@ int main(int argc, const char *argv[]) {
         NSString *summary = axs_cachekeeper_summary(@{@"rows":@[@{}]}, @{@"phase":@"auto", @"message":@"限写失败",
             @"removed":@3, @"bytes":@1048576, @"failed":@1});
         require([summary containsString:@"1 个"] && [summary containsString:@"3 个"] && [summary containsString:@"限写失败"], @"检测与清理结果同时可见");
+        NSTimeZone *previousZone=NSTimeZone.defaultTimeZone;
+        [NSTimeZone setDefaultTimeZone:[NSTimeZone timeZoneWithName:@"Asia/Shanghai"]];
+        NSDate *epoch=[NSDate dateWithTimeIntervalSince1970:0];
+        require([axs_cachekeeper_format_time(epoch,[NSTimeZone timeZoneWithName:@"Asia/Shanghai"]) isEqual:@"1970-01-01 08:00:00"] &&
+            [axs_cachekeeper_format_time(epoch,[NSTimeZone timeZoneWithName:@"America/Los_Angeles"]) isEqual:@"1969-12-31 16:00:00"], @"实际格式器支持正负时差与跨日，不能使用 UTC 日期描述");
+        NSCalendar *deviceCalendar=[[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+        deviceCalendar.timeZone=NSTimeZone.localTimeZone;
+        NSDateComponents *deviceParts=[deviceCalendar components:NSCalendarUnitYear|NSCalendarUnitMonth|NSCalendarUnitDay|NSCalendarUnitHour|NSCalendarUnitMinute|NSCalendarUnitSecond fromDate:epoch];
+        NSString *deviceTime=[NSString stringWithFormat:@"%04ld-%02ld-%02ld %02ld:%02ld:%02ld",(long)deviceParts.year,(long)deviceParts.month,(long)deviceParts.day,(long)deviceParts.hour,(long)deviceParts.minute,(long)deviceParts.second];
+        NSString *localSummary=axs_cachekeeper_summary(nil,@{@"updated":epoch});
+        require([localSummary containsString:deviceTime] && ![localSummary containsString:@"+0000"],
+            [NSString stringWithFormat:@"回执跟随设备时区而非进程默认时区（actual=%@; expected=%@）",localSummary,deviceTime]);
+        [NSTimeZone setDefaultTimeZone:previousZone];
+        require([axs_cachekeeper_time_string(@"broken date") isEqual:@"时间未知"], @"损坏时间字段显示未知而非伪造时间");
+        NSArray *pathAliases=@[@"/private/var/example/cache",@"/var/example/cache"];
+        require([axs_cachekeeper_enumerated_path(@"/var/example/cache/deep/file.png",pathAliases[0],pathAliases)
+            isEqual:@"/private/var/example/cache/deep/file.png"] &&
+            [axs_cachekeeper_enumerated_path(@"/private/var/example/cache/deep/",pathAliases[0],pathAliases)
+            isEqual:@"/private/var/example/cache/deep"], @"仅转换根别名与目录尾斜杠，不改变后代路径");
+        for (NSString *invalid in @[@"/var/example/cache-other/file",@"/var/example/cache/../outside",@"/var/example/cache/a//file",@"/var/example/cache/a/./file",@"/var/example/cache"])
+            require(!axs_cachekeeper_enumerated_path(invalid,pathAliases[0],pathAliases), @"拒绝越界前缀、空组件与路径穿越");
 
         NSString *home=[fixture stringByAppendingPathComponent:@"app-home"];
         NSArray *directoryRoots=@[@"tmp",@"Library/Caches",@"Library/Logs",@"Library/Application Support",@"Library/HTTPStorages",@"Library/WebKit",@"Library/Cookies",@"Library/SplashBoard",@"Library/Saved Application State",@"Documents",@"CustomData",@".cache"];
@@ -307,6 +355,18 @@ int main(int argc, const char *argv[]) {
             [sweep advance:1 shouldContinue:^BOOL { return YES; }];
         }
         require(sweep.complete && sweep.removed == 2 && sweep.failed == 0, @"单项分批仍能完成遍历并删除新旧缓存");
+        NSString *errorRoot=[fixture stringByAppendingPathComponent:@"unlink-error"];
+        require([fm createDirectoryAtPath:errorRoot withIntermediateDirectories:YES attributes:nil error:nil], @"失败回执夹具");
+        writeMedia([errorRoot stringByAppendingPathComponent:@"old.png"]);
+        AxsCacheKeeperSweep *failureSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:errorRoot clock:^NSTimeInterval{return future;} unlinkFile:^int(int fd,const char *name) {
+            struct stat parent;require(!fstat(fd,&parent) && S_ISDIR(parent.st_mode) && !strcmp(name,"old.png"), @"删除仍限定已打开父目录和单一文件名");
+            errno=EINVAL;return -1;
+        }];
+        for (NSUInteger pass=0;!failureSweep.complete && pass<20;pass++) [failureSweep advance:2 shouldContinue:^BOOL{return YES;}];
+        require(failureSweep.complete && failureSweep.removed==0 && failureSweep.failed==1 &&
+            [failureSweep.error containsString:@"unlinkat"] && [failureSweep.failureDetails.firstObject[@"code"] intValue]==EINVAL &&
+            [failureSweep.failureDetails.firstObject[@"stage"] isEqual:@"unlinkat"] &&
+            [fm fileExistsAtPath:[errorRoot stringByAppendingPathComponent:@"old.png"]], @"真实删除返回 EINVAL 时保留文件并准确记录调用阶段，不能冒充已清理");
         require([fm fileExistsAtPath:outside] && [fm fileExistsAtPath:cache], @"保留根目录与链接外用户文件");
         NSString *subfolder=[cache stringByAppendingPathComponent:@"later/deep"];
         require([fm createDirectoryAtPath:subfolder withIntermediateDirectories:YES attributes:nil error:nil], @"已选父目录内新增子目录");
@@ -321,6 +381,41 @@ int main(int argc, const char *argv[]) {
         require([fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"business.sqlite"]] &&
             [fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"paired.png"]] &&
             [fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"assets/attachment.png"]] && [fm fileExistsAtPath:disguised], @"数据库目录及配套媒体、后代整体保留，其他独立目录仍可清理");
+        for (NSNumber *batchLimit in @[@1,@64]) {
+            NSString *deepRoot=[fixture stringByAppendingPathComponent:[NSString stringWithFormat:@"deep-keys-%@",batchLimit]];
+            require([fm createDirectoryAtPath:[deepRoot stringByAppendingPathComponent:@"a/b/c/d"] withIntermediateDirectories:YES attributes:nil error:nil], @"四级快照键夹具");
+            writeMedia([deepRoot stringByAppendingPathComponent:@"root.png"]);
+            writeMedia([deepRoot stringByAppendingPathComponent:@"a/b/c/d/image.png"]);
+            require([fm createDirectoryAtPath:[deepRoot stringByAppendingPathComponent:@"store/assets"] withIntermediateDirectories:YES attributes:nil error:nil], @"数据库关联目录夹具");
+            writeFile([deepRoot stringByAppendingPathComponent:@"store/data.sqlite"]);
+            NSString *attachment=[deepRoot stringByAppendingPathComponent:@"store/assets/keep.png"];
+            writeMedia(attachment);
+            AxsCacheKeeperInspection *deepInspection=[[AxsCacheKeeperInspection alloc] initWithRoot:deepRoot];
+            for (NSUInteger pass=0;!deepInspection.complete && pass<80;pass++) [deepInspection advance:batchLimit.unsignedIntegerValue];
+            NSDictionary *deepProfile=[deepInspection report];
+            require([deepProfile[@"coverageComplete"] boolValue] && [deepProfile[@"files"] unsignedIntegerValue]==4, @"深度检测用同一规范路径读取完整四级目录");
+            AxsCacheKeeperSweep *deepSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:deepRoot clock:^NSTimeInterval{return future;}];
+            for (NSUInteger pass=0;!deepSweep.complete && pass<100;pass++) [deepSweep advance:batchLimit.unsignedIntegerValue shouldContinue:^BOOL{return YES;}];
+            require(deepSweep.complete && deepSweep.removed==2 && deepSweep.failed==0 && deepSweep.changedCount==0 &&
+                [fm fileExistsAtPath:attachment], @"大小批次都使用一致的父目录与快照键，数据库后代继续保留");
+        }
+        NSString *replacedRoot=[fixture stringByAppendingPathComponent:@"replaced-root"];
+        NSString *externalRoot=[fixture stringByAppendingPathComponent:@"external-root"];
+        require([fm createDirectoryAtPath:replacedRoot withIntermediateDirectories:YES attributes:nil error:nil] &&
+            [fm createDirectoryAtPath:[externalRoot stringByAppendingPathComponent:@"child"] withIntermediateDirectories:YES attributes:nil error:nil], @"根目录替换夹具");
+        NSString *externalMedia=[externalRoot stringByAppendingPathComponent:@"keep.png"];
+        writeMedia(externalMedia);writeMedia([replacedRoot stringByAppendingPathComponent:@"old.png"]);
+        AxsCacheKeeperSweep *replaced=[[AxsCacheKeeperSweep alloc] initWithRoot:replacedRoot clock:^NSTimeInterval{return future;}];
+        for (NSUInteger pass=0;replaced.checking && !replaced.complete && pass<20;pass++) [replaced advance:1 shouldContinue:^BOOL{return YES;}];
+        require(!replaced.checking && !replaced.complete && replaced.removed==0, @"根替换发生在完整预检后且删除前");
+        require([fm moveItemAtPath:replacedRoot toPath:[replacedRoot stringByAppendingString:@"-saved"] error:nil] &&
+            !symlink(externalRoot.fileSystemRepresentation,replacedRoot.fileSystemRepresentation), @"预检后用链接替换根目录");
+        [replaced advance:64 shouldContinue:^BOOL{return YES;}];
+        require(replaced.complete && replaced.removed==0 && replaced.failed>0 && [fm fileExistsAtPath:externalMedia], @"根目录被换成链接时停止清理，外部媒体仍保留");
+        int linked=axs_cachekeeper_open_directory(replacedRoot);
+        require(linked<0, @"共享访问函数继续拒绝末级目录链接");
+        linked=axs_cachekeeper_open_directory([replacedRoot stringByAppendingPathComponent:@"child"]);
+        require(linked<0, @"共享访问函数继续拒绝中间目录链接");
         NSString *fullRoot=[fixture stringByAppendingPathComponent:@"full-cache"];
         require([fm createDirectoryAtPath:[fullRoot stringByAppendingPathComponent:@"store"] withIntermediateDirectories:YES attributes:nil error:nil], @"全量清理夹具");
         writeMedia([fullRoot stringByAppendingPathComponent:@"clip.mp4"]);

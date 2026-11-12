@@ -44,7 +44,13 @@ static inline AxsCacheKeeperProcessState axs_cachekeeper_process_state_confidenc
             return AxsCacheKeeperProcessUnknown;
         }
         if ([value isEqual:bundle]) {
-            if (reason) *reason=@"FrontBoard 仍有此 APP 的进程记录（含启动、后台或退出中）；退出完成后自动重试";
+            if (reason) {
+                SEL stateSelector=NSSelectorFromString(@"state"), taskSelector=NSSelectorFromString(@"taskState");
+                id state=[item respondsToSelector:stateSelector] ? ((id(*)(id,SEL))objc_msgSend)(item,stateSelector) : nil;
+                NSString *raw=[state respondsToSelector:taskSelector] ?
+                    [NSString stringWithFormat:@"%ld",(long)((NSInteger(*)(id,SEL))objc_msgSend)(state,taskSelector)] : @"不可读";
+                *reason=[NSString stringWithFormat:@"FrontBoard 仍有此 APP 的进程记录（taskState=%@）；进程消失后自动重试，挂起状态不授权清理",raw];
+            }
             if (confidence) *confidence = AxsCacheKeeperSignalStrong;
             return AxsCacheKeeperProcessRunning;
         }

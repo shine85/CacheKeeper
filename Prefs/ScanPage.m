@@ -6,6 +6,7 @@
 #import "../AxsCacheKeeperFilza.h"
 #import "InspectionPage.h"
 #import "../AxsCacheKeeperInspection.h"
+#import "../AxsCacheKeeperProbe.h"
 #include <dlfcn.h>
 
 @interface CKScanPage : UITableViewController
@@ -27,9 +28,16 @@
 @property(nonatomic,strong) NSArray *unknownRows;
 @property(nonatomic) BOOL showUnknownData;
 @property(nonatomic,copy) NSString *actionStatus;
+@property(nonatomic,strong) NSDate *scanUpdated;
+@property(nonatomic) int probeRequestToken;
+@property(nonatomic) int probeResponseToken;
+@property(nonatomic) uint32_t probeNonce;
+@property(nonatomic) BOOL probePending;
+@property(nonatomic,strong) NSDate *probeStarted;
+@property(nonatomic,copy) NSString *probeStatus;
 @end
 @implementation CKScanPage
-- (instancetype)init {return [super initWithStyle:UITableViewStyleInsetGrouped];}
+- (instancetype)init { self=[super initWithStyle:UITableViewStyleInsetGrouped];if (self) { _probeRequestToken=-1;_probeResponseToken=-1; }return self; }
 - (NSString *)file:(NSString *)name {return [jbroot(@"/var/mobile/Library/CacheKeeper") stringByAppendingPathComponent:name];}
 - (NSDictionary *)axs_cachekeeper_display:(NSString *)name {
     if (!self.displayCache) self.displayCache=[NSMutableDictionary new];
@@ -37,6 +45,7 @@
     return self.displayCache[name];
 }
 - (void)axs_cachekeeper_reload {
+    [self axs_cachekeeper_check_probe];
     self.displayCache=nil;
     NSDictionary *report=[self axs_cachekeeper_display:[@"Status/" stringByAppendingFormat:@"%@.auto.plist",self.bundle]];
     NSArray *rows=axs_cachekeeper_display_rows(self.rows,report[@"discoveredPaths"]);
@@ -54,6 +63,7 @@
     self.rows=axs_cachekeeper_parent_rows(history[self.bundle][@"rows"]);
     self.previous=@{@"rows":history[self.bundle][@"previousRows"]?:@[]};
     self.scanError=history[self.bundle][@"error"];
+    self.scanUpdated=history[self.bundle][@"updated"];
     self.scanButton=[[UIBarButtonItem alloc] initWithTitle:@"检测目录" style:UIBarButtonItemStylePlain target:self action:@selector(scan)];
     self.enableAllButton=[[UIBarButtonItem alloc] initWithTitle:@"一键开启" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_enable_all)];
     self.enableAllButton.accessibilityLabel=@"开启自动模式、网络磁盘缓存限制与新增缓存自动发现";
@@ -83,6 +93,7 @@
         self.rows=axs_cachekeeper_parent_rows(result[@"rows"]);
         self.previous=@{@"rows":result[@"previousRows"]?:@[]};
         self.scanError=result[@"error"];
+        self.scanUpdated=result[@"updated"];
         [self axs_cachekeeper_reload];
         if (self.scanError.length) { [self message:self.scanError];return; }
         if (!self.rows.count) [self message:@"没有检测到候选目录。请先打开该应用再返回检测，或检查插件是否已加载。"];return;
@@ -99,7 +110,44 @@
     if (!self.statusTimer) self.statusTimer=[NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer){[weak axs_cachekeeper_reload];}];
 }
 - (void)viewWillDisappear:(BOOL)animated { [super viewWillDisappear:animated]; [self.statusTimer invalidate]; self.statusTimer=nil; }
-- (void)dealloc {[self.timer invalidate];[self.statusTimer invalidate];}
+- (void)dealloc {
+    [self.timer invalidate];[self.statusTimer invalidate];
+    if (_probeRequestToken>=0) notify_cancel(_probeRequestToken);
+    if (_probeResponseToken>=0) notify_cancel(_probeResponseToken);
+}
+- (void)axs_cachekeeper_begin_probe {
+    NSDictionary *states=[NSDictionary dictionaryWithContentsOfFile:[self file:@"appEnabled.plist"]];
+    if (!axs_cachekeeper_app_enabled(states[self.bundle])) { self.probePending=NO;self.probeStatus=@"此 APP 未开启，不发送网络诊断请求。";[self axs_cachekeeper_reload];return; }
+    if (self.probeRequestToken>=0) notify_cancel(self.probeRequestToken);
+    if (self.probeResponseToken>=0) notify_cancel(self.probeResponseToken);
+    self.probeRequestToken=-1;self.probeResponseToken=-1;
+    int requestToken=-1,responseToken=-1;
+    uint32_t error=notify_register_check(axs_cachekeeper_probe_name(self.bundle,NO).UTF8String,&requestToken);
+    if (error==NOTIFY_STATUS_OK) error=notify_register_check(axs_cachekeeper_probe_name(self.bundle,YES).UTF8String,&responseToken);
+    self.probeRequestToken=requestToken;self.probeResponseToken=responseToken;
+    self.probeNonce=arc4random_uniform(UINT32_MAX-1)+1;
+    uint64_t request=axs_cachekeeper_probe_request(self.probeNonce,NSDate.date.timeIntervalSince1970);
+    if (error==NOTIFY_STATUS_OK) error=notify_set_state(requestToken,request);
+    if (error==NOTIFY_STATUS_OK) error=notify_post(axs_cachekeeper_probe_name(self.bundle,NO).UTF8String);
+    self.probePending=error==NOTIFY_STATUS_OK;self.probeStarted=NSDate.date;
+    self.probeStatus=error ? [NSString stringWithFormat:@"诊断请求发送失败（notify %u）",error] : @"请求已发送。请在 5 分钟内打开此 APP 一次，再返回这里查看；无需先允许共享文件写入。";
+    [self axs_cachekeeper_reload];
+}
+- (void)axs_cachekeeper_check_probe {
+    if (!self.probePending) return;
+    uint64_t response=0;
+    uint32_t error=notify_get_state(self.probeResponseToken,&response);
+    if (error!=NOTIFY_STATUS_OK) { self.probeStatus=[NSString stringWithFormat:@"诊断响应读取失败（notify %u）",error];self.probePending=NO;return; }
+    if ((uint32_t)(response>>32)==self.probeNonce && (uint32_t)response) {
+        self.probePending=NO;self.probeStatus=axs_cachekeeper_probe_description((uint32_t)response);
+        NSError *writeError=nil;
+        if (![@{@"updated":NSDate.date,@"result":@((uint32_t)response),@"message":self.probeStatus}
+            writeToURL:[NSURL fileURLWithPath:[self file:[NSString stringWithFormat:@"Status/%@.probe.plist",self.bundle]]] error:&writeError])
+            self.probeStatus=[self.probeStatus stringByAppendingFormat:@"\n诊断记录保存失败：%@",writeError.localizedDescription];
+    } else if (-self.probeStarted.timeIntervalSinceNow>300) {
+        self.probePending=NO;self.probeStatus=@"5 分钟内未收到 APP 响应。请确认 RootHide 允许此 APP 注入 CacheKeeper，再重新检查；通知通信失败也可能造成无响应，不能单凭这一项断定未注入。";
+    } else if (-self.probeStarted.timeIntervalSinceNow>15) self.probeStatus=@"仍未收到 APP 响应。请打开此 APP 一次再返回；持续无响应请核对 RootHide 的应用注入设置。";
+}
 - (void)message:(NSString *)text {
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"目录检测" message:text preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];[self presentViewController:alert animated:YES completion:nil];
@@ -193,14 +241,16 @@
 }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)table { return 4; }
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
-    if (section==0) return 5;
+    if (section==0) return 6;
     if (section==1) return MAX((NSUInteger)1,self.cacheRows.count);
     if (section==2) return self.unknownRows.count ? 1+(self.showUnknownData ? self.unknownRows.count : 0) : 0;
     return self.otherRows.count ? 1+(self.showOtherData ? self.otherRows.count : 0) : 0;
 }
 - (NSString *)tableView:(UITableView *)table titleForHeaderInSection:(NSInteger)section {
     if (section==0) return @"缓存控制";
-    if (section==1) return [NSString stringWithFormat:@"可管理缓存 · 已选置顶 · %lu 个父目录",(unsigned long)self.cacheRows.count];
+    if (section==1) {
+        return [NSString stringWithFormat:@"可管理缓存 · 已选置顶 · %lu 个父目录\n大小快照：%@（点击检测目录刷新）",(unsigned long)self.cacheRows.count,self.scanUpdated ? axs_cachekeeper_time_string(self.scanUpdated) : @"尚未检测"];
+    }
     if (section==2) return self.unknownRows.count ? @"用途未知 · 待分析" : nil;
     return self.otherRows.count ? @"混合用途与共享数据" : nil;
 }
@@ -210,8 +260,8 @@
     if (section==3) return self.otherRows.count ? @"这些目录可能同时包含资源、业务状态或缓存，尚未逐项确认；不自动清理。已知敏感持久化目录已隐藏。" : nil;
     NSDictionary *footerStates=[self axs_cachekeeper_display:@"appEnabled.plist"];
     NSString *message=axs_cachekeeper_full_clear(footerStates[self.bundle]) ?
-        @"首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后处理。全量清理已开启：标准缓存目录内的全部文件都清空（含数据库与未知文件）；未知目录退出后先做全目录内容审查，无数据证据的自动清理，检出数据证据的自动仅清理其中的日志文件。已选目录内新增内容自动覆盖；手动关闭的目录保持排除。" :
-        @"首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后删除可识别媒体；未知目录退出后先做全目录内容审查，无数据证据的自动清理，检出数据证据的自动仅清理其中的日志文件。已选目录内新增内容自动覆盖；新增标准缓存根按自动发现选项纳入，手动关闭的目录保持排除。";
+        @"检测目录只更新大小快照，不删除 APP 文件；等待期间显示值不会自行重算。首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后处理。全量清理已开启：标准缓存目录内的全部文件都清空（含数据库与未知文件）；未知目录退出后先做全目录内容审查，无数据证据的自动清理，检出数据证据的自动仅清理其中的日志文件。已选目录内新增内容自动覆盖；手动关闭的目录保持排除。点击目录查看实际删除和失败记录。" :
+        @"检测目录只更新大小快照，不删除 APP 文件；等待期间显示值不会自行重算。首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后删除可识别媒体；未知目录退出后先做全目录内容审查，无数据证据的自动清理，检出数据证据的自动仅清理其中的日志文件。已选目录内新增内容自动覆盖；新增标准缓存根按自动发现选项纳入，手动关闭的目录保持排除。点击目录查看实际删除和失败记录。";
     return self.scanError.length ? [self.scanError stringByAppendingFormat:@"\n%@",message] : message;
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
@@ -279,6 +329,13 @@
         UISwitch *toggle=[UISwitch new];toggle.on=axs_cachekeeper_full_clear(states[self.bundle]);
         [toggle addTarget:self action:@selector(axs_cachekeeper_fullclear_changed:) forControlEvents:UIControlEventValueChanged];
         cell.accessoryView=toggle;return cell;
+    }
+    if (path.section==0 && path.row==5) {
+        UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+        cell.textLabel.text=@"检查网络限制";cell.textLabel.textColor=UIColor.systemBlueColor;cell.detailTextLabel.numberOfLines=0;
+        NSDictionary *previous=[self axs_cachekeeper_display:[NSString stringWithFormat:@"Status/%@.probe.plist",self.bundle]];
+        cell.detailTextLabel.text=self.probeStatus ?: (previous[@"message"] ? [NSString stringWithFormat:@"上次诊断（%@）：%@\n点击重新检查",axs_cachekeeper_time_string(previous[@"updated"]),previous[@"message"]] : @"点击后打开此 APP 一次，再返回查看注入、配置读取和网络容量的实际结果");
+        cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;return cell;
     }
     if ((path.section==2 || path.section==3) && path.row==0) {
         UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
@@ -437,6 +494,7 @@
 }
 - (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
     [table deselectRowAtIndexPath:path animated:YES];
+    if (path.section==0 && path.row==5) { [self axs_cachekeeper_begin_probe];return; }
     NSDictionary *row=[self axs_cachekeeper_row_at:path];
     if (row) { [self.navigationController pushViewController:[[AxsCacheKeeperInspectionPage alloc] initWithBundle:self.bundle path:row[@"path"]] animated:YES];return; }
     if (path.section==2 && path.row==0) { self.showUnknownData=!self.showUnknownData;[self axs_cachekeeper_reload]; }

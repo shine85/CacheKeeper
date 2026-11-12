@@ -18,6 +18,7 @@
 @property(nonatomic, readwrite) unsigned long long bytes;
 @property(nonatomic, readwrite, copy) NSString *error;
 @property(nonatomic, readwrite, copy) NSString *root;
+@property(nonatomic, copy) NSArray<NSString *> *rootAliases;
 @property(nonatomic, readwrite) BOOL fullClear;
 @property(nonatomic, readwrite) BOOL logMode;
 @property(nonatomic, readwrite) BOOL purgeMode;
@@ -37,6 +38,8 @@
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSArray *> *directorySnapshots;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSMutableDictionary *> *fileSnapshots;
 @property(nonatomic,strong) NSMutableSet<NSString *> *checkedDirectories;
+@property(nonatomic,strong) NSMutableArray<NSDictionary *> *recordedFailures;
+@property(nonatomic,copy) int (^unlinkFile)(int, const char *);
 @property(nonatomic,copy) NSArray<NSString *> *rootForms;
 @end
 
@@ -45,7 +48,7 @@
     return [self initWithRoot:root clock:^NSTimeInterval { return NSDate.date.timeIntervalSince1970; } fullClear:NO logMode:NO];
 }
 - (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock {
-    return [self initWithRoot:root clock:clock fullClear:NO logMode:NO];
+    return [self initWithRoot:root clock:clock unlinkFile:^int(int fd,const char *name) { return unlinkat(fd,name,0); }];
 }
 - (instancetype)initWithRoot:(NSString *)root fullClear:(BOOL)fullClear {
     return [self initWithRoot:root clock:^NSTimeInterval { return NSDate.date.timeIntervalSince1970; } fullClear:fullClear logMode:NO];
@@ -63,12 +66,16 @@
     return [self initWithRoot:root clock:^NSTimeInterval { return NSDate.date.timeIntervalSince1970; } fullClear:fullClear logMode:logMode purgeMode:purgeMode];
 }
 - (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock fullClear:(BOOL)fullClear logMode:(BOOL)logMode purgeMode:(BOOL)purgeMode {
+    // 模式只影响预检/删除阶段（advance/inspect/remove），初始化本体不依赖模式，故先走统一指定初始化器再设模式。
+    self=[self initWithRoot:root clock:clock];
+    if (self) { _fullClear=fullClear; _logMode=logMode; _purgeMode=purgeMode; }
+    return self;
+}
+- (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock unlinkFile:(int (^)(int,const char *))unlinkFile {
     if (!(self = [super init])) return nil;
     _root = [root copy];
-    _fullClear = fullClear;
-    _logMode = logMode;
-    _purgeMode = purgeMode;
     _clock = [clock copy];
+    _unlinkFile=[unlinkFile copy];_recordedFailures=[NSMutableArray new];
     struct stat info;
     if (![root isEqual:[NSURL fileURLWithPath:root].URLByResolvingSymlinksInPath.path] ||
         lstat(root.fileSystemRepresentation, &info) || !S_ISDIR(info.st_mode)) {
@@ -76,6 +83,7 @@
         return self;
     }
     _device = info.st_dev; _inode = info.st_ino;
+    _rootAliases=axs_cachekeeper_directory_aliases(root);
     // 删除入口的父路径校验要容忍路径形态差异（解析符号链接前后、标准化前后）：
     // 真机上容器根是解析后的 /private/var/... 形态，枚举条目路径形态可能不同，
     // 字符串直比会把根内文件整批误判为根外（errno 22 全灭，2026-11-11 抖音真机 263 项）。
@@ -150,23 +158,23 @@
         [path substringFromIndex:self.root.length + 1] : path.lastPathComponent;
     self.error = [NSString stringWithFormat:@"检出数据证据，已自动仅清理其中的日志文件：%@", relative];
 }
-- (void)axs_cachekeeper_inspect:(NSURL *)entry info:(struct stat)info {
+- (void)axs_cachekeeper_inspect:(NSString *)entry info:(struct stat)info {
     if (S_ISDIR(info.st_mode)) {
-        self.directorySnapshots[[self axs_cachekeeper_directory_key:entry.path]]=[self axs_cachekeeper_snapshot:info];
+        self.directorySnapshots[[self axs_cachekeeper_directory_key:entry]]=[self axs_cachekeeper_snapshot:info];
         if (self.purgeMode) {
             if (axs_cachekeeper_data_marker(entry.lastPathComponent)) {
-                [self axs_cachekeeper_purge_hit:entry.path];[self.entries skipDescendants];
+                [self axs_cachekeeper_purge_hit:entry];[self.entries skipDescendants];
             }
             return;
         }
         // 全量清理不按名字/文件头把子目录判为数据目录，但仍记录快照供删除前核对变化。
         if (!self.fullClear && axs_cachekeeper_data_marker(entry.lastPathComponent)) {
-            [self.dataDirectories addObject:entry.path];[self.entries skipDescendants];
+            [self.dataDirectories addObject:entry];[self.entries skipDescendants];
         }
         return;
     }
     if (!S_ISREG(info.st_mode)) return;
-    NSString *parent=entry.URLByDeletingLastPathComponent.path;
+    NSString *parent=entry.stringByDeletingLastPathComponent;
     if (!self.fileSnapshots[parent]) self.fileSnapshots[parent]=[NSMutableDictionary new];
     self.fileSnapshots[parent][entry.lastPathComponent]=[self axs_cachekeeper_snapshot:info];
     if (self.fullClear) return;
@@ -175,10 +183,10 @@
         // 读不到内容）只把目录标记为混合，删除时自动降级为日志门，仅删日志特征文件，
         // 数据与未知内容保留，无需手动定级；目录名命中仍整根出局（见上）。
         // 配置类 .plist/.json 不在证据口径内（见 axs_cachekeeper_purge_evidence_path）。
-        NSString *relative=[entry.path hasPrefix:[self.root stringByAppendingString:@"/"]] ?
-            [entry.path substringFromIndex:self.root.length + 1] : entry.lastPathComponent;
+        NSString *relative=[entry hasPrefix:[self.root stringByAppendingString:@"/"]] ?
+            [entry substringFromIndex:self.root.length + 1] : entry.lastPathComponent;
         if (axs_cachekeeper_data_marker(entry.lastPathComponent) || axs_cachekeeper_purge_evidence_path(relative)) {
-            [self axs_cachekeeper_purge_mixed:entry.path]; return;
+            [self axs_cachekeeper_purge_mixed:entry]; return;
         }
         int directory=axs_cachekeeper_open_directory(parent);
         int file=directory>=0 ? openat(directory,entry.lastPathComponent.fileSystemRepresentation,O_RDONLY|O_NOFOLLOW|O_NONBLOCK) : -1;
@@ -188,7 +196,7 @@
         if (file>=0 && !fstat(file,&opened) && S_ISREG(opened.st_mode) && opened.st_ino==info.st_ino && opened.st_dev==info.st_dev)
             count=pread(file,signature,sizeof(signature),0);
         if (count<0 || (count>=15 && !memcmp(signature,"SQLite format 3",15)) || (count>=6 && !memcmp(signature,"bplist",6)))
-            [self axs_cachekeeper_purge_mixed:entry.path];
+            [self axs_cachekeeper_purge_mixed:entry];
         if (file>=0) close(file);
         if (directory>=0) close(directory);
         return;
@@ -197,7 +205,7 @@
     //（真机 alog 的 ready/ 里日志与数据名文件混放，目录级标记曾使整轮删除 0）；
     // 标准模式维持目录级：数据文件所在目录整体保留（其媒体多为数据附件）。
     if (axs_cachekeeper_data_marker(entry.lastPathComponent)) {
-        if (self.logMode) [self.dataFiles addObject:entry.path];
+        if (self.logMode) [self.dataFiles addObject:entry];
         else [self.dataDirectories addObject:parent];
         return;
     }
@@ -209,12 +217,12 @@
     if (file>=0 && !fstat(file,&opened) && S_ISREG(opened.st_mode) && opened.st_ino==info.st_ino && opened.st_dev==info.st_dev)
         count=pread(file,signature,sizeof(signature),0);
     if (count<0) {
-        if (self.logMode) [self.dataFiles addObject:entry.path];
+        if (self.logMode) [self.dataFiles addObject:entry];
         else [self.dataDirectories addObject:parent];
         self.failed++;self.error=self.logMode ? @"文件预检未完成，该文件不清理" : @"文件预检未完成，该目录不清理";
     }
     else if ((count>=15 && !memcmp(signature,"SQLite format 3",15)) || (count>=6 && !memcmp(signature,"bplist",6))) {
-        if (self.logMode) [self.dataFiles addObject:entry.path];
+        if (self.logMode) [self.dataFiles addObject:entry];
         else [self.dataDirectories addObject:parent];
     }
     if (file>=0) close(file);
@@ -255,13 +263,12 @@
     if (!identity) self.verifyDetail = @"目录已被替换";
     return identity;
 }
-- (BOOL)axs_cachekeeper_remove:(NSURL *)entry expected:(struct stat)expected {
+- (BOOL)axs_cachekeeper_remove:(NSString *)entry expected:(struct stat)expected {
     self.error = nil;
-    NSString *parent = entry.URLByDeletingLastPathComponent.path;
+    NSString *parent = entry.stringByDeletingLastPathComponent;
     NSString *matchedForm = [self axs_cachekeeper_matched_root_form:parent];
     if (!matchedForm) {
-        self.error = [NSString stringWithFormat:@"删除失败·路径校验（errno %d）", EINVAL];
-        errno = EINVAL; return NO;
+        [self axs_cachekeeper_failure:@"枚举路径边界" code:EINVAL path:entry detail:[NSString stringWithFormat:@"root=%@; parent=%@",self.root,parent]];return NO;
     }
     // 从已核对身份的缓存根逐级打开，不能靠 realpath 后再打开绝对路径防竞态。
     int fd = axs_cachekeeper_open_directory(self.root);
@@ -275,14 +282,14 @@
             struct stat componentInfo;
             if (lstat(walk.fileSystemRepresentation, &componentInfo) || !S_ISDIR(componentInfo.st_mode)) { bad = part; break; }
         }
-        self.error = [NSString stringWithFormat:@"删除失败·打开缓存根（errno %d，卡在组件 %@）", openError, bad];
-        errno = openError; return NO;
+        [self axs_cachekeeper_failure:@"open-root" code:openError path:entry detail:[NSString stringWithFormat:@"%@；卡在组件 %@",self.root,bad]];return NO;
     }
     struct stat openedRoot;
-    if (fstat(fd, &openedRoot) || openedRoot.st_dev != self.device || openedRoot.st_ino != self.inode) {
-        close(fd); errno = ESTALE;
-        self.error = [NSString stringWithFormat:@"删除失败·缓存根已变化（errno %d）", ESTALE];
-        return NO;
+    if (fstat(fd,&openedRoot)) {
+        int code=errno;close(fd);[self axs_cachekeeper_failure:@"fstat-root" code:code path:entry detail:self.root];return NO;
+    }
+    if (openedRoot.st_dev != self.device || openedRoot.st_ino != self.inode) {
+        close(fd);[self axs_cachekeeper_failure:@"根目录身份核对" code:ESTALE path:entry detail:@""];return NO;
     }
     NSString *relativeParent = [parent.stringByStandardizingPath substringFromIndex:matchedForm.length];
     // 祖先链的记录键取枚举器形态：由 parent 逐级剥组件得到（root 用其自身为键）。
@@ -311,10 +318,7 @@
         int child = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
         int savedError = errno;
         close(fd);
-        if (child < 0) {
-            self.error = [NSString stringWithFormat:@"删除失败·打开子目录（errno %d）", savedError];
-            errno = savedError; return NO;
-        }
+        if (child < 0) { [self axs_cachekeeper_failure:@"openat-parent" code:savedError path:entry detail:openedPath];return NO; }
         fd = child;
         openedPath=[openedPath stringByAppendingPathComponent:part];
         partIndex++;
@@ -327,7 +331,8 @@
         [self.dataDirectories addObject:parent];self.error=@"预检后目录发生变化，已跳过";
         close(fd);errno=EBUSY;return NO;
     }
-    const char *name = entry.lastPathComponent.fileSystemRepresentation;
+    NSString *fileName=entry.lastPathComponent;
+    const char *name = fileName.fileSystemRepresentation;
     if (self.logMode || self.purgeMode) {
         // 文件级稳定性门：只比对目标文件自身的预检记录；未预检（预检后新增）或已变化的跳过本文件，
         // 不连坐同目录其他文件。计入变化数而非失败数（errno EBUSY 不计失败）。
@@ -342,7 +347,9 @@
     }
     BOOL removed = NO;
     int file = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
-    if (file >= 0 && !fstat(file, &current) && S_ISREG(current.st_mode) && current.st_nlink == 1 &&
+    if (file<0) { int code=errno;close(fd);[self axs_cachekeeper_failure:@"openat-file" code:code path:entry detail:@""];return NO; }
+    if (fstat(file,&current)) { int code=errno;close(file);close(fd);[self axs_cachekeeper_failure:@"fstat-file" code:code path:entry detail:@""];return NO; }
+    if (S_ISREG(current.st_mode) && current.st_nlink == 1 &&
         current.st_ino == expected.st_ino && current.st_dev == expected.st_dev &&
         axs_cachekeeper_old_enough(current, self.clock())) {
         // 全量清理只核对文件身份与年龄，不按内容分类；
@@ -363,7 +370,7 @@
             BOOL contentRejected = logGate ?
                 (!axs_cachekeeper_log_file_name(entry.lastPathComponent) || axs_cachekeeper_data_marker(entry.lastPathComponent)) :
                 !axs_cachekeeper_media_signature(signature, (size_t)readCount);
-            if (readCount < 0) { self.error = @"无法核对文件内容，保留文件"; }
+            if (readCount < 0) { int code=errno;[self axs_cachekeeper_failure:@"pread" code:code path:entry detail:@""]; }
             else if (database || propertyList || contentRejected) {
                 if ((database || propertyList) && !logGate) [self.dataDirectories addObject:parent];
                 self.protectedCount++; errno = EBUSY;
@@ -372,20 +379,27 @@
         }
         if (contentOK) {
             struct stat final;
-            if (!fstatat(fd, name, &final, AT_SYMLINK_NOFOLLOW) && final.st_ino == current.st_ino &&
-                final.st_dev == current.st_dev && axs_cachekeeper_old_enough(final, self.clock())) {
-                removed = unlinkat(fd, name, 0) == 0;
-                if (!removed) self.error = [NSString stringWithFormat:@"删除失败·删除文件（errno %d）", errno];
-            }
-            else { errno = ESTALE; self.error = [NSString stringWithFormat:@"删除失败·文件已变化（errno %d）", ESTALE]; }
+            if (fstatat(fd,name,&final,AT_SYMLINK_NOFOLLOW)) {
+                int code=errno;[self axs_cachekeeper_failure:@"fstatat-final" code:code path:entry detail:@""];
+            } else if (final.st_ino == current.st_ino && final.st_dev == current.st_dev && axs_cachekeeper_old_enough(final, self.clock())) {
+                int result=self.unlinkFile(fd,name);int code=result ? errno : 0;
+                removed=result==0;
+                if (!removed) [self axs_cachekeeper_failure:@"unlinkat" code:code path:entry detail:@"flags=0"];
+            } else [self axs_cachekeeper_failure:@"删除前身份/时间核对" code:ESTALE path:entry detail:@""];
         }
-    } else { errno = ESTALE; self.error = [NSString stringWithFormat:@"删除失败·文件状态已变化（errno %d）", ESTALE]; }
+    } else [self axs_cachekeeper_failure:@"打开文件身份/时间核对" code:ESTALE path:entry detail:@""];
     int savedError = errno;
     if (removed && !fstat(fd,&parentInfo)) self.directorySnapshots[[self axs_cachekeeper_directory_key:parent]]=[self axs_cachekeeper_snapshot:parentInfo];
     if (removed) [self.fileSnapshots[parent] removeObjectForKey:entry.lastPathComponent];
     if (file >= 0) close(file);
     close(fd); errno = savedError;
     return removed;
+}
+- (NSArray<NSDictionary *> *)failureDetails { return [self.recordedFailures copy]; }
+- (void)axs_cachekeeper_failure:(NSString *)stage code:(int)code path:(NSString *)path detail:(NSString *)detail {
+    self.error=[NSString stringWithFormat:@"%@ 失败（errno %d：%s）",stage,code,strerror(code)];
+    if (self.recordedFailures.count<8) [self.recordedFailures addObject:@{@"stage":stage,@"code":@(code),@"path":path ?: @"",@"detail":detail ?: @""}];
+    errno=code;
 }
 - (void)advance:(NSUInteger)limit shouldContinue:(BOOL (^)(void))shouldContinue {
     if (self.complete || self.cancelled) return;
@@ -402,17 +416,23 @@
             ![self.root isEqual:resolvedRootPath]) {
             self.failed++; self.error = @"扫描期间缓存目录已改变"; self.complete = YES; self.entries = nil; return;
         }
-        NSURL *entry = self.entries.nextObject;
-        if (!entry) {
+        NSURL *enumerated = self.entries.nextObject;
+        if (!enumerated) {
             if (self.checking && ![self axs_cachekeeper_is_data_directory:self.root]) {
                 self.checking=NO;[self axs_cachekeeper_open_enumerator];continue;
             }
             if (self.checking) self.protectedCount++;
             self.complete=YES;self.entries=nil;return;
         }
+        NSString *entry=axs_cachekeeper_enumerated_path(enumerated.path,self.root,self.rootAliases);
+        if (!entry) {
+            self.failed++;[self.dataDirectories addObject:self.root];
+            [self axs_cachekeeper_failure:@"枚举路径边界" code:EINVAL path:enumerated.path detail:self.root];
+            self.complete=YES;self.entries=nil;return;
+        }
         struct stat info;
         if (lstat(entry.fileSystemRepresentation, &info)) {
-            if (errno != ENOENT) { self.failed++; self.error = @"无法读取缓存文件属性";[self.dataDirectories addObject:entry.URLByDeletingLastPathComponent.path]; }
+            if (errno != ENOENT) { self.failed++; self.error = @"无法读取缓存文件属性";[self.dataDirectories addObject:entry.stringByDeletingLastPathComponent]; }
             continue;
         }
         // URL 枚举器不递归符号链接；对非目录调用 skipDescendants 会影响后续遍历。
@@ -423,12 +443,12 @@
         if (self.purgeMode && self.purgeBlocked) {
             self.protectedCount++;if (S_ISDIR(info.st_mode)) [self.entries skipDescendants];continue;
         }
-        if ([self axs_cachekeeper_is_data_directory:entry.path]) {
+        if ([self axs_cachekeeper_is_data_directory:entry]) {
             self.protectedCount++;if (S_ISDIR(info.st_mode)) [self.entries skipDescendants];continue;
         }
         // 日志模式的文件级数据保护：预检已标记的数据文件只跳过自身（同目录日志不受影响）。
-        if (self.logMode && [self.dataFiles containsObject:entry.path]) { self.protectedCount++; continue; }
-        NSString *relative = [entry.path substringFromIndex:self.root.length + 1];
+        if (self.logMode && [self.dataFiles containsObject:entry]) { self.protectedCount++; continue; }
+        NSString *relative = [entry substringFromIndex:self.root.length + 1];
         // 全量清理的根已由策略层限定为平台缓存契约目录，根内不再按受保护名拦截；清理模式的
         // 证据审查已在预检完成（口径见 purge_evidence_path，配置类 .plist/.json 不算证据），此处同样放行；其余模式不变。
         if (!self.fullClear && !self.purgeMode && axs_cachekeeper_protected_path(relative)) {
@@ -441,7 +461,7 @@
         if (info.st_nlink != 1 || (!self.fullClear && !self.purgeMode && !axs_cachekeeper_ordinary_cache_file(relative))) { self.protectedCount++; continue; }
         if (!axs_cachekeeper_old_enough(info, self.clock())) { self.recentCount++; continue; }
         if ([self axs_cachekeeper_remove:entry expected:info]) { self.removed++; self.bytes += info.st_size; }
-        else if (errno != ENOENT && errno != EBUSY) { self.failed++; if (![self.error hasPrefix:@"删除失败·"]) self.error = [NSString stringWithFormat:@"删除失败（errno %d）", errno]; }
+        else if (errno != ENOENT && errno != EBUSY) self.failed++;
     }
 }
 @end

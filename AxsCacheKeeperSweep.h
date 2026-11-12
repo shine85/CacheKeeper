@@ -19,8 +19,10 @@
 @property(nonatomic, readonly) NSUInteger changedCount;
 @property(nonatomic, readonly) unsigned long long bytes;
 @property(nonatomic, readonly, copy) NSString *error;
+@property(nonatomic, readonly, copy) NSArray<NSDictionary *> *failureDetails;
 - (instancetype)initWithRoot:(NSString *)root;
 - (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock;
+- (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock unlinkFile:(int (^)(int, const char *))unlinkFile;
 - (instancetype)initWithRoot:(NSString *)root fullClear:(BOOL)fullClear;
 - (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock fullClear:(BOOL)fullClear;
 - (instancetype)initWithRoot:(NSString *)root fullClear:(BOOL)fullClear logMode:(BOOL)logMode;

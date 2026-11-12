@@ -92,6 +92,7 @@
     if (cleanup) [text appendFormat:@"最近一轮清理记录（%@）：%@\n删除 %@ 个文件 · %.2f MB；保留受保护／未知 %@ 项、近期文件 %@ 项，变化目录 %@ 项，失败 %@ 项。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),[cleanup[@"cancelled"] boolValue] ? @"已中止" : [cleanup[@"complete"] boolValue] ? @"检查完成" : @"尚未完成",cleanup[@"removed"],[cleanup[@"bytes"] doubleValue]/1048576,cleanup[@"protected"],cleanup[@"recent"],cleanup[@"changed"],cleanup[@"failed"],cleanup[@"error"] ?: @""];
     else [text appendString:@"本目录尚无清理回执；占用减少不能据此归因于插件。\n\n"];
     if ([self axs_cachekeeper_judged]) [text appendString:@"本目录已定级为日志目录：该 APP 完全退出后，仅清理本目录内的日志特征文件（.log/.alog/.xlog），数据与未知内容保留；可在本页取消定级。\n\n"];
+    for (NSDictionary *failure in cleanup[@"failureDetails"]) [text appendFormat:@"失败样本：%@ · errno %@\n%@\n%@\n\n",failure[@"stage"],failure[@"code"],failure[@"path"],failure[@"detail"]];
     if (![report[@"path"] isEqual:self.relative] || (self.token && ![report[@"token"] isEqual:self.token])) {
         [text appendString:self.token ? @"等待检测服务响应…" : @"尚无本目录档案。"];
         if (self.submitted && -self.submitted.timeIntervalSinceNow>30) [text appendString:@"\n尚未收到回执：可能正在切换任务、桌面服务未加载或回执无法写入；可再次检测。持续失败请提供插件版本与此页面信息。"];
@@ -106,7 +107,7 @@
     for (NSString *age in @[@"不足 60 秒",@"60 秒至 1 天",@"1 至 30 天",@"30 天以上"]) [text appendFormat:@"%@：%@ 个\n",age,report[@"ages"][age] ?: @0];
     [text appendString:@"\n最大的 10 个文件：\n"];
     for (NSDictionary *file in report[@"largest"]) [text appendFormat:@"%@ · %.2f MB · %@\n",file[@"path"],[file[@"bytes"] doubleValue]/1048576,file[@"type"]];
-    [text appendString:@"\n这是读取期间的观察结果，不是原子快照。文件格式、旧文件和持续增长都不能单独证明可删；本页不会自动扩大清理范围。"];
+    [text appendString:@"\n下一步判断：先确认检测完整；数据库、登录态、下载或草稿保持保留。对用途不明目录，可记录本页，再用 APP 自带的‘清理缓存’后重新检测作对照。对照只能证明 APP 实际清除的那部分，不能直接判定整个混合目录可删。\n\n这是读取期间的观察结果，不是原子快照。文件格式、旧文件和持续增长都不能单独证明可删；本页不会自动扩大清理范围。"];
     self.textView.text=text;
 }
 @end

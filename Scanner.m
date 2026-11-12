@@ -182,7 +182,11 @@ static NSString *axs_cachekeeper_network_status(NSString *bundle) {
     NSString *path = [[axs_cachekeeper_folder() stringByAppendingPathComponent:@"Status"]
         stringByAppendingPathComponent:[bundle stringByAppendingString:@".network.plist"]];
     NSDictionary *report = [NSDictionary dictionaryWithContentsOfFile:path];
-    if (![report isKindOfClass:NSDictionary.class]) return @"尚无进程内网络缓存回执；请重新打开 APP 检查注入";
+    if (![report isKindOfClass:NSDictionary.class]) {
+        NSDictionary *probe=[NSDictionary dictionaryWithContentsOfFile:[[axs_cachekeeper_folder() stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[bundle stringByAppendingString:@".probe.plist"]]];
+        if ([probe[@"message"] isKindOfClass:NSString.class]) return [NSString stringWithFormat:@"尚无网络文件回执；上次主动诊断（%@）：%@",axs_cachekeeper_time_string(probe[@"updated"]),probe[@"message"]];
+        return @"尚无网络文件回执；请点“检查网络限制”后打开此 APP，再返回查看原因";
+    }
     NSString *message = [report[@"message"] isKindOfClass:NSString.class] ? report[@"message"] : @"回执格式不完整";
     return [NSString stringWithFormat:@"网络缓存回执：%@（%@）", message, axs_cachekeeper_time_string(report[@"updated"])];
 }
@@ -458,7 +462,7 @@ void CKApplyDirectorySwitches(void) {
                 if (sweep.error.length) error = sweep.error;
                 NSString *relative=[sweep.root substringFromIndex:[target[@"home"] length]+1];
                 directoryReports[relative]=@{@"updated":NSDate.date,@"complete":@(sweep.complete),@"checking":@(sweep.checking),@"cancelled":@(sweep.cancelled),
-                    @"removed":@(sweep.removed),@"bytes":@(sweep.bytes),@"protected":@(sweep.protectedCount),@"recent":@(sweep.recentCount),@"changed":@(sweep.changedCount),@"failed":@(sweep.failed),@"error":sweep.error ?: @""};
+                    @"removed":@(sweep.removed),@"bytes":@(sweep.bytes),@"protected":@(sweep.protectedCount),@"recent":@(sweep.recentCount),@"changed":@(sweep.changedCount),@"failed":@(sweep.failed),@"error":sweep.error ?: @"",@"failureDetails":sweep.failureDetails ?: @[]};
             }
             NSUInteger deltaRemoved = removed-[job[@"removed"] unsignedIntegerValue];
             unsigned long long deltaBytes = bytes-[job[@"bytes"] unsignedLongLongValue];

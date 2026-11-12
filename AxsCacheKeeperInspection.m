@@ -4,6 +4,7 @@
 
 @interface AxsCacheKeeperInspection ()
 @property(nonatomic,copy) NSString *root;
+@property(nonatomic,copy) NSArray<NSString *> *rootAliases;
 @property(nonatomic,strong) NSDirectoryEnumerator *entries;
 @property(nonatomic,readwrite) BOOL complete;
 @property(nonatomic) NSUInteger files;
@@ -42,6 +43,7 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
     int fd=axs_cachekeeper_open_directory(root);
     if (fd<0) { _complete=YES;_failures=1;_error=[NSString stringWithFormat:@"目录无法读取：errno %d",errno];return self; }
     close(fd);
+    _rootAliases=axs_cachekeeper_directory_aliases(root);
     __weak typeof(self) weak=self;
     _entries=[NSFileManager.defaultManager enumeratorAtURL:[NSURL fileURLWithPath:root] includingPropertiesForKeys:nil options:0 errorHandler:^BOOL(NSURL *url,NSError *error) {
         weak.failures++;weak.error=[NSString stringWithFormat:@"%@（%@/%ld）",error.localizedDescription,error.domain,(long)error.code];return YES;
@@ -52,9 +54,11 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
 - (void)advance:(NSUInteger)limit {
     for (NSUInteger index=0;index<limit && !self.complete;index++) {
         @autoreleasepool {
-            NSURL *entry=[self.entries nextObject];
-            if (!entry) { self.complete=YES;break; }
-            NSString *relative=[entry.path substringFromIndex:self.root.length+1];
+            NSURL *enumerated=[self.entries nextObject];
+            if (!enumerated) { self.complete=YES;break; }
+            NSString *entry=axs_cachekeeper_enumerated_path(enumerated.path,self.root,self.rootAliases);
+            if (!entry) { self.failures++;self.error=@"枚举路径不属于已核验目录，已停止读取";self.complete=YES;break; }
+            NSString *relative=[entry substringFromIndex:self.root.length+1];
             struct stat info;
             if (lstat(entry.fileSystemRepresentation,&info)) { self.failures++;self.error=[NSString stringWithFormat:@"无法读取文件属性：errno %d",errno];continue; }
             if (S_ISLNK(info.st_mode) || (S_ISREG(info.st_mode) && info.st_nlink!=1)) { self.links++;continue; }
@@ -64,7 +68,7 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
                 continue;
             }
             if (!S_ISREG(info.st_mode)) continue;
-            int parent=axs_cachekeeper_open_directory(entry.URLByDeletingLastPathComponent.path);
+            int parent=axs_cachekeeper_open_directory(entry.stringByDeletingLastPathComponent);
             int fd=parent>=0 ? openat(parent,entry.lastPathComponent.fileSystemRepresentation,O_RDONLY|O_NOFOLLOW|O_NONBLOCK) : -1;
             struct stat opened={0},after={0};unsigned char sample[4096];ssize_t count=-1;
             if (fd>=0 && !fstat(fd,&opened) && S_ISREG(opened.st_mode) && opened.st_nlink==1 && opened.st_ino==info.st_ino && opened.st_dev==info.st_dev)
