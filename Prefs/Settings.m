@@ -52,10 +52,13 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
     self.definesPresentationContext = YES;
     self.tabWrap = [[UIView alloc] initWithFrame:CGRectZero];
+    self.tabWrap.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.tabWrap.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     self.tabs = [[UISegmentedControl alloc] initWithItems:@[@"已开启", @"用户应用", @"巨魔应用", @"收藏应用"]];
     self.tabs.frame = CGRectMake(16, 7, self.view.bounds.size.width - 32, 32);
-    self.tabs.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    // 注意：tabs 不挂 FlexibleWidth。tabWrap 初始为 CGRectZero，首次布局时宽度从 0 变到
+    // 全屏，自动伸缩会把宽度增量再加到 tabs 上，导致控件变成约两倍宽、只露出前两段
+    // （#57 真机 bug）；tabs 的 frame 改由 viewDidLayoutSubviews 每次显式重算。
     self.tabs.selectedSegmentIndex = 0;
     [self.tabs addTarget:self action:@selector(tabChanged:) forControlEvents:UIControlEventValueChanged];
     [self.tabWrap addSubview:self.tabs];
@@ -73,6 +76,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     CGFloat top = self.view.safeAreaInsets.top;
     CGFloat tabHeight = 46;
     self.tabWrap.frame = CGRectMake(0, top, self.view.bounds.size.width, tabHeight);
+    self.tabs.frame = CGRectMake(16, 7, self.tabWrap.bounds.size.width - 32, 32);
     self.table.frame = CGRectMake(0, top + tabHeight, self.view.bounds.size.width, self.view.bounds.size.height - top - tabHeight);
 }
 - (void)tabChanged:(UISegmentedControl *)sender {
