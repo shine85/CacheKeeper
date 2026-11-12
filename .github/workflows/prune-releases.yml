@@ -1,0 +1,29 @@
+name: 清理旧测试包
+on:
+  release:
+    types: [published]
+  schedule:
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 只保留最新 2 个 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tags=$(gh release list --repo ${{ github.repository }} --limit 100 --json tagName --jq '.[].tagName')
+          keep=2
+          i=0
+          for tag in $tags; do
+            i=$((i+1))
+            if [ "$i" -le "$keep" ]; then
+              echo "保留 $tag"
+            else
+              echo "删除 $tag"
+              gh release delete "$tag" --repo ${{ github.repository }} --yes
+            fi
+          done
