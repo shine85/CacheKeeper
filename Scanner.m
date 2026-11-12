@@ -367,18 +367,18 @@ void CKApplyDirectorySwitches(void) {
             NSMutableArray *effectiveRoots=[NSMutableArray new];
             for (NSString *relative in paths) [effectiveRoots addObject:[target[@"home"] stringByAppendingPathComponent:relative]];
             roots=effectiveRoots;
-            // 未知目录自动清理（B 案）：候选集来自目录扫描（30 秒缓存，与缓存根发现同节奏，不传 Group——
-            // Group 候选只读，本就不入选）；内容审查在 Sweep 预检内完成，此处只决定候选集
-            //（用途未知类、未定级为日志、未被手动排除）。只开总开关即全自动：候选发现不依赖自动发现开关。
+            // 未知目录自动清理（B 案）：候选集来自家目录枚举（30 秒缓存，与缓存根发现同节奏；Group 容器不在内）；
+            // 内容审查在 Sweep 预检内完成，此处只决定候选集（用途未知类、未定级为日志、未被手动排除）。
+            // 只开总开关即全自动：候选发现不依赖自动发现开关。
             NSArray *purgeCandidates=@[];
             NSError *purgeError=nil;
             NSDictionary *knownPurge=purgeDiscovery[bundle];
             NSTimeInterval nowPurge=NSProcessInfo.processInfo.systemUptime;
             if (![knownPurge[@"home"] isEqual:target[@"home"]] || nowPurge-[knownPurge[@"time"] doubleValue]>=30) {
-                NSArray *found=axs_cachekeeper_scan_targets([NSURL fileURLWithPath:target[@"home"]], nil, &purgeError);
-                NSMutableArray *raw=[NSMutableArray new];
-                for (NSDictionary *candidate in found) if (![candidate[@"readOnly"] boolValue]) [raw addObject:candidate[@"path"]];
-                knownPurge=@{@"home":target[@"home"],@"time":@(nowPurge),@"paths":raw,@"error":purgeError.localizedDescription ?: @""};
+                // 注意：不能用 scan_targets 的 readOnly 过滤——它标记的是“非标准缓存路径”，
+                // 未知目录全是 readOnly=YES，过滤后 B 案候选集恒为空（#37 真机静默失效）。
+                NSArray *found=axs_cachekeeper_purge_candidates([NSURL fileURLWithPath:target[@"home"]], &purgeError);
+                knownPurge=@{@"home":target[@"home"],@"time":@(nowPurge),@"paths":found ?: @[],@"error":purgeError.localizedDescription ?: @""};
                 purgeDiscovery[bundle]=knownPurge;
             }
             purgeCandidates=knownPurge[@"paths"];

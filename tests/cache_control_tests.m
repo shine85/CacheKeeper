@@ -174,6 +174,10 @@ int main(int argc, const char *argv[]) {
         NSArray *found=axs_cachekeeper_scan_directories([NSURL fileURLWithPath:home],&scanError);
         require(!scanError && ![found containsObject:@"Documents"] && ![found containsObject:@"Library/WebKit"] &&
             ![found containsObject:@"Library/Cookies"] && [found containsObject:@"Library/Application Support"] && [found containsObject:@"CustomData"], @"隐藏明确保护目录，混合用途与未知目录仍待分析");
+        NSArray *purgeFound=axs_cachekeeper_purge_candidates([NSURL fileURLWithPath:home],&scanError);
+        require([purgeFound containsObject:@"CustomData"] && [purgeFound containsObject:@"Library/Caches"], @"清理候选发现包含未知目录与缓存根（不能用 readOnly 过滤）");
+        NSArray *purgeKept=axs_cachekeeper_purge_paths(purgeFound,@{@"enabled":@YES});
+        require([purgeKept containsObject:@"CustomData"] && ![purgeKept containsObject:@"Library/Caches"] && ![purgeKept containsObject:@"Library/Logs"], @"清理候选集只保留未知目录");
         require([axs_cachekeeper_directory_kind(@"Library/Application Support") isEqual:@"mixed"] &&
             [axs_cachekeeper_directory_kind(@"CustomData") isEqual:@"unknown"] &&
             [axs_cachekeeper_directory_kind(@"Library/Preferences") isEqual:@"protected"], @"不把所有白名单外目录都当成必需数据");

@@ -66,6 +66,12 @@ NSArray<NSString *> *axs_cachekeeper_scan_directories(NSURL *home, NSError **err
     return axs_cachekeeper_parent_paths(paths);
 }
 
+NSArray<NSString *> *axs_cachekeeper_purge_candidates(NSURL *home, NSError **error) {
+    // 直接复用目录枚举：相对路径字符串，未知目录与缓存根都在内；
+    // 类型/定级/排除的过滤由 axs_cachekeeper_purge_paths 负责，此处不做任何筛选。
+    return axs_cachekeeper_scan_directories(home, error);
+}
+
 NSDictionary<NSString *,NSURL *> *axs_cachekeeper_valid_group_homes(NSDictionary *groups) {
     if (![groups isKindOfClass:NSDictionary.class]) return @{};
     NSMutableDictionary *result=[NSMutableDictionary new];
