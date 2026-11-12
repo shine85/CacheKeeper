@@ -553,15 +553,19 @@
     if (self.recordedFailures.count<8) [self.recordedFailures addObject:@{@"stage":stage,@"code":@(code),@"path":path ?: @"",@"detail":detail ?: @""}];
     errno=code;
 }
-- (void)advance:(NSUInteger)limit shouldContinue:(BOOL (^)(void))shouldContinue {
-    if (self.complete || self.cancelled) return;
+- (void)cancel {
+    if (self.complete) return;
+    self.cancelled = YES; self.entries = nil;
+}
+
+// 拆分 advance（方案任务 3，P1-3）：预检与删除分开推进。多根作业须先让全部根完成
+// 预检（含任务 1 验证）再删除；旧的单接口会在首根完成预检时即开始删除，导致 120 秒
+// 期限从首根离开预检起算、与其它根的预检重叠（审计 P1-3）。
+- (void)advancePreflight:(NSUInteger)limit {
+    if (self.complete || self.cancelled || !self.checking) return;
     self.checkedDirectories=[NSMutableSet new];
-    // 根路径的符号链接解析每调用一次即可：逐文件解析是单周期开销的主要来源之一；
-    // 根被替换仍由逐文件的 inode/设备核对捕获，解析比较只负责跨调用的指向变化。
     NSString *resolvedRootPath = [NSURL fileURLWithPath:self.root].URLByResolvingSymlinksInPath.path;
-    // 枚举器跨批次保留位置，避免每次超时都从头扫描。
     for (NSUInteger index = 0; index < limit; index++) {
-        if (!shouldContinue()) { self.cancelled = YES; self.entries = nil; return; }
         struct stat rootInfo;
         if (lstat(self.root.fileSystemRepresentation, &rootInfo) || !S_ISDIR(rootInfo.st_mode) ||
             rootInfo.st_ino != self.inode || rootInfo.st_dev != self.device ||
@@ -573,18 +577,53 @@
             if (self.checking && self.verifying) {
                 // 验证枚举结束：核对快照全覆盖；通过则进入删除，未通过已失效、收尾。
                 if ([self axs_cachekeeper_verify_complete]) {
-                    self.checking=NO; self.verifying=NO; [self axs_cachekeeper_open_enumerator]; continue;
+                    self.checking=NO; self.verifying=NO; [self axs_cachekeeper_open_enumerator]; return;
                 }
                 self.complete=YES; self.entries=nil; return;
             }
             if (self.checking && ![self axs_cachekeeper_is_data_directory:self.root]) {
                 // 零证据清理根：预检完成后先验证分类仍有效，再删除（方案任务 1）。
                 if ([self axs_cachekeeper_begin_verify]) continue;
-                self.checking=NO;[self axs_cachekeeper_open_enumerator];continue;
+                self.checking=NO;[self axs_cachekeeper_open_enumerator];return;
             }
             if (self.checking) self.protectedCount++;
             self.complete=YES;self.entries=nil;return;
         }
+        NSString *entry=axs_cachekeeper_enumerated_path(enumerated.path,self.root,self.rootAliases);
+        if (!entry) {
+            self.failed++;
+            [self axs_cachekeeper_failure:@"枚举路径边界" code:EINVAL path:enumerated.path detail:self.root];
+            continue;
+        }
+        struct stat info;
+        if (lstat(entry.fileSystemRepresentation, &info)) {
+            if (errno != ENOENT) { self.failed++; self.error = @"无法读取缓存文件属性";[self.dataDirectories addObject:entry.stringByDeletingLastPathComponent]; }
+            continue;
+        }
+        if (S_ISLNK(info.st_mode)) continue;
+        if (self.checking && self.verifying) {
+            [self axs_cachekeeper_verify_entry:entry info:info];
+            if (self.purgeInvalid) { self.complete=YES; self.entries=nil; return; }
+            continue;
+        }
+        if (self.checking) { self.inspected++;[self axs_cachekeeper_inspect:entry info:info]; continue; }
+    }
+}
+
+- (void)advanceDeletion:(NSUInteger)limit shouldContinue:(BOOL (^)(void))shouldContinue {
+    if (self.complete || self.cancelled || self.checking) return;
+    self.checkedDirectories=[NSMutableSet new];
+    NSString *resolvedRootPath = [NSURL fileURLWithPath:self.root].URLByResolvingSymlinksInPath.path;
+    for (NSUInteger index = 0; index < limit; index++) {
+        if (!shouldContinue()) { self.cancelled = YES; self.entries = nil; return; }
+        struct stat rootInfo;
+        if (lstat(self.root.fileSystemRepresentation, &rootInfo) || !S_ISDIR(rootInfo.st_mode) ||
+            rootInfo.st_ino != self.inode || rootInfo.st_dev != self.device ||
+            ![self.root isEqual:resolvedRootPath]) {
+            self.failed++; self.error = @"扫描期间缓存目录已改变"; self.complete = YES; self.entries = nil; return;
+        }
+        NSURL *enumerated = self.entries.nextObject;
+        if (!enumerated) { self.complete=YES;self.entries=nil;return; }
         NSString *entry=axs_cachekeeper_enumerated_path(enumerated.path,self.root,self.rootAliases);
         if (!entry) {
             // 单条枚举路径越界只跳过该条并计失败，不终结整根：一根内混入一条
@@ -601,12 +640,6 @@
         }
         // URL 枚举器不递归符号链接；对非目录调用 skipDescendants 会影响后续遍历。
         if (S_ISLNK(info.st_mode)) continue;
-        if (self.checking && self.verifying) {
-            [self axs_cachekeeper_verify_entry:entry info:info];
-            if (self.purgeInvalid) { self.complete=YES; self.entries=nil; return; }
-            continue;
-        }
-        if (self.checking) { self.inspected++;[self axs_cachekeeper_inspect:entry info:info]; continue; }
         // 清理模式目录名命中数据证据：整根出局，本轮逐项计保护、不删、不计失败；证据路径已记入 error。
         // 文件级证据改走混合降级（purgeMixed），不经过此处，删除时按日志门逐文件判定。
         if (self.purgeMode && self.purgeBlocked) {
@@ -654,5 +687,12 @@
         if ([self axs_cachekeeper_remove:entry expected:info]) { self.removed++; self.bytes += info.st_size; }
         else if (errno != ENOENT && errno != EBUSY) self.failed++;
     }
+}
+
+// 单根兼容入口（测试用）：先预检后删除。多根作业须用拆分后的接口。
+- (void)advance:(NSUInteger)limit shouldContinue:(BOOL (^)(void))shouldContinue {
+    if (self.complete || self.cancelled) return;
+    [self advancePreflight:limit];
+    if (!self.checking && !self.complete && !self.cancelled) [self advanceDeletion:limit shouldContinue:shouldContinue];
 }
 @end

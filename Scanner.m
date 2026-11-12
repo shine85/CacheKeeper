@@ -7,6 +7,7 @@
 #include <time.h>
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperSweep.h"
+#import "AxsCacheKeeperCleanupJob.h"
 #import "AxsCacheKeeperDirectories.h"
 #import "AxsCacheKeeperProcess.h"
 #import "AxsCacheKeeperProcessObservation.h"
@@ -153,7 +154,7 @@ void CKInspectRequests(void) {
     });
 }
 static NSMutableSet<NSString *> *axs_cachekeeper_manual;
-// 最近一次观测到的运行实例标识（仅主线程读写：CKApply 入口观测、目标构建与门控采样均在主线程——门控经 dispatch_sync 回主队列执行；shouldContinue 在清理队列执行，但只读局部的 sweepAllowed，不碰本字典）。
+// 最近一次观测到的运行实例标识（仅主线程读写：CKApply 入口观测、目标构建与门控采样均在主线程——门控经 dispatch_sync 回主队列执行；作业在清理队列执行，但门控采样块内部回主队列，不碰本字典）。
 static NSMutableDictionary<NSString *, NSString *> *axs_cachekeeper_seen_instances;
 static AxsCacheKeeperExecState axs_cachekeeper_exec(NSString *bundle, NSString **identity, NSInteger *taskState, NSString **reason) {
     id manager = SRead(NSClassFromString(@"FBProcessManager"), @"sharedInstance");
@@ -237,7 +238,7 @@ void CKApplyDirectorySwitches(void) {
     static dispatch_queue_t queue;
     static NSMutableDictionary *jobs, *finished, *discovery, *lockChecks, *purgeDiscovery;
     // 实例观测独立于清理忙碌状态：每轮入口先记录各已启用 APP 当前运行实例，
-    // 使长任务存续期间发生的新实例启停也能被 shouldContinue 的绑定比对发现；
+    // 使长任务存续期间发生的新实例启停也能被门控采样的绑定比对发现；
     // 同时维护挂起稳定跟踪（同一实例被系统挂起的起始时刻），供放行判定使用。
     if (!axs_cachekeeper_seen_instances) axs_cachekeeper_seen_instances = [NSMutableDictionary new];
     NSDictionary *observedStates = [NSDictionary dictionaryWithContentsOfFile:
@@ -433,14 +434,14 @@ void CKApplyDirectorySwitches(void) {
             BOOL hasPurgeRoot = purgePaths.count > 0;
             NSString *signature = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\n%@", [roots componentsJoinedByString:@"\n"], mode, fullClear ? @"full" : @"media", target[@"instance"], [purgePaths componentsJoinedByString:@"\n"]];
             NSDictionary *done = finished[bundle];
-            // 静默期：干净的 0 删除轮（无删除、无失败、预检中无目录变化）说明该 APP 已到稳态，
-            // 30 秒后重开只会反复空转预检（#63 真机：极速版等反复检测、完成也是 0）；同签名下一次
-            // 轮次延至 30 分钟后。有删除、有失败或有目录变化的轮次仍按 30 秒重试；APP 再次运行
-            // （新实例→签名变化）或配置改变时不受限；手动清理不受限。
-            NSTimeInterval quiet = (done && [done[@"removed"] unsignedIntegerValue] == 0 && [done[@"failed"] unsignedIntegerValue] == 0 && [done[@"changed"] unsignedIntegerValue] == 0) ? 1800 : 30;
+            // 静默期（方案任务 3，P1-3）：1800 秒只给真正干净的完成轮——结束原因 Completed
+            //（触顶轮不算，哪怕 0 删除）、无删除、无失败、无变化、无近期待处理文件、
+            // 发现覆盖完整。任一条件不满足都按 30 秒重试；APP 再次运行（新实例→签名变化）
+            // 或配置改变时不受限；手动清理不受限。
+            NSTimeInterval quiet = (done && [done[@"endReason"] integerValue] == AxsCacheKeeperCleanupEndReasonCompleted && [done[@"removed"] unsignedIntegerValue] == 0 && [done[@"failed"] unsignedIntegerValue] == 0 && [done[@"changed"] unsignedIntegerValue] == 0 && [done[@"recent"] unsignedIntegerValue] == 0 && [done[@"coverageComplete"] boolValue]) ? 1800 : 30;
             if (!manual && [done[@"signature"] isEqual:signature] && -[done[@"time"] timeIntervalSinceNow] < quiet) continue;
-            NSMutableDictionary *job = jobs[bundle];
-            if (![job[@"signature"] isEqual:signature]) {
+            AxsCacheKeeperCleanupJob *job = jobs[bundle];
+            if (![job.signature isEqual:signature]) {
                 NSMutableArray *sweeps = [NSMutableArray new];
                 for (NSUInteger index = 0; index < roots.count; index++) {
                     NSString *root = roots[index];
@@ -456,16 +457,15 @@ void CKApplyDirectorySwitches(void) {
                     if (lstat(purgeRoot.fileSystemRepresentation, &info) && errno == ENOENT) continue;
                     [sweeps addObject:[[AxsCacheKeeperSweep alloc] initWithRoot:purgeRoot fullClear:NO logMode:NO purgeMode:YES]];
                 }
-                job = [@{@"signature":signature, @"sweeps":sweeps, @"removed":@0, @"bytes":@0,
-                    @"instance":target[@"instance"] ?: @"", @"deleteStarted":@0} mutableCopy];
+                job = [[AxsCacheKeeperCleanupJob alloc] initWithSweeps:sweeps signature:signature instance:target[@"instance"] ?: @"" clock:^NSTimeInterval { return axs_cachekeeper_monotonic_seconds(); }];
                 jobs[bundle] = job;
             }
-            NSString *jobInstance = job[@"instance"];
+            NSString *jobInstance = job.instance;
             // 放行判定逐 sweep 采样：每周期采样一次时，周期内重开 APP 或关闭总开关要到
             // 下一周期才停手，至多 36 根 × 256 项的超删；逐 sweep 采样把超删界定在一根
             // （256 项，远不足 2 秒），采样量 ≤36 次/周期，远低于逐文件采样的 9216 次
             // （#42 实证：逐文件采样把单周期拖到约 10 秒；审计 #42 后续，用户 12:19 定）。
-            __block BOOL sweepAllowed = NO;
+            // 作业每周期每根调用一次本块（预检与删除都一样）；根内不再重采。
             BOOL (^sampleGate)(void) = ^BOOL {
                 __block BOOL allowed = NO;
                 dispatch_sync(dispatch_get_main_queue(), ^{
@@ -488,34 +488,19 @@ void CKApplyDirectorySwitches(void) {
                 });
                 return allowed;
             };
-            BOOL (^shouldContinue)(void) = ^BOOL { return sweepAllowed; };
-            NSUInteger removed = 0, failures = 0, protectedCount = 0, recentCount = 0, inspected = 0, changedCount = 0, mixedPurgeRemoved = 0;
-            unsigned long long bytes = 0;
-            BOOL complete = YES, cancelled = NO, checking = NO, hasMixedPurge = NO, anyDeleting = NO;
-            // 单轮删除共享预算（审计第 8 项）：本轮已删总量，逐根推进后累加，硬封顶 2000 项。
-            NSUInteger budgetUsed = 0;
-            for (AxsCacheKeeperSweep *s in job[@"sweeps"]) budgetUsed += s.removed;
+            // 单周期推进由作业驱动：Checking 阶段只预检全部根；全部预检完成才转入删除，
+            // 120 秒期限从首次真实删除推进起算；2000 项全作业共享硬上限（方案任务 3）。
+            [job advanceCycleWithPerRootLimit:256 gate:sampleGate];
+            NSUInteger removed = job.removed, failures = job.failed, protectedCount = job.protectedCount, recentCount = job.recentCount, inspected = job.inspected, changedCount = job.changedCount, mixedPurgeRemoved = job.mixedPurgeRemoved;
+            unsigned long long bytes = job.bytes;
+            BOOL complete = job.endReason == AxsCacheKeeperCleanupEndReasonCompleted;
+            BOOL cancelled = job.endReason == AxsCacheKeeperCleanupEndReasonCancelled;
+            BOOL capHit = job.endReason == AxsCacheKeeperCleanupEndReasonLimitReached;
+            BOOL checking = job.phase == AxsCacheKeeperCleanupPhaseChecking;
+            BOOL hasMixedPurge = job.hasMixedPurge;
             NSString *error = @"";
             NSMutableDictionary *directoryReports=[NSMutableDictionary new];
-            for (AxsCacheKeeperSweep *sweep in job[@"sweeps"]) {
-                sweepAllowed = sampleGate();
-                // 共享预算与删除阶段期限（审计第 8 项）：每根的推进量受剩余预算约束，
-                // 单轮删除总量硬封顶 2000 项（旧实现事后才检查，单周期可超删约 9216 项）；
-                // 期限到后不再推进新根（删除阶段单调计时，用户 12:19 定）。
-                double deleteStarted = [job[@"deleteStarted"] doubleValue];
-                BOOL deadlineHit = deleteStarted > 0 && axs_cachekeeper_monotonic_seconds() - deleteStarted >= 120;
-                NSUInteger limit = budgetUsed >= 2000 ? 0 : MIN((NSUInteger)256, 2000 - budgetUsed);
-                NSUInteger beforeRemoved = sweep.removed;
-                if (!cancelled && !deadlineHit) [sweep advance:limit shouldContinue:shouldContinue];
-                budgetUsed += sweep.removed - beforeRemoved;
-                anyDeleting |= !sweep.checking;
-                removed += sweep.removed; bytes += sweep.bytes; failures += sweep.failed;
-                hasMixedPurge |= sweep.purgeMixed;
-                if (sweep.purgeMixed) mixedPurgeRemoved += sweep.removed;
-                protectedCount += sweep.protectedCount; recentCount += sweep.recentCount;
-                inspected += sweep.inspected; checking |= sweep.checking && !sweep.complete;
-                changedCount += sweep.changedCount;
-                complete &= sweep.complete; cancelled |= sweep.cancelled;
+            for (AxsCacheKeeperSweep *sweep in job.sweeps) {
                 if (sweep.error.length) error = sweep.error;
                 NSString *relative=[sweep.root substringFromIndex:[target[@"home"] length]+1];
                 // 分类与首条证据独立落盘（审计第 10 项）：error 会被后续失败覆盖，不能作为证据载体；
@@ -529,18 +514,9 @@ void CKApplyDirectorySwitches(void) {
                 directoryReports[relative]=@{@"updated":NSDate.date,@"complete":@(sweep.complete),@"checking":@(sweep.checking),@"cancelled":@(sweep.cancelled),
                     @"removed":@(sweep.removed),@"bytes":@(sweep.bytes),@"protected":@(sweep.protectedCount),@"recent":@(sweep.recentCount),@"changed":@(sweep.changedCount),@"failed":@(sweep.failed),@"error":sweep.error ?: @"",@"failureDetails":sweep.failureDetails ?: @[],@"purgeClassification":purgeClassification,@"purgeEvidence":sweep.purgeEvidence ?: @""};
             }
-            NSUInteger deltaRemoved = removed-[job[@"removed"] unsignedIntegerValue];
-            unsigned long long deltaBytes = bytes-[job[@"bytes"] unsignedLongLongValue];
+            NSUInteger deltaRemoved = removed-job.reportedRemoved;
+            unsigned long long deltaBytes = bytes-job.reportedBytes;
             // 累计不在此推进：须等回执写成功后再推进，写失败时保留增量与作业以便下周期重试（审计第 9 项）。
-            // 删除阶段起始时刻：首根完成预检进入删除时记下单调时钟；120 秒上限从此计时，
-            // 不再从任务创建计时（长预检不再导致删除刚开始就触顶，用户 12:19 定）。
-            if (![job[@"deleteStarted"] doubleValue] && anyDeleting) job[@"deleteStarted"] = @(axs_cachekeeper_monotonic_seconds());
-            // 单轮硬上限（对照方案吸收并按本引擎分批模型适配）：单轮累计删除 2000 项或删除阶段
-            // 累计运行 120 秒即收尾，剩余内容顺延下轮重新预检后继续，限制单轮异常时的损害半径。
-            // 2000 项由共享预算硬封顶（推进前约束每根限额，非事后检查）；120 秒用单调时钟，
-            // 从删除阶段起始计时（预检不删任何文件，不计入上限）。
-            BOOL capHit = !complete && !cancelled &&
-                (removed >= 2000 || ([job[@"deleteStarted"] doubleValue] > 0 && axs_cachekeeper_monotonic_seconds() - [job[@"deleteStarted"] doubleValue] >= 120));
             NSString *phase = @"cleaning", *message = @"正在分批清理；无需重新检测目录";
             if (checking) message=[NSString stringWithFormat:@"正在检查数据目录，已检查 %lu 项；预检完成后才删除",(unsigned long)inspected];
             if (cancelled) {
@@ -554,7 +530,7 @@ void CKApplyDirectorySwitches(void) {
                 if (changedCount) message=[message stringByAppendingFormat:@"；%lu 个目录在预检后变化，已跳过等待下轮",(unsigned long)changedCount];
                 if (fullClear) message=[message stringByAppendingString:@"\n全量清理开启：标准缓存目录内的文件按平台缓存契约处理，不按类型保留（60 秒内新文件除外）"];
                 if (hasLogRoot) message=[message stringByAppendingString:@"\n含用户定级的日志目录：仅清理日志特征文件（.log/.alog/.xlog)，数据与未知内容保留"];
-                if (hasPurgeRoot) message=[message stringByAppendingString:@"\n未知目录已按内容审查清理：无数据证据的目录退出后清理，检出数据证据的目录自动仅清理其中的日志文件"];
+                if (hasPurgeRoot) message=[message stringByAppendingString:@"\n未知目录已按内容审查处理：检出数据证据的目录自动仅清理其中的日志文件；无数据证据的目录暂不自动清理，待专属识别规则"];
                 if (hasMixedPurge) {
                     // 混合行按实际删除数表述，不只按策略启用（审计第 10 项）：0 删除时明确说未删。
                     if (mixedPurgeRemoved) message=[message stringByAppendingFormat:@"\n本轮有未知目录检出数据证据，已自动仅清理其中的日志文件 %lu 个（数据与未知内容保留）",(unsigned long)mixedPurgeRemoved];
@@ -570,9 +546,11 @@ void CKApplyDirectorySwitches(void) {
             NSDictionary *round = (complete || capHit || cancelled) ? @{@"removed":@(removed), @"bytes":@(bytes)} : nil;
             BOOL reported = axs_cachekeeper_report(bundle, phase, message, deltaRemoved, deltaBytes, failures, paths, axs_cachekeeper_auto_discover(states[bundle]) ? discovered : nil, directoryReports, round);
             if (reported) {
-                job[@"removed"] = @(removed); job[@"bytes"] = @(bytes);
+                job.reportedRemoved = removed; job.reportedBytes = bytes;
                 if (cancelled || complete || capHit) {
-                    if (complete || capHit) finished[bundle] = @{@"signature":signature, @"time":NSDate.date, @"removed":@(removed), @"failed":@(failures), @"changed":@(changedCount)};
+                    // 结束记录供静默期判定：结束原因＋近期文件数＋发现覆盖完整性（方案任务 3）。
+                    // 取消的轮次不记录（下周期立即重开，不受静默期约束）。
+                    if (complete || capHit) finished[bundle] = @{@"signature":signature, @"time":NSDate.date, @"removed":@(removed), @"failed":@(failures), @"changed":@(changedCount), @"recent":@(recentCount), @"endReason":@(job.endReason), @"coverageComplete":@(discoveryError.length == 0 && [knownPurge[@"error"] length] == 0)};
                     [jobs removeObjectForKey:bundle];
                     if (manual && (complete || cancelled)) dispatch_async(dispatch_get_main_queue(), ^{ [axs_cachekeeper_manual removeObject:bundle]; });
                 }

@@ -20,6 +20,7 @@ try:
                     str(root / "AxsCacheKeeperDirectories.m"),
                     str(root / "AxsCacheKeeperInspection.m"),
                     str(root / "AxsCacheKeeperProcessObservation.m"),
+                    str(root / "AxsCacheKeeperCleanupJob.m"),
                     "-o", str(output / "cache-tests")], check=True, timeout=60)
     subprocess.run([str(output / "cache-tests"), str(output / "fixtures")], check=True, timeout=60)
 finally:

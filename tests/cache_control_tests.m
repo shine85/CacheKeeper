@@ -10,6 +10,7 @@
 #import "../AxsCacheKeeperFilza.h"
 #import "../AxsCacheKeeperProcess.h"
 #import "../AxsCacheKeeperProcessObservation.h"
+#import "../AxsCacheKeeperCleanupJob.h"
 #import "../AxsCacheKeeperInspection.h"
 #import "../AxsCacheKeeperProbe.h"
 #import "../AxsCacheKeeperFileAccess.h"
@@ -772,6 +773,87 @@ int main(int argc, const char *argv[]) {
             ![fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-two.log"]] &&
             [fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/keep-changing.log"]] &&
             [fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/data.bin"]], @"变化文件保留、稳定日志删除、数据库保留");
+        // 方案任务 3（P1-3）：CleanupJob 状态机与期限/预算。作业时钟注入 jobNow（手动推进），
+        // 根时钟用 future（文件已够 60 秒，可删）；近期文件测试的根用真实时钟。
+        __block NSTimeInterval jobNow = 1000;
+        NSTimeInterval (^jobClock)(void) = ^NSTimeInterval { return jobNow; };
+        BOOL (^jobGate)(void) = ^BOOL { return YES; };
+        // 1. 非对称双根：A 10 文件、B 1 文件。B 先完成预检时 A 仍在预检，B 不得删除；
+        // 全部预检完成前期限不得启动；Ready 时零删除、文件完好。
+        NSString *jobRootA=[fixture stringByAppendingPathComponent:@"job-a"];
+        NSString *jobRootB=[fixture stringByAppendingPathComponent:@"job-b"];
+        require([fm createDirectoryAtPath:jobRootA withIntermediateDirectories:YES attributes:nil error:nil], @"作业根 A 夹具");
+        require([fm createDirectoryAtPath:jobRootB withIntermediateDirectories:YES attributes:nil error:nil], @"作业根 B 夹具");
+        for (int i=0;i<10;i++) writeMedia([jobRootA stringByAppendingPathComponent:[NSString stringWithFormat:@"a%d.png",i]]);
+        writeMedia([jobRootB stringByAppendingPathComponent:@"b0.png"]);
+        AxsCacheKeeperSweep *jobSweepA=[[AxsCacheKeeperSweep alloc] initWithRoot:jobRootA clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO];
+        AxsCacheKeeperSweep *jobSweepB=[[AxsCacheKeeperSweep alloc] initWithRoot:jobRootB clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO];
+        AxsCacheKeeperCleanupJob *job=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[jobSweepA,jobSweepB] signature:@"job-sig" instance:@"1:100" clock:jobClock];
+        for (NSUInteger pass=0;pass<3;pass++) [job advanceCycleWithPerRootLimit:1 gate:jobGate];
+        require(job.phase==AxsCacheKeeperCleanupPhaseChecking && !jobSweepB.checking && jobSweepA.checking && jobSweepB.removed==0 && job.removed==0 && job.deleteDeadline==0, @"任一根在预检时，任何根都不删除、期限不启动");
+        for (NSUInteger pass=0;job.phase==AxsCacheKeeperCleanupPhaseChecking && pass<100;pass++) [job advanceCycleWithPerRootLimit:1 gate:jobGate];
+        require(job.phase==AxsCacheKeeperCleanupPhaseReady && job.removed==0 && job.deleteDeadline==0 &&
+            [fm fileExistsAtPath:[jobRootA stringByAppendingPathComponent:@"a0.png"]] &&
+            [fm fileExistsAtPath:[jobRootB stringByAppendingPathComponent:@"b0.png"]], @"全部预检完成才 Ready；预检零删除、期限未启动");
+        // 2. 首次真实删除推进启动 120 秒期限（jobNow=1000 → 截止 1120）。
+        [job advanceCycleWithPerRootLimit:1 gate:jobGate];
+        require(job.phase==AxsCacheKeeperCleanupPhaseDeleting && job.deleteDeadline==1120 && job.removed==2, @"首次删除推进启动期限（1000+120）");
+        // 3. 期限边界：1119 未到仍继续，1120 到达即触顶收尾，不再删除。
+        jobNow=1119;
+        [job advanceCycleWithPerRootLimit:1 gate:jobGate];
+        require(job.phase==AxsCacheKeeperCleanupPhaseDeleting && job.removed==3, @"期限前一秒仍可删除");
+        jobNow=1120;
+        [job advanceCycleWithPerRootLimit:1 gate:jobGate];
+        require(job.phase==AxsCacheKeeperCleanupPhaseFinished && job.endReason==AxsCacheKeeperCleanupEndReasonLimitReached && job.removed==3 &&
+            [[fm contentsOfDirectoryAtPath:jobRootA error:nil] count]==7, @"期限到达即触顶收尾，剩余 7 个文件保留");
+        // 4. 空根不启动计时：空根 E＋有文件根 F。Ready 时期限仍为 0；首次删除推进（F）才启动。
+        NSString *jobRootE=[fixture stringByAppendingPathComponent:@"job-e"];
+        NSString *jobRootF=[fixture stringByAppendingPathComponent:@"job-f"];
+        require([fm createDirectoryAtPath:jobRootE withIntermediateDirectories:YES attributes:nil error:nil], @"作业空根夹具");
+        require([fm createDirectoryAtPath:jobRootF withIntermediateDirectories:YES attributes:nil error:nil], @"作业有文件根夹具");
+        writeMedia([jobRootF stringByAppendingPathComponent:@"f0.png"]);
+        writeMedia([jobRootF stringByAppendingPathComponent:@"f1.png"]);
+        AxsCacheKeeperSweep *jobSweepE=[[AxsCacheKeeperSweep alloc] initWithRoot:jobRootE clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO];
+        AxsCacheKeeperSweep *jobSweepF=[[AxsCacheKeeperSweep alloc] initWithRoot:jobRootF clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO];
+        jobNow=2000;
+        AxsCacheKeeperCleanupJob *jobEF=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[jobSweepE,jobSweepF] signature:@"job-ef" instance:@"1:100" clock:jobClock];
+        for (NSUInteger pass=0;jobEF.phase==AxsCacheKeeperCleanupPhaseChecking && pass<100;pass++) [jobEF advanceCycleWithPerRootLimit:64 gate:jobGate];
+        require(jobEF.phase==AxsCacheKeeperCleanupPhaseReady && jobEF.deleteDeadline==0 && jobSweepE.inspected==0, @"空根预检 0 项，不启动计时");
+        [jobEF advanceCycleWithPerRootLimit:64 gate:jobGate];
+        require(jobEF.deleteDeadline==2120 && jobSweepE.complete && jobEF.removed==2, @"有文件根首次删除推进启动期限，空根同时完成");
+        // 5. 2000 项全作业共享硬上限：2005 文件单根，触顶收尾，剩 5 个。
+        NSString *capRoot=[fixture stringByAppendingPathComponent:@"job-cap"];
+        require([fm createDirectoryAtPath:capRoot withIntermediateDirectories:YES attributes:nil error:nil], @"预算上限夹具");
+        for (int i=0;i<2005;i++) writeMedia([capRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"f%d.png",i]]);
+        AxsCacheKeeperSweep *capSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:capRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO];
+        jobNow=3000;
+        AxsCacheKeeperCleanupJob *capJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[capSweep] signature:@"job-cap" instance:@"1:100" clock:jobClock];
+        for (NSUInteger pass=0;capJob.phase!=AxsCacheKeeperCleanupPhaseFinished && pass<100;pass++) [capJob advanceCycleWithPerRootLimit:256 gate:jobGate];
+        require(capJob.endReason==AxsCacheKeeperCleanupEndReasonLimitReached && capJob.removed==AxsCacheKeeperCleanupRoundItemCap &&
+            [[fm contentsOfDirectoryAtPath:capRoot error:nil] count]==5, @"2000 项硬封顶，剩余 5 个顺延下轮");
+        // 6. 近期文件根：真实时钟下新建文件均未满 60 秒，整轮完成但 0 删除、recent>0。
+        NSString *recentRoot=[fixture stringByAppendingPathComponent:@"job-recent"];
+        require([fm createDirectoryAtPath:recentRoot withIntermediateDirectories:YES attributes:nil error:nil], @"近期文件根夹具");
+        for (int i=0;i<3;i++) writeMedia([recentRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"r%d.png",i]]);
+        AxsCacheKeeperSweep *recentSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:recentRoot fullClear:NO logMode:NO];
+        jobNow=4000;
+        AxsCacheKeeperCleanupJob *recentJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[recentSweep] signature:@"job-recent" instance:@"1:100" clock:jobClock];
+        for (NSUInteger pass=0;recentJob.phase!=AxsCacheKeeperCleanupPhaseFinished && pass<100;pass++) [recentJob advanceCycleWithPerRootLimit:64 gate:jobGate];
+        require(recentJob.endReason==AxsCacheKeeperCleanupEndReasonCompleted && recentJob.removed==0 && recentJob.recentCount==3, @"近期文件整轮完成但 0 删除，recent 计数供静默期判定");
+        // 7. 门控关闭取消轮次：Ready 后门控关闭，作业取消收尾。
+        NSString *cancelRoot=[fixture stringByAppendingPathComponent:@"job-cancel"];
+        require([fm createDirectoryAtPath:cancelRoot withIntermediateDirectories:YES attributes:nil error:nil], @"取消轮次夹具");
+        writeMedia([cancelRoot stringByAppendingPathComponent:@"c0.png"]);
+        AxsCacheKeeperSweep *cancelSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:cancelRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO];
+        __block BOOL gateOpen = YES;
+        BOOL (^cancelGate)(void) = ^BOOL { return gateOpen; };
+        jobNow=5000;
+        AxsCacheKeeperCleanupJob *cancelJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[cancelSweep] signature:@"job-cancel" instance:@"1:100" clock:jobClock];
+        for (NSUInteger pass=0;cancelJob.phase==AxsCacheKeeperCleanupPhaseChecking && pass<100;pass++) [cancelJob advanceCycleWithPerRootLimit:64 gate:cancelGate];
+        require(cancelJob.phase==AxsCacheKeeperCleanupPhaseReady, @"取消测试基线：Ready");
+        gateOpen = NO;
+        [cancelJob advanceCycleWithPerRootLimit:64 gate:cancelGate];
+        require(cancelJob.phase==AxsCacheKeeperCleanupPhaseFinished && cancelJob.endReason==AxsCacheKeeperCleanupEndReasonCancelled && cancelJob.removed==0, @"门控关闭取消轮次，不删除");
         // 方案任务 1（P1-1）：根分类失效黑盒测试。预检后内容变化（新增数据库、原地改写、
         // 新增受保护子树、新增近期/硬链接证据、条目缺失、读失败）须使零证据分类失效，
         // 本轮延期、稳定文件保留；自身删除不误判。测试只通过 advance 推进与文件操作，
