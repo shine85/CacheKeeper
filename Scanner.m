@@ -242,8 +242,15 @@ void CKApplyDirectorySwitches(void) {
     if (!axs_cachekeeper_seen_instances) axs_cachekeeper_seen_instances = [NSMutableDictionary new];
     NSDictionary *observedStates = [NSDictionary dictionaryWithContentsOfFile:
         [axs_cachekeeper_folder() stringByAppendingPathComponent:@"appEnabled.plist"]];
+    // 配置读不到时无法枚举应观测的 bundle，全部挂起起点作废（方案任务 2 第 3 步）。
+    if (!observedStates) [AxsCacheKeeperProcessObservation invalidateAllBundles];
     for (NSString *bundle in observedStates) {
-        if (!axs_cachekeeper_bundle_id(bundle) || !axs_cachekeeper_app_enabled(observedStates[bundle])) continue;
+        if (!axs_cachekeeper_bundle_id(bundle) || !axs_cachekeeper_app_enabled(observedStates[bundle])) {
+            // 未启用/无效 bundle 不观测，但须清除旧挂起记录：停用期间进程恢复运行再挂起，
+            // 重开时不能继承停用前的旧起点（方案任务 2 第 3 步）。
+            [AxsCacheKeeperProcessObservation observeBundle:bundle state:AxsCacheKeeperExecUnknown identity:nil atMonotonicTime:axs_cachekeeper_monotonic_seconds()];
+            continue;
+        }
         NSString *identity=nil;
         AxsCacheKeeperExecState exec=axs_cachekeeper_exec(bundle,&identity,NULL,NULL);
         if (exec==AxsCacheKeeperExecExecuting && identity) axs_cachekeeper_seen_instances[bundle]=identity;
@@ -261,15 +268,22 @@ void CKApplyDirectorySwitches(void) {
     NSDictionary *states = [NSDictionary dictionaryWithContentsOfFile:stateFile];
     if ((!selection && [NSFileManager.defaultManager fileExistsAtPath:selectionFile]) ||
         (!states && [NSFileManager.defaultManager fileExistsAtPath:stateFile])) {
+        // 配置不可读：无法枚举应观测的 bundle，全部挂起起点作废，不继承未持续维护的窗口。
+        [AxsCacheKeeperProcessObservation invalidateAllBundles];
         NSLog(@"[CacheKeeper] 用户配置不可读，停止本轮处理"); return;
     }
     NSMutableSet *bundles = [NSMutableSet setWithArray:selection.allKeys ?: @[]];
     [bundles addObjectsFromArray:states.allKeys ?: @[]];
     [bundles addObjectsFromArray:axs_cachekeeper_manual.allObjects ?: @[]];
     NSMutableDictionary *targets = [NSMutableDictionary new];
+    if (!states) [AxsCacheKeeperProcessObservation invalidateAllBundles];
     for (NSString *bundle in bundles) {
         if (!axs_cachekeeper_bundle_id(bundle)) continue;
-        if (!axs_cachekeeper_app_enabled(states[bundle])) { [axs_cachekeeper_manual removeObject:bundle];continue; }
+        if (!axs_cachekeeper_app_enabled(states[bundle])) {
+            // 未启用：清除旧挂起记录（见定时入口同款处理）；同时取消其手动请求。
+            [AxsCacheKeeperProcessObservation observeBundle:bundle state:AxsCacheKeeperExecUnknown identity:nil atMonotonicTime:axs_cachekeeper_monotonic_seconds()];
+            [axs_cachekeeper_manual removeObject:bundle]; continue;
+        }
         NSArray *selected = axs_cachekeeper_selected_paths(selection, states, bundle);
         BOOL manual = [axs_cachekeeper_manual containsObject:bundle];
         NSString *mode = axs_cachekeeper_mode(states[bundle]);

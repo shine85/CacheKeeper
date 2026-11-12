@@ -33,4 +33,10 @@ static NSMutableDictionary<NSString *, NSDictionary *> *AxsCacheKeeperSuspendedR
     return [record[@"identity"] isEqual:identity] && now - [record[@"since"] doubleValue] >= AxsCacheKeeperSuspendedStableInterval;
 }
 
++ (void)invalidateAllBundles {
+    // 配置不可读/缺失时无法枚举应观测的 bundle，全部挂起起点作废，不继承未持续维护的窗口。
+    NSAssert([NSThread isMainThread], @"AxsCacheKeeperProcessObservation 仅限主线程调用");
+    [AxsCacheKeeperSuspendedRecords() removeAllObjects];
+}
+
 @end

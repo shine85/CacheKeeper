@@ -167,6 +167,21 @@ int main(int argc, const char *argv[]) {
         [AxsCacheKeeperProcessObservation observeBundle:obsBundle state:AxsCacheKeeperExecSuspended identity:@"1:200.000000" atMonotonicTime:400];
         [AxsCacheKeeperProcessObservation observeBundle:obsBundle state:AxsCacheKeeperExecAbsent identity:nil atMonotonicTime:401];
         require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:obsBundle identity:@"1:200.000000" atMonotonicTime:500], @"消失观测清除窗口，不借旧窗口");
+        // 任务 2 补齐：停用期间的观测中断须失效旧窗口。Suspended@500 后停用（以 Unknown 观测
+        // 模拟跳过清除），重开后同实例挂起@561 不得继承 t=500，须到新窗口满 60 秒才放行。
+        NSString *disableBundle=@"com.example.disable";
+        [AxsCacheKeeperProcessObservation observeBundle:disableBundle state:AxsCacheKeeperExecSuspended identity:@"1:300.000000" atMonotonicTime:500];
+        [AxsCacheKeeperProcessObservation observeBundle:disableBundle state:AxsCacheKeeperExecUnknown identity:nil atMonotonicTime:530];
+        [AxsCacheKeeperProcessObservation observeBundle:disableBundle state:AxsCacheKeeperExecSuspended identity:@"1:300.000000" atMonotonicTime:561];
+        require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:disableBundle identity:@"1:300.000000" atMonotonicTime:561], @"停用清除后重开挂起不得继承旧起点");
+        require([AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:disableBundle identity:@"1:300.000000" atMonotonicTime:621], @"停用清除后新窗口满 60 秒放行");
+        // 配置不可读：invalidateAll 清除全部 bundle 的挂起起点。
+        [AxsCacheKeeperProcessObservation observeBundle:disableBundle state:AxsCacheKeeperExecSuspended identity:@"1:300.000000" atMonotonicTime:700];
+        [AxsCacheKeeperProcessObservation observeBundle:obsBundle state:AxsCacheKeeperExecSuspended identity:@"1:200.000000" atMonotonicTime:700];
+        [AxsCacheKeeperProcessObservation invalidateAllBundles];
+        [AxsCacheKeeperProcessObservation observeBundle:disableBundle state:AxsCacheKeeperExecSuspended identity:@"1:300.000000" atMonotonicTime:761];
+        require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:disableBundle identity:@"1:300.000000" atMonotonicTime:761], @"invalidateAll 后旧起点作废");
+        require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:obsBundle identity:@"1:200.000000" atMonotonicTime:761], @"invalidateAll 清除全部 bundle");
         NSDictionary *selection = @{bundle:@[@"Library/Caches/a", @"Library/Caches", @"Library/Caches/a",
             @"Library/Application Support", @"Library/Caches/../Preferences", @"Library/CachesOther"]};
         require([axs_cachekeeper_selected_paths(selection, @{bundle:@YES}, bundle) isEqual:@[@"Library/Caches"]], @"过滤保护目录并去掉父子重复选择");

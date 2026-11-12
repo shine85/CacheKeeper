@@ -13,4 +13,5 @@
 @interface AxsCacheKeeperProcessObservation : NSObject
 + (void)observeBundle:(NSString *)bundle state:(AxsCacheKeeperExecState)state identity:(NSString *)identity atMonotonicTime:(NSTimeInterval)now;
 + (BOOL)allowsSuspendedCleanupForBundle:(NSString *)bundle identity:(NSString *)identity atMonotonicTime:(NSTimeInterval)now;
++ (void)invalidateAllBundles;
 @end
