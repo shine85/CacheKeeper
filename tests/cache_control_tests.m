@@ -799,10 +799,11 @@ int main(int argc, const char *argv[]) {
         writeFile(backslashFile);
         NSString *plainFile = [backslashRoot stringByAppendingPathComponent:@"plain.txt"];
         writeFile(plainFile);
-        AxsCacheKeeperSweep *backslashSweep = [[AxsCacheKeeperSweep alloc] initWithRoot:backslashRoot fullClear:YES logMode:NO];
+        AxsCacheKeeperSweep *backslashSweep = [[AxsCacheKeeperSweep alloc] initWithRoot:backslashRoot clock:^NSTimeInterval{return future;} fullClear:YES logMode:NO];
         for (NSUInteger pass=0;!backslashSweep.complete && pass<100;pass++) [backslashSweep advance:64 shouldContinue:^BOOL{return YES;}];
         require(backslashSweep.complete && backslashSweep.failed == 0 && backslashSweep.removed == 2 &&
-            ![fm fileExistsAtPath:backslashFile] && ![fm fileExistsAtPath:plainFile], @"反斜杠文件名不终结整根清理");
+            ![fm fileExistsAtPath:backslashFile] && ![fm fileExistsAtPath:plainFile],
+            [NSString stringWithFormat:@"反斜杠文件名不终结整根清理（complete=%d removed=%lu failed=%lu）",backslashSweep.complete,(unsigned long)backslashSweep.removed,(unsigned long)backslashSweep.failed]);
 
         NSString *lockRoot = [fixture stringByAppendingPathComponent:@"lock-root"];
         NSString *lockSub = [lockRoot stringByAppendingPathComponent:@"sub"];
