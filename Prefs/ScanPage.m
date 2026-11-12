@@ -162,8 +162,8 @@
 }
 - (NSDictionary *)axs_cachekeeper_row_at:(NSIndexPath *)path {
     if (path.section==1 && path.row<self.cacheRows.count) return self.cacheRows[path.row];
-    if (path.section==2 && self.showOtherData && path.row>0 && path.row-1<self.otherRows.count) return self.otherRows[path.row-1];
-    if (path.section==3 && self.showUnknownData && path.row>0 && path.row-1<self.unknownRows.count) return self.unknownRows[path.row-1];
+    if (path.section==2 && self.showUnknownData && path.row>0 && path.row-1<self.unknownRows.count) return self.unknownRows[path.row-1];
+    if (path.section==3 && self.showOtherData && path.row>0 && path.row-1<self.otherRows.count) return self.otherRows[path.row-1];
     return nil;
 }
 - (UIContextMenuConfiguration *)tableView:(UITableView *)table contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)path point:(CGPoint)point {
@@ -195,19 +195,19 @@
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
     if (section==0) return 5;
     if (section==1) return MAX((NSUInteger)1,self.cacheRows.count);
-    if (section==2) return self.otherRows.count ? 1+(self.showOtherData ? self.otherRows.count : 0) : 0;
-    return self.unknownRows.count ? 1+(self.showUnknownData ? self.unknownRows.count : 0) : 0;
+    if (section==2) return self.unknownRows.count ? 1+(self.showUnknownData ? self.unknownRows.count : 0) : 0;
+    return self.otherRows.count ? 1+(self.showOtherData ? self.otherRows.count : 0) : 0;
 }
 - (NSString *)tableView:(UITableView *)table titleForHeaderInSection:(NSInteger)section {
     if (section==0) return @"缓存控制";
     if (section==1) return [NSString stringWithFormat:@"可管理缓存 · 已选置顶 · %lu 个父目录",(unsigned long)self.cacheRows.count];
-    if (section==2) return self.otherRows.count ? @"混合用途与共享数据" : nil;
-    return self.unknownRows.count ? @"用途未知 · 待分析" : nil;
+    if (section==2) return self.unknownRows.count ? @"用途未知 · 待分析" : nil;
+    return self.otherRows.count ? @"混合用途与共享数据" : nil;
 }
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
     if (section==0) return @"一键开启 = 自动模式 + 网络磁盘缓存限制 + 新增缓存自动发现。可能增加流量和重复加载，网络选项可随时关闭。";
-    if (section==2) return self.otherRows.count ? @"这些目录可能同时包含资源、业务状态或缓存，尚未逐项确认；不自动清理。已知敏感持久化目录已隐藏。" : nil;
-    if (section==3) return self.unknownRows.count ? @"点击目录进入只读深度检测：类型组成、文件时间与最大文件。未知不等于必需，也不等于垃圾。退出后先做全目录内容审查：无数据证据的自动清理，检出数据证据的整目录保留。日志与数据混放的目录可在档案页定级为日志目录，只清日志文件；已定级的目录可在此关闭定级。" : nil;
+    if (section==2) return self.unknownRows.count ? @"点击目录进入只读深度检测：类型组成、文件时间与最大文件。未知不等于必需，也不等于垃圾。退出后先做全目录内容审查：无数据证据的自动清理，检出数据证据的整目录保留。日志与数据混放的目录可在档案页定级为日志目录，只清日志文件；已定级的目录可在此关闭定级。每目录开关默认开启（自动审查）；关闭则保留该目录，不自动清理。" : nil;
+    if (section==3) return self.otherRows.count ? @"这些目录可能同时包含资源、业务状态或缓存，尚未逐项确认；不自动清理。已知敏感持久化目录已隐藏。" : nil;
     NSDictionary *footerStates=[self axs_cachekeeper_display:@"appEnabled.plist"];
     NSString *message=axs_cachekeeper_full_clear(footerStates[self.bundle]) ?
         @"首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后处理。全量清理已开启：标准缓存目录内的全部文件都清空（含数据库与未知文件）；未知目录退出后先做全目录内容审查，无数据证据的自动清理，检出数据证据的整目录保留。已选目录内新增内容自动覆盖；手动关闭的目录保持排除。" :
@@ -282,7 +282,7 @@
     }
     if ((path.section==2 || path.section==3) && path.row==0) {
         UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
-        BOOL unknown=path.section==3,expanded=unknown ? self.showUnknownData : self.showOtherData;
+        BOOL unknown=path.section==2,expanded=unknown ? self.showUnknownData : self.showOtherData;
         NSArray *items=unknown ? self.unknownRows : self.otherRows;
         unsigned long long bytes=0;BOOL complete=YES;
         for (NSDictionary *row in items) {bytes+=[row[@"bytes"] unsignedLongLongValue];complete&=[row[@"complete"] boolValue];}
@@ -320,6 +320,12 @@
     if (partial) state=[state stringByAppendingString:@"（保留旧配置中选定的部分子目录）"];
     if (judged) state=!masterOn ? @"已定级：日志目录；APP 未开启，不处理" :
         (axs_cachekeeper_wants_cleanup(master[self.bundle]) ? @"已定级：日志目录；退出后仅清理日志特征文件，数据与未知内容保留" : @"已定级：日志目录；只禁止模式不删除文件");
+    if ([axs_cachekeeper_directory_kind(relative) isEqual:@"unknown"] && !judged) {
+        // 未定级未知目录不走“已纳入/未开启”那套文案：它由 B 案内容审查决定，行文须与实际一致。
+        BOOL excluded=axs_cachekeeper_row_selected(relative,axs_cachekeeper_exclusions(viewState));
+        state=excluded ? @"已保留：不自动清理" : (!masterOn ? @"APP 未开启：不处理任何目录" :
+            (axs_cachekeeper_wants_cleanup(master[self.bundle]) ? @"退出后内容审查，无数据证据即自动清理" : @"只禁止模式：不删除、不锁定"));
+    }
     NSString *size=row[@"bytes"] ? [NSString stringWithFormat:@"%.2f MB%@%@",[row[@"bytes"] doubleValue]/1048576,growth,[row[@"complete"] boolValue]?@"":@" · 大小未统计完"] : @"自动发现，大小待检测";
     NSDictionary *snapshot=[self axs_cachekeeper_display:@"snapshots.plist"][self.bundle];
     NSString *trend=axs_cachekeeper_growth_evidence(relative,snapshot[@"recentScans"] ?: @[],snapshot);
@@ -330,6 +336,11 @@
     } else if (judged) {
         UISwitch *toggle=[UISwitch new];toggle.on=YES;toggle.enabled=!self.timer;toggle.accessibilityIdentifier=relative;
         [toggle addTarget:self action:@selector(axs_cachekeeper_log_toggle:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=toggle;
+    } else if ([axs_cachekeeper_directory_kind(relative) isEqual:@"unknown"]) {
+        // 未定级未知目录的逐项保留开关：默认开（参与自动内容审查），关则整目录保留。
+        BOOL excluded=axs_cachekeeper_row_selected(relative,axs_cachekeeper_exclusions(viewState));
+        UISwitch *toggle=[UISwitch new];toggle.on=!excluded;toggle.enabled=!self.timer;toggle.accessibilityIdentifier=relative;
+        [toggle addTarget:self action:@selector(axs_cachekeeper_exclude_toggle:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=toggle;
     }
     return cell;
 }
@@ -417,14 +428,21 @@
     self.actionStatus=error ?: (toggle.on ? @"已定级为日志目录；完全退出后按日志规则清理" : @"已取消日志目录定级；恢复为用途未知，按内容审查处理");
     [self axs_cachekeeper_reload];
 }
+- (void)axs_cachekeeper_exclude_toggle:(UISwitch *)toggle {
+    if (self.timer) { [self axs_cachekeeper_reload];return; }
+    NSString *error=axs_cachekeeper_set_excluded_path(jbroot(@"/var/mobile/Library/CacheKeeper"),self.bundle,toggle.accessibilityIdentifier,!toggle.on);
+    if (error) [self message:error]; else axs_cachekeeper_notify_preferences();
+    self.actionStatus=error ?: (toggle.on ? @"已恢复该目录的自动内容审查" : @"已保留该目录，不自动清理");
+    [self axs_cachekeeper_reload];
+}
 - (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
     [table deselectRowAtIndexPath:path animated:YES];
     NSDictionary *row=[self axs_cachekeeper_row_at:path];
     if (row) { [self.navigationController pushViewController:[[AxsCacheKeeperInspectionPage alloc] initWithBundle:self.bundle path:row[@"path"]] animated:YES];return; }
-    if (path.section==2 && path.row==0) {
+    if (path.section==2 && path.row==0) { self.showUnknownData=!self.showUnknownData;[self axs_cachekeeper_reload]; }
+    if (path.section==3 && path.row==0) {
         self.showOtherData=!self.showOtherData;
         [self axs_cachekeeper_reload];
     }
-    if (path.section==3 && path.row==0) { self.showUnknownData=!self.showUnknownData;[self axs_cachekeeper_reload]; }
 }
 @end

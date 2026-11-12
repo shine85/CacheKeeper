@@ -250,7 +250,13 @@ static inline BOOL axs_cachekeeper_purge_evidence_path(NSString *relative) {
     return NO;
 }
 static inline NSArray<NSString *> *axs_cachekeeper_exclusions(id state) {
-    return [state isKindOfClass:NSDictionary.class] ? axs_cachekeeper_cache_paths(state[@"excludedPaths"]) : @[];
+    // 用户手动排除的目录：缓存根（行开关）与用途未知目录（保留开关）共用同一清单。
+    // 只要求相对路径且非受保护路径——不能再用 cache_paths 过滤，否则未知目录的保留会被悄悄丢掉。
+    if (![state isKindOfClass:NSDictionary.class]) return @[];
+    NSMutableArray *safe=[NSMutableArray new];
+    if ([state[@"excludedPaths"] isKindOfClass:NSArray.class]) for (id path in state[@"excludedPaths"])
+        if ([path isKindOfClass:NSString.class] && axs_cachekeeper_relative_path(path) && !axs_cachekeeper_protected_path(path)) [safe addObject:path];
+    return axs_cachekeeper_parent_paths(safe);
 }
 static inline BOOL axs_cachekeeper_paths_overlap(NSString *left, NSString *right) {
     return [left isEqual:right] || [left hasPrefix:[right stringByAppendingString:@"/"]] ||

@@ -180,7 +180,9 @@ int main(int argc, const char *argv[]) {
         require(axs_cachekeeper_hidden_directory(@"Group/group.example/Library/Cookies") &&
             !axs_cachekeeper_hidden_directory(@"Library/Application Support"), @"共享敏感目录同样隐藏，混合数据不武断认定必需");
         NSArray *sorted=axs_cachekeeper_prioritized_rows(@[@{@"path":@"tmp",@"bytes":@1},@{@"path":@"Library/Caches",@"bytes":@999},@{@"path":@"Library/Logs",@"bytes":@500}],@[@"tmp"],@{@"enabled":@YES});
-        require([sorted[0][@"path"] isEqual:@"tmp"] && [sorted[1][@"path"] isEqual:@"Library/Caches"], @"已开启置顶，同组按大小排序");
+        require([sorted[0][@"path"] isEqual:@"Library/Caches"] && [sorted[1][@"path"] isEqual:@"tmp"], @"新 APP 默认自动发现开启：自动纳入的缓存根与已选同组置顶，同组按大小排序");
+        NSArray *sortedOff=axs_cachekeeper_prioritized_rows(@[@{@"path":@"tmp",@"bytes":@1},@{@"path":@"Library/Caches",@"bytes":@999},@{@"path":@"Library/Logs",@"bytes":@500}],@[@"tmp"],@{@"enabled":@YES,@"autoDiscover":@NO});
+        require([sortedOff[0][@"path"] isEqual:@"tmp"] && [sortedOff[1][@"path"] isEqual:@"Library/Caches"], @"明确关闭自动发现时，仅已选置顶，同组按大小排序");
         NSArray *sortedAuto=axs_cachekeeper_prioritized_rows(sorted,@[],@{@"enabled":@YES,@"autoDiscover":@YES,@"excludedPaths":@[@"Library/Caches"]});
         require([sortedAuto.lastObject[@"path"] isEqual:@"Library/Caches"], @"自动纳入与排除使用同一开启排序依据");
         NSArray *offSorted=axs_cachekeeper_prioritized_rows(sorted,@[@"tmp"],@{@"enabled":@NO,@"autoDiscover":@YES});
@@ -460,6 +462,17 @@ int main(int argc, const char *argv[]) {
         require(!axs_cachekeeper_auto_discover(@{@"autoDiscover":@NO}), @"已明确关闭自动发现的保持关闭");
         require([axs_cachekeeper_app_state(nil,YES)[@"autoDiscover"] boolValue], @"全新 APP 状态保存默认自动发现开启");
         require([axs_cachekeeper_purge_paths(@[@"Library/tma",@"Library/alog",@"Library/Caches",@"Library/Preferences"],@{@"enabled":@YES,@"logPaths":@[@"Library/alog"]}) isEqual:@[@"Library/tma"]], @"清理候选集只取未定级未知目录");
+        NSString *excludeFolder=[fixture stringByAppendingPathComponent:@"exclude-state"];
+        require([fm createDirectoryAtPath:excludeFolder withIntermediateDirectories:YES attributes:nil error:nil], @"排除状态夹具");
+        require(!axs_cachekeeper_set_excluded_path(excludeFolder,@"com.example.app",@"Library/tma",YES), @"未知目录可单独保留");
+        NSDictionary *excludedState=[NSDictionary dictionaryWithContentsOfFile:[excludeFolder stringByAppendingPathComponent:@"appEnabled.plist"]][@"com.example.app"];
+        require([axs_cachekeeper_exclusions(excludedState) containsObject:@"Library/tma"] &&
+            ![axs_cachekeeper_purge_paths(@[@"Library/tma",@"Library/Pitaya"],excludedState) containsObject:@"Library/tma"], @"保留的未知目录退出内容审查候选集");
+        require([axs_cachekeeper_exclusions(axs_cachekeeper_app_state(excludedState,YES)) containsObject:@"Library/tma"], @"切模式/总开关保留未知目录的保留选择");
+        require(!axs_cachekeeper_set_excluded_path(excludeFolder,@"com.example.app",@"Library/tma",NO), @"保留可取消，恢复自动审查");
+        NSDictionary *unexcludedState=[NSDictionary dictionaryWithContentsOfFile:[excludeFolder stringByAppendingPathComponent:@"appEnabled.plist"]][@"com.example.app"];
+        require(![axs_cachekeeper_exclusions(unexcludedState) containsObject:@"Library/tma"] &&
+            [axs_cachekeeper_purge_paths(@[@"Library/tma",@"Library/Pitaya"],unexcludedState) containsObject:@"Library/tma"], @"取消保留后恢复为清理候选");
         NSString *purgeRoot=[fixture stringByAppendingPathComponent:@"purge-clean"];
         require([fm createDirectoryAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime"] withIntermediateDirectories:YES attributes:nil error:nil], @"清理目录夹具");
         writeMedia([purgeRoot stringByAppendingPathComponent:@"runtime/model.bin"]);

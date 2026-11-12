@@ -85,7 +85,7 @@ static inline NSString *axs_cachekeeper_save_selection(NSString *folder, NSStrin
             if (axs_cachekeeper_paths_overlap(excluded,added)) { [exclusions removeObject:excluded];break; }
         }
     } else [exclusions addObjectsFromArray:changes];
-    state[@"excludedPaths"]=axs_cachekeeper_cache_paths(exclusions);
+    state[@"excludedPaths"]=axs_cachekeeper_parent_paths(exclusions);
     if (oneClick) { state[@"mode"]=@"auto";state[@"urlCache"]=@YES;state[@"autoDiscover"]=@YES; }
     directories[bundle]=axs_cachekeeper_cache_paths(paths);
     if (![directories writeToFile:directoryFile atomically:YES]) return @"目录选择保存失败。";
@@ -123,6 +123,25 @@ static inline NSString *axs_cachekeeper_set_log_path(NSString *folder, NSString 
     state[@"logPaths"]=axs_cachekeeper_log_paths(@{@"logPaths":list});
     states[bundle]=state;
     if (![states writeToFile:stateFile atomically:YES]) return @"定级保存失败。";
+    NSDictionary *readStates=[NSDictionary dictionaryWithContentsOfFile:stateFile];
+    if (![readStates[bundle] isEqual:state]) return @"保存后回读不一致，请检查配置访问；未确认设置已应用。";
+    return nil;
+}
+// 未知目录逐项保留（只写状态文件）：关 = 加入排除清单，退出时不做内容审查；开 = 移出清单，恢复自动审查。
+// 保留不走 save_selection（其只接受标准缓存路径），与定级开关同一写入规矩：回读验证。
+static inline NSString *axs_cachekeeper_set_excluded_path(NSString *folder, NSString *bundle, NSString *path, BOOL exclude) {
+    if (!axs_cachekeeper_bundle_id(bundle) || !axs_cachekeeper_relative_path(path)) return @"目录路径无效，未应用。";
+    if (exclude && !axs_cachekeeper_log_path_valid(path)) return @"该目录不属于可保留的用途未知目录，未应用。";
+    NSString *stateFile=[folder stringByAppendingPathComponent:@"appEnabled.plist"];
+    NSMutableDictionary *states=axs_cachekeeper_edit_configuration(stateFile);
+    if (!states) return @"原配置不可读或损坏，已停止保存。";
+    NSMutableDictionary *state=axs_cachekeeper_app_state(states[bundle],axs_cachekeeper_app_enabled(states[bundle]));
+    NSMutableArray *list=[[axs_cachekeeper_exclusions(states[bundle]) mutableCopy] ?: [NSMutableArray new]];
+    [list removeObject:path];
+    if (exclude) [list addObject:path];
+    state[@"excludedPaths"]=axs_cachekeeper_parent_paths(list);
+    states[bundle]=state;
+    if (![states writeToFile:stateFile atomically:YES]) return @"保留设置保存失败。";
     NSDictionary *readStates=[NSDictionary dictionaryWithContentsOfFile:stateFile];
     if (![readStates[bundle] isEqual:state]) return @"保存后回读不一致，请检查配置访问；未确认设置已应用。";
     return nil;
