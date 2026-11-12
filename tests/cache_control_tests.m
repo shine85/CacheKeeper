@@ -415,7 +415,8 @@ int main(int argc, const char *argv[]) {
         int linked=axs_cachekeeper_open_directory(replacedRoot);
         require(linked<0, @"共享访问函数继续拒绝末级目录链接");
         linked=axs_cachekeeper_open_directory([replacedRoot stringByAppendingPathComponent:@"child"]);
-        require(linked<0, @"共享访问函数继续拒绝中间目录链接");
+        require(linked>=0, @"中间目录链接按 #27 跟随（真机容器路径含 /var 等中间链接），仅末级链接拒绝；根替换安全由 sweep 的身份核对保证");
+        if (linked>=0) close(linked);
         NSString *fullRoot=[fixture stringByAppendingPathComponent:@"full-cache"];
         require([fm createDirectoryAtPath:[fullRoot stringByAppendingPathComponent:@"store"] withIntermediateDirectories:YES attributes:nil error:nil], @"全量清理夹具");
         writeMedia([fullRoot stringByAppendingPathComponent:@"clip.mp4"]);
