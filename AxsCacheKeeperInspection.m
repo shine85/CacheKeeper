@@ -134,8 +134,12 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
 - (void)axs_cachekeeper_begin_twin {
     self.twinPhase=YES;
     self.linkIndex=[NSMutableDictionary new];
-    for (NSDictionary *record in self.linkFiles)
-        self.linkIndex[axs_cachekeeper_inode_key([record[@"device"] unsignedLongLongValue],[record[@"inode"] unsignedLongLongValue])]=record;
+    for (NSDictionary *record in self.linkFiles) {
+        NSString *key=axs_cachekeeper_inode_key([record[@"device"] unsignedLongLongValue],[record[@"inode"] unsignedLongLongValue]);
+        NSMutableArray *records=self.linkIndex[key];
+        if (!records) { records=[NSMutableArray new];self.linkIndex[key]=records; }
+        [records addObject:record];
+    }
     self.searchIndex=0;
     [self axs_cachekeeper_open_search_root];
     if (!self.searchEntries) self.complete=YES;
@@ -148,7 +152,7 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
         NSString *path=candidate[@"path"];
         if (![path isKindOfClass:NSString.class] || !path.length) { self.twinSkipped++;continue; }
         __weak typeof(self) weak=self;
-        NSDirectoryEnumerator *entries=[NSFileManager.defaultManager enumeratorAtURL:[NSURL fileURLWithPath:path] includingPropertiesForKeys:nil options:0 errorHandler:^BOOL(NSURL *url,NSError *error) { weak.twinSkipped++;return YES; }];
+        NSDirectoryEnumerator *entries=[NSFileManager.defaultManager enumeratorAtURL:[NSURL fileURLWithPath:path] includingPropertiesForKeys:nil options:0 errorHandler:^BOOL(NSURL *url,NSError *error) { (void)error;weak.twinSkipped++;return YES; }];
         if (entries) { self.searchEntries=entries;self.searchCurrent=candidate;return; }
         self.twinSkipped++;
     }
@@ -162,22 +166,24 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
     if (lstat(enumerated.path.fileSystemRepresentation,&info)) return;
     if (!S_ISREG(info.st_mode) || info.st_nlink==1) return;
     NSString *key=axs_cachekeeper_inode_key(info.st_dev,info.st_ino);
-    NSDictionary *source=self.linkIndex[key];
-    if (!source) return;
-    NSString *sourceFull=[self.root stringByAppendingPathComponent:source[@"path"]];
-    NSString *twinResolved=[NSURL fileURLWithPath:enumerated.path].URLByResolvingSymlinksInPath.path;
-    NSString *sourceResolved=[NSURL fileURLWithPath:sourceFull].URLByResolvingSymlinksInPath.path;
-    if ([twinResolved isEqual:sourceResolved]) return;
-    NSUInteger existing=0;
-    for (NSDictionary *twin in self.twinEntries) if ([twin[@"source"] isEqual:source[@"path"]]) existing++;
-    if (existing>=3 || self.twinEntries.count>=50) return;
-    NSString *base=self.searchCurrent[@"path"];
-    NSString *label=self.searchCurrent[@"label"] ?: @"";
-    NSString *shown=[enumerated.path hasPrefix:[base stringByAppendingString:@"/"]] ?
-        [NSString stringWithFormat:@"%@/%@",label,[enumerated.path substringFromIndex:base.length+1]] :
-        [NSString stringWithFormat:@"%@/%@",label,enumerated.path.lastPathComponent];
-    [self.twinEntries addObject:@{@"source":source[@"path"],@"twin":shown,@"bytes":source[@"bytes"]}];
-    if (![self.twinnedKeys containsObject:key]) { [self.twinnedKeys addObject:key];self.twinBytes+=[source[@"bytes"] unsignedLongLongValue]; }
+    NSArray *sources=self.linkIndex[key];
+    if (!sources.count) return;
+    for (NSDictionary *source in sources) {
+        NSString *sourceFull=[self.root stringByAppendingPathComponent:source[@"path"]];
+        NSString *twinResolved=[NSURL fileURLWithPath:enumerated.path].URLByResolvingSymlinksInPath.path;
+        NSString *sourceResolved=[NSURL fileURLWithPath:sourceFull].URLByResolvingSymlinksInPath.path;
+        if ([twinResolved isEqual:sourceResolved]) continue;
+        NSUInteger existing=0;
+        for (NSDictionary *twin in self.twinEntries) if ([twin[@"source"] isEqual:source[@"path"]]) existing++;
+        if (existing>=3 || self.twinEntries.count>=50) continue;
+        NSString *base=self.searchCurrent[@"path"];
+        NSString *label=self.searchCurrent[@"label"] ?: @"";
+        NSString *shown=[enumerated.path hasPrefix:[base stringByAppendingString:@"/"]] ?
+            [NSString stringWithFormat:@"%@/%@",label,[enumerated.path substringFromIndex:base.length+1]] :
+            [NSString stringWithFormat:@"%@/%@",label,enumerated.path.lastPathComponent];
+        [self.twinEntries addObject:@{@"source":source[@"path"],@"twin":shown,@"bytes":source[@"bytes"]}];
+        if (![self.twinnedKeys containsObject:source[@"path"]]) { [self.twinnedKeys addObject:source[@"path"]];self.twinBytes+=[source[@"bytes"] unsignedLongLongValue]; }
+    }
 }
 - (NSDictionary *)report {
     BOOL covered=self.complete && !self.failures && !self.changed;

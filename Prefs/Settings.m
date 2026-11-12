@@ -23,6 +23,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @interface CKSettings : PSViewController <UITableViewDataSource, UITableViewDelegate, UISearchResultsUpdating, UIContextMenuInteractionDelegate>
 @property(nonatomic,strong) UITableView *table;
 @property(nonatomic,strong) UISegmentedControl *tabs;
+@property(nonatomic,strong) UIView *tabWrap;
 @property(nonatomic,assign) NSInteger selectedTab;
 @property(nonatomic,strong) NSArray *apps;
 @property(nonatomic,strong) NSArray *sections;
@@ -50,21 +51,29 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     self.navigationItem.searchController = search;
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
     self.definesPresentationContext = YES;
-    CGFloat tabHeight = 46;
-    UIView *tabWrap = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, tabHeight)];
-    tabWrap.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    self.tabWrap = [[UIView alloc] initWithFrame:CGRectZero];
+    self.tabWrap.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     self.tabs = [[UISegmentedControl alloc] initWithItems:@[@"已开启", @"用户应用", @"巨魔应用", @"收藏应用"]];
     self.tabs.frame = CGRectMake(16, 7, self.view.bounds.size.width - 32, 32);
     self.tabs.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     self.tabs.selectedSegmentIndex = 0;
     [self.tabs addTarget:self action:@selector(tabChanged:) forControlEvents:UIControlEventValueChanged];
-    [tabWrap addSubview:self.tabs];
-    [self.view addSubview:tabWrap];
-    self.table = [[UITableView alloc] initWithFrame:CGRectMake(0, tabHeight, self.view.bounds.size.width, self.view.bounds.size.height - tabHeight) style:UITableViewStyleInsetGrouped];
+    [self.tabWrap addSubview:self.tabs];
+    [self.view addSubview:self.tabWrap];
+    self.table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
     self.table.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.table.dataSource = self; self.table.delegate = self;
     [self.view addSubview:self.table];
     self.navigationItem.rightBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"检测全部" style:UIBarButtonItemStylePlain target:self action:@selector(scanAll)];
+}
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    // 视图延伸到导航栏下方，Tab 条必须从安全区顶部（导航栏下沿）起算，不能从 y=0 起；
+    // 否则会被状态栏/灵动岛盖住（#55 真机 bug）。每次布局都重算，旋转与导航栏变化时也正确。
+    CGFloat top = self.view.safeAreaInsets.top;
+    CGFloat tabHeight = 46;
+    self.tabWrap.frame = CGRectMake(0, top, self.view.bounds.size.width, tabHeight);
+    self.table.frame = CGRectMake(0, top + tabHeight, self.view.bounds.size.width, self.view.bounds.size.height - top - tabHeight);
 }
 - (void)tabChanged:(UISegmentedControl *)sender {
     self.selectedTab = sender.selectedSegmentIndex;
