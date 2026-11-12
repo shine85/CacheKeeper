@@ -25,7 +25,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 // 来源判据是 applicationType，不是收据：巨魔应用报 @"System"（CoreTrust 系统级信任），商店
 // 应用报 @"User"；解密的商店 IPA 包内常带原始 StoreKit 收据，收据判据会把巨魔应用误判为
 // 商店应用（#60 真机：轻悦时光落在用户应用）。
-@interface CKSettings : PSViewController <UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate, UIContextMenuInteractionDelegate>
+@interface CKSettings : PSViewController <UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate>
 @property(nonatomic,strong) UITableView *table;
 @property(nonatomic,strong) UISegmentedControl *tabs;
 @property(nonatomic,strong) UIView *tabWrap;
@@ -40,6 +40,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @property(nonatomic,copy) NSString *appsError;
 @property(nonatomic,strong) NSDictionary *directoriesSnapshot;
 @property(nonatomic,strong) NSDictionary *statesSnapshot;
+@property(nonatomic,copy) NSString *lastBatchKey;
 @end
 @implementation CKSettings
 - (void)viewDidLoad {
@@ -152,14 +153,14 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     else if (!axs_cachekeeper_selected_paths(directories,states,app[@"id"]).count && !axs_cachekeeper_auto_discover(states[app[@"id"]])) cell.detailTextLabel.text=[bundleLine stringByAppendingString:@"\n总开关已开启；没有文件清理目录，网络缓存按独立选项执行"];
     [toggle addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = toggle; cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-    [cell addInteraction:[[UIContextMenuInteraction alloc] initWithDelegate:self]];
     return cell;
 }
-- (UIContextMenuConfiguration *)contextMenuInteraction:(UIContextMenuInteraction *)interaction configurationForMenuAtLocation:(CGPoint)location {
-    UITableViewCell *cell = (UITableViewCell *)interaction.view;
-    NSIndexPath *path = [self.table indexPathForCell:cell];
-    if (!path || path.section >= self.sections.count) return nil;
-    NSDictionary *app = self.sections[path.section][@"apps"][path.row];
+// 长按菜单由 UITableView 代理方法提供（iOS 13+ 标准做法），不要给每个 cell 挂 UIContextMenuInteraction：
+// 列表每秒刷新会重建 cell，挂在 cell 上的手势随 cell 一起被销毁，长按永远等不到菜单（#62 真机：长按无菜单）。
+- (UIContextMenuConfiguration *)tableView:(UITableView *)tableView contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point {
+    (void)tableView; (void)point;
+    if (indexPath.section >= self.sections.count) return nil;
+    NSDictionary *app = self.sections[indexPath.section][@"apps"][indexPath.row];
     NSString *bundle = app[@"id"];
     BOOL favorited = [self.favorites containsObject:bundle];
     __weak typeof(self) weak = self;
@@ -284,7 +285,14 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     self.directoriesSnapshot=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist")];
     NSArray *savedFavorites=[NSArray arrayWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/favorites.plist")];
     self.favorites=[NSSet setWithArray:[savedFavorites isKindOfClass:NSArray.class] ? savedFavorites : @[]];
+    self.scanHistory=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/snapshots.plist")];
+    NSDictionary *batch=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/batch.plist")];
     NSString *query = self.searchBar.text;
+    // 每秒定时刷新：输入（Tab/查询/各快照）无变化时跳过重建与 reloadData——无谓的全量重建
+    // 每秒销毁重建全部 cell，既抖动又打断长按手势（#62）；清理进行中快照在变，仍会正常刷新。
+    NSString *key=[NSString stringWithFormat:@"%ld|%@|%lu|%lu|%lu|%lu|%lu",(long)self.selectedTab,query?:@"",(unsigned long)states.hash,(unsigned long)self.directoriesSnapshot.hash,(unsigned long)self.favorites.hash,(unsigned long)self.scanHistory.hash,(unsigned long)batch.hash];
+    if ([key isEqualToString:self.lastBatchKey]) return;
+    self.lastBatchKey=key;
     NSMutableArray *matches = [NSMutableArray new];
     for (NSDictionary *app in self.apps) {
         NSString *name = app[@"name"], *bundle = app[@"id"];
@@ -321,8 +329,6 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     for (NSString *letter in letters) [sections addObject:@{@"title":letter, @"apps":[byLetter[letter] copy]}];
     self.sections = sections;
 
-    self.scanHistory=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/snapshots.plist")];
-    NSDictionary *batch=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/batch.plist")];
     BOOL active=[batch[@"remaining"] count]>0;
     self.navigationItem.rightBarButtonItem.enabled=!active;
     self.navigationItem.rightBarButtonItem.title=active?[NSString stringWithFormat:@"%@/%@",batch[@"completed"],batch[@"total"]]:@"检测全部";
