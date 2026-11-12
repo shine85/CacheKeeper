@@ -536,11 +536,12 @@ void CKApplyDirectorySwitches(void) {
             if (checking) message=[NSString stringWithFormat:@"正在检查数据目录，已检查 %lu 项；预检完成后才删除",(unsigned long)inspected];
             if (cancelled) {
                 phase = @"waiting"; message = @"APP 重新运行或配置改变，已停止清理";
+                if (removed) message = [message stringByAppendingFormat:@"；已清理 %lu 项 · %.2f MB", (unsigned long)removed, bytes / 1048576.0];
             } else if (complete || capHit) {
                 phase = failures ? @"error" : @"complete";
                 message = failures ? [@"本轮未全部完成：" stringByAppendingString:error] :
-                    (capHit ? [NSString stringWithFormat:@"本轮已达单轮上限（2000 项或 120 秒），已清理 %lu 项；剩余内容顺延下轮继续", (unsigned long)removed] :
-                    [NSString stringWithFormat:@"本轮检查完成；保留 %lu 项受保护/未知内容、%lu 项近期文件", (unsigned long)protectedCount, (unsigned long)recentCount]);
+                    (capHit ? [NSString stringWithFormat:@"本轮已达单轮上限（2000 项或 120 秒），已清理 %lu 项 · %.2f MB；剩余内容顺延下轮继续", (unsigned long)removed, bytes / 1048576.0] :
+                    [NSString stringWithFormat:@"本轮检查完成；已清理 %lu 项 · %.2f MB；保留 %lu 项受保护/未知内容、%lu 项近期文件", (unsigned long)removed, bytes / 1048576.0, (unsigned long)protectedCount, (unsigned long)recentCount]);
                 if (changedCount) message=[message stringByAppendingFormat:@"；%lu 个目录在预检后变化，已跳过等待下轮",(unsigned long)changedCount];
                 if (fullClear) message=[message stringByAppendingString:@"\n全量清理开启：标准缓存目录内的文件按平台缓存契约处理，不按类型保留（60 秒内新文件除外）"];
                 if (hasLogRoot) message=[message stringByAppendingString:@"\n含用户定级的日志目录：仅清理日志特征文件（.log/.alog/.xlog)，数据与未知内容保留"];
