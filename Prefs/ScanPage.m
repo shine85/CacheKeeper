@@ -12,6 +12,8 @@
 @interface CKScanPage : UITableViewController
 @property(nonatomic,copy) NSString *bundle;
 @property(nonatomic,copy) NSString *appName;
+@property(nonatomic,copy) NSString *bundlePath;
+@property(nonatomic,copy) NSString *appType;
 @property(nonatomic,strong) NSArray *rows;
 @property(nonatomic,strong) NSDictionary *previous;
 @property(nonatomic,strong) NSTimer *timer;
@@ -255,7 +257,7 @@
     return self.otherRows.count ? @"混合用途与共享数据" : nil;
 }
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
-    if (section==0) return @"一键开启 = 自动模式 + 网络磁盘缓存限制 + 新增缓存自动发现。可能增加流量和重复加载，网络选项可随时关闭。";
+    if (section==0) return [NSString stringWithFormat:@"一键开启 = 自动模式 + 网络磁盘缓存限制 + 新增缓存自动发现。可能增加流量和重复加载，网络选项可随时关闭。\n包体：%@\n类型：%@", self.bundlePath.length ? self.bundlePath : @"（无）", self.appType.length ? self.appType : @"（无）"];
     if (section==2) return self.unknownRows.count ? @"点击目录进入只读深度检测：类型组成、文件时间与最大文件。未知不等于必需，也不等于垃圾。退出后先做全目录内容审查：无数据证据的自动清理，检出数据证据的自动仅清理其中的日志文件（数据与未知内容保留），无需手动定级。每目录开关默认开启（自动审查）；关闭则保留该目录，不自动清理。" : nil;
     if (section==3) return self.otherRows.count ? @"这些目录可能同时包含资源、业务状态或缓存，尚未逐项确认；不自动清理。已知敏感持久化目录已隐藏。" : nil;
     NSDictionary *footerStates=[self axs_cachekeeper_display:@"appEnabled.plist"];

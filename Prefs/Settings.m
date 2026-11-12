@@ -16,6 +16,8 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @interface CKScanPage : UITableViewController
 @property(nonatomic,copy) NSString *bundle;
 @property(nonatomic,copy) NSString *appName;
+@property(nonatomic,copy) NSString *bundlePath;
+@property(nonatomic,copy) NSString *appType;
 @end
 
 // 分类 Tab：0 已开启，1 用户应用（App Store），2 巨魔应用（TrollStore），3 收藏应用。
@@ -256,6 +258,9 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
         pinyin=[pinyin stringByApplyingTransform:NSStringTransformStripCombiningMarks reverse:NO] ?: pinyin;
         NSMutableDictionary *entry=[app mutableCopy];
         entry[@"source"]=[self axs_cachekeeper_source_for_type:type];
+        // 诊断用：把分类判据的原始值（包体路径 + applicationType）带进详情页，分类争议时直接看实测值，不再猜测。
+        entry[@"bundlePath"]=[url.path isKindOfClass:NSString.class] ? url.path : @"";
+        entry[@"appType"]=[type isKindOfClass:NSString.class] ? type : @"";
         NSString *version=axs_cachekeeper_app_property(proxy,@"shortVersionString");
         if ([version isKindOfClass:NSString.class] && version.length) entry[@"version"]=version;
         entry[@"pinyin"]=pinyin;
@@ -342,7 +347,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     [table deselectRowAtIndexPath:path animated:YES];
     if (path.section >= self.sections.count) return;
     NSDictionary *app=self.sections[path.section][@"apps"][path.row];
-    CKScanPage *page=[CKScanPage new];page.bundle=app[@"id"];page.appName=app[@"name"];
+    CKScanPage *page=[CKScanPage new];page.bundle=app[@"id"];page.appName=app[@"name"];page.bundlePath=app[@"bundlePath"];page.appType=app[@"appType"];
     [self.navigationController pushViewController:page animated:YES];
 }
 - (void)changed:(UISwitch *)toggle {
