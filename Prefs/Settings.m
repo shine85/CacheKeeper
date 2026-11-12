@@ -21,10 +21,12 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @end
 
 // 分类 Tab：0 已开启，1 用户应用（App Store），2 巨魔应用（TrollStore），3 收藏应用。
-// 系统应用不进缓存管家，分两层排除：①包体不在容器目录下的 System 应用（/Applications/、
-// /System/Applications/、/System/Library/、/var/jb/Applications/）；②bundle ID 以 com.apple. 开头
-// 且为 System 类型的——Apple 系统应用经 App Store 更新后包体也在容器目录下，仍报 System 类型，
-// 仅凭容器路径无法排除（#62 真机：备忘录/播客等 10 个系统应用仍在巨魔应用）。商店下载的 Apple
+// 系统应用不进缓存管家，分两层排除：①包体不在真实容器里的 System 应用——真实容器是
+// Application/ 后恰好两级的 <UUID>/<App>.app；Roothide 的 jbroot 藏在容器目录下
+// （.jbroot-<hex>/Applications/，三级），仅含子串会把 Sileo 等越狱应用误判为容器应用
+// （#66 真机）；②bundle ID 以 com.apple. 开头且为 System 类型的——Apple 系统应用经
+// App Store 更新后包体也在容器目录下，仍报 System 类型，仅凭容器路径无法排除
+// （#62 真机：备忘录/播客等 10 个系统应用仍在巨魔应用）。商店下载的 Apple
 // 应用（如 Apple Store、iMovie）报 User 类型，不受第②层影响。
 // 来源判据是 applicationType，不是收据：巨魔应用报 @"System"（CoreTrust 系统级信任），商店
 // 应用报 @"User"；解密的商店 IPA 包内常带原始 StoreKit 收据，收据判据会把巨魔应用误判为
@@ -247,7 +249,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
         NSString *type=axs_cachekeeper_app_property(proxy,@"applicationType");
         NSURL *url=axs_cachekeeper_app_property(proxy,@"bundleURL");
         NSString *bundleID=axs_cachekeeper_app_property(proxy,@"applicationIdentifier");
-        BOOL isContainer=[url.path containsString:@"/containers/Bundle/Application/"];
+        BOOL isContainer=axs_cachekeeper_container_bundle_path(url.path);
         if ([type isEqual:@"System"] && !isContainer) continue;
         if ([type isEqual:@"System"] && [bundleID hasPrefix:@"com.apple."]) continue;
         NSDictionary *app=axs_cachekeeper_application_entry(bundleID,

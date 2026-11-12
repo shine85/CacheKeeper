@@ -165,6 +165,16 @@ static inline NSDictionary *axs_cachekeeper_application_entry(NSString *bundle, 
     if (!appURL && ![type isEqual:@"User"] && ![type isEqual:@"System"]) return nil;
     return @{@"id":bundle,@"name":[name isKindOfClass:NSString.class] && name.length ? name : bundle};
 }
+static inline BOOL axs_cachekeeper_container_bundle_path(NSString *path) {
+    // 真实应用容器：…/Bundle/Application/<UUID>/<App>.app（Application/ 后恰好两级）。
+    // Roothide 的 jbroot 藏在容器目录下（…/Application/.jbroot-<hex>/Applications/<App>.app，Application/ 后三级），
+    // 仅含子串会把越狱应用误判为容器应用（#66 真机：Sileo 包体 /private/var/containers/Bundle/Application/.jbroot-A9F73A89EAC821EE/Applications/Sileo.app）。
+    if (![path isKindOfClass:NSString.class] || !path.length) return NO;
+    NSRange marker=[path rangeOfString:@"/containers/Bundle/Application/"];
+    if (marker.location==NSNotFound) return NO;
+    NSArray *parts=[[path substringFromIndex:NSMaxRange(marker)] pathComponents];
+    return parts.count==2 && [parts[1].lowercaseString hasSuffix:@".app"];
+}
 static inline BOOL axs_cachekeeper_app_enabled(id state) {
     if (!state) return NO;
     if ([state isKindOfClass:NSNumber.class]) return [state boolValue];

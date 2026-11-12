@@ -206,6 +206,9 @@ int main(int argc, const char *argv[]) {
         require(axs_cachekeeper_application_entry(appRows[@"system"][@"bundle"],@"Safari",@"System",[NSURL fileURLWithPath:@"/Applications/MobileSafari.app"]) != nil, @"已安装系统 APP 也列出");
         require(axs_cachekeeper_application_entry(appRows[@"wechat"][@"bundle"],@"微信",@"User",nil) != nil, @"第三方 APP 不按名称排除");
         require(!axs_cachekeeper_application_entry(@"service",@"服务",@"Plugin",[NSURL fileURLWithPath:@"/Plugins/test.appex"]), @"扩展服务不冒充已安装 APP");
+        require(axs_cachekeeper_container_bundle_path(@"/private/var/containers/Bundle/Application/9D2CF640-4735-4F4E-ACF5-3381A3F5A44B/ibisPaintX.app"), @"真实容器包体");
+        require(!axs_cachekeeper_container_bundle_path(@"/private/var/containers/Bundle/Application/.jbroot-A9F73A89EAC821EE/Applications/Sileo.app"), @"jbroot 伪容器不算容器");
+        require(!axs_cachekeeper_container_bundle_path(@"/var/jb/Applications/Sileo.app") && !axs_cachekeeper_container_bundle_path(@"/Applications/MobileSafari.app") && !axs_cachekeeper_container_bundle_path(nil) && !axs_cachekeeper_container_bundle_path(@"/private/var/containers/Bundle/Application/"), @"非容器路径一律否");
         NSString *configFile=[fixture stringByAppendingPathComponent:@"appEnabled.plist"];
         require([@"broken configuration" writeToFile:configFile atomically:YES encoding:NSUTF8StringEncoding error:nil], @"配置损坏夹具");
         require(!axs_cachekeeper_edit_configuration(configFile) && [[NSString stringWithContentsOfFile:configFile encoding:NSUTF8StringEncoding error:nil] isEqual:@"broken configuration"], @"拒绝覆盖损坏的既有配置");
