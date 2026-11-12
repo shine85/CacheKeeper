@@ -272,11 +272,14 @@
         cell.detailTextLabel.numberOfLines = 0;
         NSString *summaryText = axs_cachekeeper_summary(nil,report);
         NSMutableAttributedString *summaryStyled = [[NSMutableAttributedString alloc] initWithString:summaryText];
+        NSRange totalLine = [summaryText rangeOfString:@"累计清理 "];
         NSRange lastLine = [summaryText rangeOfString:@"上次清理："];
-        if (lastLine.location != NSNotFound) {
-            NSUInteger lineEnd = lastLine.location;
+        NSUInteger redStart = totalLine.location != NSNotFound ? totalLine.location : lastLine.location;
+        if (redStart != NSNotFound) {
+            NSUInteger scanFrom = (lastLine.location != NSNotFound && lastLine.location >= redStart) ? lastLine.location : redStart;
+            NSUInteger lineEnd = scanFrom;
             while (lineEnd < summaryText.length && [summaryText characterAtIndex:lineEnd] != '\n') lineEnd++;
-            [summaryStyled addAttribute:NSForegroundColorAttributeName value:UIColor.systemRedColor range:NSMakeRange(lastLine.location, lineEnd - lastLine.location)];
+            [summaryStyled addAttribute:NSForegroundColorAttributeName value:UIColor.systemRedColor range:NSMakeRange(redStart, lineEnd - redStart)];
         }
         cell.detailTextLabel.attributedText = summaryStyled;
         NSDictionary *states=[self axs_cachekeeper_display:@"appEnabled.plist"];
