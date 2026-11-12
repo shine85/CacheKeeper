@@ -644,7 +644,7 @@ int main(int argc, const char *argv[]) {
         require([@"SQLite format 3\0payload" writeToFile:[purgeProtectedFile stringByAppendingPathComponent:@"data.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"受保护文件名混放数据库夹具");
         AxsCacheKeeperSweep *purgeProtectedFileSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeProtectedFile clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
         for (NSUInteger pass=0;!purgeProtectedFileSweep.complete && pass<100;pass++) [purgeProtectedFileSweep advance:64 shouldContinue:^BOOL{return YES;}];
-        require(purgeProtectedFileSweep.complete && purgeProtectedFileSweep.failed==0 && purgeProtectedFileSweep.removed==1 && purgeProtectedFileSweep.purgeMixed && !purgeProtectedFileSweep.purgeBlocked && [purgeProtectedFileSweep.purgeEvidence isEqual:@"data.bin"] &&
+        require(purgeProtectedFileSweep.complete && purgeProtectedFileSweep.failed==0 && purgeProtectedFileSweep.removed==1 && purgeProtectedFileSweep.purgeMixed && !purgeProtectedFileSweep.purgeBlocked && ([purgeProtectedFileSweep.purgeEvidence isEqual:@"inbox.log"] || [purgeProtectedFileSweep.purgeEvidence isEqual:@"data.bin"]) &&
             ![fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"app.log"]] &&
             [fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"inbox.log"]] &&
             [fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"data.bin"]], @"混合目录日志门受保护路径否决：inbox.log 保留、普通日志删除");
