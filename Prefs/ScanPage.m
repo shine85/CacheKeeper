@@ -324,7 +324,7 @@
     if (path.section==0 && path.row==4) {
         UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
         cell.textLabel.text=@"标准缓存目录全量清理";
-        cell.detailTextLabel.text=@"开启后，该 APP 完全退出时清空其 Library/Caches、tmp 等标准缓存目录内的全部文件（含数据库与未知文件），按平台缓存契约处理；草稿、离线下载若存于这些目录会一并删除。仅对已开启的缓存目录生效，其他目录仍按原规则；一键开启不会打开此项。";cell.detailTextLabel.numberOfLines=0;
+        cell.detailTextLabel.text=@"开启后，该 APP 完全退出时清空其 Library/Caches、tmp 标准缓存目录内的全部文件（含数据库与未知文件），按平台缓存契约处理；草稿、离线下载若存于这些目录会一并删除。仅对已开启的缓存目录生效，其他目录仍按原规则；一键开启不会打开此项。";cell.detailTextLabel.numberOfLines=0;
         NSDictionary *states=[self axs_cachekeeper_display:@"appEnabled.plist"];
         UISwitch *toggle=[UISwitch new];toggle.on=axs_cachekeeper_full_clear(states[self.bundle]);
         [toggle addTarget:self action:@selector(axs_cachekeeper_fullclear_changed:) forControlEvents:UIControlEventValueChanged];

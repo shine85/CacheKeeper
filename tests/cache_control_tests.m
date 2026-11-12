@@ -35,6 +35,13 @@ static void writeMedia(NSString *path) {
 @end
 @implementation AxsTestProcessState
 @end
+// 数据安全测试白盒入口：仅用于验证删除阶段重标混合（审计第 2 项）。文件级稳定性门
+//（inode/设备/mtime/ctime）已拦下预检后被改写的文件，黑盒无法让带新证据的文件走到
+// 删除门，故直接刷新预检记录以单独验证复核逻辑。
+@interface AxsCacheKeeperSweep (DataSafetyTestAccess)
+@property(nonatomic,strong) NSMutableDictionary<NSString *,NSMutableDictionary *> *fileSnapshots;
+- (NSArray *)axs_cachekeeper_snapshot:(struct stat)info;
+@end
 @interface AxsTestProcess : NSObject
 @property(nonatomic,copy) NSString *bundleIdentifier;
 @property(nonatomic) BOOL running;
@@ -156,7 +163,8 @@ int main(int argc, const char *argv[]) {
         require(!axs_cachekeeper_full_clear(axs_cachekeeper_app_state(@{@"enabled":@YES},YES)), @"状态构建不能凭空打开全量清理");
         NSDictionary *fullOn=@{@"enabled":@YES,@"fullClear":@YES};
         require(axs_cachekeeper_full_clear_path(fullOn,@"Library/Caches") && axs_cachekeeper_full_clear_path(fullOn,@"tmp") &&
-            axs_cachekeeper_full_clear_path(fullOn,@"Caches"), @"全量清理覆盖平台缓存契约根");
+            !axs_cachekeeper_full_clear_path(fullOn,@"Caches") && !axs_cachekeeper_full_clear_path(fullOn,@"Cache") &&
+            !axs_cachekeeper_full_clear_path(fullOn,@"cache") && !axs_cachekeeper_full_clear_path(fullOn,@".cache"), @"全量清理只作用于 Library/Caches 与 tmp，顶层 Caches/Cache/cache/.cache 不在平台缓存契约内");
         require(!axs_cachekeeper_full_clear_path(fullOn,@"Library/Logs") &&
             !axs_cachekeeper_full_clear_path(fullOn,@"Library/Application Support") &&
             !axs_cachekeeper_full_clear_path(fullOn,@"Group/com.example/Library/Caches") &&
@@ -615,9 +623,9 @@ int main(int argc, const char *argv[]) {
         writeFile([purgeNamed stringByAppendingPathComponent:@"plain.txt"]);
         AxsCacheKeeperSweep *purgeNamedSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeNamed clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
         for (NSUInteger pass=0;!purgeNamedSweep.complete && pass<100;pass++) [purgeNamedSweep advance:64 shouldContinue:^BOOL{return YES;}];
-        require(purgeNamedSweep.complete && purgeNamedSweep.removed==0 && purgeNamedSweep.purgeMixed && !purgeNamedSweep.purgeBlocked &&
+        require(purgeNamedSweep.complete && purgeNamedSweep.removed==0 && purgeNamedSweep.purgeBlocked && !purgeNamedSweep.purgeMixed &&
             [fm fileExistsAtPath:[purgeNamed stringByAppendingPathComponent:@"Preferences/a.txt"]] &&
-            [fm fileExistsAtPath:[purgeNamed stringByAppendingPathComponent:@"plain.txt"]], @"受保护子目录自动降级为日志门、非日志文件零删除");
+            [fm fileExistsAtPath:[purgeNamed stringByAppendingPathComponent:@"plain.txt"]], @"受保护子目录整根出局、连日志也不删（审计第 1 项：预检即按受保护路径否决）");
         NSString *purgeDirNamed=[fixture stringByAppendingPathComponent:@"purge-dirnamed"];
         require([fm createDirectoryAtPath:[purgeDirNamed stringByAppendingPathComponent:@"session-cache"] withIntermediateDirectories:YES attributes:nil error:nil], @"含数据标记子目录的清理夹具");
         writeFile([purgeDirNamed stringByAppendingPathComponent:@"session-cache/a.txt"]);
@@ -627,6 +635,65 @@ int main(int argc, const char *argv[]) {
         require(purgeDirNamedSweep.complete && purgeDirNamedSweep.failed==0 && purgeDirNamedSweep.removed==0 && purgeDirNamedSweep.purgeBlocked && !purgeDirNamedSweep.purgeMixed &&
             [fm fileExistsAtPath:[purgeDirNamed stringByAppendingPathComponent:@"session-cache/a.txt"]] &&
             [fm fileExistsAtPath:[purgeDirNamed stringByAppendingPathComponent:@"run.log"]], @"数据标记子目录名整根出局、连日志也不删");
+        // 数据安全（审计第 1 项）：混合目录日志门受保护路径否决。inbox.log 含受保护成分
+        //（inbox）但无数据标记，旧日志门只看名字会删掉它；现须保留，普通日志仍可删。
+        NSString *purgeProtectedFile=[fixture stringByAppendingPathComponent:@"purge-protected-file"];
+        require([fm createDirectoryAtPath:purgeProtectedFile withIntermediateDirectories:YES attributes:nil error:nil], @"受保护文件名混放的清理夹具");
+        writeFile([purgeProtectedFile stringByAppendingPathComponent:@"app.log"]);
+        writeFile([purgeProtectedFile stringByAppendingPathComponent:@"inbox.log"]);
+        require([@"SQLite format 3\0payload" writeToFile:[purgeProtectedFile stringByAppendingPathComponent:@"data.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"受保护文件名混放数据库夹具");
+        AxsCacheKeeperSweep *purgeProtectedFileSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeProtectedFile clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!purgeProtectedFileSweep.complete && pass<100;pass++) [purgeProtectedFileSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(purgeProtectedFileSweep.complete && purgeProtectedFileSweep.failed==0 && purgeProtectedFileSweep.removed==1 && purgeProtectedFileSweep.purgeMixed && !purgeProtectedFileSweep.purgeBlocked &&
+            ![fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"app.log"]] &&
+            [fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"inbox.log"]] &&
+            [fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"data.bin"]], @"混合目录日志门受保护路径否决：inbox.log 保留、普通日志删除");
+        // 数据安全（审计第 3 项）：清理模式读不到内容的文件须落盘保护（入 dataFiles、计失败），
+        // 否则混合后日志门会按名字删掉它；删除阶段亦查 dataFiles。
+        NSString *purgeUnreadable=[fixture stringByAppendingPathComponent:@"purge-unreadable"];
+        require([fm createDirectoryAtPath:purgeUnreadable withIntermediateDirectories:YES attributes:nil error:nil], @"含不可读文件的清理夹具");
+        NSString *unreadableLog=[purgeUnreadable stringByAppendingPathComponent:@"secret.log"];
+        writeFile(unreadableLog);
+        writeMedia([purgeUnreadable stringByAppendingPathComponent:@"thumb.png"]);
+        require(!chmod(unreadableLog.fileSystemRepresentation, 0000), @"不可读文件夹具");
+        AxsCacheKeeperSweep *purgeUnreadableSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeUnreadable clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;!purgeUnreadableSweep.complete && pass<100;pass++) [purgeUnreadableSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        chmod(unreadableLog.fileSystemRepresentation, 0644);
+        require(purgeUnreadableSweep.complete && purgeUnreadableSweep.failed>0 && purgeUnreadableSweep.removed==0 && purgeUnreadableSweep.purgeMixed &&
+            [fm fileExistsAtPath:unreadableLog] &&
+            [fm fileExistsAtPath:[purgeUnreadable stringByAppendingPathComponent:@"thumb.png"]], @"不可读文件落盘保护：计失败、入保护集、混合后不按名字删除");
+        // 数据安全（审计第 3 项）：日志门媒体头否决。photo.log.jpg 挂日志名但内容是图片，
+        // 旧日志门只看名字会删掉它；现按文件头否决，真日志仍可删。
+        NSString *logMediaDir=[fixture stringByAppendingPathComponent:@"log-media"];
+        require([fm createDirectoryAtPath:logMediaDir withIntermediateDirectories:YES attributes:nil error:nil], @"日志目录媒体夹具");
+        writeFile([logMediaDir stringByAppendingPathComponent:@"app.log"]);
+        writeMedia([logMediaDir stringByAppendingPathComponent:@"photo.log.jpg"]);
+        AxsCacheKeeperSweep *logMediaSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:logMediaDir clock:^NSTimeInterval{return future;} fullClear:NO logMode:YES purgeMode:NO];
+        for (NSUInteger pass=0;!logMediaSweep.complete && pass<100;pass++) [logMediaSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(logMediaSweep.complete && logMediaSweep.failed==0 && logMediaSweep.removed==1 &&
+            ![fm fileExistsAtPath:[logMediaDir stringByAppendingPathComponent:@"app.log"]] &&
+            [fm fileExistsAtPath:[logMediaDir stringByAppendingPathComponent:@"photo.log.jpg"]], @"日志门媒体头否决：挂日志名的图片保留、真日志删除");
+        // 数据安全（审计第 2 项）：删除阶段重标混合。预检零证据后文件内容变为数据库，
+        // 删除时复核须重标混合、改走日志门（数据库保留、同目录日志仍可删）。文件级稳定
+        // 性门会拦下被改写的文件，故用白盒刷新预检记录以单独验证复核逻辑（见文件头注释）。
+        NSString *staleDir=[fixture stringByAppendingPathComponent:@"stale-classification"];
+        require([fm createDirectoryAtPath:staleDir withIntermediateDirectories:YES attributes:nil error:nil], @"分类过期夹具");
+        NSString *victim=[staleDir stringByAppendingPathComponent:@"victim.bin"];
+        writeMedia(victim);
+        writeFile([staleDir stringByAppendingPathComponent:@"other.log"]);
+        AxsCacheKeeperSweep *stale=[[AxsCacheKeeperSweep alloc] initWithRoot:staleDir clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        for (NSUInteger pass=0;stale.checking && !stale.complete && pass<100;pass++) [stale advance:1 shouldContinue:^BOOL{return YES;}];
+        require(!stale.checking && stale.removed==0 && !stale.purgeMixed, @"预检零证据：分类过期测试基线");
+        NSFileHandle *victimWriter=[NSFileHandle fileHandleForWritingAtPath:victim];
+        [victimWriter writeData:[@"SQLite format 3\0payload" dataUsingEncoding:NSUTF8StringEncoding]];
+        [victimWriter closeFile];
+        struct stat victimStat;
+        require(!stat(victim.fileSystemRepresentation,&victimStat), @"读取改写后文件状态");
+        stale.fileSnapshots[staleDir][@"victim.bin"]=[stale axs_cachekeeper_snapshot:victimStat];
+        for (NSUInteger pass=0;!stale.complete && pass<100;pass++) [stale advance:64 shouldContinue:^BOOL{return YES;}];
+        require(stale.complete && stale.purgeMixed && stale.removed==1 &&
+            [fm fileExistsAtPath:victim] &&
+            ![fm fileExistsAtPath:[staleDir stringByAppendingPathComponent:@"other.log"]], @"删除阶段检出新数据证据重标混合：数据库保留、同目录日志仍可删");
         NSString *hotPurgeRoot=[fixture stringByAppendingPathComponent:@"hot-purge"];
         require([fm createDirectoryAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready"] withIntermediateDirectories:YES attributes:nil error:nil], @"热清理目录夹具");
         writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-one.bin"]);

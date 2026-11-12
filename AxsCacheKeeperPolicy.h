@@ -201,9 +201,15 @@ static inline BOOL axs_cachekeeper_auto_discover(id state) {
 static inline BOOL axs_cachekeeper_full_clear(id state) {
     return [state isKindOfClass:NSDictionary.class] && [state[@"fullClear"] isKindOfClass:NSNumber.class] && [state[@"fullClear"] boolValue];
 }
-// 全量清理只作用于 kind=cache 的白名单缓存根；Library/Logs 自 0.7.0 起归混合类（可能含数据库 WAL），不在此列。
+// 全量清理只作用于平台缓存契约目录 Library/Caches 与 tmp；顶层 Caches/Cache/cache/.cache
+// 虽属 kind=cache 白名单根，但非苹果缓存契约目录，不做全量清理（审计第 4 项）。
+// Library/Logs 自 0.7.0 起归混合类（可能含数据库 WAL），不在此列。
 static inline BOOL axs_cachekeeper_full_clear_path(id state, NSString *path) {
-    return axs_cachekeeper_full_clear(state) && [axs_cachekeeper_directory_kind(path) isEqual:@"cache"];
+    if (!axs_cachekeeper_full_clear(state)) return NO;
+    for (NSString *root in @[@"Library/Caches", @"tmp"]) {
+        if ([path isEqual:root] || [path hasPrefix:[root stringByAppendingString:@"/"]]) return YES;
+    }
+    return NO;
 }
 static inline BOOL axs_cachekeeper_log_file_name(NSString *name) {
     // 日志特征文件名（定级日志目录内的删除门）：常见日志扩展名及其复合后缀形态

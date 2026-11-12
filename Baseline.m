@@ -162,7 +162,11 @@
     if (S_ISDIR(info.st_mode)) {
         self.directorySnapshots[[self axs_cachekeeper_directory_key:entry]]=[self axs_cachekeeper_snapshot:info];
         if (self.purgeMode) {
-            if (axs_cachekeeper_data_marker(entry.lastPathComponent)) {
+            // 受保护成分的子目录同样整根出局：仅查数据标记名会漏掉 Preferences 等
+            // 受保护目录，其内日志会走混合日志门被删（审计第 1 项）。
+            NSString *relative=[entry hasPrefix:[self.root stringByAppendingString:@"/"]] ?
+                [entry substringFromIndex:self.root.length + 1] : entry.lastPathComponent;
+            if (axs_cachekeeper_data_marker(entry.lastPathComponent) || axs_cachekeeper_protected_path(relative)) {
                 [self axs_cachekeeper_purge_hit:entry];[self.entries skipDescendants];
             }
             return;
@@ -195,7 +199,15 @@
         ssize_t count=-1;
         if (file>=0 && !fstat(file,&opened) && S_ISREG(opened.st_mode) && opened.st_ino==info.st_ino && opened.st_dev==info.st_dev)
             count=pread(file,signature,sizeof(signature),0);
-        if (count<0 || (count>=15 && !memcmp(signature,"SQLite format 3",15)) || (count>=6 && !memcmp(signature,"bplist",6)))
+        // 正数短读须核对完整性：未读满 min(16, 文件大小) 即未读全，按读失败处理（审计第 3 项）。
+        BOOL shortRead = count >= 0 && count < MIN((ssize_t)sizeof(signature), (ssize_t)opened.st_size);
+        if (count<0 || shortRead) {
+            // 读不到内容的文件须落盘保护（入 dataFiles、计失败），否则混合后日志门
+            // 会按名字删掉它（审计第 3 项）；删除阶段亦查 dataFiles（见 advance）。
+            [self.dataFiles addObject:entry]; self.failed++;
+            [self axs_cachekeeper_purge_mixed:entry];
+        }
+        else if ((count>=15 && !memcmp(signature,"SQLite format 3",15)) || (count>=6 && !memcmp(signature,"bplist",6)))
             [self axs_cachekeeper_purge_mixed:entry];
         if (file>=0) close(file);
         if (directory>=0) close(directory);
@@ -216,7 +228,8 @@
     ssize_t count=-1;
     if (file>=0 && !fstat(file,&opened) && S_ISREG(opened.st_mode) && opened.st_ino==info.st_ino && opened.st_dev==info.st_dev)
         count=pread(file,signature,sizeof(signature),0);
-    if (count<0) {
+    BOOL shortRead = count >= 0 && count < MIN((ssize_t)sizeof(signature), (ssize_t)opened.st_size);
+    if (count<0 || shortRead) {
         if (self.logMode) [self.dataFiles addObject:entry];
         else [self.dataDirectories addObject:parent];
         self.failed++;self.error=self.logMode ? @"文件预检未完成，该文件不清理" : @"文件预检未完成，该目录不清理";
@@ -354,28 +367,46 @@
         axs_cachekeeper_old_enough(current, self.clock())) {
         // 全量清理只核对文件身份与年龄，不按内容分类；
         // 日志模式在数据库/bplist 门槛之上再加文件名日志特征门与数据标记名否决；
-        // 清理模式无证据时证据审查已在预检完成，此处只核对身份与年龄；
-        // 检出证据的清理目录自动降级为日志门（仅删日志特征文件，无需手动定级）；
+        // 清理模式零证据时也须复核内容：预检后新增的数据证据须在删除阶段重标混合
+        //（审计第 2 项），否则旧文件会按过期零证据分类全删；检出证据的清理目录
+        // 自动降级为日志门（仅删日志特征文件，无需手动定级）；
         // 标准模式保持媒体签名与数据库门槛。
-        BOOL contentOK = self.fullClear || (self.purgeMode && !self.purgeMixed);
+        BOOL contentOK = self.fullClear;
         if (!contentOK) {
+            NSString *relative=[entry hasPrefix:[self.root stringByAppendingString:@"/"]] ?
+                [entry substringFromIndex:self.root.length + 1] : entry.lastPathComponent;
             unsigned char signature[32] = {0};
             ssize_t readCount = pread(file, signature, sizeof(signature), 0);
+            // 正数短读须核对完整性：未读满 min(32, 文件大小) 即未读全，按读失败保护（审计第 3 项）。
+            BOOL shortRead = readCount >= 0 && readCount < MIN((ssize_t)sizeof(signature), (ssize_t)current.st_size);
             BOOL database = readCount >= 15 && !memcmp(signature, "SQLite format 3", 15);
             BOOL propertyList = readCount >= 6 && !memcmp(signature, "bplist", 6);
-            // 日志模式与混合清理同为文件级保护：数据文件只否决自身，不连坐同目录的日志文件
-            //（目录级连坐曾使热日志目录整轮删除 0；此处若把父目录记入数据目录，枚举顺序在后
-            // 的同目录日志会被整目录跳过，混合降级即失效——故文件级模式下不记目录）。
-            BOOL logGate = self.logMode || (self.purgeMode && self.purgeMixed);
-            BOOL contentRejected = logGate ?
-                (!axs_cachekeeper_log_file_name(entry.lastPathComponent) || axs_cachekeeper_data_marker(entry.lastPathComponent)) :
-                !axs_cachekeeper_media_signature(signature, (size_t)readCount);
             if (readCount < 0) { int code=errno;[self axs_cachekeeper_failure:@"pread" code:code path:entry detail:@""]; }
-            else if (database || propertyList || contentRejected) {
-                if ((database || propertyList) && !logGate) [self.dataDirectories addObject:parent];
-                self.protectedCount++; errno = EBUSY;
+            else if (shortRead) { [self axs_cachekeeper_failure:@"pread" code:EIO path:entry detail:@"短读：未读满请求长度"]; }
+            else if (self.purgeMode && !self.purgeMixed) {
+                // 零证据清理：删除时复核证据；任一新证据（数据标记名、受保护路径成分、
+                // 数据库/bplist 头）重标混合，本文件改走下方日志门，不再直接删除。
+                if (axs_cachekeeper_data_marker(entry.lastPathComponent) || axs_cachekeeper_purge_evidence_path(relative) || database || propertyList) {
+                    [self axs_cachekeeper_purge_mixed:entry];
+                } else { contentOK = YES; }
             }
-            else contentOK = YES;
+            if (!contentOK && readCount >= 0 && !shortRead) {
+                // 日志模式与混合清理同为文件级保护：数据文件只否决自身，不连坐同目录的日志文件
+                //（目录级连坐曾使热日志目录整轮删除 0；此处若把父目录记入数据目录，枚举顺序在后
+                // 的同目录日志会被整目录跳过，混合降级即失效——故文件级模式下不记目录）。
+                // 日志门另加两道否决：受保护路径成分（审计第 1 项）与可识别媒体头
+                //（photo.log.jpg 这类挂日志名的媒体文件，审计第 3 项）。
+                BOOL logGate = self.logMode || (self.purgeMode && self.purgeMixed);
+                BOOL contentRejected = logGate ?
+                    (!axs_cachekeeper_log_file_name(entry.lastPathComponent) || axs_cachekeeper_data_marker(entry.lastPathComponent) ||
+                     axs_cachekeeper_protected_path(relative) || axs_cachekeeper_media_signature(signature, (size_t)readCount)) :
+                    !axs_cachekeeper_media_signature(signature, (size_t)readCount);
+                if (database || propertyList || contentRejected) {
+                    if ((database || propertyList) && !logGate) [self.dataDirectories addObject:parent];
+                    self.protectedCount++; errno = EBUSY;
+                }
+                else contentOK = YES;
+            }
         }
         if (contentOK) {
             struct stat final;
@@ -447,7 +478,7 @@
             self.protectedCount++;if (S_ISDIR(info.st_mode)) [self.entries skipDescendants];continue;
         }
         // 日志模式的文件级数据保护：预检已标记的数据文件只跳过自身（同目录日志不受影响）。
-        if (self.logMode && [self.dataFiles containsObject:entry]) { self.protectedCount++; continue; }
+        if ((self.logMode || self.purgeMode) && [self.dataFiles containsObject:entry]) { self.protectedCount++; continue; }
         NSString *relative = [entry substringFromIndex:self.root.length + 1];
         // 全量清理的根已由策略层限定为平台缓存契约目录，根内不再按受保护名拦截；清理模式的
         // 证据审查已在预检完成（口径见 purge_evidence_path，配置类 .plist/.json 不算证据），此处同样放行；其余模式不变。
