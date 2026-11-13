@@ -1021,7 +1021,10 @@ int main(int argc, const char *argv[]) {
         AxsCacheKeeperSweep *jobSweepA = makeSweep(jobRootA, @{});
         AxsCacheKeeperSweep *jobSweepB = makeSweep(jobRootB, @{});
         AxsCacheKeeperCleanupJob *job=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[jobSweepA,jobSweepB] signature:@"job-sig" instance:@"1:100" clock:jobClock];
-        for (NSUInteger pass=0;pass<3;pass++) [job advanceCycleWithPerRootLimit:1 gate:jobGate];
+        for (NSUInteger pass=0;jobSweepB.checking && pass<100;pass++) {
+            [job advanceCycleWithPerRootLimit:1 gate:jobGate];
+            require(job.removed==0 && job.deleteDeadline==0, @"非对称预检每次推进都零删除且不启动期限");
+        }
         require(job.phase==AxsCacheKeeperCleanupPhaseChecking && !jobSweepB.checking && jobSweepA.checking && jobSweepB.removed==0 && job.removed==0 && job.deleteDeadline==0, @"任一根在预检时，任何根都不删除、期限不启动");
         for (NSUInteger pass=0;job.phase==AxsCacheKeeperCleanupPhaseChecking && pass<100;pass++) [job advanceCycleWithPerRootLimit:1 gate:jobGate];
         require(job.phase==AxsCacheKeeperCleanupPhaseReady && job.removed==0 && job.deleteDeadline==0 &&
