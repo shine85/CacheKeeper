@@ -18,7 +18,24 @@ static NSMutableDictionary<NSString *, NSString *> *AxsCacheKeeperExecutingIdent
     return identities;
 }
 
+static NSMutableDictionary<NSString *, NSNumber *> *AxsCacheKeeperRevisions(void) {
+    static NSMutableDictionary *revisions;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ revisions=[NSMutableDictionary new]; });
+    return revisions;
+}
+
 @implementation AxsCacheKeeperProcessObservation
+
++ (void)requestRecheckForBundle:(NSString *)bundle {
+    NSAssert([NSThread isMainThread], @"AxsCacheKeeperProcessObservation 仅限主线程调用");
+    static NSUInteger revision;
+    if (bundle.length) AxsCacheKeeperRevisions()[bundle]=@(++revision);
+}
++ (NSUInteger)revisionForBundle:(NSString *)bundle {
+    NSAssert([NSThread isMainThread], @"AxsCacheKeeperProcessObservation 仅限主线程调用");
+    return bundle.length ? [AxsCacheKeeperRevisions()[bundle] unsignedIntegerValue] : 0;
+}
 
 + (void)observeBundle:(NSString *)bundle state:(AxsCacheKeeperExecState)state identity:(NSString *)identity atMonotonicTime:(NSTimeInterval)now {
     // 仅主线程调用：三个采样点（定时观测、目标构建、门控采样）均在主线程——门控经
@@ -28,7 +45,10 @@ static NSMutableDictionary<NSString *, NSString *> *AxsCacheKeeperExecutingIdent
     NSAssert([NSThread isMainThread], @"AxsCacheKeeperProcessObservation 仅限主线程调用");
     if (!bundle.length) return;
     // 所有采样入口的 Executing 都同步记录最新执行实例，供门控实例绑定比对。
-    if (state==AxsCacheKeeperExecExecuting && identity.length) AxsCacheKeeperExecutingIdentities()[bundle]=identity;
+    if (state==AxsCacheKeeperExecExecuting) {
+        [self requestRecheckForBundle:bundle];
+        if (identity.length) AxsCacheKeeperExecutingIdentities()[bundle]=identity;
+    }
     if (state==AxsCacheKeeperExecSuspended && identity.length) {
         NSDictionary *record=AxsCacheKeeperSuspendedRecords()[bundle];
         if (![record[@"identity"] isEqual:identity])
@@ -48,6 +68,7 @@ static NSMutableDictionary<NSString *, NSString *> *AxsCacheKeeperExecutingIdent
     NSAssert([NSThread isMainThread], @"AxsCacheKeeperProcessObservation 仅限主线程调用");
     [AxsCacheKeeperSuspendedRecords() removeAllObjects];
     [AxsCacheKeeperExecutingIdentities() removeAllObjects];
+    [AxsCacheKeeperRevisions() removeAllObjects];
 }
 
 + (void)beginCycleWithEnabledBundles:(NSSet<NSString *> *)enabledBundles configurationReadable:(BOOL)readable {
@@ -59,6 +80,8 @@ static NSMutableDictionary<NSString *, NSString *> *AxsCacheKeeperExecutingIdent
         if (![enabledBundles containsObject:bundle]) [AxsCacheKeeperSuspendedRecords() removeObjectForKey:bundle];
     for (NSString *bundle in [AxsCacheKeeperExecutingIdentities().allKeys copy])
         if (![enabledBundles containsObject:bundle]) [AxsCacheKeeperExecutingIdentities() removeObjectForKey:bundle];
+    for (NSString *bundle in [AxsCacheKeeperRevisions().allKeys copy])
+        if (![enabledBundles containsObject:bundle]) [AxsCacheKeeperRevisions() removeObjectForKey:bundle];
 }
 
 + (NSString *)lastExecutingIdentityForBundle:(NSString *)bundle {

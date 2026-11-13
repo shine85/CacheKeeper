@@ -132,6 +132,12 @@ jobs:
           - 已完成：macOS 原生回归、Theos 编译、deb 文件检查。
           - 尚未完成：iOS 真机注入与功能验收。
 
+          已启用 APP 的 Library/Caches、tmp 按平台缓存用途清理，旧 fullClear 不再是前提；草稿、唯一副本、必要业务状态和用户排除优先保留。
+          auto / prevent / clean 共用引擎，处理存量与新增缓存；不再施加通用目录写锁，旧权限按记录恢复。模式切换保留独立网络选项，网络限制仅针对 NSURLCache。
+          未识别的非标准资源仍需真实 APP 规则与恢复证据，不代表任意 APP 均已适配。
+
+          真机测试与反馈步骤：仓库 docs/2026-11-13-真机验收.md。
+
           下载下方 .deb 文件；SHA256SUMS 可用于完整性校验。
           EOF
           gh release create "v$PACKAGE_VERSION" packages/*.deb packages/SHA256SUMS packages/package-contents.txt \

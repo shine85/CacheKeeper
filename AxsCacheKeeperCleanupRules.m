@@ -131,7 +131,7 @@ static BOOL AxsCacheKeeperRuleApplies(AxsCacheKeeperAppRule *rule, NSString *ver
         scopeRelativePath:retained reason:@"已确认保留范围" dependencyPaths:@[]];
     NSArray<AxsCacheKeeperAppRule *> *rules = bundle.length ? AxsCacheKeeperRuleRegistry()[bundle] : nil;
     for (AxsCacheKeeperAppRule *rule in rules) {
-        if (!AxsCacheKeeperRuleApplies(rule, version)) continue;
+        // 已确认必需状态的保留独立于可清规则版本；升级只撤销删除授权。
         NSString *ruleRetained = AxsCacheKeeperMatchedScope(relativePath, rule.retentionPaths);
         if (ruleRetained) return [[AxsCacheKeeperCleanupDecision alloc] initWithDisposition:AxsCacheKeeperCleanupKeep
             basis:AxsCacheKeeperCleanupBasisAppRule ruleID:rule.ruleID ruleRevision:rule.ruleRevision

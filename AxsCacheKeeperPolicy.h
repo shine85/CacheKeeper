@@ -278,11 +278,11 @@ static inline BOOL axs_cachekeeper_purge_evidence_path(NSString *relative) {
 }
 static inline NSArray<NSString *> *axs_cachekeeper_exclusions(id state) {
     // 用户手动排除的目录：缓存根（行开关）与用途未知目录（保留开关）共用同一清单。
-    // 只要求相对路径且非受保护路径——不能再用 cache_paths 过滤，否则未知目录的保留会被悄悄丢掉。
+    // 保留意图只校验路径语法；用途/格式过滤会丢掉用户排除，不能用于缩小保留清单。
     if (![state isKindOfClass:NSDictionary.class]) return @[];
     NSMutableArray *safe=[NSMutableArray new];
     if ([state[@"excludedPaths"] isKindOfClass:NSArray.class]) for (id path in state[@"excludedPaths"])
-        if ([path isKindOfClass:NSString.class] && axs_cachekeeper_relative_path(path) && !axs_cachekeeper_protected_path(path)) [safe addObject:path];
+        if ([path isKindOfClass:NSString.class] && axs_cachekeeper_relative_path(path)) [safe addObject:path];
     return axs_cachekeeper_parent_paths(safe);
 }
 static inline BOOL axs_cachekeeper_paths_overlap(NSString *left, NSString *right) {
@@ -335,6 +335,11 @@ static inline NSMutableDictionary *axs_cachekeeper_app_state(id previous, BOOL e
         @"autoDiscover":@(axs_cachekeeper_auto_discover(previous)),
         @"logPaths":axs_cachekeeper_log_paths(previous),
         @"excludedPaths":axs_cachekeeper_exclusions(previous)} mutableCopy];
+}
+static inline NSMutableDictionary *axs_cachekeeper_state_with_mode(id previous, NSString *mode) {
+    NSMutableDictionary *state=axs_cachekeeper_app_state(previous,axs_cachekeeper_app_enabled(previous));
+    state[@"mode"]=axs_cachekeeper_mode(@{@"mode":mode ?: @""});
+    return state;
 }
 static inline NSArray *axs_cachekeeper_activation_paths(id previous) {
     return axs_cachekeeper_cache_paths(previous);

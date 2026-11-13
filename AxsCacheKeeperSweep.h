@@ -2,6 +2,9 @@
 #import <Foundation/Foundation.h>
 
 @interface AxsCacheKeeperSweep : NSObject
+// Job 将自己成功的删除广播给同轮其他范围，推进共同依赖的基线。
+@property(nonatomic,copy) void (^removalObserver)(NSString *path);
+- (void)updateDependenciesAfterRemovingPath:(NSString *)path;
 @property(nonatomic, readonly, copy) NSString *root;
 @property(nonatomic, readonly, copy) NSString *bundle;
 @property(nonatomic, readonly, copy) NSString *version;

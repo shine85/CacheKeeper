@@ -17,6 +17,7 @@ typedef NS_ENUM(NSInteger, AxsCacheKeeperRangeState) {
 + (NSDictionary *)summaryForJob:(AxsCacheKeeperCleanupJob *)job directories:(NSDictionary *)directories
               externalFailures:(NSUInteger)externalFailures discoveryComplete:(BOOL)discoveryComplete;
 + (NSTimeInterval)quietIntervalForSummary:(NSDictionary *)summary;
++ (BOOL)shouldSkipSummary:(NSDictionary *)summary signature:(NSString *)signature now:(NSTimeInterval)now;
 + (BOOL)retireJob:(AxsCacheKeeperCleanupJob *)job bundle:(NSString *)bundle message:(NSString *)message;
 // 只取当前容器内的失败路径；后代路径可加入本轮排除，独立范围继续。
 + (NSArray<NSString *> *)restoreExclusions:(NSDictionary *)restored home:(NSString *)home;

@@ -448,10 +448,7 @@
     NSString *path=[self file:@"appEnabled.plist"];
     NSMutableDictionary *states=axs_cachekeeper_edit_configuration(path);
     if (!states) { [self message:@"原配置存在但不可读，已停止保存。"];return; }
-    BOOL enabled=axs_cachekeeper_app_enabled(states[self.bundle]);
-    NSMutableDictionary *state=axs_cachekeeper_app_state(states[self.bundle],enabled);
-    state[@"mode"]=mode;states[self.bundle]=state;
-    if (![mode isEqual:@"clean"]) state[@"urlCache"]=@YES;
+    states[self.bundle]=axs_cachekeeper_state_with_mode(states[self.bundle],mode);
     if (![states writeToFile:path atomically:YES]) [self message:@"模式保存失败。"];
     else axs_cachekeeper_notify_preferences();
     self.actionStatus=nil;

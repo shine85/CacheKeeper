@@ -24,7 +24,9 @@ try:
                     str(root / "AxsCacheKeeperCleanupRules.m"),
                     str(root / "AxsCacheKeeperReceipts.m"),
                     str(root / "AxsCacheKeeperCleanupSchedule.m"),
+                    str(root / "AxsCacheKeeperDependencySnapshot.m"),
                     str(root / "tests" / "plan_repair_tests.m"),
+                    str(root / "tests" / "review_followup_tests.m"),
                     "-o", str(output / "cache-tests")], check=True, timeout=60)
     subprocess.run([str(output / "cache-tests"), str(output / "fixtures")], check=True, timeout=60)
 finally:

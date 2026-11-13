@@ -2,6 +2,7 @@
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperFileAccess.h"
 #import "AxsCacheKeeperCleanupRules.h"
+#import "AxsCacheKeeperDependencySnapshot.h"
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -49,9 +50,12 @@
 @property(nonatomic) NSUInteger decisionCursor;
 @property(nonatomic) BOOL enumerationComplete;
 @property(nonatomic,readwrite) BOOL measurementComplete;
-@property(nonatomic,strong) NSMutableSet<NSString *> *dependencyUnmet;
 @property(nonatomic,strong) NSMutableSet<NSString *> *failedCandidates;
-@property(nonatomic,strong) NSMutableDictionary<NSString *,NSArray *> *dependencySnapshots;
+@property(nonatomic,strong) NSMutableDictionary<NSString *,AxsCacheKeeperDependencySnapshot *> *dependencySnapshots;
+@property(nonatomic,strong) NSMutableArray<NSString *> *dependencyOrder;
+@property(nonatomic) NSUInteger dependencyCaptureCursor;
+@property(nonatomic) NSUInteger dependencyVerifyCursor;
+@property(nonatomic) BOOL verifyingDependencies;
 @property(nonatomic,strong) NSMutableSet<NSString *> *invalidDependencies;
 @property(nonatomic,strong) NSMutableArray<NSDictionary *> *recordedFailures;
 @property(nonatomic,copy) int (^unlinkFile)(int, const char *);
@@ -111,9 +115,9 @@
     _fileDecisions = [NSMutableDictionary new];
     _deleteCandidates = [NSMutableArray new];
     _decisionEntries = [NSMutableArray new];
-    _dependencyUnmet = [NSMutableSet new];
     _failedCandidates = [NSMutableSet new];
     _dependencySnapshots = [NSMutableDictionary new];
+    _dependencyOrder = [NSMutableArray new];
     _invalidDependencies = [NSMutableSet new];
     _directorySnapshots = [NSMutableDictionary new];
     _fileSnapshots = [NSMutableDictionary new];
@@ -265,28 +269,21 @@
             if (!self.fileDecisions[parent]) self.fileDecisions[parent] = [NSMutableDictionary new];
             self.fileDecisions[parent][name] = decision;
             if (decision.disposition == AxsCacheKeeperCleanupDelete) {
-                BOOL depsOK = YES;
                 for (NSString *dep in decision.dependencyPaths) {
-                    if ([self.dependencyUnmet containsObject:dep]) { depsOK = NO; break; }
+                    if (!axs_cachekeeper_relative_path(dep)) {
+                        [self.invalidDependencies addObject:dep];
+                        self.dependencyInvalidated=YES;self.invalidEvidence=dep;
+                        self.error=@"规则依赖路径无效，相关范围本轮延期";continue;
+                    }
                     if (!self.dependencySnapshots[dep]) {
                         NSString *depPath = [self.containerPath stringByAppendingPathComponent:dep];
-                        struct stat depInfo;
-                        if (lstat(depPath.fileSystemRepresentation, &depInfo)) {
-                            [self.dependencyUnmet addObject:dep]; depsOK = NO;
-                            if (!self.dependencyInvalidated) {
-                                self.dependencyInvalidated = YES;
-                                self.invalidEvidence = dep;
-                                self.error = [NSString stringWithFormat:@"规则依赖缺失（%@），相关范围本轮延期", dep];
-                            }
-                            break;
-                        }
-                        self.dependencySnapshots[dep] = [self axs_cachekeeper_snapshot:depInfo];
+                        self.dependencySnapshots[dep]=[[AxsCacheKeeperDependencySnapshot alloc] initWithPath:depPath];
+                        [self.dependencyOrder addObject:dep];
                     }
                 }
-                if (depsOK && self.clock() < [facts[@"matureAt"] doubleValue]) {
+                if (self.clock() < [facts[@"matureAt"] doubleValue]) {
                     self.recentCount++; self.recentBytes += [self axs_cachekeeper_snapshot_bytes:entry];
-                } else if (depsOK) [self.deleteCandidates addObject:entry];
-                else { self.changedCount++; self.changedBytes += [self axs_cachekeeper_snapshot_bytes:entry]; }
+                } else [self.deleteCandidates addObject:entry];
             } else if (decision.disposition == AxsCacheKeeperCleanupKeep) {
                 self.protectedCount++;
             } else if (decision.disposition == AxsCacheKeeperCleanupDefer) {
@@ -305,17 +302,13 @@
 - (BOOL)axs_cachekeeper_dependencies_valid:(AxsCacheKeeperCleanupDecision *)decision {
     for (NSString *dep in decision.dependencyPaths) {
         if ([self.invalidDependencies containsObject:dep]) return NO;
-        NSArray *record = self.dependencySnapshots[dep];
-        if (!record) return NO;
-        NSString *depPath = [self.containerPath stringByAppendingPathComponent:dep];
-        struct stat depInfo;
-        if (lstat(depPath.fileSystemRepresentation, &depInfo) ||
-            ![[self axs_cachekeeper_snapshot:depInfo] isEqual:record]) {
+        AxsCacheKeeperDependencySnapshot *record=self.dependencySnapshots[dep];
+        if (![record validateRoot]) {
             [self.invalidDependencies addObject:dep];
             if (!self.dependencyInvalidated) {
                 self.dependencyInvalidated = YES;
                 self.invalidEvidence = dep;
-                self.error = [NSString stringWithFormat:@"规则依赖已变化（%@），相关范围本轮延期，下轮重新预检", dep];
+                self.error = record.error ?: @"规则依赖无法确认，相关范围本轮延期";
             }
             return NO;
         }
@@ -433,12 +426,19 @@
     } else [self axs_cachekeeper_failure:@"打开文件身份/时间核对" code:ESTALE path:entry detail:@""];
     int savedError = errno;
     if (removed && !fstat(fd,&parentInfo)) self.directorySnapshots[[self axs_cachekeeper_directory_key:parent]]=[self axs_cachekeeper_snapshot:parentInfo];
-    if (removed) [self.fileSnapshots[parent] removeObjectForKey:entry.lastPathComponent];
+    if (removed) {
+        [self.fileSnapshots[parent] removeObjectForKey:entry.lastPathComponent];
+        [self updateDependenciesAfterRemovingPath:entry];
+        if (self.removalObserver) self.removalObserver(entry);
+    }
     if (file >= 0) close(file);
     close(fd); errno = savedError;
     return removed;
 }
 - (NSArray<NSDictionary *> *)failureDetails { return [self.recordedFailures copy]; }
+- (void)updateDependenciesAfterRemovingPath:(NSString *)path {
+    for (AxsCacheKeeperDependencySnapshot *snapshot in self.dependencySnapshots.allValues) [snapshot didRemovePath:path];
+}
 - (void)axs_cachekeeper_failure:(NSString *)stage code:(int)code path:(NSString *)path detail:(NSString *)detail {
     self.error=[NSString stringWithFormat:@"%@ 失败（errno %d：%s）",stage,code,strerror(code)];
     if (self.recordedFailures.count<8) [self.recordedFailures addObject:@{@"stage":stage,@"code":@(code),@"path":path ?: @"",@"detail":detail ?: @""}];
@@ -463,8 +463,16 @@
             self.failed++; self.error = @"扫描期间缓存目录已改变"; self.complete = YES; self.entries = nil; return;
         }
         if (self.enumerationComplete) {
-            if (self.decisionCursor < self.decisionEntries.count)
+            if (self.decisionCursor < self.decisionEntries.count) {
                 [self axs_cachekeeper_decide_entry:self.decisionEntries[self.decisionCursor++]];
+                continue;
+            }
+            if (self.dependencyCaptureCursor<self.dependencyOrder.count) {
+                AxsCacheKeeperDependencySnapshot *snapshot=self.dependencySnapshots[self.dependencyOrder[self.dependencyCaptureCursor]];
+                [snapshot advance:1];
+                if (snapshot.complete) self.dependencyCaptureCursor++;
+                continue;
+            }
             if (self.decisionCursor == self.decisionEntries.count) {
                 self.checking=NO; self.measurementComplete=YES; self.decisionEntries=nil; return;
             }
@@ -498,9 +506,30 @@
     [self advanceDeletion:limit shouldContinue:shouldContinue willDelete:shouldContinue];
 }
 - (void)advanceDeletion:(NSUInteger)limit shouldContinue:(BOOL (^)(void))shouldContinue willDelete:(BOOL (^)(void))willDelete {
-    if (self.complete || self.cancelled || self.checking) return;
+    if (!limit || self.complete || self.cancelled || self.checking) return;
+    if (!shouldContinue()) { self.cancelled=YES;return; }
+    if (self.deleteCursor>=self.deleteCandidates.count) { self.complete=YES;return; }
+    // 每个删除批次前分批复核完整依赖集合。核验消耗本批额度，尚未 unlink 时不启动期限。
+    NSUInteger used=0;
+    {
+        if (!self.verifyingDependencies) {
+            self.verifyingDependencies=YES;self.dependencyVerifyCursor=0;
+            for (AxsCacheKeeperDependencySnapshot *snapshot in self.dependencySnapshots.allValues) [snapshot beginVerification];
+        }
+        while (self.dependencyVerifyCursor<self.dependencyOrder.count && used<limit) {
+            if (!shouldContinue()) { self.cancelled=YES;return; }
+            AxsCacheKeeperDependencySnapshot *snapshot=self.dependencySnapshots[self.dependencyOrder[self.dependencyVerifyCursor]];
+            used += [snapshot advance:1];
+            if (snapshot.complete) self.dependencyVerifyCursor++;
+        }
+        if (self.dependencyVerifyCursor<self.dependencyOrder.count) return;
+        self.verifyingDependencies=NO;
+    }
+    // 核验完成后同次推进处理至少一个候选，不能把完整核验结果留到下一调度周期。
+    // 集合核验和成功删除分别受 limit 约束；仍只在真实 unlink 前启动/复核期限。
+    NSUInteger deletionLimit=MAX((NSUInteger)1,limit-used);
     NSString *resolvedRootPath = [NSURL fileURLWithPath:self.root].URLByResolvingSymlinksInPath.path;
-    for (NSUInteger index = 0; index < limit; index++) {
+    for (NSUInteger index = 0; index < deletionLimit; index++) {
         if (!shouldContinue()) { self.cancelled = YES; return; }
         if (self.deleteCursor >= self.deleteCandidates.count) { self.complete=YES; return; }
         struct stat rootInfo;

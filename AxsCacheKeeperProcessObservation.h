@@ -22,4 +22,7 @@
 + (void)beginCycleWithEnabledBundles:(NSSet<NSString *> *)enabledBundles configurationReadable:(BOOL)readable;
 // 最近一次观测到的执行实例（无记录时为 nil）；替代 Scanner 独立维护的 seen_instances。
 + (NSString *)lastExecutingIdentityForBundle:(NSString *)bundle;
+// 执行活动和用户重检共用修订号；同实例再次活动也使旧静默/未知登记失效。
++ (NSUInteger)revisionForBundle:(NSString *)bundle;
++ (void)requestRecheckForBundle:(NSString *)bundle;
 @end

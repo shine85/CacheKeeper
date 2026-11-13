@@ -1,5 +1,6 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#include <sys/stat.h>
 
 // 只读档案；识别文件格式不等于证明可以删除。
 // searchRoots：孪生扫描的搜索根，每项 @{@"path": 绝对路径, @"label": 显示名}；
@@ -8,6 +9,9 @@
 @property(nonatomic,readonly) BOOL complete;
 - (instancetype)initWithRoot:(NSString *)root;
 - (instancetype)initWithRoot:(NSString *)root searchRoots:(NSArray<NSDictionary *> *)searchRoots;
+// 默认 100000 项、真实 lstat；可注入预算/读取以确定性验证搜索边界和读取失败。
+- (instancetype)initWithRoot:(NSString *)root searchRoots:(NSArray<NSDictionary *> *)searchRoots
+                 searchLimit:(NSUInteger)searchLimit stat:(int (^)(const char *, struct stat *))statBlock;
 - (void)advance:(NSUInteger)limit;
 - (NSDictionary *)report;
 @end

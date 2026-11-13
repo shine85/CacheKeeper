@@ -152,7 +152,7 @@
     for (NSString *age in @[@"不足 60 秒",@"60 秒至 1 天",@"1 至 30 天",@"30 天以上"]) [text appendFormat:@"%@：%@ 个\n",age,report[@"ages"][age] ?: @0];
     [text appendString:@"\n最大的 10 个文件：\n"];
     for (NSDictionary *file in report[@"largest"]) [text appendFormat:@"%@ · %.2f MB · %@\n",file[@"path"],[file[@"bytes"] doubleValue]/1048576,file[@"type"]];
-    [text appendString:@"\n下一步判断：先确认检测完整；数据库、登录态、下载或草稿保持保留。对用途不明目录，可记录本页，再用 APP 自带的‘清理缓存’后重新检测作对照。对照只能证明 APP 实际清除的那部分，不能直接判定整个混合目录可删。\n\n这是读取期间的观察结果，不是原子快照。文件格式、旧文件和持续增长都不能单独证明可删；本页不会自动扩大清理范围。"];
+    [text appendString:@"\n下一步判断：先确认检测完整。标准 Library/Caches、tmp 按平台缓存用途处理，数据库格式不单独构成保留依据；已确认的登录与业务状态、草稿、唯一副本及用户排除优先保留。非标准下载资源须有匹配的 APP 规则及恢复证据，未知内容暂不清理。可用 APP 自带的‘清理缓存’后重新检测作对照，但不能据此认定整个混合目录可删。\n\n这是读取期间的观察结果，不是原子快照。文件格式、旧文件和持续增长都不能单独证明可删；本页不会自动扩大清理范围。"];
     self.textView.text=text;
 }
 @end

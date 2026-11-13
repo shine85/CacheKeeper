@@ -26,6 +26,14 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
         _phase = AxsCacheKeeperCleanupPhaseChecking;
         _endReason = AxsCacheKeeperCleanupEndReasonNone;
         _deleteDeadline = 0;
+        __weak typeof(self) weak=self;
+        for (AxsCacheKeeperSweep *source in _sweeps) {
+            __weak AxsCacheKeeperSweep *weakSource=source;
+            source.removalObserver=^(NSString *path) {
+                for (AxsCacheKeeperSweep *other in weak.sweeps)
+                    if (other!=weakSource) [other updateDependenciesAfterRemovingPath:path];
+            };
+        }
     }
     return self;
 }

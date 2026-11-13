@@ -46,6 +46,8 @@ void CKScanRequests(void) {
     }
     NSString *bundle=request[@"bundle"],*token=request[@"token"];
     if (!axs_cachekeeper_bundle_id(bundle) || ![token isKindOfClass:NSString.class] || !token.length) return;
+    // 检测仍只读；让下一次满足进程条件的清理轮重新预检，不沿用旧静默/未知登记。
+    [AxsCacheKeeperProcessObservation requestRecheckForBundle:bundle];
     NSURL *home=Container(bundle);
     Class proxy=NSClassFromString(@"LSApplicationProxy");
     SEL lookup=NSSelectorFromString(@"applicationProxyForIdentifier:");
@@ -312,7 +314,7 @@ void CKApplyDirectorySwitches(void) {
         NSString *version=[rawVersion isKindOfClass:NSString.class] ? rawVersion : @"";
         targets[bundle] = @{@"version":version, @"roots":roots, @"paths":paths, @"home":home.path ?: @"", @"mode":mode,
             @"manual":@(manual), @"process":@(process), @"processReason":reason ?: @"",
-            @"instance":instance, @"confidence":@(confidence)};
+            @"instance":instance, @"revision":@([AxsCacheKeeperProcessObservation revisionForBundle:bundle]), @"confidence":@(confidence)};
     }
     busy = YES;
     dispatch_async(queue, ^{
@@ -419,14 +421,14 @@ void CKApplyDirectorySwitches(void) {
             // 容器路径已在签名内（roots 为绝对路径，含 home 前缀）：重装换容器即签名变化，静默期失效。
             // 任务 8 起签名不再含 fullClear（该键已废止，标准缓存统一按平台规则处理）。
             NSString *exclusionsString = [axs_cachekeeper_exclusions(states[bundle]) componentsJoinedByString:@"\n"] ?: @"";
-            NSString *signature = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@", [roots componentsJoinedByString:@"\n"], mode, target[@"instance"], [purgePaths componentsJoinedByString:@"\n"], exclusionsString, [AxsCacheKeeperCleanupRules rulesVersion], target[@"version"], [axs_cachekeeper_log_paths(states[bundle]) componentsJoinedByString:@"\n"], [restoreExclusions componentsJoinedByString:@"\n"]];
+            NSString *signature = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@", [roots componentsJoinedByString:@"\n"], mode, target[@"instance"], [purgePaths componentsJoinedByString:@"\n"], exclusionsString, [AxsCacheKeeperCleanupRules rulesVersion], target[@"version"], [axs_cachekeeper_log_paths(states[bundle]) componentsJoinedByString:@"\n"], [restoreExclusions componentsJoinedByString:@"\n"], target[@"revision"]];
             NSDictionary *done = finished[bundle];
             // 静默期（方案任务 3，P1-3＋扩展）：1800 秒只给真正干净的完成轮——结束原因 Completed
             //（触顶/未确认轮不算，哪怕 0 删除）、无删除、无失败、无变化、无近期待处理文件、
             // 无未确认残留、发现覆盖完整。任一条件不满足都按 30 秒重试；APP 再次运行
             //（新实例→签名变化）、规则升级、排除改变或容器改变时不受限；手动清理不受限。
-            NSTimeInterval quiet = [AxsCacheKeeperCleanupSchedule quietIntervalForSummary:done];
-            if (!manual && !discoveryErrors.length && !restoreExclusions.count && !unlocatedRestoreFailures && [done[@"signature"] isEqual:signature] && -[done[@"time"] timeIntervalSinceNow] < quiet) continue;
+            if (!manual && !discoveryErrors.length && !restoreExclusions.count && !unlocatedRestoreFailures &&
+                [AxsCacheKeeperCleanupSchedule shouldSkipSummary:done signature:signature now:axs_cachekeeper_monotonic_seconds()]) continue;
             AxsCacheKeeperCleanupJob *job = jobs[bundle];
             // 手动重查（用户点检测目录）强制重建作业并清空未确认登记：完整重查，
             // 不受静默期与登记跳过约束。重建即消耗手动请求（异步清标志，避免下周期
@@ -500,7 +502,8 @@ void CKApplyDirectorySwitches(void) {
                     // 仅清理未知目录的任务没有缓存根，currentPaths 为空是正常态：任一根存在即放行。
                     // 任务 9：三种模式共用引擎，门控不再按模式拦截清理（模式只决定网络限制）。
                     allowed = readable && selected && (currentPaths.count || currentPurgePaths.count) && [Container(bundle).path isEqual:target[@"home"]] &&
-                        axs_cachekeeper_gate_open(bundle, jobInstance) && instanceOK && purgeOK;
+                        axs_cachekeeper_gate_open(bundle, jobInstance) && instanceOK && purgeOK &&
+                        [AxsCacheKeeperProcessObservation revisionForBundle:bundle]==[target[@"revision"] unsignedIntegerValue];
                 });
                 return allowed;
             };
@@ -565,7 +568,7 @@ void CKApplyDirectorySwitches(void) {
                     // 取消的轮次不记录（下周期立即重开，不受静默期约束）。
                     if (complete || capHit || unresolvedEnd) {
                         NSMutableDictionary *finishedSummary=[summary mutableCopy];
-                        finishedSummary[@"signature"]=signature; finishedSummary[@"time"]=NSDate.date;
+                        finishedSummary[@"signature"]=signature; finishedSummary[@"finishedAt"]=@(axs_cachekeeper_monotonic_seconds());
                         finished[bundle]=finishedSummary;
                     }
                     for (AxsCacheKeeperSweep *sweep in job.sweeps) {

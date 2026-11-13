@@ -80,6 +80,11 @@ static NSArray *AxsCacheKeeperRangeStamp(struct stat info) {
         endReason:job.endReason phase:@"waiting" message:message failed:job.failed effectivePaths:directories.allKeys
         discoveredPaths:nil directories:directories round:@{@"removed":@(job.removed),@"bytes":@(job.bytes)} coverageComplete:NO];
 }
++ (BOOL)shouldSkipSummary:(NSDictionary *)summary signature:(NSString *)signature now:(NSTimeInterval)now {
+    if (![summary[@"signature"] isEqual:signature] || ![summary[@"finishedAt"] isKindOfClass:NSNumber.class]) return NO;
+    NSTimeInterval elapsed=now-[summary[@"finishedAt"] doubleValue];
+    return elapsed>=0 && elapsed<[self quietIntervalForSummary:summary];
+}
 + (NSArray<NSString *> *)restoreExclusions:(NSDictionary *)restored home:(NSString *)home {
     NSMutableArray *paths=[NSMutableArray new];
     if (!home.length) return paths;

@@ -74,6 +74,7 @@ static void writeMedia(NSString *path) {
 @end
 
 extern void axs_cachekeeper_run_plan_repair_tests(NSString *fixture);
+extern void axs_cachekeeper_run_review_followup_tests(NSString *fixture);
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
@@ -1587,8 +1588,7 @@ int main(int argc, const char *argv[]) {
         NSDictionary *sourceProfile=[sourceInspection report];
         require(sourceInspection.complete && [sourceProfile[@"hardLinks"] unsignedIntegerValue]==101 &&
             [sourceProfile[@"linkFilesTruncated"] boolValue] && ![sourceProfile[@"twinCoverageComplete"] boolValue], @"硬链接源文件超 100 截断并标记");
-        // 注：搜索截断（扫描超 10 万项）与孪生搜索的 lstat 竞态失败无法在原生测试里确定性触发，
-        // 前者需 10 万个文件，后者需枚举与删除的时序竞态；两者与已测路径共用同一计数/标记机制。
+        // 搜索上限和搜索阶段 lstat 失败由 review_followup_tests 的注入入口验证实际搜索路径。
         NSDictionary *h1=@{@"updated":NSDate.date,@"home":@"same",@"rows":@[@{@"path":@"tmp",@"bytes":@1,@"complete":@YES}]};
         NSDictionary *h2=@{@"updated":NSDate.date,@"home":@"same",@"rows":@[@{@"path":@"tmp",@"bytes":@2,@"complete":@YES}]};
         NSDictionary *h3=@{@"updated":NSDate.date,@"home":@"same",@"rows":@[@{@"path":@"tmp",@"bytes":@3,@"complete":@YES}]};
@@ -1688,6 +1688,7 @@ int main(int argc, const char *argv[]) {
         receipt = [NSDictionary dictionaryWithContentsOfFile:receiptPath];
         require([receipt[@"removed"] unsignedIntegerValue]==210 && ![receipt[@"coverageComplete"] boolValue], @"覆盖翻转落盘，累计不重复计入");
         axs_cachekeeper_run_plan_repair_tests(fixture);
+        axs_cachekeeper_run_review_followup_tests(fixture);
         puts("PASS: configuration, modes, deduplication, age, protected files, cleanup, cancellation, permission restoration, receipts and URLCache");
     }
     return 0;

@@ -37,6 +37,8 @@
 @property(nonatomic) BOOL twinTruncated;
 @property(nonatomic) BOOL twinDisplayTruncated;
 @property(nonatomic) NSUInteger twinSkipped;
+@property(nonatomic) NSUInteger searchLimit;
+@property(nonatomic,copy) int (^searchStat)(const char *,struct stat *);
 @end
 
 static NSString *axs_cachekeeper_inode_key(dev_t device, ino_t inode) {
@@ -63,7 +65,11 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
     return [self initWithRoot:root searchRoots:@[@{@"path":root ?: @"",@"label":@"本目录"}]];
 }
 - (instancetype)initWithRoot:(NSString *)root searchRoots:(NSArray<NSDictionary *> *)searchRoots {
+    return [self initWithRoot:root searchRoots:searchRoots searchLimit:100000 stat:^int(const char *path,struct stat *info) { return lstat(path,info); }];
+}
+- (instancetype)initWithRoot:(NSString *)root searchRoots:(NSArray<NSDictionary *> *)searchRoots searchLimit:(NSUInteger)searchLimit stat:(int (^)(const char *,struct stat *))statBlock {
     self=[super init];if (!self) return nil;
+    _searchLimit=searchLimit;_searchStat=[statBlock copy];
     _root=[root copy];_types=[NSMutableDictionary new];_ages=[NSMutableDictionary new];_largest=[NSMutableArray new];_started=NSDate.date;
     _searchRoots=[searchRoots count] ? [searchRoots copy] : @[@{@"path":root ?: @"",@"label":@"本目录"}];
     _linkFiles=[NSMutableArray new];_twinEntries=[NSMutableArray new];_twinnedKeys=[NSMutableSet new];
@@ -164,13 +170,13 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
     }
 }
 - (void)axs_cachekeeper_advance_twin {
-    if (self.twinScanned>=100000) { self.twinTruncated=YES;self.complete=YES;return; }
+    if (self.twinScanned>=self.searchLimit) { self.twinTruncated=YES;self.complete=YES;return; }
     NSURL *enumerated=[self.searchEntries nextObject];
     if (!enumerated) { [self axs_cachekeeper_open_search_root];if (!self.searchEntries) self.complete=YES;return; }
     self.twinScanned++;
     struct stat info;
     // 孪生搜索的 lstat 失败计入孪生失败（任务 7）：静默跳过会让 0 匹配看起来像"已确认无孪生"。
-    if (lstat(enumerated.path.fileSystemRepresentation,&info)) { self.twinSkipped++;return; }
+    if (self.searchStat(enumerated.path.fileSystemRepresentation,&info)) { self.twinSkipped++;return; }
     if (!S_ISREG(info.st_mode) || info.st_nlink==1) return;
     NSString *key=axs_cachekeeper_inode_key(info.st_dev,info.st_ino);
     NSArray *sources=self.linkIndex[key];
