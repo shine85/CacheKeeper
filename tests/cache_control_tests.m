@@ -427,7 +427,7 @@ int main(int argc, const char *argv[]) {
         require(!axs_cachekeeper_update_selection(preferences,@"single.app",@[@"Library/Caches/video"],YES), @"单项开启无需另开总开关");
         require(axs_cachekeeper_app_enabled([NSDictionary dictionaryWithContentsOfFile:statesPath][@"single.app"]), @"单项开启仅激活对应 APP");
         // 任务 6：开启父目录不清除子目录的排除；重新开启被排除的路径本身才清除该排除。
-        require(!axs_cachekeeper_set_excluded_path(preferences,@"single.app",@"Library/Caches/video",YES), @"子目录排除夹具");
+        require(!axs_cachekeeper_update_selection(preferences,@"single.app",@[@"Library/Caches/video"],NO), @"通过标准目录关闭入口建立子目录排除");
         require(!axs_cachekeeper_update_selection(preferences,@"single.app",@[@"Library/Caches"],YES), @"开启父目录");
         require([[NSDictionary dictionaryWithContentsOfFile:statesPath][@"single.app"][@"excludedPaths"] containsObject:@"Library/Caches/video"], @"开启父目录保留子目录排除");
         require(!axs_cachekeeper_update_selection(preferences,@"single.app",@[@"Library/Caches/video"],YES), @"重新开启被排除的路径本身");
