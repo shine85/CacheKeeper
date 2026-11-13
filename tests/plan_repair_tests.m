@@ -42,6 +42,49 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     };
     [AxsCacheKeeperCleanupRules removeAllRulesForTesting];
 
+    // 生产入口须能回收已确认的 ALog，而非只有测试注册规则能删除。
+    // 任何按目录全删、版本泛化、挂起放行或取消内容否决都会破坏本组断言。
+    NSString *alogBundle=@"com.ss.iphone.ugc.Aweme";
+    NSString *alogVersion=@"41.1.0";
+    NSDictionary *exited=@{@"processExited":@YES};
+    NSDictionary *clearLog=@{@"readComplete":@YES,@"hasEvidence":@NO,@"hasMediaSignature":@NO};
+    NSString *alogPath=@"Library/alog/ready/BDALog_20261111_193314.alog.iOS.1128";
+    AxsCacheKeeperCleanupDecision *alogDecision=[AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:alogVersion relativePath:alogPath state:exited evidence:clearLog];
+    check(alogDecision.disposition==AxsCacheKeeperCleanupDelete && alogDecision.basis==AxsCacheKeeperCleanupBasisAppRule,
+        @"内置抖音规则应识别已退出进程的 ALog 日志，不能仍全部待识别");
+    for (NSString *otherVersion in @[@"",@"41.1.1",@"41.1.0.1"])
+        check([AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:otherVersion relativePath:alogPath state:exited evidence:clearLog].disposition!=AxsCacheKeeperCleanupDelete,@"未验版本不继承 ALog 删除授权");
+    check([AxsCacheKeeperCleanupRules decisionForBundle:@"com.example.other" version:alogVersion relativePath:alogPath state:exited evidence:clearLog].disposition!=AxsCacheKeeperCleanupDelete,@"同名目录不跨 APP 放行");
+    for (NSString *wrongPath in @[@"Library/alog/ready/notes.txt",@"Library/alog/ready/app.log",@"Library/alog/ready/BDALog_broken.alog.iOS.1128",
+        @"Library/alog/ready/BDALog_20261111_193314.alog.iOS.1128.pdf",@"Library/alog/ready/BDALog_20261111_193314.alog.iOS.1128\n",
+        @"Library/alog/drafts/BDALog_20261111_193314.alog.iOS.1128",@"Library/alog-other/ready/BDALog_20261111_193314.alog.iOS.1128"])
+        check([AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:alogVersion relativePath:wrongPath state:exited evidence:clearLog].disposition!=AxsCacheKeeperCleanupDelete,@"未知文件、额外后缀与邻近/保留路径不放行");
+    for (NSDictionary *veto in @[@{@"readComplete":@NO},@{@"readComplete":@YES,@"hasEvidence":@YES},@{@"readComplete":@YES,@"hasMediaSignature":@YES},@{}])
+        check([AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:alogVersion relativePath:alogPath state:exited evidence:veto].disposition!=AxsCacheKeeperCleanupDelete,@"读取或用途证据不齐不能当日志删除");
+    for (NSDictionary *state in @[@{},@{@"processExited":@NO},@{@"processExited":@YES,@"excludedPaths":@[@"Library/alog/ready"]}])
+        check([AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:alogVersion relativePath:alogPath state:state evidence:clearLog].disposition!=AxsCacheKeeperCleanupDelete,@"挂起/未知进程与用户排除保持保留");
+
+    NSString *alogRoot=makeDir(home,@"Library/alog");
+    makeDir(home,@"Library/alog/ready");
+    NSString *readyLog=[home stringByAppendingPathComponent:alogPath];
+    put(readyLog);
+    NSString *unknown=[alogRoot stringByAppendingPathComponent:@"ready/notes.txt"];put(unknown);
+    NSString *database=[alogRoot stringByAppendingPathComponent:@"ready/BDALog_20261111_193315.alog.iOS.1128"];
+    check([@"SQLite format 3\0payload" writeToFile:database atomically:YES encoding:NSUTF8StringEncoding error:nil],@"写伪装日志的数据库");
+    NSString *media=[alogRoot stringByAppendingPathComponent:@"ready/BDALog_20261111_193316.alog.iOS.1128"];
+    const unsigned char png[]={0x89,'P','N','G',13,10,26,10,0,0,0,0};
+    check([[NSData dataWithBytes:png length:sizeof(png)] writeToFile:media atomically:YES],@"写伪装日志的媒体");
+    NSString *shared=[alogRoot stringByAppendingPathComponent:@"ready/BDALog_20261111_193317.alog.iOS.1128"];put(shared);
+    NSString *outside=[home stringByAppendingPathComponent:@"shared-original"];check(link(shared.fileSystemRepresentation,outside.fileSystemRepresentation)==0,@"创建日志硬链接对照");
+    AxsCacheKeeperSweep *alogRecent=[[AxsCacheKeeperSweep alloc] initWithRoot:alogRoot bundle:alogBundle version:alogVersion containerPath:home state:exited];finish(alogRecent);
+    check(alogRecent.removed==0 && alogRecent.recentCount>=1 && [fm fileExistsAtPath:readyLog],@"新日志仍遵守年龄门");
+    AxsCacheKeeperSweep *alogReal=[[AxsCacheKeeperSweep alloc] initWithRoot:alogRoot bundle:alogBundle version:alogVersion containerPath:home state:exited clock:^NSTimeInterval{return future;}];finish(alogReal);
+    check(alogReal.removed==1 && alogReal.bytes==13 && ![fm fileExistsAtPath:readyLog],@"成熟日志真实删除且回执等于实际删量");
+    for (NSString *kept in @[unknown,database,media,shared,outside]) check([fm fileExistsAtPath:kept],@"同目录未知、数据库、媒体与根外硬链接保持完整");
+    put(readyLog);
+    AxsCacheKeeperSweep *alogAgain=[[AxsCacheKeeperSweep alloc] initWithRoot:alogRoot bundle:alogBundle version:alogVersion containerPath:home state:exited clock:^NSTimeInterval{return future;}];finish(alogAgain);
+    check(alogAgain.removed==1 && ![fm fileExistsAtPath:readyLog],@"第二轮新产生日志成熟后仍实际回收");
+
     // 根在范围检查后消失时，失败对象仍须有稳定报告键，不能让调度器以 nil 作字典键。
     AxsCacheKeeperSweep *missingRoot=sweepFor([home stringByAppendingPathComponent:@"Library/Caches/disappeared"],@{});
     check(missingRoot.complete && missingRoot.failed==1 && [missingRoot.relativePath isEqual:@"Library/Caches/disappeared"],@"构造失败仍保留目录标识");
