@@ -185,7 +185,7 @@ static BOOL axs_cachekeeper_gate_open(NSString *bundle, NSString *jobInstance) {
 static NSString *axs_cachekeeper_folder(void) { return jbroot(@"/var/mobile/Library/CacheKeeper"); }
 // 回执模块配置（幂等）：Status 目录只由调用方给定，模块本身不依赖 jbroot。
 static void axs_cachekeeper_configure_receipts(void) {
-    [AxsCacheKeeperReceipts configureWithStatusFolder:[[axs_cachekeeper_folder() stringByAppendingPathComponent:@"Status"]]];
+    [AxsCacheKeeperReceipts configureWithStatusFolder:[axs_cachekeeper_folder() stringByAppendingPathComponent:@"Status"]];
 }
 static NSString *axs_cachekeeper_network_status(NSString *bundle) {
     NSString *path = [[axs_cachekeeper_folder() stringByAppendingPathComponent:@"Status"]
