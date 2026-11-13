@@ -387,6 +387,7 @@
     NSDictionary *directoryReport=[self axs_cachekeeper_display:[@"Status/" stringByAppendingFormat:@"%@.auto.plist",self.bundle]][@"directories"][relative];
     if ([directoryReport isKindOfClass:NSDictionary.class]) {
         NSMutableArray *residual=[NSMutableArray new];
+        if (![directoryReport[@"measurementComplete"] boolValue] && ![directoryReport[@"skipped"] boolValue]) [residual addObject:@"测量未完成，残留数量与大小未知"];
         NSUInteger remaining=[directoryReport[@"remaining"] unsignedIntegerValue];
         unsigned long long remainingBytes=[directoryReport[@"remainingBytes"] unsignedLongLongValue];
         if (remaining) [residual addObject:remainingBytes ? [NSString stringWithFormat:@"待处理 %lu 项 · %.2f MB", (unsigned long)remaining, remainingBytes / 1048576.0] : [NSString stringWithFormat:@"待处理 %lu 项", (unsigned long)remaining]];

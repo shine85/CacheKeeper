@@ -10,6 +10,21 @@ static dispatch_queue_t AxsCacheKeeperReceiptsQueue(void) {
 static NSString *AxsCacheKeeperReceiptsFolder = nil;
 static NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *AxsCacheKeeperReceiptsPending = nil;
 
+static NSDictionary *AxsCacheKeeperReadReceipt(NSString *path) {
+    NSError *error=nil;
+    NSData *data=[NSData dataWithContentsOfFile:path options:0 error:&error];
+    if (!data) {
+        if ([error.domain isEqual:NSCocoaErrorDomain] && error.code==NSFileReadNoSuchFileError) return @{};
+        NSLog(@"[CacheKeeper] 回执读取失败：%@", error); return nil;
+    }
+    id record=[NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:&error];
+    if (![record isKindOfClass:NSDictionary.class]) return nil;
+    for (NSString *key in @[@"removed",@"bytes",@"confirmedRemoved",@"confirmedBytes",@"failed",@"lastRemoved",@"lastBytes"])
+        if (record[key] && (![record[key] isKindOfClass:NSNumber.class] || [record[key] doubleValue]<0)) return nil;
+    if (record[@"updated"] && ![record[@"updated"] isKindOfClass:NSDate.class]) return nil;
+    return record;
+}
+
 @interface AxsCacheKeeperReceipts ()
 + (BOOL)flushQueueForBundle:(NSString *)bundle;
 + (BOOL)attemptSnapshot:(NSDictionary *)snapshot bundle:(NSString *)bundle;
@@ -47,6 +62,11 @@ static NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *AxsCac
     });
     return done;
 }
++ (void)flushAllPending {
+    dispatch_sync(AxsCacheKeeperReceiptsQueue(), ^{
+        for (NSString *bundle in AxsCacheKeeperReceiptsPending.allKeys) [self flushQueueForBundle:bundle];
+    });
+}
 
 + (BOOL)submitRoundForBundle:(NSString *)bundle roundID:(NSString *)roundID removed:(NSUInteger)removed bytes:(unsigned long long)bytes endReason:(NSInteger)endReason phase:(NSString *)phase message:(NSString *)message failed:(NSUInteger)failed effectivePaths:(NSArray *)effectivePaths discoveredPaths:(NSArray *)discoveredPaths directories:(NSDictionary *)directories round:(NSDictionary *)round coverageComplete:(BOOL)coverageComplete {
     if (!bundle.length || !roundID.length) return NO;
@@ -63,8 +83,11 @@ static NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *AxsCac
         // 不同轮次各占一项——每轮累计量独立核算，跨轮合并会错认已确认量致重复或丢失。
         NSUInteger existing = NSNotFound;
         for (NSUInteger i = 0; i < queue.count; i++) if ([queue[i][@"roundID"] isEqual:roundID]) { existing = i; break; }
-        if (existing != NSNotFound) queue[existing] = [snapshot copy];
-        else [queue addObject:[snapshot copy]];
+        if (existing != NSNotFound) {
+            NSDictionary *pending=queue[existing];
+            BOOL stale=removed<[pending[@"removed"] unsignedIntegerValue] || bytes<[pending[@"bytes"] unsignedLongLongValue] || (pending[@"round"] && !round);
+            if (!stale) queue[existing] = [snapshot copy];
+        } else [queue addObject:[snapshot copy]];
         done = [self flushQueueForBundle:bundle];
     });
     return done;
@@ -88,6 +111,7 @@ static NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *AxsCac
         if (![self attemptSnapshot:queue[0] bundle:bundle]) return NO;
         [queue removeObjectAtIndex:0];
     }
+    [AxsCacheKeeperReceiptsPending removeObjectForKey:bundle];
     return YES;
 }
 
@@ -96,8 +120,8 @@ static NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *AxsCac
 + (BOOL)attemptSnapshot:(NSDictionary *)snapshot bundle:(NSString *)bundle {
     if (!AxsCacheKeeperReceiptsFolder.length) return NO;
     NSString *path = [[AxsCacheKeeperReceiptsFolder stringByAppendingPathComponent:bundle] stringByAppendingString:@".auto.plist"];
-    NSDictionary *previous = [NSDictionary dictionaryWithContentsOfFile:path];
-    if (!previous && [[NSFileManager defaultManager] fileExistsAtPath:path]) {
+    NSDictionary *previous = AxsCacheKeeperReadReceipt(path);
+    if (!previous) {
         // 损坏/不可读的回执：明确失败，永不以累计 0 覆盖。恢复须手动删除损坏文件后重试。
         NSLog(@"[CacheKeeper] 回执文件损坏，拒绝覆盖：%@", path);
         return NO;
@@ -105,11 +129,14 @@ static NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *AxsCac
     NSString *roundID = snapshot[@"roundID"];
     NSUInteger submittedRemoved = [snapshot[@"removed"] unsignedIntegerValue];
     unsigned long long submittedBytes = [snapshot[@"bytes"] unsignedLongLongValue];
+    BOOL sameRound=[previous[@"confirmedRoundID"] isEqual:roundID];
+    if (sameRound && (submittedRemoved<[previous[@"confirmedRemoved"] unsignedIntegerValue] ||
+        submittedBytes<[previous[@"confirmedBytes"] unsignedLongLongValue])) return YES;
     NSUInteger prevRemoved = [previous[@"removed"] unsignedIntegerValue];
     unsigned long long prevBytes = [previous[@"bytes"] unsignedLongLongValue];
     NSUInteger incrementRemoved;
     unsigned long long incrementBytes;
-    if ([previous[@"confirmedRoundID"] isEqual:roundID]) {
+    if (sameRound) {
         NSUInteger confirmedRemoved = [previous[@"confirmedRemoved"] unsignedIntegerValue];
         unsigned long long confirmedBytes = [previous[@"confirmedBytes"] unsignedLongLongValue];
         incrementRemoved = submittedRemoved > confirmedRemoved ? submittedRemoved - confirmedRemoved : 0;
@@ -123,7 +150,7 @@ static NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *AxsCac
     NSDictionary *directories = snapshot[@"directories"];
     // 去重：增量为 0、非退役、展示内容未变且 30 秒内写过——不重复落盘（沿用旧 report 的去重语义）。
     // 覆盖完整性变化同样打破去重（任务 5/6：发现不完整时面板须如实展示，不得沿用旧的完整标记）。
-    if (!round && !incrementRemoved && !incrementBytes && [previous[@"phase"] isEqual:snapshot[@"phase"]] && [previous[@"message"] isEqual:snapshot[@"message"]] &&
+    if (sameRound && !round && !incrementRemoved && !incrementBytes && [previous[@"phase"] isEqual:snapshot[@"phase"]] && [previous[@"message"] isEqual:snapshot[@"message"]] &&
         [previous[@"failed"] unsignedIntegerValue] == [snapshot[@"failed"] unsignedIntegerValue] && [previous[@"effectivePaths"] isEqual:snapshot[@"effectivePaths"]] &&
         [previous[@"discoveredPaths"] isEqual:known] && [previous[@"coverageComplete"] isEqual:snapshot[@"coverageComplete"]] && !directories && -[previous[@"updated"] timeIntervalSinceNow] < 30) return YES;
     NSDictionary *report = @{@"updated":NSDate.date, @"phase":snapshot[@"phase"], @"message":snapshot[@"message"],
@@ -143,8 +170,8 @@ static NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *AxsCac
 + (BOOL)writeStatusForBundle:(NSString *)bundle phase:(NSString *)phase message:(NSString *)message failed:(NSUInteger)failed effectivePaths:(NSArray *)effectivePaths discoveredPaths:(NSArray *)discoveredPaths directories:(NSDictionary *)directories {
     if (!AxsCacheKeeperReceiptsFolder.length) return NO;
     NSString *path = [[AxsCacheKeeperReceiptsFolder stringByAppendingPathComponent:bundle] stringByAppendingString:@".auto.plist"];
-    NSDictionary *previous = [NSDictionary dictionaryWithContentsOfFile:path];
-    if (!previous && [[NSFileManager defaultManager] fileExistsAtPath:path]) {
+    NSDictionary *previous = AxsCacheKeeperReadReceipt(path);
+    if (!previous) {
         NSLog(@"[CacheKeeper] 回执文件损坏，拒绝覆盖：%@", path);
         return NO;
     }

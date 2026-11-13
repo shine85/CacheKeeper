@@ -50,6 +50,8 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @property(nonatomic,copy) NSString *lastStatusMtime;
 @property(nonatomic,assign) NSInteger lastSelectedTab;
 @property(nonatomic,copy) NSString *lastQuery;
+@property(nonatomic) BOOL axs_cachekeeper_menuVisible;
+@property(nonatomic) BOOL axs_cachekeeper_refreshPending;
 @end
 @implementation CKSettings
 - (void)viewDidLoad {
@@ -195,6 +197,16 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     UIAction *launch = [UIAction actionWithTitle:@"启动" image:[UIImage systemImageNamed:@"arrow.up.forward.app"] identifier:nil handler:^(__kindof UIAction *action) { [weak axs_cachekeeper_launch:bundle]; }];
     return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggested) { return [UIMenu menuWithTitle:app[@"name"] children:@[favorite, launch]]; }];
 }
+- (void)tableView:(UITableView *)tableView willDisplayContextMenuWithConfiguration:(UIContextMenuConfiguration *)configuration animator:(id<UIContextMenuInteractionAnimating>)animator {
+    self.axs_cachekeeper_menuVisible=YES;
+}
+- (void)tableView:(UITableView *)tableView willEndContextMenuInteractionWithConfiguration:(UIContextMenuConfiguration *)configuration animator:(id<UIContextMenuInteractionAnimating>)animator {
+    void (^apply)(void)=^{
+        self.axs_cachekeeper_menuVisible=NO;
+        if (self.axs_cachekeeper_refreshPending) { self.axs_cachekeeper_refreshPending=NO; [self updateBatch]; }
+    };
+    if (animator) [animator addCompletion:apply]; else apply();
+}
 - (void)axs_cachekeeper_set_favorite:(NSString *)bundle favorite:(BOOL)favorite {
     NSString *path = jbroot(@"/var/mobile/Library/CacheKeeper/favorites.plist");
     NSArray *existing = [NSArray arrayWithContentsOfFile:path];
@@ -246,7 +258,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     return placeholder;
 }
 - (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];[self updateBatch];
+    [super viewWillAppear:animated]; self.axs_cachekeeper_menuVisible=NO; self.axs_cachekeeper_refreshPending=NO; [self updateBatch];
     if (!self.batchTimer) {
         __weak typeof(self) weak=self;
         self.batchTimer=[NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer){[weak updateBatch];}];
@@ -327,6 +339,8 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 - (void)searchBarTextDidEndEditing:(UISearchBar *)searchBar { [searchBar setShowsCancelButton:NO animated:YES]; }
 - (void)searchBarCancelButtonClicked:(UISearchBar *)searchBar { searchBar.text = @""; [searchBar resignFirstResponder]; [self updateBatch]; }
 - (void)updateBatch {
+    // 菜单关闭后重新读取最新输入；不在菜单期间推进用于判等的快照。
+    if (self.axs_cachekeeper_menuVisible) { self.axs_cachekeeper_refreshPending=YES; return; }
     NSDictionary *states = [NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")] ?: @{};
     NSDictionary *directories=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist")] ?: @{};
     NSArray *savedFavorites=[NSArray arrayWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/favorites.plist")];

@@ -45,6 +45,12 @@
 @property(nonatomic,strong) NSMutableSet<NSString *> *retentionRanges;
 @property(nonatomic,strong) NSMutableArray<NSString *> *deleteCandidates;
 @property(nonatomic) NSUInteger deleteCursor;
+@property(nonatomic,strong) NSMutableArray<NSString *> *decisionEntries;
+@property(nonatomic) NSUInteger decisionCursor;
+@property(nonatomic) BOOL enumerationComplete;
+@property(nonatomic,readwrite) BOOL measurementComplete;
+@property(nonatomic,strong) NSMutableSet<NSString *> *dependencyUnmet;
+@property(nonatomic,strong) NSMutableSet<NSString *> *failedCandidates;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSArray *> *dependencySnapshots;
 @property(nonatomic,strong) NSMutableSet<NSString *> *invalidDependencies;
 @property(nonatomic,strong) NSMutableArray<NSDictionary *> *recordedFailures;
@@ -71,6 +77,10 @@
     _state = [state copy] ?: @{};
     _clock = [clock copy];
     _unlinkFile=[unlinkFile copy];_recordedFailures=[NSMutableArray new];
+    // 根可能在调度器检查后消失；失败对象同样需要稳定的回执目录键。
+    NSString *containerPrefix = [_containerPath stringByAppendingString:@"/"];
+    _relativePath = (_containerPath.length && [root hasPrefix:containerPrefix]) ?
+        [root substringFromIndex:containerPrefix.length] : @"";
     struct stat info;
     if (![root isEqual:[NSURL fileURLWithPath:root].URLByResolvingSymlinksInPath.path] ||
         lstat(root.fileSystemRepresentation, &info) || !S_ISDIR(info.st_mode)) {
@@ -89,10 +99,9 @@
     _rootForms = forms.allObjects;
     // 根相对容器的路径：决策入口的相对路径基准。根本身若为已确认保留范围
     //（如整个根是 Preferences），预先记入保留范围（枚举器不输出根自身）。
-    NSString *containerPrefix = [_containerPath stringByAppendingString:@"/"];
-    _relativePath = (_containerPath.length && [root hasPrefix:containerPrefix]) ?
-        [root substringFromIndex:containerPrefix.length] : @"";
     _retentionRanges = [NSMutableSet new];
+    // 调度器采集的本轮不可访问路径，独立于持久用户排除；仅用于恢复失败子树。
+    for (id path in _state[@"unavailablePaths"]) if ([path isKindOfClass:NSString.class] && axs_cachekeeper_relative_path(path)) [_retentionRanges addObject:path];
     // 已验证 APP 可清范围与根有交集时不记入——名称启发式不挡已验证规则。
     if (_relativePath.length && axs_cachekeeper_retention_path(_relativePath) &&
         ![AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:_bundle version:_version relativePath:_relativePath])
@@ -101,6 +110,9 @@
     _fileFacts = [NSMutableDictionary new];
     _fileDecisions = [NSMutableDictionary new];
     _deleteCandidates = [NSMutableArray new];
+    _decisionEntries = [NSMutableArray new];
+    _dependencyUnmet = [NSMutableSet new];
+    _failedCandidates = [NSMutableSet new];
     _dependencySnapshots = [NSMutableDictionary new];
     _invalidDependencies = [NSMutableSet new];
     _directorySnapshots = [NSMutableDictionary new];
@@ -109,17 +121,32 @@
     [self axs_cachekeeper_open_enumerator];
     return self;
 }
-- (BOOL)hasDeleteCandidates { return self.deleteCandidates.count > 0; }
-- (NSUInteger)remainingCandidates { return self.deleteCandidates.count - self.deleteCursor; }
+- (BOOL)hasDeleteCandidates { return !self.checking && self.deleteCursor < self.deleteCandidates.count; }
+- (NSUInteger)remainingCandidates { return self.deleteCandidates.count - self.deleteCursor + self.failedCandidates.count; }
 - (unsigned long long)remainingBytes {
     unsigned long long total=0;
     for (NSUInteger i=self.deleteCursor;i<self.deleteCandidates.count;i++)
         total+=[self axs_cachekeeper_snapshot_bytes:self.deleteCandidates[i]];
+    for (NSString *entry in self.failedCandidates) total += [self axs_cachekeeper_snapshot_bytes:entry];
     return total;
 }
 // 延期类（任务 5）：近期与变化合并为一类——同一文件同一轮只计一类，互斥。
 - (NSUInteger)deferredCount { return self.recentCount + self.changedCount; }
 - (unsigned long long)deferredBytes { return self.recentBytes + self.changedBytes; }
+- (BOOL)coverageComplete { return self.measurementComplete && !self.failed && !self.changedCount; }
+- (NSDictionary *)directoryReport {
+    NSMutableDictionary *report = [@{@"updated":NSDate.date, @"complete":@(self.complete),
+        @"checking":@(self.checking), @"cancelled":@(self.cancelled), @"measurementComplete":@(self.measurementComplete),
+        @"coverageComplete":@(self.coverageComplete), @"removed":@(self.removed), @"bytes":@(self.bytes),
+        @"failed":@(self.failed), @"error":self.error ?: @"", @"failureDetails":self.failureDetails ?: @[],
+        @"purgeClassification":self.dependencyInvalidated ? @"invalid" : self.unresolvedCount ? @"paused" : @"",
+        @"purgeEvidence":self.dependencyInvalidated ? (self.invalidEvidence ?: @"") : (self.unresolvedEvidence ?: @"")} mutableCopy];
+    if (self.measurementComplete) [report addEntriesFromDictionary:@{@"protected":@(self.protectedCount),
+        @"recent":@(self.recentCount), @"changed":@(self.changedCount), @"remaining":@(self.remainingCandidates),
+        @"remainingBytes":@(self.remainingBytes), @"deferred":@(self.deferredCount), @"deferredBytes":@(self.deferredBytes),
+        @"unresolved":@(self.unresolvedCount), @"unresolvedBytes":@(self.unresolvedBytes)}];
+    return [report copy];
+}
 // 预检快照里的文件大小（索引 6）；无快照（预检后新增）返回 0，不伪造。
 - (unsigned long long)axs_cachekeeper_snapshot_bytes:(NSString *)entry {
     NSArray *snapshot=self.fileSnapshots[entry.stringByDeletingLastPathComponent][entry.lastPathComponent];
@@ -191,6 +218,8 @@
         (count >= 6 && !memcmp(signature, "bplist", 6)));
     BOOL mediaSignature = readComplete && axs_cachekeeper_media_signature(signature, (size_t)count);
     return @{@"hasEvidence": @(nameEvidence || headerEvidence),
+        @"matureAt":@(MAX(info.st_birthtimespec.tv_sec + info.st_birthtimespec.tv_nsec/1e9,
+            MAX(info.st_mtimespec.tv_sec + info.st_mtimespec.tv_nsec/1e9,info.st_ctimespec.tv_sec + info.st_ctimespec.tv_nsec/1e9)) + AxsCacheKeeperMinimumFileAge),
         @"hasMediaSignature": @(mediaSignature),
         @"readComplete": @(readComplete)};
 }
@@ -200,6 +229,9 @@
     if (S_ISDIR(info.st_mode)) {
         self.directorySnapshots[[self axs_cachekeeper_directory_key:entry]]=[self axs_cachekeeper_snapshot:info];
         NSString *relative = [self axs_cachekeeper_relative_path:entry];
+        for (NSString *unavailable in self.state[@"unavailablePaths"]) if (axs_cachekeeper_path_inside(relative,unavailable)) {
+            [self.entries skipDescendants]; return;
+        }
         // 已验证 APP 可清范围有交集时不裁剪——名称启发式不挡已验证规则。
         if (axs_cachekeeper_retention_path(relative) &&
             ![AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:self.bundle version:self.version relativePath:relative]) {
@@ -214,16 +246,15 @@
     self.fileSnapshots[parent][entry.lastPathComponent]=[self axs_cachekeeper_snapshot:info];
     if (!self.fileFacts[parent]) self.fileFacts[parent]=[NSMutableDictionary new];
     self.fileFacts[parent][entry.lastPathComponent]=[self axs_cachekeeper_collect_facts:entry info:info];
+    [self.decisionEntries addObject:entry];
     self.inspected++;
 }
 // 统一决策（预检枚举结束时调用）：对每个已采集文件调用规则入口，产生不可变决定；
 // 可删文件进入删除候选列表；保留/未确认文件计数；规则依赖快照同步采集。
 // 依赖缺失时决定不成立，相关文件本轮延期（计变化），下轮重新预检时重建决定。
-- (void)axs_cachekeeper_decide {
-    NSMutableSet *dependencyUnmet = [NSMutableSet new];
-    for (NSString *parent in self.fileSnapshots) {
-        for (NSString *name in self.fileSnapshots[parent]) {
-            NSString *entry = [parent stringByAppendingPathComponent:name];
+- (void)axs_cachekeeper_decide_entry:(NSString *)entry {
+            NSString *parent = entry.stringByDeletingLastPathComponent;
+            NSString *name = entry.lastPathComponent;
             NSString *relative = [self axs_cachekeeper_relative_path:entry];
             NSDictionary *facts = self.fileFacts[parent][name] ?: @{};
             NSDictionary *evidence = @{@"hasEvidence": facts[@"hasEvidence"] ?: @NO,
@@ -236,12 +267,12 @@
             if (decision.disposition == AxsCacheKeeperCleanupDelete) {
                 BOOL depsOK = YES;
                 for (NSString *dep in decision.dependencyPaths) {
-                    if ([dependencyUnmet containsObject:dep]) { depsOK = NO; break; }
+                    if ([self.dependencyUnmet containsObject:dep]) { depsOK = NO; break; }
                     if (!self.dependencySnapshots[dep]) {
                         NSString *depPath = [self.containerPath stringByAppendingPathComponent:dep];
                         struct stat depInfo;
                         if (lstat(depPath.fileSystemRepresentation, &depInfo)) {
-                            [dependencyUnmet addObject:dep]; depsOK = NO;
+                            [self.dependencyUnmet addObject:dep]; depsOK = NO;
                             if (!self.dependencyInvalidated) {
                                 self.dependencyInvalidated = YES;
                                 self.invalidEvidence = dep;
@@ -252,20 +283,22 @@
                         self.dependencySnapshots[dep] = [self axs_cachekeeper_snapshot:depInfo];
                     }
                 }
-                if (depsOK) [self.deleteCandidates addObject:entry];
+                if (depsOK && self.clock() < [facts[@"matureAt"] doubleValue]) {
+                    self.recentCount++; self.recentBytes += [self axs_cachekeeper_snapshot_bytes:entry];
+                } else if (depsOK) [self.deleteCandidates addObject:entry];
                 else { self.changedCount++; self.changedBytes += [self axs_cachekeeper_snapshot_bytes:entry]; }
             } else if (decision.disposition == AxsCacheKeeperCleanupKeep) {
                 self.protectedCount++;
+            } else if (decision.disposition == AxsCacheKeeperCleanupDefer) {
+                self.failed++; self.changedCount++; self.changedBytes += [self axs_cachekeeper_snapshot_bytes:entry];
+                [self axs_cachekeeper_failure:@"read-preflight" code:EIO path:entry detail:decision.reason];
             } else {
                 self.unresolvedCount++;
                 NSArray *snapshot = self.fileSnapshots[parent][name];
                 self.unresolvedBytes += [snapshot[6] unsignedLongLongValue];
                 if (!self.unresolvedEvidence) self.unresolvedEvidence = relative;
             }
-        }
-    }
-    // 候选列表按路径排序：删除顺序确定，不依赖枚举顺序（测试断言与回执稳定）。
-    self.deleteCandidates = [[self.deleteCandidates sortedArrayUsingSelector:@selector(compare:)] mutableCopy];
+    // 保持预检枚举顺序；不在收尾做全树排序或再次遍历。
 }
 // 规则依赖复核：删除前重读每个依赖的快照；变化/缺失使相关范围失效，
 // 本轮延期，下轮重建决定；已失效的依赖不再重复核对。无依赖的决定直接通过。
@@ -303,8 +336,7 @@
     if (!identity) self.verifyDetail = @"目录已被替换";
     return identity;
 }
-- (BOOL)axs_cachekeeper_remove:(NSString *)entry expected:(struct stat)expected {
-    self.error = nil;
+- (BOOL)axs_cachekeeper_remove:(NSString *)entry expected:(struct stat)expected willDelete:(BOOL (^)(void))willDelete {
     NSString *parent = entry.stringByDeletingLastPathComponent;
     NSString *matchedForm = [self axs_cachekeeper_matched_root_form:parent];
     if (!matchedForm) {
@@ -393,6 +425,7 @@
         if (fstatat(fd,name,&final,AT_SYMLINK_NOFOLLOW)) {
             int code=errno;[self axs_cachekeeper_failure:@"fstatat-final" code:code path:entry detail:@""];
         } else if (final.st_ino == current.st_ino && final.st_dev == current.st_dev && axs_cachekeeper_old_enough(final, self.clock())) {
+            if (!willDelete()) { self.cancelled=YES; close(file); close(fd); errno=ECANCELED; return NO; }
             int result=self.unlinkFile(fd,name);int code=result ? errno : 0;
             removed=result==0;
             if (!removed) [self axs_cachekeeper_failure:@"unlinkat" code:code path:entry detail:@"flags=0"];
@@ -429,12 +462,21 @@
             ![self.root isEqual:resolvedRootPath]) {
             self.failed++; self.error = @"扫描期间缓存目录已改变"; self.complete = YES; self.entries = nil; return;
         }
+        if (self.enumerationComplete) {
+            if (self.decisionCursor < self.decisionEntries.count)
+                [self axs_cachekeeper_decide_entry:self.decisionEntries[self.decisionCursor++]];
+            if (self.decisionCursor == self.decisionEntries.count) {
+                self.checking=NO; self.measurementComplete=YES; self.decisionEntries=nil; return;
+            }
+            continue;
+        }
         NSURL *enumerated = self.entries.nextObject;
         if (!enumerated) {
             // 预检枚举结束：统一决策，产生不可变决定与删除候选列表；删除阶段只遍历候选，
             // 预检后新增的文件不混入旧候选。
-            [self axs_cachekeeper_decide];
-            self.checking=NO; self.entries=nil; return;
+            self.enumerationComplete=YES; self.entries=nil;
+            if (!self.decisionEntries.count) { self.checking=NO; self.measurementComplete=YES; }
+            continue;
         }
         NSString *entry=axs_cachekeeper_enumerated_path(enumerated.path,self.root,self.rootAliases);
         if (!entry) {
@@ -453,6 +495,9 @@
 }
 
 - (void)advanceDeletion:(NSUInteger)limit shouldContinue:(BOOL (^)(void))shouldContinue {
+    [self advanceDeletion:limit shouldContinue:shouldContinue willDelete:shouldContinue];
+}
+- (void)advanceDeletion:(NSUInteger)limit shouldContinue:(BOOL (^)(void))shouldContinue willDelete:(BOOL (^)(void))willDelete {
     if (self.complete || self.cancelled || self.checking) return;
     NSString *resolvedRootPath = [NSURL fileURLWithPath:self.root].URLByResolvingSymlinksInPath.path;
     for (NSUInteger index = 0; index < limit; index++) {
@@ -473,15 +518,16 @@
         struct stat info;
         if (lstat(entry.fileSystemRepresentation, &info)) {
             // 预检后被删：计变化，不计失败；其他读取错误计失败。
-            if (errno != ENOENT) { self.failed++; self.error = @"无法读取缓存文件属性"; }
+            if (errno != ENOENT) { self.failed++; [self.failedCandidates addObject:entry]; self.error = @"无法读取缓存文件属性"; }
             else self.changedCount++;
             continue;
         }
         if (S_ISLNK(info.st_mode) || !S_ISREG(info.st_mode)) { self.changedCount++; continue; }
-        if (info.st_nlink != 1) { self.protectedCount++; continue; }
+        if (info.st_nlink != 1) { self.changedCount++; self.changedBytes += info.st_size; self.error=@"共享硬链接暂不清理，避免影响根外数据"; continue; }
         if (!axs_cachekeeper_old_enough(info, self.clock())) { self.recentCount++; self.recentBytes += info.st_size; continue; }
-        if ([self axs_cachekeeper_remove:entry expected:info]) { self.removed++; self.bytes += info.st_size; }
-        else if (errno != ENOENT && errno != EBUSY) self.failed++;
+        if ([self axs_cachekeeper_remove:entry expected:info willDelete:willDelete]) { self.removed++; self.bytes += info.st_size; }
+        else if (self.cancelled) { self.deleteCursor--; return; }
+        else if (errno != ENOENT && errno != EBUSY) { self.failed++; [self.failedCandidates addObject:entry]; }
     }
 }
 

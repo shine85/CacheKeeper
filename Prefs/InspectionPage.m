@@ -107,6 +107,7 @@
         else if ([cleanup[@"remaining"] unsignedIntegerValue]) roundState=[NSString stringWithFormat:@"部分完成（待处理 %@ 项）",cleanup[@"remaining"]];
         else roundState=@"完成";
         if (skipped) [text appendFormat:@"最近一轮清理记录（%@）：%@\n删除 %@ 个文件 · %.2f MB；待识别 %@ 项 · %.2f MB。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),roundState,cleanup[@"removed"] ?: @0,[cleanup[@"bytes"] doubleValue]/1048576,cleanup[@"unresolved"] ?: @0,[cleanup[@"unresolvedBytes"] doubleValue]/1048576,cleanup[@"error"] ?: @""];
+        else if (![cleanup[@"measurementComplete"] boolValue]) [text appendFormat:@"最近清理记录（%@）：测量未完成，残留数量与大小未知；已删除 %@ 项，失败 %@ 项。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),cleanup[@"removed"] ?: @0,cleanup[@"failed"] ?: @0,cleanup[@"error"] ?: @""];
         else [text appendFormat:@"最近一轮清理记录（%@）：%@\n删除 %@ 个文件 · %.2f MB；保留受保护 %@ 项，延期 %lu 项 · %.2f MB，失败 %@ 项，待识别 %@ 项 · %.2f MB，待处理 %@ 项 · %.2f MB。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),roundState,cleanup[@"removed"] ?: @0,[cleanup[@"bytes"] doubleValue]/1048576,cleanup[@"protected"] ?: @0,(unsigned long)deferred,[cleanup[@"deferredBytes"] doubleValue]/1048576,cleanup[@"failed"] ?: @0,cleanup[@"unresolved"] ?: @0,[cleanup[@"unresolvedBytes"] doubleValue]/1048576,cleanup[@"remaining"] ?: @0,[cleanup[@"remainingBytes"] doubleValue]/1048576,cleanup[@"error"] ?: @""];
     }
     else [text appendString:@"本目录尚无清理回执；占用减少不能据此归因于插件。\n\n"];
@@ -141,7 +142,7 @@
         NSUInteger shown=MIN(twins.count,(NSUInteger)20);
         for (NSUInteger i=0;i<shown;i++) [text appendFormat:@"%@ → %@\n",twins[i][@"source"],twins[i][@"twin"]];
         if (twins.count>shown) [text appendFormat:@"…等 %lu 处\n",(unsigned long)(twins.count-shown)];
-        [text appendFormat:@"%@。\n清理跳过硬链接文件：只删本目录这边的链接不释放空间（数据仍被其他位置的链接占用）。\n\n",twinStatusLine];
+        [text appendFormat:@"%@。\n当前清理跳过共享硬链接文件。外部链接仍存在时，删除本目录链接不会释放其数据；即使全部已观察链接均在本范围，也不能保证立即释放空间。\n\n",twinStatusLine];
     } else if ([report[@"hardLinks"] unsignedIntegerValue]) {
         [text appendFormat:@"硬链接文件未在其余位置找到孪生：可能孪生已被删除，或位于本次未覆盖的位置。\n%@。\n\n",twinStatusLine];
     }

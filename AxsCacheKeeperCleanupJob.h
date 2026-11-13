@@ -61,4 +61,6 @@ typedef NS_ENUM(NSInteger, AxsCacheKeeperCleanupEndReason) {
 // 单周期推进：Checking 阶段只预检；Ready 后转入删除并受预算/期限约束。
 // gate 每根调用一次；返回 NO 时本轮取消（endReason=Cancelled）。
 - (void)advanceCycleWithPerRootLimit:(NSUInteger)perRootLimit gate:(BOOL (^)(void))gate;
+// 作业停用、替换与门控取消共用终态入口；调用方随后提交同 roundID 的最终累计。
+- (void)cancel;
 @end

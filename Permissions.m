@@ -25,7 +25,7 @@ static NSString *jbroot(NSString *path) {
 NSDictionary *axs_cachekeeper_restore_paths(NSArray *paths, NSString *file) {
     NSDictionary *stored = [NSDictionary dictionaryWithContentsOfFile:file];
     if ((!stored && [NSFileManager.defaultManager fileExistsAtPath:file]) || !file.length)
-        return @{@"failed":@1, @"applied":@0, @"failedPaths":@[], @"error":@"权限恢复记录不可读"};
+        return @{@"failed":@1, @"unlocatedFailures":@1, @"applied":@0, @"failedPaths":@[], @"error":@"权限恢复记录不可读"};
     NSMutableDictionary *records = [stored mutableCopy] ?: [NSMutableDictionary new];
     NSUInteger applied = 0, failed = 0;
     NSMutableArray *failedPaths = [NSMutableArray new];
@@ -36,7 +36,7 @@ NSDictionary *axs_cachekeeper_restore_paths(NSArray *paths, NSString *file) {
         if (![path isKindOfClass:NSString.class] || ![saved isKindOfClass:NSDictionary.class] ||
             ![saved[@"inode"] isKindOfClass:NSNumber.class] || ![saved[@"device"] isKindOfClass:NSNumber.class] ||
             ![saved[@"mode"] isKindOfClass:NSNumber.class]) {
-            failed++; [failedPaths addObject:path]; message = @"原权限记录损坏，保留记录等待修复"; continue;
+            failed++; if ([path isKindOfClass:NSString.class]) [failedPaths addObject:path]; message = @"原权限记录损坏，保留记录等待修复"; continue;
         }
         int fd = axs_cachekeeper_open_directory(path);
         if (fd < 0 && errno == ENOTDIR) fd = axs_cachekeeper_open_regular_file(path);
@@ -53,6 +53,10 @@ NSDictionary *axs_cachekeeper_restore_paths(NSArray *paths, NSString *file) {
             [records removeObjectForKey:path]; close(fd); continue;
         }
         mode_t mode = [saved[@"mode"] unsignedIntValue] & 07777;
+        if (S_ISREG(info.st_mode) && info.st_nlink != 1 && (info.st_mode & 07777) != mode) {
+            failed++; [failedPaths addObject:path]; message=@"条目现有共享硬链接，未更改共享 inode 权限，保留恢复记录";
+            close(fd); continue;
+        }
         if (fchmod(fd, mode) || fstat(fd, &info) || (info.st_mode & 07777) != mode) {
             failed++; [failedPaths addObject:path]; message = [NSString stringWithFormat:@"恢复原权限失败（errno %d）", errno];
         } else { applied++; [records removeObjectForKey:path]; }
@@ -61,7 +65,7 @@ NSDictionary *axs_cachekeeper_restore_paths(NSArray *paths, NSString *file) {
     if (![records isEqual:stored ?: @{}] && ![records writeToFile:file atomically:YES]) {
         failed++; message = @"恢复记录保存失败，将在下次重试";
     }
-    return @{@"failed":@(failed), @"applied":@(applied), @"failedPaths":failedPaths, @"error":message};
+    return @{@"failed":@(failed), @"unlocatedFailures":@(failed-failedPaths.count), @"applied":@(applied), @"failedPaths":failedPaths, @"error":message};
 }
 // 只禁止模式的目录写锁：先把未记录条目的原始权限写入记录并落盘，再逐项去掉写权限并核对；
 // 任一项失败回滚本轮已改条目。已无写权限的条目跳过，重复调用只补锁被改回的条目。

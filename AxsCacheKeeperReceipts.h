@@ -7,6 +7,7 @@
 // - 写失败时快照滞留内存待处理队列，作业替换/取消不清除；落盘后按序补记，不丢不重。
 // - 损坏/不可读的回执文件明确失败，永不以累计 0 覆盖。
 // - 待处理快照只是内存保证：SpringBoard 在落盘前崩溃仍可能丢失内存数据（已声明）。
+// - 调用方按轮次顺序提交；新轮开始后不得重交更早轮。Scanner 串行队列与 pending 暂停共同保证该前提。
 // - 本模块不依赖 jbroot/roothide：Status 目录由调用方配置，测试可指向临时目录。
 @interface AxsCacheKeeperReceipts : NSObject
 
@@ -47,6 +48,8 @@
 
 // 重试该 APP 待处理快照的落盘（按提交顺序）。返回 YES 表示已全部落盘或无待处理。
 + (BOOL)flushPendingForBundle:(NSString *)bundle;
+// 每个调度周期独立重试全部待保存回执，与 APP 是否启用/运行无关。
++ (void)flushAllPending;
 
 // 测试用：清空配置与全部待处理队列。
 + (void)resetForTesting;

@@ -16,7 +16,7 @@ CacheKeeperPrefs_RESOURCE_FILES = Prefs/Info.plist
 CacheKeeperPrefs_CODESIGN_FLAGS = -S -Idev.local.cachekeeper.preferences
 include $(THEOS_MAKE_PATH)/bundle.mk
 TWEAK_NAME = CacheKeeper
-CacheKeeper_FILES = Cleaner.m Desktop.xm Permissions.m Scanner.m Baseline.m AxsCacheKeeperNetworkCache.m AxsCacheKeeperDirectories.m AxsCacheKeeperInspection.m AxsCacheKeeperProcessObservation.m AxsCacheKeeperCleanupJob.m AxsCacheKeeperCleanupRules.m AxsCacheKeeperReceipts.m
+CacheKeeper_FILES = Cleaner.m Desktop.xm Permissions.m Scanner.m Baseline.m AxsCacheKeeperNetworkCache.m AxsCacheKeeperDirectories.m AxsCacheKeeperInspection.m AxsCacheKeeperProcessObservation.m AxsCacheKeeperCleanupJob.m AxsCacheKeeperCleanupRules.m AxsCacheKeeperReceipts.m AxsCacheKeeperCleanupSchedule.m
 CacheKeeper_CFLAGS = -fobjc-arc -IVendor
 CacheKeeper_FRAMEWORKS = UIKit Foundation
 CacheKeeper_LIBRARIES = roothide sandy substrate

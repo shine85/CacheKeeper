@@ -3,7 +3,7 @@
 
 // 平台缓存规则修订：Library/Caches 与 tmp 按平台缓存用途约定清理；修订变化使旧 job 失效。
 static NSString * const AxsCacheKeeperPlatformCacheRuleID = @"platform-cache";
-static NSString * const AxsCacheKeeperPlatformCacheRuleRevision = @"1";
+static NSString * const AxsCacheKeeperPlatformCacheRuleRevision = @"2";
 static NSString * const AxsCacheKeeperUserLogRuleID = @"user-log";
 static NSString * const AxsCacheKeeperUserLogRuleRevision = @"1";
 
@@ -139,9 +139,22 @@ static BOOL AxsCacheKeeperRuleApplies(AxsCacheKeeperAppRule *rule, NSString *ver
     }
     // 3. 读取不完整：本轮不删除，下轮重新预检时再判（不静默跳过，也不强行删除）。
     if (evidence[@"readComplete"] && ![evidence[@"readComplete"] boolValue])
-        return [[AxsCacheKeeperCleanupDecision alloc] initWithDisposition:AxsCacheKeeperCleanupKeep
+        return [[AxsCacheKeeperCleanupDecision alloc] initWithDisposition:AxsCacheKeeperCleanupDefer
             basis:AxsCacheKeeperCleanupBasisNone ruleID:@"read-incomplete" ruleRevision:@""
             scopeRelativePath:relativePath reason:@"内容读取不完整，本轮不删除" dependencyPaths:@[]];
+    // 精确 APP 范围先于平台规则，保留其依赖；允许遍历父目录不等于允许删除父树全部内容。
+    for (AxsCacheKeeperAppRule *rule in rules) {
+        if (!AxsCacheKeeperRuleApplies(rule, version)) continue;
+        NSString *cleanable = AxsCacheKeeperMatchedScope(relativePath, rule.cleanablePaths);
+        if (cleanable) return [[AxsCacheKeeperCleanupDecision alloc] initWithDisposition:AxsCacheKeeperCleanupDelete
+            basis:AxsCacheKeeperCleanupBasisAppRule ruleID:rule.ruleID ruleRevision:rule.ruleRevision
+            scopeRelativePath:cleanable reason:@"APP 专属规则：可清资源" dependencyPaths:rule.dependencyPaths];
+    }
+    NSString *parent = relativePath.stringByDeletingLastPathComponent;
+    if (parent.length && axs_cachekeeper_retention_path(parent))
+        return [[AxsCacheKeeperCleanupDecision alloc] initWithDisposition:AxsCacheKeeperCleanupKeep
+            basis:AxsCacheKeeperCleanupBasisNone ruleID:@"necessary-state" ruleRevision:@""
+            scopeRelativePath:parent reason:@"必要状态目录，未命中精确可清资源范围" dependencyPaths:@[]];
     // 4. 平台缓存：Library/Caches 与 tmp 按平台缓存用途约定清理，不按文件类型保留。
     // SQLite/无后缀文件同样可清（格式不单独证明必须保留）；顶层 Cache/Caches/.cache
     // 等同名自建目录不获得平台约定。平台缓存不依赖“全根不存在数据库”，无规则依赖。
@@ -151,14 +164,6 @@ static BOOL AxsCacheKeeperRuleApplies(AxsCacheKeeperAppRule *rule, NSString *ver
                 basis:AxsCacheKeeperCleanupBasisPlatformCache ruleID:AxsCacheKeeperPlatformCacheRuleID
                 ruleRevision:AxsCacheKeeperPlatformCacheRuleRevision scopeRelativePath:platformRoot
                 reason:@"平台缓存用途约定" dependencyPaths:@[]];
-    }
-    // 5. APP 专属规则：已验证的可清资源范围；删除前复核规则依赖（资源索引等）。
-    for (AxsCacheKeeperAppRule *rule in rules) {
-        if (!AxsCacheKeeperRuleApplies(rule, version)) continue;
-        NSString *cleanable = AxsCacheKeeperMatchedScope(relativePath, rule.cleanablePaths);
-        if (cleanable) return [[AxsCacheKeeperCleanupDecision alloc] initWithDisposition:AxsCacheKeeperCleanupDelete
-            basis:AxsCacheKeeperCleanupBasisAppRule ruleID:rule.ruleID ruleRevision:rule.ruleRevision
-            scopeRelativePath:cleanable reason:@"APP 专属规则：可清资源" dependencyPaths:rule.dependencyPaths];
     }
     // 6. 用户/插件日志定级：日志定级目录内的日志文件，且不命中任何保护事实
     //（数据证据、受保护路径成分、可识别媒体头）。mixed 不再自动意味着“只按 .log

@@ -59,6 +59,9 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
     for (AxsCacheKeeperSweep *sweep in self.sweeps) if (!sweep.complete) [sweep cancel];
     [self finishWithReason:AxsCacheKeeperCleanupEndReasonCancelled];
 }
+- (void)cancel {
+    if (self.phase != AxsCacheKeeperCleanupPhaseFinished) [self cancelJob];
+}
 
 #pragma mark - 周期推进
 
@@ -96,13 +99,18 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
         if (!gate()) { [self cancelJob]; return; }
         // 首次真实删除推进：启动 120 秒期限，只设一次、永不重置。
         // 无可删候选的根（空根/全保留/全未确认）不启动计时：它在删除推进时立即完成，不代表删除工作已开始。
-        if (self.deleteDeadline == 0 && sweep.hasDeleteCandidates) self.deleteDeadline = self.clock() + AxsCacheKeeperCleanupDeleteTimeLimit;
         NSUInteger remaining = AxsCacheKeeperCleanupRoundItemCap - self.removed;
         NSUInteger limit = MIN(perRootLimit, remaining);
         // 逐 unlink 本地复核：期限与配额（任务 3 扩展）。门控已按根采样，本根内不再重采
         // （与旧 Scanner 逐根采样一致；逐文件 FrontBoard 查询曾把单周期拖到约 10 秒，见 #42）。
         // 期限到达时不再开始新的 unlink；配额用尽时同样停手。
-        [sweep advanceDeletion:limit shouldContinue:^BOOL { return ![self deadlineHit] && self.removed < AxsCacheKeeperCleanupRoundItemCap; }];
+        [sweep advanceDeletion:limit shouldContinue:^BOOL {
+            return ![self deadlineHit] && self.removed < AxsCacheKeeperCleanupRoundItemCap;
+        } willDelete:^BOOL {
+            NSTimeInterval now = self.clock();
+            if (self.deleteDeadline == 0) self.deleteDeadline = now + AxsCacheKeeperCleanupDeleteTimeLimit;
+            return now < self.deleteDeadline && self.removed < AxsCacheKeeperCleanupRoundItemCap;
+        }];
         if (sweep.cancelled) {
             // 停手原因由作业判定：期限/配额→触顶；其余（门控已在本根采样前判定，不应到此）→取消。
             if ([self deadlineHit] || self.removed >= AxsCacheKeeperCleanupRoundItemCap) [self finishWithReason:AxsCacheKeeperCleanupEndReasonLimitReached];

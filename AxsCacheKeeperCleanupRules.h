@@ -11,8 +11,9 @@
 
 typedef NS_ENUM(NSInteger, AxsCacheKeeperCleanupDisposition) {
     AxsCacheKeeperCleanupDelete,     // 已确认可删
-    AxsCacheKeeperCleanupKeep,       // 保留（排除/已确认数据/运行必需/读取不完整）
-    AxsCacheKeeperCleanupUnresolved  // 用途未确认，不自动删除
+    AxsCacheKeeperCleanupKeep,       // 保留（排除/已确认数据/运行必需）
+    AxsCacheKeeperCleanupUnresolved, // 用途未确认，不自动删除
+    AxsCacheKeeperCleanupDefer       // 读取失败，本轮延期并报告失败
 };
 
 typedef NS_ENUM(NSInteger, AxsCacheKeeperCleanupBasis) {

@@ -26,7 +26,7 @@ static inline BOOL axs_cachekeeper_protected_path(NSString *path) {
     for (NSString *part in [path.lowercaseString componentsSeparatedByString:@"/"]) {
         for (NSString *word in @[@"documents", @"preferences", @"webkit", @"cookie", @"database", @"sqlite",
             @"realm", @"keychain", @"credential", @"login", @"account", @"auth", @"session", @"token",
-            @"downloads", @"offline", @"inbox"]) {
+            @"downloads", @"offline", @"inbox", @"draft"]) {
             if ([part containsString:word]) return YES;
         }
         if ([part isEqual:@"db"] || [part hasSuffix:@".db"] || [part containsString:@".db-"] ||
@@ -45,7 +45,7 @@ static inline BOOL axs_cachekeeper_retention_path(NSString *path) {
     for (NSString *part in [path.lowercaseString componentsSeparatedByString:@"/"]) {
         for (NSString *word in @[@"documents", @"preferences", @"webkit", @"cookie",
             @"keychain", @"credential", @"login", @"account", @"auth", @"session", @"token",
-            @"downloads", @"offline", @"inbox"]) {
+            @"downloads", @"offline", @"inbox", @"draft"]) {
             if ([part containsString:word]) return YES;
         }
     }
@@ -101,8 +101,8 @@ static inline NSString *axs_cachekeeper_directory_kind(NSString *path) {
 static inline NSString *axs_cachekeeper_directory_description(NSString *path) {
     if ([path hasPrefix:@"Group/"]) return @"App Group 共享数据：可能被其他 APP 或扩展使用；仅统计，不锁不删";
     NSDictionary *descriptions=@{
-        @"tmp":@"临时工作文件、导入导出与下载中转；仅识别出的媒体缓存可清理",
-        @"Library/Caches":@"可重建缓存；普通媒体可清理，数据库与未知内容保留",
+        @"tmp":@"按平台临时文件用途清理；保留已确认数据与手动排除，近期文件延期",
+        @"Library/Caches":@"按平台缓存用途清理，包含缓存数据库；保留已确认数据与手动排除，近期文件延期",
         @"Library/Logs":@"平台约定：日志与诊断，也可能含数据库 WAL；当前不提供清理开关，可深度检测",
         @"Library/Application Support":@"混合用途：业务数据、数据库、离线资源或缓存；未逐项验证可删性",
         @"Library/HTTPStorages":@"混合用途：网络持久化数据与会话状态；未验证可删性",
@@ -116,7 +116,8 @@ static inline NSString *axs_cachekeeper_directory_description(NSString *path) {
         @"Inbox":@"导入或共享接收的用户文件；仅查看"
     };
     if (descriptions[path]) return descriptions[path];
-    return axs_cachekeeper_cache_path(path) ? @"缓存目录；仅清理可识别的普通媒体，其他内容保留" : @"用途未确认：尚无证据证明是缓存或必需数据；退出后做全目录内容审查，无数据证据即自动清理";
+    if ([path hasPrefix:@"Library/Caches/"] || [path hasPrefix:@"tmp/"]) return @"标准缓存范围：按平台用途清理；已确认数据与手动排除优先";
+    return @"用途待识别；仅按已验证 APP 规则或日志定级处理，零证据不构成删除依据";
 }
 static inline BOOL axs_cachekeeper_ordinary_cache_file(NSString *relative) {
     return !axs_cachekeeper_protected_path(relative);

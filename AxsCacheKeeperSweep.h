@@ -22,9 +22,12 @@
 @property(nonatomic, readonly) NSUInteger inspected;
 @property(nonatomic, readonly) NSUInteger changedCount;
 @property(nonatomic, readonly) unsigned long long bytes;
-@property(nonatomic, readonly) BOOL hasDeleteCandidates; // 预检完成且有可删候选（供作业判断是否启动 120 秒计时）
+@property(nonatomic, readonly) BOOL hasDeleteCandidates; // 已预检且尚有未推进的可删候选
+@property(nonatomic, readonly) BOOL measurementComplete;
+@property(nonatomic, readonly) BOOL coverageComplete;
+- (NSDictionary *)directoryReport;
 // 剩余可删候选数（任务 5/6 最低残留展示）：预检已确认可删但本轮尚未删除的项数。
-// 触顶轮次大于 0（下轮继续），完成轮次为 0；预检完成前为 0。
+// 包括本轮删除失败而仍留存的候选；预检完成前不得把零值报告成完整测量。
 @property(nonatomic, readonly) NSUInteger remainingCandidates;
 @property(nonatomic, readonly) unsigned long long remainingBytes;
 @property(nonatomic, readonly) unsigned long long recentBytes;
@@ -42,6 +45,8 @@
 - (void)advancePreflight:(NSUInteger)limit;
 // 删除推进（方案任务 3，P1-3）：仅在预检完成后调用；预检未完成时直接返回。
 - (void)advanceDeletion:(NSUInteger)limit shouldContinue:(BOOL (^)(void))shouldContinue;
+// 本地边界：willDelete 在全部身份/年龄复核之后、实际 unlink 之前调用；不得访问 FrontBoard。
+- (void)advanceDeletion:(NSUInteger)limit shouldContinue:(BOOL (^)(void))shouldContinue willDelete:(BOOL (^)(void))willDelete;
 // 取消本根：门控关闭时由作业调用；已完成的根不受影响。
 - (void)cancel;
 // 单根兼容入口：先预检后删除（测试用；多根作业须用拆分后的接口，以保证全部根预检完成才删除）。

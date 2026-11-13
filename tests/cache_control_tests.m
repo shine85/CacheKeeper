@@ -73,6 +73,8 @@ static void writeMedia(NSString *path) {
 }
 @end
 
+extern void axs_cachekeeper_run_plan_repair_tests(NSString *fixture);
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         require(argc == 2, @"需要传入项目 tmp 内的测试目录");
@@ -389,6 +391,15 @@ int main(int argc, const char *argv[]) {
         require(delivered && !openError, @"现代文件投递保持指定应用、文件 URL 和回调契约");
         axs_cachekeeper_send_filza_document([NSObject new],[AxsTestOpenConfiguration new],@"test-payload",modernURL,^(BOOL success,NSError *error){delivered=success;openError=error;});
         require(!delivered && openError, @"目标 API 不存在时明确失败，不模拟打开成功");
+        axs_cachekeeper_send_filza_document(workspace,[NSObject new],@"test-payload",modernURL,^(BOOL success,NSError *error){delivered=success;openError=error;});
+        require(!delivered && openError, @"Filza 定向配置接口缺失明确失败");
+        axs_cachekeeper_send_filza_document(workspace,[AxsTestOpenConfiguration new],@"",modernURL,^(BOOL success,NSError *error){delivered=success;openError=error;});
+        require(!delivered && openError, @"Filza Payload 常量缺失明确失败");
+        axs_cachekeeper_send_filza_document(workspace,[AxsTestOpenConfiguration new],@"test-payload",legacyURL,^(BOOL success,NSError *error){delivered=success;openError=error;});
+        require(!delivered && openError, @"定向文档接口不投递旧 scheme");
+        workspace.expectedPath=@"/a-different-directory";
+        axs_cachekeeper_send_filza_document(workspace,[AxsTestOpenConfiguration new],@"test-payload",modernURL,^(BOOL success,NSError *error){delivered=success;openError=error;});
+        require(!delivered, @"系统拒绝 Filza 请求不得包装成成功");
         NSDictionary *automaticState=savedStates[bundle];
         NSArray *discovered=@[@"Library/Caches",@"tmp",@"Library/Logs",@"Library/Application Support",@"Group/group.example/Library/Caches"];
         require([axs_cachekeeper_effective_paths(@[@"tmp"],automaticState,discovered) isEqual:@[@"Library/Caches",@"tmp"]], @"自动发现只纳入有清理支持的缓存根并按父目录去重");
@@ -482,7 +493,7 @@ int main(int argc, const char *argv[]) {
         require(dec.disposition == AxsCacheKeeperCleanupKeep && [dec.ruleID isEqualToString:@"retention-range"], @"保留范围优先于平台规则");
         // 读取不完整 → Keep，本轮不删除。
         dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Caches/secret.log" state:emptyState evidence:incompleteEvidence];
-        require(dec.disposition == AxsCacheKeeperCleanupKeep && [dec.ruleID isEqualToString:@"read-incomplete"], @"读取不完整本轮不删除");
+        require(dec.disposition == AxsCacheKeeperCleanupDefer && [dec.ruleID isEqualToString:@"read-incomplete"], @"读取不完整本轮不删除");
         // 日志定级：日志名 + 无证据 + 无媒体头 + 不受保护 → Delete/UserLog。
         NSDictionary *logState = @{@"logPaths": @[@"Library/alog"]};
         dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/alog/app.log" state:logState evidence:cleanEvidence];
@@ -615,7 +626,7 @@ int main(int argc, const char *argv[]) {
             errno=EINVAL;return -1;
         }];
         for (NSUInteger pass=0;!failureSweep.complete && pass<20;pass++) [failureSweep advance:2 shouldContinue:^BOOL{return YES;}];
-        require(failureSweep.complete && failureSweep.removed==0 && failureSweep.failed==1 &&
+        require(failureSweep.complete && failureSweep.removed==0 && failureSweep.failed==1 && failureSweep.remainingCandidates==1 && failureSweep.remainingBytes==12 &&
             [failureSweep.error containsString:@"unlinkat"] && [failureSweep.failureDetails.firstObject[@"code"] intValue]==EINVAL &&
             [failureSweep.failureDetails.firstObject[@"stage"] isEqual:@"unlinkat"] &&
             [fm fileExistsAtPath:[errorRoot stringByAppendingPathComponent:@"old.png"]], @"真实删除返回 EINVAL 时保留文件并准确记录调用阶段，不能冒充已清理");
@@ -899,7 +910,7 @@ int main(int argc, const char *argv[]) {
             ![fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"app.log"]] &&
             [fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"inbox.log"]] &&
             [fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"data.bin"]], @"定级后受保护路径否决：inbox.log 保留、普通日志删除");
-        // 不可读文件：读取不完整是保留决定（计保护、不计失败），不是删除依据也不是失败。
+        // 不可读文件：明确失败并延期，不能伪装为正常保护或完整覆盖。
         NSString *purgeUnreadable=[fixture stringByAppendingPathComponent:@"purge-unreadable"];
         require([fm createDirectoryAtPath:purgeUnreadable withIntermediateDirectories:YES attributes:nil error:nil], @"含不可读文件的清理夹具");
         NSString *unreadableLog=[purgeUnreadable stringByAppendingPathComponent:@"secret.log"];
@@ -909,9 +920,9 @@ int main(int argc, const char *argv[]) {
         AxsCacheKeeperSweep *purgeUnreadableSweep = makeFlatSweep(purgeUnreadable, @{});
         for (NSUInteger pass=0;!purgeUnreadableSweep.complete && pass<100;pass++) [purgeUnreadableSweep advance:64 shouldContinue:^BOOL{return YES;}];
         chmod(unreadableLog.fileSystemRepresentation, 0644);
-        require(purgeUnreadableSweep.complete && purgeUnreadableSweep.failed==0 && purgeUnreadableSweep.removed==0 && purgeUnreadableSweep.protectedCount==1 && purgeUnreadableSweep.unresolvedCount==1 &&
+        require(purgeUnreadableSweep.complete && purgeUnreadableSweep.failed==1 && purgeUnreadableSweep.removed==0 && purgeUnreadableSweep.deferredCount==1 && purgeUnreadableSweep.unresolvedCount==1 &&
             [fm fileExistsAtPath:unreadableLog] &&
-            [fm fileExistsAtPath:[purgeUnreadable stringByAppendingPathComponent:@"thumb.png"]], @"不可读文件读取不完整计保护、其余未确认，全部保留");
+            [fm fileExistsAtPath:[purgeUnreadable stringByAppendingPathComponent:@"thumb.png"]], @"不可读文件计失败并延期、其余未确认，全部保留待重试");
         // 日志门媒体头否决：photo.log.jpg 挂日志名但内容是图片，按文件头否决，真日志仍可删。
         NSString *logMediaDir=[fixture stringByAppendingPathComponent:@"log-media"];
         require([fm createDirectoryAtPath:logMediaDir withIntermediateDirectories:YES attributes:nil error:nil], @"日志目录媒体夹具");
@@ -1017,7 +1028,10 @@ int main(int argc, const char *argv[]) {
         jobNow=1120;
         [job advanceCycleWithPerRootLimit:1 gate:jobGate];
         require(job.phase==AxsCacheKeeperCleanupPhaseFinished && job.endReason==AxsCacheKeeperCleanupEndReasonLimitReached && job.removed==3 &&
-            [[fm contentsOfDirectoryAtPath:jobRootA error:nil] count]==7, @"期限到达即触顶收尾，剩余 7 个文件保留");
+            jobSweepA.removed==2 && jobSweepB.removed==1 &&
+            [[fm contentsOfDirectoryAtPath:jobRootA error:nil] count]==8 && [[fm contentsOfDirectoryAtPath:jobRootB error:nil] count]==0 &&
+            job.removed + [[fm contentsOfDirectoryAtPath:jobRootA error:nil] count] + [[fm contentsOfDirectoryAtPath:jobRootB error:nil] count]==11,
+            @"期限到达即触顶：A 删 2 剩 8，B 删 1 剩 0，总量守恒 11");
         // 4. 空根不启动计时：空根 E＋有文件根 F。Ready 时期限仍为 0；首次删除推进（F）才启动。
         NSString *jobRootE=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-e"];
         NSString *jobRootF=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-f"];
@@ -1067,7 +1081,7 @@ int main(int argc, const char *argv[]) {
         jobNow=4000;
         AxsCacheKeeperCleanupJob *recentJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[recentSweep] signature:@"job-recent" instance:@"1:100" clock:jobClock];
         for (NSUInteger pass=0;recentJob.phase!=AxsCacheKeeperCleanupPhaseFinished && pass<100;pass++) [recentJob advanceCycleWithPerRootLimit:64 gate:jobGate];
-        require(recentJob.endReason==AxsCacheKeeperCleanupEndReasonCompleted && recentJob.removed==0 && recentJob.recentCount==3 && recentSweep.deferredCount==3 && recentSweep.deferredBytes==36, @"近期文件整轮完成但 0 删除，recent 计数供静默期判定；延期类 3 项 · 36 字节");
+        require(recentJob.endReason==AxsCacheKeeperCleanupEndReasonCompleted && recentJob.deleteDeadline==0 && recentJob.removed==0 && recentJob.recentCount==3 && recentSweep.deferredCount==3 && recentSweep.deferredBytes==36, @"仅近期文件不启动期限，延期类 3 项 · 36 字节");
         // 7. 门控关闭取消轮次：Ready 后门控关闭，作业取消收尾。
         NSString *cancelRoot=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-cancel"];
         require([fm createDirectoryAtPath:cancelRoot withIntermediateDirectories:YES attributes:nil error:nil], @"取消轮次夹具");
@@ -1140,19 +1154,15 @@ int main(int argc, const char *argv[]) {
         for (NSUInteger pass=0;matureJob.phase!=AxsCacheKeeperCleanupPhaseFinished && pass<100;pass++) [matureJob advanceCycleWithPerRootLimit:64 gate:jobGate];
         require(matureJob.endReason==AxsCacheKeeperCleanupEndReasonCompleted && matureJob.removed==3 && matureJob.recentCount==0 &&
             [[fm contentsOfDirectoryAtPath:recentRoot error:nil] count]==0, @"近期文件成熟后第二轮全部删除");
-        // 12. 批次中跨越期限：10 文件根单批删除，作业时钟每次调用推进 20 秒。
-        // 期限由首次删除推进的调用定为 10000＋120＝10120；逐 unlink 复核时时钟
-        // 10020/10040/10060/10080/10100 均未到期（删 5 个），第 7 次调用达 10120
-        // 即停手——期限落在每次删除前，不是只在整批前后。若 shouldContinue 恒 YES，
-        // 单批会删完 10 个、整轮 Completed，此测试即失败。
+        // 批次内期限：时间由每次真实 unlink 推进，不依赖内部检查次数。
         NSString *midRoot=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-midbatch"];
         require([fm createDirectoryAtPath:midRoot withIntermediateDirectories:YES attributes:nil error:nil], @"批次中期限夹具");
         for (int i=0;i<10;i++) writeMedia([midRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"d%d.png",i]]);
-        AxsCacheKeeperSweep *midSweep = makeSweep(midRoot, @{});
-        __block NSTimeInterval midNow = 10000;
-        __block NSUInteger midCalls = 0;
-        NSTimeInterval (^midClock)(void) = ^NSTimeInterval { midCalls++; return midNow + (midCalls - 1) * 20; };
-        AxsCacheKeeperCleanupJob *midJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[midSweep] signature:@"job-midbatch" instance:@"1:100" clock:midClock];
+        __block NSTimeInterval midNow=10000;
+        AxsCacheKeeperSweep *midSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:midRoot bundle:bundle version:@"1.0" containerPath:sweepHome state:@{} clock:^NSTimeInterval { return future; } unlinkFile:^int(int fd,const char *name) {
+            int result=unlinkat(fd,name,0); if (!result) midNow+=24; return result;
+        }];
+        AxsCacheKeeperCleanupJob *midJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[midSweep] signature:@"job-midbatch" instance:@"1:100" clock:^NSTimeInterval { return midNow; }];
         for (NSUInteger pass=0;midJob.phase!=AxsCacheKeeperCleanupPhaseFinished && pass<100;pass++) [midJob advanceCycleWithPerRootLimit:64 gate:jobGate];
         require(midJob.endReason==AxsCacheKeeperCleanupEndReasonLimitReached && midJob.removed==5 && midJob.deleteDeadline==10120 &&
             [[fm contentsOfDirectoryAtPath:midRoot error:nil] count]==5, @"批次中期限到达即停手：删 5 个、剩 5 个、触顶收尾");
@@ -1522,18 +1532,18 @@ int main(int argc, const char *argv[]) {
         require(badRootInspection.complete && [badRootProfile[@"twinFailures"] unsignedIntegerValue]==1 &&
             ![badRootProfile[@"twinCoverageComplete"] boolValue] && [badRootProfile[@"linkTwins"] count]==2, @"不可读搜索根计入孪生失败且覆盖不完整，已覆盖的孪生仍找到");
         // 任务 7：展示截断（每源 3 条）——同一源有 4 个孪生时只记 3 条并标记截断。
-        NSString *capRoot=[fixture stringByAppendingPathComponent:@"twin-cap"];
-        require([fm createDirectoryAtPath:capRoot withIntermediateDirectories:YES attributes:nil error:nil], @"展示截断夹具");
-        NSString *capFile=[capRoot stringByAppendingPathComponent:@"many.bin"];
+        NSString *twinCapRoot=[fixture stringByAppendingPathComponent:@"twin-cap"];
+        require([fm createDirectoryAtPath:twinCapRoot withIntermediateDirectories:YES attributes:nil error:nil], @"展示截断夹具");
+        NSString *capFile=[twinCapRoot stringByAppendingPathComponent:@"many.bin"];
         writeMedia(capFile);
-        NSMutableArray *capRoots=[NSMutableArray arrayWithObject:@{@"path":capRoot,@"label":@"本目录"}];
+        NSMutableArray *twinCapRoots=[NSMutableArray arrayWithObject:@{@"path":twinCapRoot,@"label":@"本目录"}];
         for (NSUInteger i=0;i<4;i++) {
             NSString *capOther=[fixture stringByAppendingPathComponent:[NSString stringWithFormat:@"twin-cap-%lu",(unsigned long)i]];
             require([fm createDirectoryAtPath:capOther withIntermediateDirectories:YES attributes:nil error:nil], @"展示截断搜索根夹具");
             require(!link(capFile.fileSystemRepresentation, [[capOther stringByAppendingPathComponent:@"copy.bin"] fileSystemRepresentation]), @"建立多链接夹具");
-            [capRoots addObject:@{@"path":capOther,@"label":[NSString stringWithFormat:@"别处%lu",(unsigned long)i]}];
+            [twinCapRoots addObject:@{@"path":capOther,@"label":[NSString stringWithFormat:@"别处%lu",(unsigned long)i]}];
         }
-        AxsCacheKeeperInspection *capInspection=[[AxsCacheKeeperInspection alloc] initWithRoot:capRoot searchRoots:capRoots];
+        AxsCacheKeeperInspection *capInspection=[[AxsCacheKeeperInspection alloc] initWithRoot:twinCapRoot searchRoots:twinCapRoots];
         for (NSUInteger pass=0;!capInspection.complete && pass<100;pass++) [capInspection advance:32];
         NSDictionary *capProfile=[capInspection report];
         require(capInspection.complete && [capProfile[@"linkTwins"] count]==3 && [capProfile[@"twinDisplayTruncated"] boolValue] &&
@@ -1669,6 +1679,7 @@ int main(int argc, const char *argv[]) {
         require([AxsCacheKeeperReceipts submitRoundForBundle:receiptBundle roundID:@"r2" removed:60 bytes:600 endReason:0 phase:@"waiting" message:@"wait" failed:0 effectivePaths:@[@"Library/Caches"] discoveredPaths:nil directories:nil round:nil coverageComplete:NO], @"覆盖翻转提交");
         receipt = [NSDictionary dictionaryWithContentsOfFile:receiptPath];
         require([receipt[@"removed"] unsignedIntegerValue]==210 && ![receipt[@"coverageComplete"] boolValue], @"覆盖翻转落盘，累计不重复计入");
+        axs_cachekeeper_run_plan_repair_tests(fixture);
         puts("PASS: configuration, modes, deduplication, age, protected files, cleanup, cancellation, permission restoration, receipts and URLCache");
     }
     return 0;

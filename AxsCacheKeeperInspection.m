@@ -199,7 +199,7 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
     BOOL covered=self.complete && !self.failures && !self.changed;
     // 孪生搜索完整性与主扫描分开报告（任务 7）：主扫描未完成时孪生源清单本身不完整，
     // 不能声称孪生已覆盖；无硬链接时孪生阶段不启动，各项计数为 0，完整性自然成立。
-    BOOL twinCovered=self.complete && !self.twinSkipped && !self.twinTruncated && !self.linkFilesTruncated && !self.twinDisplayTruncated;
+    BOOL twinCovered=covered && !self.twinSkipped && !self.twinTruncated && !self.linkFilesTruncated && !self.twinDisplayTruncated;
     NSString *evidence=@"用途仍未确认；请结合文件类型与实际功能继续核查";
     if (self.markers || self.types[@"SQLite 数据库"] || self.types[@"二进制 plist"] || self.types[@"JSON 数据"])
         evidence=@"检出数据格式或数据名称特征；不代表整个目录都是必需数据，也不能直接清空";
