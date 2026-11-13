@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import "../AxsCacheKeeperAppList.h"
+#include <math.h>
 
 static void alcheck(BOOL condition, NSString *message) {
     if (!condition) { fprintf(stderr,"FAIL: app list: %s\n",message.UTF8String);exit(1); }
@@ -19,16 +20,96 @@ static NSArray *alids(NSArray *sections) {
     return ids;
 }
 
+static void alschemawrite(NSString *folder, NSString *name, id value) {
+    NSData *data=[NSPropertyListSerialization dataWithPropertyList:value format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+    alcheck(data && [data writeToFile:[folder stringByAppendingPathComponent:name] atomically:YES],@"写入含嵌套字段的二进制来源夹具");
+}
+static id alschemavalue(NSDictionary *snapshot, NSString *name) {
+    if ([name hasPrefix:@"Status/"]) return snapshot[@"statuses"][@"test.baidu"];
+    NSDictionary *keys=@{@"appEnabled.plist":@"states",@"directories.plist":@"directories",@"favorites.plist":@"favorites",@"snapshots.plist":@"history",@"batch.plist":@"batch"};
+    return snapshot[keys[name]];
+}
+static void alschematests(Class cls, NSString *fixture, NSArray *apps) {
+    NSString *folder=[fixture stringByAppendingPathComponent:@"app-list-schema"];
+    alcheck([NSFileManager.defaultManager createDirectoryAtPath:[folder stringByAppendingPathComponent:@"Status"] withIntermediateDirectories:YES attributes:nil error:nil],@"创建来源类型夹具");
+    NSDictionary *valid=@{@"appEnabled.plist":@{@"test.baidu":@YES,@"test.swiftgram":@{@"enabled":@NO,@"urlCache":@YES,@"autoDiscover":@NO,@"restrict":@NO,@"mode":@"prevent",@"logPaths":@[@"Library/alog"],@"excludedPaths":@[@"Library/Caches/private"],@"futureField":@"preserved"}},
+        @"directories.plist":@{@"test.baidu":@[@"Library/Caches",@"Group/group.test/cache"]},@"favorites.plist":@[@"test.swiftgram"],
+        @"snapshots.plist":@{@"test.baidu":@{@"rows":@[],@"futureField":@1}},
+        @"batch.plist":@{@"remaining":@[@"test.baidu"],@"total":@1,@"completed":@0},
+        @"Status/test.baidu.auto.plist":@{@"removed":@7,@"bytes":@20,@"failed":@0,@"lastBytes":@2,@"confirmedRemoved":@3,@"confirmedBytes":@4,@"lastRemoved":@1,@"updated":[NSDate dateWithTimeIntervalSince1970:100],@"message":@"已完成"}};
+    for (NSString *name in valid) alschemawrite(folder,name,valid[name]);
+    __block NSUInteger callbacks=0;
+    __block NSDictionary *latest=nil;
+    AxsCacheKeeperAppList *source=[[cls alloc] initWithFolder:folder applicationsProvider:^NSArray *(NSError **error) {
+        (void)error;return apps;
+    } completion:^(NSDictionary *snapshot) { latest=snapshot;callbacks++; }];
+    [source requestRefreshApplications:YES];
+    alwait(^BOOL {return callbacks==1;},@"来源类型夹具先读取有效快照");
+    alcheck(![latest[@"errors"] count],@"旧NSNumber开关、缺省字段与未知扩展字段继续兼容");
+    NSMutableArray *cases=[NSMutableArray new];
+    // Place the crash-prone shape first: NSDictionary passes a container-only validator,
+    // but a string remaining value cannot receive the count selector used by Settings.
+    [cases addObject:@{@"name":@"batch.plist",@"value":@{@"remaining":@"broken"}}];
+    for (id remaining in @[@[@1],@[@"../invalid"],@{}])
+        [cases addObject:@{@"name":@"batch.plist",@"value":@{@"remaining":remaining}}];
+    for (NSString *field in @[@"total",@"completed"]) for (id bad in @[@"one",@-1,@(NAN),@(INFINITY)])
+        [cases addObject:@{@"name":@"batch.plist",@"value":@{field:bad}}];
+    for (NSString *field in @[@"removed",@"bytes",@"failed",@"lastBytes",@"confirmedRemoved",@"confirmedBytes",@"lastRemoved"])
+        for (id bad in @[@[],@-1,@(NAN),@(INFINITY)])
+            [cases addObject:@{@"name":@"Status/test.baidu.auto.plist",@"value":@{field:bad}}];
+    [cases addObject:@{@"name":@"Status/test.baidu.auto.plist",@"value":@{@"updated":@1}}];
+    [cases addObject:@{@"name":@"Status/test.baidu.auto.plist",@"value":@{@"message":@[]}}];
+    [cases addObject:@{@"name":@"appEnabled.plist",@"value":@{@"test.baidu":@"enabled"}}];
+    for (NSString *field in @[@"enabled",@"urlCache",@"autoDiscover",@"restrict"])
+        [cases addObject:@{@"name":@"appEnabled.plist",@"value":@{@"test.baidu":@{field:@"true"}}}];
+    [cases addObject:@{@"name":@"appEnabled.plist",@"value":@{@"test.baidu":@{@"mode":@"unknown"}}}];
+    for (NSString *field in @[@"logPaths",@"excludedPaths"]) for (id bad in @[@"Library/Caches",@[@1],@[@"../outside"],@[@"/var/mobile"]])
+        [cases addObject:@{@"name":@"appEnabled.plist",@"value":@{@"test.baidu":@{field:bad}}}];
+    for (id bad in @[@"Library/Caches",@[@1],@[@"../outside"],@[@"/var/mobile"]])
+        [cases addObject:@{@"name":@"directories.plist",@"value":@{@"test.baidu":bad}}];
+    [cases addObject:@{@"name":@"snapshots.plist",@"value":@{@"test.baidu":@NO}}];
+    [cases addObject:@{@"name":@"snapshots.plist",@"value":@{@"test.baidu":@{@"rows":@1}}}];
+    [cases addObject:@{@"name":@"favorites.plist",@"value":@[@1]}];
+    for (NSDictionary *test in cases) {
+        NSString *name=test[@"name"], *path=[folder stringByAppendingPathComponent:name];
+        alschemawrite(folder,name,test[@"value"]);
+        NSData *original=[NSData dataWithContentsOfFile:path];
+        NSUInteger target=callbacks+1;
+        [source requestRefreshApplications:NO];
+        alwait(^BOOL {return callbacks==target;},@"坏字段读取应完成并报告");
+        alcheck([alschemavalue(latest,name) isEqual:valid[name]] && latest[@"errors"][name],
+            [NSString stringWithFormat:@"%@ 坏嵌套字段必须保留整个文件的最后有效快照",name]);
+        NSError *error=nil;
+        id read=[cls axs_cachekeeper_read_source_at_path:path name:name error:&error];
+        alcheck(!read && error,@"同步写入入口必须重读并拒绝快照之后变坏的实际文件");
+        alcheck([[NSData dataWithContentsOfFile:path] isEqual:original],@"验证失败不能改写坏文件");
+        alschemawrite(folder,name,valid[name]);
+        target=callbacks+1;[source requestRefreshApplications:NO];
+        alwait(^BOOL {return callbacks==target;},@"坏字段修复后来源可恢复");
+        alcheck([alschemavalue(latest,name) isEqual:valid[name]] && !latest[@"errors"][name],@"恢复合法内容后清除该来源错误");
+    }
+    for (NSString *name in @[@"batch.plist",@"appEnabled.plist",@"directories.plist",@"snapshots.plist",@"Status/test.baidu.auto.plist"]) {
+        alschemawrite(folder,name,@{});
+        NSError *error=nil;
+        id empty=[cls axs_cachekeeper_read_source_at_path:[folder stringByAppendingPathComponent:name] name:name error:&error];
+        alcheck([empty isEqual:@{}] && !error,@"合法缺省字段不能被新schema拒绝");
+    }
+    NSError *missingError=nil;
+    alcheck(![cls axs_cachekeeper_read_source_at_path:[folder stringByAppendingPathComponent:@"absent.plist"] name:@"batch.plist" error:&missingError] && !missingError,@"写入边界区分缺文件与损坏文件");
+    [source invalidate];
+}
+
 void axs_cachekeeper_run_app_list_tests(NSString *fixture) {
     Class cls=NSClassFromString(@"AxsCacheKeeperAppList");
     alcheck(cls!=Nil,@"必须提供异步列表来源，不能在输入回调同步枚举和读配置");
     alcheck(NSThread.isMainThread,@"测试从主线程驱动 UI 调度契约");
     NSArray *apps=@[@{@"id":@"test.baidu",@"name":@"百度",@"pinyin":@"bai du",@"source":@"user"},
         @{@"id":@"test.swiftgram",@"name":@"Swiftgram",@"pinyin":@"Swiftgram",@"source":@"troll"}];
-    NSDictionary *states=@{@"test.baidu":@{@"enabled":@YES},@"test.swiftgram":@{@"enabled":@NO}};
+    NSDictionary *states=@{@"test.baidu":@{@"enabled":@YES},@"test.swiftgram":@{@"enabled":@NO},@"test.missing":@YES};
     NSSet *favorites=[NSSet setWithObject:@"test.swiftgram"];
     alcheck([alids([cls sectionsForApps:apps states:states favorites:favorites tab:1 query:@"百度"]) isEqual:@[@"test.baidu"]],@"中文搜索只在当前分类过滤");
     alcheck([alids([cls sectionsForApps:apps states:states favorites:favorites tab:1 query:@"BAI"]) isEqual:@[@"test.baidu"]],@"拼音搜索忽略大小写");
+    alcheck([alids([cls sectionsForApps:apps states:states favorites:favorites tab:1 query:@"baidu"]) isEqual:@[@"test.baidu"]],@"连续拼音匹配系统转写中的音节空格");
     alcheck([alids([cls sectionsForApps:apps states:states favorites:favorites tab:3 query:@"test.swift"]) isEqual:@[@"test.swiftgram"]],@"收藏分类允许按包名过滤");
     alcheck([alids([cls sectionsForApps:apps states:states favorites:favorites tab:0 query:@""]) isEqual:@[@"test.baidu"]],@"清空搜索恢复开启项");
 
@@ -105,6 +186,7 @@ void axs_cachekeeper_run_app_list_tests(NSString *fixture) {
     [source requestRefreshApplications:YES];
     alwait(^BOOL {return snapshots==1;},@"载入完整列表来源");
     alcheck([latest[@"states"] isEqual:states] && [latest[@"statuses"][@"test.baidu"][@"removed"] isEqual:@7],@"配置和启用项回执一起进入内存快照");
+    alcheck(!latest[@"statuses"][@"test.missing"],@"没有回执的已开启项不能伪造累计清理零字节");
     alcheck([latest[@"apps"] isEqual:apps] && ![latest[@"errors"] count],@"有效来源保留应用列表且无错误");
     for (NSUInteger i=0;i<30;i++) [cls sectionsForApps:latest[@"apps"] states:latest[@"states"] favorites:favorites tab:i%4 query:@"b"];
     alcheck(appReads==1,@"输入与分类切换不发起来源调用");
@@ -122,5 +204,16 @@ void axs_cachekeeper_run_app_list_tests(NSString *fixture) {
     [source requestRefreshApplications:YES];
     alwait(^BOOL {return snapshots==4;},@"失败后可恢复刷新");
     alcheck(![latest[@"states"] count] && ![latest[@"statuses"] count] && ![latest[@"errors"] count],@"有效空配置替换旧值，清除过期回执与错误");
+    NSString *favoritePath=[folder stringByAppendingPathComponent:@"favorites.plist"];
+    alcheck([NSFileManager.defaultManager removeItemAtPath:favoritePath error:nil] &&
+        [NSFileManager.defaultManager createDirectoryAtPath:favoritePath withIntermediateDirectories:NO attributes:nil error:nil],@"用非普通文件模拟不可读来源");
+    [source requestRefreshApplications:NO];
+    alwait(^BOOL {return snapshots==5;},@"非普通文件来源会返回明确错误");
+    alcheck([latest[@"favorites"] isEqual:@[@"test.swiftgram"]] && latest[@"errors"][@"favorites.plist"],@"不能把文件访问错误当作空收藏");
+    alcheck([NSFileManager.defaultManager removeItemAtPath:favoritePath error:nil],@"删除列表夹具中的异常来源");
+    [source requestRefreshApplications:NO];
+    alwait(^BOOL {return snapshots==6;},@"真实删除的来源应刷新为空");
+    alcheck(![latest[@"favorites"] count] && !latest[@"errors"][@"favorites.plist"],@"ENOENT 清除过期收藏，不无限显示旧值");
     [slow invalidate];[coalesced invalidate];[generation invalidate];[source invalidate];
+    alschematests(cls,fixture,apps);
 }

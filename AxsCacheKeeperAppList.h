@@ -16,5 +16,7 @@ typedef void (^AxsCacheKeeperAppListCompletion)(NSDictionary *snapshot);
 - (void)requestRefreshApplications:(BOOL)refreshApplications;
 // Invalidates in-flight delivery and pending work; the next request can start a new generation.
 - (void)invalidate;
+// Read and validate the actual file before a write. Missing file: nil/no error; invalid or unreadable: nil/error.
++ (id)axs_cachekeeper_read_source_at_path:(NSString *)path name:(NSString *)name error:(NSError **)error;
 + (NSArray<NSDictionary *> *)sectionsForApps:(NSArray<NSDictionary *> *)apps states:(NSDictionary *)states favorites:(NSSet<NSString *> *)favorites tab:(NSInteger)tab query:(NSString *)query;
 @end
