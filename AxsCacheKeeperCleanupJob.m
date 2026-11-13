@@ -21,6 +21,7 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
         _sweeps = [sweeps copy];
         _signature = [signature copy];
         _instance = [instance copy];
+        _roundID = NSUUID.UUID.UUIDString;
         _clock = [clock copy];
         _phase = AxsCacheKeeperCleanupPhaseChecking;
         _endReason = AxsCacheKeeperCleanupEndReasonNone;
@@ -38,8 +39,10 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
 - (NSUInteger)recentCount { NSUInteger total = 0; for (AxsCacheKeeperSweep *s in self.sweeps) total += s.recentCount; return total; }
 - (NSUInteger)inspected { NSUInteger total = 0; for (AxsCacheKeeperSweep *s in self.sweeps) total += s.inspected; return total; }
 - (unsigned long long)bytes { unsigned long long total = 0; for (AxsCacheKeeperSweep *s in self.sweeps) total += s.bytes; return total; }
-- (BOOL)hasMixedPurge { for (AxsCacheKeeperSweep *s in self.sweeps) if (s.purgeMixed) return YES; return NO; }
-- (NSUInteger)mixedPurgeRemoved { NSUInteger total = 0; for (AxsCacheKeeperSweep *s in self.sweeps) if (s.purgeMixed) total += s.removed; return total; }
+- (BOOL)hasUnresolved { for (AxsCacheKeeperSweep *s in self.sweeps) if (s.unresolvedCount > 0) return YES; return NO; }
+- (NSUInteger)unresolvedCount { NSUInteger total = 0; for (AxsCacheKeeperSweep *s in self.sweeps) total += s.unresolvedCount; return total; }
+- (unsigned long long)unresolvedBytes { unsigned long long total = 0; for (AxsCacheKeeperSweep *s in self.sweeps) total += s.unresolvedBytes; return total; }
+- (BOOL)partial { return self.failed > 0 || self.changedCount > 0 || self.unresolvedCount > 0; }
 
 #pragma mark - 内部
 
@@ -92,13 +95,20 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
         }
         if (!gate()) { [self cancelJob]; return; }
         // 首次真实删除推进：启动 120 秒期限，只设一次、永不重置。
-        // 空根（预检 0 项）不启动计时：它在删除推进时立即完成，不代表删除工作已开始。
-        if (self.deleteDeadline == 0 && sweep.inspected > 0) self.deleteDeadline = self.clock() + AxsCacheKeeperCleanupDeleteTimeLimit;
+        // 无可删候选的根（空根/全保留/全未确认）不启动计时：它在删除推进时立即完成，不代表删除工作已开始。
+        if (self.deleteDeadline == 0 && sweep.hasDeleteCandidates) self.deleteDeadline = self.clock() + AxsCacheKeeperCleanupDeleteTimeLimit;
         NSUInteger remaining = AxsCacheKeeperCleanupRoundItemCap - self.removed;
         NSUInteger limit = MIN(perRootLimit, remaining);
-        // 门控已按根采样，本根内不再重采（与旧 Scanner 逐根采样一致）。
-        [sweep advanceDeletion:limit shouldContinue:^BOOL { return YES; }];
-        if (sweep.cancelled) { [self cancelJob]; return; }
+        // 逐 unlink 本地复核：期限与配额（任务 3 扩展）。门控已按根采样，本根内不再重采
+        // （与旧 Scanner 逐根采样一致；逐文件 FrontBoard 查询曾把单周期拖到约 10 秒，见 #42）。
+        // 期限到达时不再开始新的 unlink；配额用尽时同样停手。
+        [sweep advanceDeletion:limit shouldContinue:^BOOL { return ![self deadlineHit] && self.removed < AxsCacheKeeperCleanupRoundItemCap; }];
+        if (sweep.cancelled) {
+            // 停手原因由作业判定：期限/配额→触顶；其余（门控已在本根采样前判定，不应到此）→取消。
+            if ([self deadlineHit] || self.removed >= AxsCacheKeeperCleanupRoundItemCap) [self finishWithReason:AxsCacheKeeperCleanupEndReasonLimitReached];
+            else [self cancelJob];
+            return;
+        }
         if ([self deadlineHit] || self.removed >= AxsCacheKeeperCleanupRoundItemCap) {
             [self finishWithReason:AxsCacheKeeperCleanupEndReasonLimitReached];
             return;
@@ -106,7 +116,9 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
     }
     BOOL allComplete = YES;
     for (AxsCacheKeeperSweep *sweep in self.sweeps) if (!sweep.complete) { allComplete = NO; break; }
-    if (allComplete) [self finishWithReason:AxsCacheKeeperCleanupEndReasonCompleted];
+    // 全部根完成：有未确认残留→Unresolved（部分完成）；否则 Completed。
+    // 失败/变化的范围不阻塞其他已备好的范围，但轮次只报部分完成（见 partial）。
+    if (allComplete) [self finishWithReason:self.unresolvedCount > 0 ? AxsCacheKeeperCleanupEndReasonUnresolved : AxsCacheKeeperCleanupEndReasonCompleted];
 }
 
 @end

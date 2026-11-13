@@ -20,12 +20,15 @@ static NSString *jbroot(NSString *path) {
 // 权限记录 permissions.plist 由两方共用：旧版残留权限的恢复，以及只禁止模式的目录写锁
 // （用户 2026-11-11 在对话中确认：选了只禁止就同时锁已选缓存目录；仅在 APP 完全退出后上锁/解锁，
 // 关模式、关总开关或卸载时按记录恢复。记录格式 {inode, device, mode} 两方通用。）
+// 任务 9 起生产侧不再新施加写锁（lock_paths 仅供测试验证记录机制），本文件只剩恢复路径在用：
+// 每轮恢复全部记录；恢复失败只拦受影响的范围（见 failedPaths），不再一并拦下全部 APP。
 NSDictionary *axs_cachekeeper_restore_paths(NSArray *paths, NSString *file) {
     NSDictionary *stored = [NSDictionary dictionaryWithContentsOfFile:file];
     if ((!stored && [NSFileManager.defaultManager fileExistsAtPath:file]) || !file.length)
-        return @{@"failed":@1, @"applied":@0, @"error":@"权限恢复记录不可读"};
+        return @{@"failed":@1, @"applied":@0, @"failedPaths":@[], @"error":@"权限恢复记录不可读"};
     NSMutableDictionary *records = [stored mutableCopy] ?: [NSMutableDictionary new];
     NSUInteger applied = 0, failed = 0;
+    NSMutableArray *failedPaths = [NSMutableArray new];
     NSString *message = @"";
     for (NSString *path in (paths ?: records.allKeys)) {
         NSDictionary *saved = records[path];
@@ -33,35 +36,37 @@ NSDictionary *axs_cachekeeper_restore_paths(NSArray *paths, NSString *file) {
         if (![path isKindOfClass:NSString.class] || ![saved isKindOfClass:NSDictionary.class] ||
             ![saved[@"inode"] isKindOfClass:NSNumber.class] || ![saved[@"device"] isKindOfClass:NSNumber.class] ||
             ![saved[@"mode"] isKindOfClass:NSNumber.class]) {
-            failed++; message = @"原权限记录损坏，保留记录等待修复"; continue;
+            failed++; [failedPaths addObject:path]; message = @"原权限记录损坏，保留记录等待修复"; continue;
         }
         int fd = axs_cachekeeper_open_directory(path);
         if (fd < 0 && errno == ENOTDIR) fd = axs_cachekeeper_open_regular_file(path);
         if (fd < 0) {
             if (errno == ENOENT) { [records removeObjectForKey:path]; continue; }
-            failed++; message = [NSString stringWithFormat:@"恢复条目访问失败（errno %d）", errno]; continue;
+            failed++; [failedPaths addObject:path]; message = [NSString stringWithFormat:@"恢复条目访问失败（errno %d）", errno]; continue;
         }
         struct stat info;
-        if (fstat(fd, &info)) { failed++; message = @"无法核对条目身份"; close(fd); continue; }
+        if (fstat(fd, &info)) { failed++; [failedPaths addObject:path]; message = @"无法核对条目身份"; close(fd); continue; }
         if (!S_ISDIR(info.st_mode) && !S_ISREG(info.st_mode)) {
-            failed++; message = @"条目类型异常，保留记录等待修复"; close(fd); continue;
+            failed++; [failedPaths addObject:path]; message = @"条目类型异常，保留记录等待修复"; close(fd); continue;
         }
         if ([saved[@"inode"] unsignedLongLongValue] != info.st_ino || [saved[@"device"] unsignedLongLongValue] != info.st_dev) {
             [records removeObjectForKey:path]; close(fd); continue;
         }
         mode_t mode = [saved[@"mode"] unsignedIntValue] & 07777;
         if (fchmod(fd, mode) || fstat(fd, &info) || (info.st_mode & 07777) != mode) {
-            failed++; message = [NSString stringWithFormat:@"恢复原权限失败（errno %d）", errno];
+            failed++; [failedPaths addObject:path]; message = [NSString stringWithFormat:@"恢复原权限失败（errno %d）", errno];
         } else { applied++; [records removeObjectForKey:path]; }
         close(fd);
     }
     if (![records isEqual:stored ?: @{}] && ![records writeToFile:file atomically:YES]) {
         failed++; message = @"恢复记录保存失败，将在下次重试";
     }
-    return @{@"failed":@(failed), @"applied":@(applied), @"error":message};
+    return @{@"failed":@(failed), @"applied":@(applied), @"failedPaths":failedPaths, @"error":message};
 }
 // 只禁止模式的目录写锁：先把未记录条目的原始权限写入记录并落盘，再逐项去掉写权限并核对；
 // 任一项失败回滚本轮已改条目。已无写权限的条目跳过，重复调用只补锁被改回的条目。
+// 任务 9 起生产侧不再新施加写锁（Scanner 不再调用本函数）；保留本函数供测试验证
+// 记录机制（记录格式与恢复路径共用），以及未来确有需要的定向锁定时复用。
 NSDictionary *axs_cachekeeper_lock_paths(NSArray *roots, NSString *file) {
     NSDictionary *stored = [NSDictionary dictionaryWithContentsOfFile:file];
     if ((!stored && [NSFileManager.defaultManager fileExistsAtPath:file]) || !file.length)
@@ -137,7 +142,7 @@ NSDictionary *axs_cachekeeper_lock_paths(NSArray *roots, NSString *file) {
     return @{@"failed":@0, @"locked":@(changed.count), @"error":@""};
 }
 NSDictionary *CKPermissions(NSURL *home, BOOL enabled) {
-    if (enabled) return @{@"failed":@1,@"error":@"目录写锁由桌面进程按只禁止模式统一处理，此入口不执行锁定"};
+    if (enabled) return @{@"failed":@1,@"error":@"目录写锁已停止新施加，旧记录由桌面进程按记录恢复，此入口不执行锁定"};
     NSString *journal = jbroot(@"/var/mobile/Library/CacheKeeper/permissions.plist");
     NSArray *paths = nil;
     if (home) {

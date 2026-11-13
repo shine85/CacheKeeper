@@ -88,14 +88,30 @@
     NSMutableString *text=[NSMutableString stringWithFormat:@"%@\n\n完整枚举本目录，每个普通文件读取最多 4 KB 文件头；不设总文件数上限。链接与敏感目录跳过，不修改 APP 文件。点击右上角深度检测开始，也可再次检测。\n\n",self.relative];
     if (self.requestError.length) [text appendFormat:@"%@\n\n",self.requestError];
     if (self.stopping) [text appendString:@"已请求停止，等待当前请求的停止回执。\n\n"];
-    NSDictionary *cleanup=[NSDictionary dictionaryWithContentsOfFile:[self axs_cachekeeper_file:[NSString stringWithFormat:@"Status/%@.auto.plist",self.bundle]]][@"directories"][self.relative];
-    if (cleanup) [text appendFormat:@"最近一轮清理记录（%@）：%@\n删除 %@ 个文件 · %.2f MB；保留受保护／未知 %@ 项、近期文件 %@ 项，变化目录 %@ 项，失败 %@ 项。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),[cleanup[@"cancelled"] boolValue] ? @"已中止" : [cleanup[@"complete"] boolValue] ? @"检查完成" : @"尚未完成",cleanup[@"removed"],[cleanup[@"bytes"] doubleValue]/1048576,cleanup[@"protected"],cleanup[@"recent"],cleanup[@"changed"],cleanup[@"failed"],cleanup[@"error"] ?: @""];
+    NSDictionary *autoReport=[NSDictionary dictionaryWithContentsOfFile:[self axs_cachekeeper_file:[NSString stringWithFormat:@"Status/%@.auto.plist",self.bundle]]];
+    NSDictionary *cleanup=autoReport[@"directories"][self.relative];
+    if (cleanup) {
+        // 轮次状态按残留推导（任务 5）：覆盖不完整或有未确认残留时不显示"完成"，
+        // 零删除也不冒充"已经干净"；残留三类互斥（待处理/延期/待识别），失败是独立诊断。
+        // 结转报告（skipped）本轮未重扫：只显示已登记的未确认残留，未测量字段不写 0。
+        BOOL skipped=[cleanup[@"skipped"] boolValue];
+        NSUInteger deferred=cleanup[@"deferred"] ? [cleanup[@"deferred"] unsignedIntegerValue] : [cleanup[@"recent"] unsignedIntegerValue] + [cleanup[@"changed"] unsignedIntegerValue];
+        NSString *roundState;
+        if (skipped) roundState=@"本轮未重扫（残留为上轮登记）";
+        else if ([cleanup[@"cancelled"] boolValue]) roundState=@"已中止";
+        else if (![cleanup[@"complete"] boolValue]) roundState=@"尚未完成";
+        else if ([cleanup[@"failed"] unsignedIntegerValue]) roundState=[NSString stringWithFormat:@"失败（%@ 项）",cleanup[@"failed"]];
+        else if (![autoReport[@"coverageComplete"] boolValue]) roundState=@"发现不完整（本轮未覆盖全部范围）";
+        else if ([cleanup[@"unresolved"] unsignedIntegerValue]) roundState=@"待识别";
+        else if (deferred) roundState=@"等待延期文件";
+        else if ([cleanup[@"remaining"] unsignedIntegerValue]) roundState=[NSString stringWithFormat:@"部分完成（待处理 %@ 项）",cleanup[@"remaining"]];
+        else roundState=@"完成";
+        if (skipped) [text appendFormat:@"最近一轮清理记录（%@）：%@\n删除 %@ 个文件 · %.2f MB；待识别 %@ 项 · %.2f MB。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),roundState,cleanup[@"removed"] ?: @0,[cleanup[@"bytes"] doubleValue]/1048576,cleanup[@"unresolved"] ?: @0,[cleanup[@"unresolvedBytes"] doubleValue]/1048576,cleanup[@"error"] ?: @""];
+        else [text appendFormat:@"最近一轮清理记录（%@）：%@\n删除 %@ 个文件 · %.2f MB；保留受保护 %@ 项，延期 %lu 项 · %.2f MB，失败 %@ 项，待识别 %@ 项 · %.2f MB，待处理 %@ 项 · %.2f MB。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),roundState,cleanup[@"removed"] ?: @0,[cleanup[@"bytes"] doubleValue]/1048576,cleanup[@"protected"] ?: @0,(unsigned long)deferred,[cleanup[@"deferredBytes"] doubleValue]/1048576,cleanup[@"failed"] ?: @0,cleanup[@"unresolved"] ?: @0,[cleanup[@"unresolvedBytes"] doubleValue]/1048576,cleanup[@"remaining"] ?: @0,[cleanup[@"remainingBytes"] doubleValue]/1048576,cleanup[@"error"] ?: @""];
+    }
     else [text appendString:@"本目录尚无清理回执；占用减少不能据此归因于插件。\n\n"];
-    if ([cleanup[@"purgeClassification"] isEqual:@"blocked"]) [text appendFormat:@"内容审查：整根保留，检出数据证据于 %@。\n\n",cleanup[@"purgeEvidence"] ?: @""];
-    else if ([cleanup[@"purgeClassification"] isEqual:@"mixed"]) [text appendFormat:@"内容审查：混合目录，仅清理日志文件；首条证据 %@。\n\n",cleanup[@"purgeEvidence"] ?: @""];
-    else if ([cleanup[@"purgeClassification"] isEqual:@"invalid"]) [text appendFormat:@"内容审查：分类已失效，预检后内容变化，本轮延期，下轮重新预检；触发条目 %@。\n\n",cleanup[@"purgeEvidence"] ?: @""];
+    if ([cleanup[@"purgeClassification"] isEqual:@"invalid"]) [text appendFormat:@"内容审查：规则依赖已变化（%@），相关范围本轮延期，下轮重新预检。\n\n",cleanup[@"purgeEvidence"] ?: @""];
     else if ([cleanup[@"purgeClassification"] isEqual:@"paused"]) [text appendString:@"内容审查：未知内容待识别，暂不自动清理；专属识别规则后续按占用补充。\n\n"];
-    else if ([cleanup[@"purgeClassification"] isEqual:@"clean"]) [text appendString:@"内容审查：无数据证据。\n\n"];
     if ([self axs_cachekeeper_judged]) [text appendString:@"本目录已定级为日志目录：该 APP 完全退出后，仅清理本目录内的日志特征文件（.log/.alog/.xlog），数据与未知内容保留；可在本页取消定级。\n\n"];
     for (NSDictionary *failure in cleanup[@"failureDetails"]) [text appendFormat:@"失败样本：%@ · errno %@\n%@\n%@\n\n",failure[@"stage"],failure[@"code"],failure[@"path"],failure[@"detail"]];
     if (![report[@"path"] isEqual:self.relative] || (self.token && ![report[@"token"] isEqual:self.token])) {
@@ -109,15 +125,25 @@
     NSString *linkDetail=report[@"hardLinks"] ? [NSString stringWithFormat:@"跳过链接 %@ 项（硬链接 %@ 项、符号链接 %@ 项）",report[@"links"] ?: @0,report[@"hardLinks"] ?: @0,report[@"symlinks"] ?: @0] : [NSString stringWithFormat:@"跳过链接 %@ 项",report[@"links"] ?: @0];
     [text appendFormat:@"读取失败 %@ 项；扫描中变化 %@ 项；%@、敏感目录 %@ 项。\n%@\n",report[@"failures"] ?: @0,report[@"changed"] ?: @0,linkDetail,report[@"hidden"] ?: @0,report[@"error"] ?: @""];
     NSArray *twins=report[@"linkTwins"];
+    // 孪生搜索状态（任务 7）：主扫描与孪生搜索的完整性分开报告；0 匹配时同样展示
+    // 搜索失败与截断，不让"未找到"看起来像"已确认无孪生"。三类截断分别标明：
+    // 源收集（硬链接源文件超 100 仅记前 100）、搜索（扫描超 10 万项）、展示（每源 3 条/总 50 条）。
+    NSMutableArray *twinStatus=[NSMutableArray new];
+    if ([report[@"twinCoverageComplete"] boolValue]) [twinStatus addObject:@"孪生搜索覆盖完整"];
+    else [twinStatus addObject:@"孪生搜索未完整覆盖"];
+    if ([report[@"twinFailures"] unsignedIntegerValue]) [twinStatus addObject:[NSString stringWithFormat:@"搜索失败 %@ 项",report[@"twinFailures"]]];
+    if ([report[@"linkFilesTruncated"] boolValue]) [twinStatus addObject:@"源收集已截断（硬链接源文件超 100）"];
+    if ([report[@"twinScanTruncated"] boolValue]) [twinStatus addObject:@"搜索已截断（扫描超 10 万项）"];
+    if ([report[@"twinDisplayTruncated"] boolValue]) [twinStatus addObject:@"展示已截断（每源 3 条/总 50 条）"];
+    NSString *twinStatusLine=[twinStatus componentsJoinedByString:@"；"];
     if ([twins isKindOfClass:NSArray.class] && twins.count) {
-        [text appendFormat:@"\n硬链接孪生：%lu 处，涉及 %.2f MB（只删本目录这边不释放空间）：\n",(unsigned long)twins.count,[report[@"twinBytes"] doubleValue]/1048576];
+        [text appendFormat:@"\n硬链接孪生：%lu 处，涉及 %.2f MB（逻辑关联大小，按设备＋inode 去重，非实测释放空间）：\n",(unsigned long)twins.count,[report[@"twinBytes"] doubleValue]/1048576];
         NSUInteger shown=MIN(twins.count,(NSUInteger)20);
         for (NSUInteger i=0;i<shown;i++) [text appendFormat:@"%@ → %@\n",twins[i][@"source"],twins[i][@"twin"]];
         if (twins.count>shown) [text appendFormat:@"…等 %lu 处\n",(unsigned long)(twins.count-shown)];
-        if ([report[@"twinScanTruncated"] boolValue]) [text appendString:@"孪生扫描达到上限，未完全覆盖。\n"];
-        [text appendString:@"\n"];
+        [text appendFormat:@"%@。\n清理跳过硬链接文件：只删本目录这边的链接不释放空间（数据仍被其他位置的链接占用）。\n\n",twinStatusLine];
     } else if ([report[@"hardLinks"] unsignedIntegerValue]) {
-        [text appendString:@"硬链接文件未在其余位置找到孪生：可能孪生已被删除，或位于本次未覆盖的位置。\n\n"];
+        [text appendFormat:@"硬链接文件未在其余位置找到孪生：可能孪生已被删除，或位于本次未覆盖的位置。\n%@。\n\n",twinStatusLine];
     }
     [text appendString:@"\n文件类型组成：\n"];
     for (NSString *kind in [report[@"types"] allKeys]) [text appendFormat:@"%@：%@ 个 · %.2f MB\n",kind,report[@"types"][kind][@"count"],[report[@"types"][kind][@"bytes"] doubleValue]/1048576];

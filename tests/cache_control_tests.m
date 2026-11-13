@@ -4,6 +4,7 @@
 #import "../AxsCacheKeeperPolicy.h"
 #import "../AxsCacheKeeperFileAccess.h"
 #import "../AxsCacheKeeperSweep.h"
+#import "../AxsCacheKeeperCleanupRules.h"
 #import "../AxsCacheKeeperNetworkCache.h"
 #import "../AxsCacheKeeperDirectories.h"
 #import "../AxsCacheKeeperSelection.h"
@@ -11,6 +12,7 @@
 #import "../AxsCacheKeeperProcess.h"
 #import "../AxsCacheKeeperProcessObservation.h"
 #import "../AxsCacheKeeperCleanupJob.h"
+#import "../AxsCacheKeeperReceipts.h"
 #import "../AxsCacheKeeperInspection.h"
 #import "../AxsCacheKeeperProbe.h"
 #import "../AxsCacheKeeperFileAccess.h"
@@ -37,13 +39,7 @@ static void writeMedia(NSString *path) {
 @end
 @implementation AxsTestProcessState
 @end
-// 数据安全测试白盒入口：仅用于验证删除阶段重标混合（审计第 2 项）。文件级稳定性门
-//（inode/设备/mtime/ctime）已拦下预检后被改写的文件，黑盒无法让带新证据的文件走到
-// 删除门，故直接刷新预检记录以单独验证复核逻辑。
-@interface AxsCacheKeeperSweep (DataSafetyTestAccess)
-@property(nonatomic,strong) NSMutableDictionary<NSString *,NSMutableDictionary *> *fileSnapshots;
-- (NSArray *)axs_cachekeeper_snapshot:(struct stat)info;
-@end
+
 @interface AxsTestProcess : NSObject
 @property(nonatomic,copy) NSString *bundleIdentifier;
 @property(nonatomic) BOOL running;
@@ -233,7 +229,7 @@ int main(int argc, const char *argv[]) {
         require(!axs_cachekeeper_url_cache_enabled(axs_cachekeeper_app_state(nil,YES)), @"新 APP 网络缓存选项默认关闭");
         require(axs_cachekeeper_url_cache_enabled(explicitOn), @"现有已开启自动模式保持原有网络行为");
         NSDictionary *networkOff=@{@"enabled":@YES,@"mode":@"auto",@"urlCache":@NO};
-        require(!axs_cachekeeper_should_prevent(networkOff) && axs_cachekeeper_wants_cleanup(networkOff), @"关闭独立网络开关不关闭自动清理");
+        require(!axs_cachekeeper_should_prevent(networkOff) && axs_cachekeeper_can_clean(selection, @{bundle:networkOff}, bundle), @"关闭独立网络开关不关闭自动清理");
         require(!axs_cachekeeper_url_cache_enabled(axs_cachekeeper_app_state(networkOff,NO)), @"修改总开关保留网络选项");
         require(!axs_cachekeeper_activation_paths(nil).count &&
             !axs_cachekeeper_activation_paths(@[]).count, @"新 APP 不默认选择缓存目录，空选择也保持为空");
@@ -241,22 +237,14 @@ int main(int argc, const char *argv[]) {
         require([axs_cachekeeper_selected_paths(selection, @{bundle:@{@"enabled":@YES,@"restrict":@NO}}, bundle) count] == 1, @"关闭限写不能关闭自动清理");
         require(!axs_cachekeeper_wants_restriction(@{@"enabled":@YES,@"restrict":@NO}), @"独立限写开关");
         require([axs_cachekeeper_app_state(@{@"enabled":@YES,@"restrict":@NO}, NO)[@"mode"] isEqual:@"clean"], @"总开关修改保留模式并兼容旧配置");
-        require(!axs_cachekeeper_wants_cleanup(@{@"mode":@"prevent"}), @"只禁止不能删除文件");
-        require(!axs_cachekeeper_full_clear(nil) && !axs_cachekeeper_full_clear(@{}) &&
-            !axs_cachekeeper_full_clear(@{@"fullClear":@"yes"}) &&
-            axs_cachekeeper_full_clear(@{@"fullClear":@YES}) && !axs_cachekeeper_full_clear(@{@"fullClear":@NO}), @"全量清理默认关闭且只认明确的布尔真值");
-        require(!axs_cachekeeper_full_clear(axs_cachekeeper_app_state(nil,YES)), @"新 APP 经状态构建后全量清理仍默认关闭");
-        require(axs_cachekeeper_full_clear(axs_cachekeeper_app_state(@{@"enabled":@YES,@"fullClear":@YES},NO)), @"总开关与模式保存必须保留已开启的全量清理");
-        require(!axs_cachekeeper_full_clear(axs_cachekeeper_app_state(@{@"enabled":@YES},YES)), @"状态构建不能凭空打开全量清理");
-        NSDictionary *fullOn=@{@"enabled":@YES,@"fullClear":@YES};
-        require(axs_cachekeeper_full_clear_path(fullOn,@"Library/Caches") && axs_cachekeeper_full_clear_path(fullOn,@"tmp") &&
-            !axs_cachekeeper_full_clear_path(fullOn,@"Caches") && !axs_cachekeeper_full_clear_path(fullOn,@"Cache") &&
-            !axs_cachekeeper_full_clear_path(fullOn,@"cache") && !axs_cachekeeper_full_clear_path(fullOn,@".cache"), @"全量清理只作用于 Library/Caches 与 tmp，顶层 Caches/Cache/cache/.cache 不在平台缓存契约内");
-        require(!axs_cachekeeper_full_clear_path(fullOn,@"Library/Logs") &&
-            !axs_cachekeeper_full_clear_path(fullOn,@"Library/Application Support") &&
-            !axs_cachekeeper_full_clear_path(fullOn,@"Group/com.example/Library/Caches") &&
-            !axs_cachekeeper_full_clear_path(fullOn,@"Documents") &&
-            !axs_cachekeeper_full_clear_path(@{@"enabled":@YES},@"Library/Caches"), @"全量清理不越出缓存根：Logs 已归混合类、共享与受保护目录除外、未开开关不生效");
+        require(axs_cachekeeper_can_clean(selection, @{bundle:@{@"enabled":@YES,@"mode":@"prevent"}}, bundle), @"限制缓存并清理模式同样清理（任务 9：三种模式共用引擎）");
+        // 方案任务 8：fullClear 键已废止——状态归一化时丢弃，旧 true/false 归一化后完全相同；
+        // 其余选择（模式、网络选项、自动发现、日志定级、手动排除）原样保留。
+        NSDictionary *migratedOn = axs_cachekeeper_app_state(@{@"enabled":@YES, @"mode":@"prevent", @"urlCache":@NO, @"autoDiscover":@NO, @"fullClear":@YES, @"logPaths":@[@"Library/alog"], @"excludedPaths":@[@"Library/Caches/keep"]}, YES);
+        NSDictionary *migratedOff = axs_cachekeeper_app_state(@{@"enabled":@YES, @"mode":@"prevent", @"urlCache":@NO, @"autoDiscover":@NO, @"fullClear":@NO, @"logPaths":@[@"Library/alog"], @"excludedPaths":@[@"Library/Caches/keep"]}, YES);
+        require(migratedOn[@"fullClear"] == nil && [migratedOn isEqual:migratedOff], @"旧 fullClear 键归一化时丢弃，新旧值行为一致");
+        require([migratedOn[@"mode"] isEqual:@"prevent"] && ![migratedOn[@"urlCache"] boolValue] && ![migratedOn[@"autoDiscover"] boolValue] &&
+            [migratedOn[@"logPaths"] isEqual:@[@"Library/alog"]] && [migratedOn[@"excludedPaths"] isEqual:@[@"Library/Caches/keep"]], @"归一化保留模式、网络选项、自动发现、日志定级与手动排除");
         NSDate *fixedDate=[NSDate dateWithTimeIntervalSince1970:1762852378];
         NSString *shown=axs_cachekeeper_time_string(fixedDate);
         NSDateFormatter *expect=[NSDateFormatter new];expect.dateFormat=@"yyyy-MM-dd HH:mm:ss";expect.timeZone=NSTimeZone.localTimeZone;expect.locale=[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
@@ -276,7 +264,7 @@ int main(int argc, const char *argv[]) {
         require(!axs_cachekeeper_selected_paths(@{}, @{}, bundle).count, @"未选中 APP 不处理");
         require(axs_cachekeeper_can_clean(selection, @{bundle:@YES}, bundle), @"明确开启的 APP 可以清理");
         require(!axs_cachekeeper_can_clean(selection, @{}, bundle) &&
-            !axs_cachekeeper_can_clean(selection, @{bundle:@{@"enabled":@YES,@"mode":@"prevent"}}, bundle), @"快捷操作也不能绕过开启状态或只禁止模式");
+            !axs_cachekeeper_can_clean(selection, @{bundle:@{@"enabled":@NO,@"mode":@"auto"}}, bundle), @"快捷操作也不能绕过开启状态");
         NSDictionary *appRows=@{@"system":@{@"bundle":@"com.apple.mobilesafari",@"name":@"Safari"},
             @"wechat":@{@"bundle":@"com.tencent.xin",@"name":@"微信"}};
         require(axs_cachekeeper_application_entry(appRows[@"system"][@"bundle"],@"Safari",@"System",[NSURL fileURLWithPath:@"/Applications/MobileSafari.app"]) != nil, @"已安装系统 APP 也列出");
@@ -413,7 +401,8 @@ int main(int argc, const char *argv[]) {
         require(axs_cachekeeper_can_clean(@{},@{bundle:automaticState},bundle) &&
             !axs_cachekeeper_can_clean(@{},@{bundle:axs_cachekeeper_app_state(automaticState,NO)},bundle), @"自动发现为唯一来源时允许快捷请求，关闭总开关仍拒绝");
         NSDictionary *excludeChild=@{@"enabled":@YES,@"autoDiscover":@YES,@"excludedPaths":@[@"Library/Caches/video"]};
-        require(![axs_cachekeeper_effective_paths(@[@"Library/Caches"],excludeChild,@[@"Library/Caches"]) count], @"自动发现父目录不能绕过对子目录的手动排除");
+        require([axs_cachekeeper_effective_paths(@[@"Library/Caches"],excludeChild,@[@"Library/Caches"]) isEqual:@[@"Library/Caches"]], @"排除子目录时父根保留，文件级排除裁剪子树（任务 6：不丢合法同级范围）");
+        require(![axs_cachekeeper_effective_paths(@[@"Library/Caches/video"],excludeChild,@[]) count], @"排除子树本身仍被移除");
         require([axs_cachekeeper_app_state(afterExclusion,YES)[@"excludedPaths"] containsObject:@"Library/Caches"] &&
             axs_cachekeeper_auto_discover(axs_cachekeeper_app_state(afterExclusion,YES)), @"切模式/总开关保留自动发现与排除选择");
         require(!axs_cachekeeper_effective_paths(@[@"tmp"],axs_cachekeeper_app_state(afterExclusion,NO),discovered).count, @"总开关关闭时新增缓存不能被纳入处理");
@@ -426,6 +415,12 @@ int main(int argc, const char *argv[]) {
         require([axs_cachekeeper_discover_cache_roots([NSURL fileURLWithPath:home],&discoveryError) containsObject:@"Cache"], @"后续检测发现新增顶级标准缓存目录");
         require(!axs_cachekeeper_update_selection(preferences,@"single.app",@[@"Library/Caches/video"],YES), @"单项开启无需另开总开关");
         require(axs_cachekeeper_app_enabled([NSDictionary dictionaryWithContentsOfFile:statesPath][@"single.app"]), @"单项开启仅激活对应 APP");
+        // 任务 6：开启父目录不清除子目录的排除；重新开启被排除的路径本身才清除该排除。
+        require(!axs_cachekeeper_set_excluded_path(preferences,@"single.app",@"Library/Caches/video",YES), @"子目录排除夹具");
+        require(!axs_cachekeeper_update_selection(preferences,@"single.app",@[@"Library/Caches"],YES), @"开启父目录");
+        require([[NSDictionary dictionaryWithContentsOfFile:statesPath][@"single.app"][@"excludedPaths"] containsObject:@"Library/Caches/video"], @"开启父目录保留子目录排除");
+        require(!axs_cachekeeper_update_selection(preferences,@"single.app",@[@"Library/Caches/video"],YES), @"重新开启被排除的路径本身");
+        require(![[NSDictionary dictionaryWithContentsOfFile:statesPath][@"single.app"][@"excludedPaths"] containsObject:@"Library/Caches/video"], @"重新开启被排除的路径清除该排除");
         NSData *beforeInvalid=[NSData dataWithContentsOfFile:directoriesPath];
         require(axs_cachekeeper_update_selection(preferences,bundle,@[@"Documents"],YES)!=nil &&
             [[NSData dataWithContentsOfFile:directoriesPath] isEqual:beforeInvalid], @"非法目录不改变现有配置");
@@ -433,8 +428,95 @@ int main(int argc, const char *argv[]) {
         require(axs_cachekeeper_update_selection(preferences,bundle,enableAll,YES)!=nil &&
             [[NSData dataWithContentsOfFile:directoriesPath] isEqual:beforeInvalid], @"损坏配置时不写入部分选择");
 
-        NSString *cache = [fixture stringByAppendingPathComponent:@"cache"];
-        require([fm createDirectoryAtPath:cache withIntermediateDirectories:NO attributes:nil error:nil], @"创建缓存根");
+        // ========== 任务 1：统一清理决策（CleanupRules）与平台缓存清理 ==========
+        // 假容器 sweep-home：平台根 Library/Caches、tmp；未知目录 Library/Pitaya 等。
+        // 日志/未知夹具平铺于 fixture 下（容器即 fixture），相对路径即目录名。
+        NSString *sweepHome = [fixture stringByAppendingPathComponent:@"sweep-home"];
+        NSString *cache = [sweepHome stringByAppendingPathComponent:@"Library/Caches"];
+        NSTimeInterval future = NSDate.date.timeIntervalSince1970 + 120;
+        AxsCacheKeeperSweep *(^makeSweep)(NSString *, NSDictionary *) = ^AxsCacheKeeperSweep *(NSString *root, NSDictionary *state) {
+            return [[AxsCacheKeeperSweep alloc] initWithRoot:root bundle:bundle version:@"1.0" containerPath:sweepHome state:state ?: @{} clock:^NSTimeInterval { return future; }];
+        };
+        AxsCacheKeeperSweep *(^makeFlatSweep)(NSString *, NSDictionary *) = ^AxsCacheKeeperSweep *(NSString *root, NSDictionary *state) {
+            return [[AxsCacheKeeperSweep alloc] initWithRoot:root bundle:bundle version:@"1.0" containerPath:fixture state:state ?: @{} clock:^NSTimeInterval { return future; }];
+        };
+        // ---- 任务 1：CleanupRules 决策表（真实规则模块直接调用） ----
+        NSDictionary *cleanEvidence = @{@"hasEvidence": @NO, @"hasMediaSignature": @NO, @"readComplete": @YES, @"retentionRanges": @[]};
+        NSDictionary *dataEvidence = @{@"hasEvidence": @YES, @"hasMediaSignature": @NO, @"readComplete": @YES, @"retentionRanges": @[]};
+        NSDictionary *mediaEvidence = @{@"hasEvidence": @NO, @"hasMediaSignature": @YES, @"readComplete": @YES, @"retentionRanges": @[]};
+        NSDictionary *incompleteEvidence = @{@"hasEvidence": @NO, @"hasMediaSignature": @NO, @"readComplete": @NO, @"retentionRanges": @[]};
+        NSDictionary *retentionEvidence = @{@"hasEvidence": @NO, @"hasMediaSignature": @NO, @"readComplete": @YES, @"retentionRanges": @[@"Library/Preferences"]};
+        NSDictionary *emptyState = @{};
+        // 平台缓存：媒体/SQLite/无后缀均可删，不要求逐文件证明下载地址。
+        AxsCacheKeeperCleanupDecision *dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Caches/a.png" state:emptyState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupDelete && dec.basis == AxsCacheKeeperCleanupBasisPlatformCache, @"平台缓存媒体可删");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Caches/store.sqlite" state:emptyState evidence:dataEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupDelete && dec.basis == AxsCacheKeeperCleanupBasisPlatformCache, @"平台缓存数据库不因格式保留");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"tmp/opaque" state:emptyState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupDelete && dec.basis == AxsCacheKeeperCleanupBasisPlatformCache, @"tmp 无后缀缓存可删");
+        // 顶层 Caches 同名自建目录不获得平台约定。
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Caches/a.png" state:emptyState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupUnresolved, @"顶层 Caches 自建目录不获得平台约定");
+        // 未知目录只有普通文件 → Unresolved，零证据不是删除依据。
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Pitaya/a.png" state:emptyState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupUnresolved, @"未知目录零证据内容不自动删");
+        // 平台规则不越出缓存根（任务 8：旧 fullClear 范围测试的等价断言）：Logs 已归混合类、
+        // 共享与受保护目录除外；平台 Delete 只来自 Library/Caches 与 tmp。
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Logs/app.log" state:emptyState evidence:cleanEvidence];
+        require(dec.disposition != AxsCacheKeeperCleanupDelete || dec.basis != AxsCacheKeeperCleanupBasisPlatformCache, @"Library/Logs 不按平台规则删");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Application Support/data.bin" state:emptyState evidence:cleanEvidence];
+        require(dec.disposition != AxsCacheKeeperCleanupDelete || dec.basis != AxsCacheKeeperCleanupBasisPlatformCache, @"Application Support 不按平台规则删");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Group/com.example/Library/Caches/a.png" state:emptyState evidence:cleanEvidence];
+        require(dec.disposition != AxsCacheKeeperCleanupDelete || dec.basis != AxsCacheKeeperCleanupBasisPlatformCache, @"共享容器不按平台规则删");
+        NSDictionary *documentsEvidence = @{@"hasEvidence": @NO, @"hasMediaSignature": @NO, @"readComplete": @YES, @"retentionRanges": @[@"Documents"]};
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Documents/a.png" state:emptyState evidence:documentsEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupKeep, @"Documents 按保留范围保留");
+        // 用户排除优先于平台规则（父范围不能绕过子排除），排除外独立范围仍可清。
+        NSDictionary *excludedState = @{@"excludedPaths": @[@"Library/Caches/keep"]};
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Caches/keep/a.png" state:excludedState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupKeep && [dec.ruleID isEqualToString:@"user-exclusion"], @"用户排除优先于平台规则");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Caches/other/a.png" state:excludedState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupDelete, @"排除子树外的独立范围仍可清理");
+        // 保留范围优先于平台规则。
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Preferences/a.txt" state:emptyState evidence:retentionEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupKeep && [dec.ruleID isEqualToString:@"retention-range"], @"保留范围优先于平台规则");
+        // 读取不完整 → Keep，本轮不删除。
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Caches/secret.log" state:emptyState evidence:incompleteEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupKeep && [dec.ruleID isEqualToString:@"read-incomplete"], @"读取不完整本轮不删除");
+        // 日志定级：日志名 + 无证据 + 无媒体头 + 不受保护 → Delete/UserLog。
+        NSDictionary *logState = @{@"logPaths": @[@"Library/alog"]};
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/alog/app.log" state:logState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupDelete && dec.basis == AxsCacheKeeperCleanupBasisUserLog, @"日志定级目录内纯日志可删");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/alog/data.log" state:logState evidence:dataEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupUnresolved, @"日志文件带数据证据不删除");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/alog/photo.log.jpg" state:logState evidence:mediaEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupUnresolved, @"日志名但媒体头不删除");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/alog/inbox.log" state:logState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupUnresolved, @"受保护名日志不删除");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/alog/notes.txt" state:logState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupUnresolved, @"非日志名不删除");
+        // APP 规则：注册 / 匹配 / 版本 / 规则版本 / 可清范围交集。
+        NSString *versionBefore = [AxsCacheKeeperCleanupRules rulesVersion];
+        AxsCacheKeeperAppRule *testRule = [[AxsCacheKeeperAppRule alloc] initWithRuleID:@"test-downloads" revision:@"1" appVersion:@"1.0" cleanablePaths:@[@"Library/Downloads/cache"] retentionPaths:@[@"Library/Downloads/drafts"] dependencyPaths:@[@"Library/Downloads/index.json"]];
+        [AxsCacheKeeperCleanupRules registerRule:testRule forBundle:bundle];
+        require(![[AxsCacheKeeperCleanupRules rulesVersion] isEqualToString:versionBefore], @"注册规则改变规则版本");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads/cache/res.bin" state:emptyState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupDelete && dec.basis == AxsCacheKeeperCleanupBasisAppRule && [dec.dependencyPaths isEqualToArray:@[@"Library/Downloads/index.json"]], @"APP 规则可清理资源可删且携带依赖");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads/drafts/draft.txt" state:emptyState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupKeep && dec.basis == AxsCacheKeeperCleanupBasisAppRule, @"APP 规则保留范围保留");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"2.0" relativePath:@"Library/Downloads/cache/res.bin" state:emptyState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupUnresolved, @"APP 版本不匹配规则失效");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:nil relativePath:@"Library/Downloads/cache/res.bin" state:emptyState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupUnresolved, @"版本缺失时带版本规则不匹配");
+        require([AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads"] &&
+            [AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads/cache"] &&
+            [AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads/cache/sub"] &&
+            ![AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads/drafts"] &&
+            ![AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:bundle version:@"2.0" relativePath:@"Library/Downloads/cache"], @"可清范围交集：父/自身/子均命中，保留范围与版本不匹配不命中");
+        [AxsCacheKeeperCleanupRules removeAllRulesForTesting];
+        require([[AxsCacheKeeperCleanupRules rulesVersion] isEqualToString:versionBefore], @"清除测试规则后规则版本恢复");
+        // ---- 任务 1：平台缓存主测试（Library/Caches 按用途全清，不按类型保留） ----
+        require([fm createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil], @"创建缓存根");
         NSString *outside = [fixture stringByAppendingPathComponent:@"user-document"];
         writeFile(outside);
         writeMedia([cache stringByAppendingPathComponent:@"old.cache"]);
@@ -449,20 +531,86 @@ int main(int argc, const char *argv[]) {
         writeFile([dataDirectory stringByAppendingPathComponent:@"000003.log"]);
         NSString *disguised=[dataDirectory stringByAppendingPathComponent:@"opaque.cache"];
         require([@"SQLite format 3\0payload" writeToFile:disguised atomically:YES encoding:NSUTF8StringEncoding error:nil], @"数据库内容测试");
-        AxsCacheKeeperSweep *fresh = [[AxsCacheKeeperSweep alloc] initWithRoot:cache];
+        AxsCacheKeeperSweep *fresh = [[AxsCacheKeeperSweep alloc] initWithRoot:cache bundle:bundle version:@"1.0" containerPath:sweepHome state:@{}];
         [fresh advance:30 shouldContinue:^BOOL { return YES; }];
         require(fresh.removed==0 && [fm fileExistsAtPath:[cache stringByAppendingPathComponent:@"new.tmp"]], @"真实新文件不删除");
         require(symlink(outside.fileSystemRepresentation, [cache stringByAppendingPathComponent:@"link"].fileSystemRepresentation) == 0, @"创建链接测试边界");
-        NSTimeInterval future=NSDate.date.timeIntervalSince1970+120;
-        AxsCacheKeeperSweep *sweep = [[AxsCacheKeeperSweep alloc] initWithRoot:cache clock:^NSTimeInterval { return future; }];
+        AxsCacheKeeperSweep *sweep = makeSweep(cache, @{});
         for (NSUInteger pass = 0; !sweep.complete && pass < 100; pass++) {
             [sweep advance:1 shouldContinue:^BOOL { return YES; }];
         }
-        require(sweep.complete && sweep.removed == 2 && sweep.failed == 0, @"单项分批仍能完成遍历并删除新旧缓存");
-        NSString *errorRoot=[fixture stringByAppendingPathComponent:@"unlink-error"];
+        require(sweep.complete && sweep.removed == 9 && sweep.failed == 0 && sweep.changedCount == 0,
+            [NSString stringWithFormat:@"平台缓存单项分批全清：媒体/SQLite/无后缀/日志均删（removed=%lu failed=%lu changed=%lu）",(unsigned long)sweep.removed,(unsigned long)sweep.failed,(unsigned long)sweep.changedCount]);
+        require(![fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"business.sqlite"]] &&
+            ![fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"paired.png"]] &&
+            ![fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"assets/attachment.png"]] &&
+            ![fm fileExistsAtPath:disguised] &&
+            ![fm fileExistsAtPath:[cache stringByAppendingPathComponent:@"unknown-data"]] &&
+            ![fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"000003.log"]], @"平台缓存内数据库、配套媒体、无后缀与日志文件全部删除（格式不单独证明必须保留）");
+        require([fm fileExistsAtPath:outside] && [fm fileExistsAtPath:cache], @"保留根目录与链接外用户文件");
+        NSString *subfolder=[cache stringByAppendingPathComponent:@"later/deep"];
+        require([fm createDirectoryAtPath:subfolder withIntermediateDirectories:YES attributes:nil error:nil], @"已选父目录内新增子目录");
+        NSString *laterFile=[subfolder stringByAppendingPathComponent:@"later.cache"];
+        writeMedia(laterFile);
+        AxsCacheKeeperSweep *nextSweep = makeSweep(cache, @{});
+        for (NSUInteger pass=0;!nextSweep.complete && pass<100;pass++) [nextSweep advance:2 shouldContinue:^BOOL{return YES;}];
+        require(nextSweep.complete && nextSweep.removed==1 && ![fm fileExistsAtPath:laterFile],
+            [NSString stringWithFormat:@"后续扫描自动覆盖父目录中新生子目录，无需新增配置（complete=%d removed=%lu failed=%lu protected=%lu recent=%lu changed=%lu inspected=%lu error=%@）",
+                nextSweep.complete,(unsigned long)nextSweep.removed,(unsigned long)nextSweep.failed,(unsigned long)nextSweep.protectedCount,
+                (unsigned long)nextSweep.recentCount,(unsigned long)nextSweep.changedCount,(unsigned long)nextSweep.inspected,nextSweep.error]);
+        // tmp 同为平台缓存根：媒体、数据库、无后缀均删。
+        NSString *tmpRoot=[sweepHome stringByAppendingPathComponent:@"tmp"];
+        require([fm createDirectoryAtPath:tmpRoot withIntermediateDirectories:YES attributes:nil error:nil], @"tmp 根夹具");
+        writeMedia([tmpRoot stringByAppendingPathComponent:@"clip.mp4"]);
+        require([@"SQLite format 3\0payload" writeToFile:[tmpRoot stringByAppendingPathComponent:@"state.sqlite"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"tmp 数据库夹具");
+        writeFile([tmpRoot stringByAppendingPathComponent:@"opaque"]);
+        AxsCacheKeeperSweep *tmpSweep = makeSweep(tmpRoot, @{});
+        for (NSUInteger pass=0;!tmpSweep.complete && pass<100;pass++) [tmpSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(tmpSweep.complete && tmpSweep.failed==0 && tmpSweep.removed==3 &&
+            ![fm fileExistsAtPath:[tmpRoot stringByAppendingPathComponent:@"clip.mp4"]] &&
+            ![fm fileExistsAtPath:[tmpRoot stringByAppendingPathComponent:@"state.sqlite"]] &&
+            ![fm fileExistsAtPath:[tmpRoot stringByAppendingPathComponent:@"opaque"]] &&
+            [fm fileExistsAtPath:tmpRoot], @"tmp 按平台缓存用途全清，根目录本身保留");
+        // 方案任务 8 迁移：旧 fullClear=false 的状态在新标准范围内同样按平台规则全清
+        //（数据库、无后缀文件不再因旧开关被类型过滤）；旧 fullClear=true/false 归一化已证明相同。
+        NSString *migrateRoot=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-migrate"];
+        require([fm createDirectoryAtPath:migrateRoot withIntermediateDirectories:YES attributes:nil error:nil], @"迁移根夹具");
+        writeMedia([migrateRoot stringByAppendingPathComponent:@"clip.mp4"]);
+        require([@"SQLite format 3\0payload" writeToFile:[migrateRoot stringByAppendingPathComponent:@"state.sqlite"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"迁移数据库夹具");
+        writeFile([migrateRoot stringByAppendingPathComponent:@"opaque"]);
+        AxsCacheKeeperSweep *migrateSweep = makeSweep(migrateRoot, @{@"fullClear":@NO});
+        [migrateSweep advance:64 shouldContinue:^BOOL { return YES; }];
+        require(migrateSweep.removed==3 && migrateSweep.failed==0 && migrateSweep.unresolvedCount==0 &&
+            ![fm fileExistsAtPath:[migrateRoot stringByAppendingPathComponent:@"clip.mp4"]] &&
+            ![fm fileExistsAtPath:[migrateRoot stringByAppendingPathComponent:@"state.sqlite"]] &&
+            ![fm fileExistsAtPath:[migrateRoot stringByAppendingPathComponent:@"opaque"]] &&
+            [fm fileExistsAtPath:migrateRoot], @"旧 fullClear=false 不再类型过滤标准缓存，数据库与无后缀文件同样清理");
+        // 方案任务 6：排除子目录时父根保留，文件级排除裁剪子树，合法同级范围继续处理。
+        NSString *exclRoot=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-excl"];
+        NSString *exclKeep=[exclRoot stringByAppendingPathComponent:@"keep"];
+        require([fm createDirectoryAtPath:exclKeep withIntermediateDirectories:YES attributes:nil error:nil], @"排除同级夹具");
+        writeMedia([exclRoot stringByAppendingPathComponent:@"sibling.mp4"]);
+        writeMedia([exclKeep stringByAppendingPathComponent:@"kept.mp4"]);
+        AxsCacheKeeperSweep *exclSweep = makeSweep(exclRoot, @{@"excludedPaths":@[@"Library/Caches/job-excl/keep"]});
+        [exclSweep advance:64 shouldContinue:^BOOL { return YES; }];
+        require(exclSweep.removed==1 && exclSweep.protectedCount==1 && exclSweep.failed==0 &&
+            ![fm fileExistsAtPath:[exclRoot stringByAppendingPathComponent:@"sibling.mp4"]] &&
+            [fm fileExistsAtPath:[exclKeep stringByAppendingPathComponent:@"kept.mp4"]], @"排除子树的文件保留，同级文件照常清理");
+        // 保留子树裁剪：平台根内的 Preferences 子树整片保留，其余独立文件照常删除。
+        NSString *prefRoot=[sweepHome stringByAppendingPathComponent:@"tmp/pref-root"];
+        require([fm createDirectoryAtPath:[prefRoot stringByAppendingPathComponent:@"Preferences"] withIntermediateDirectories:YES attributes:nil error:nil], @"保留子树夹具");
+        writeFile([prefRoot stringByAppendingPathComponent:@"Preferences/a.txt"]);
+        writeFile([prefRoot stringByAppendingPathComponent:@"plain.txt"]);
+        AxsCacheKeeperSweep *prefSweep = makeSweep(prefRoot, @{});
+        for (NSUInteger pass=0;!prefSweep.complete && pass<100;pass++) [prefSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(prefSweep.complete && prefSweep.failed==0 && prefSweep.removed==1 &&
+            [fm fileExistsAtPath:[prefRoot stringByAppendingPathComponent:@"Preferences/a.txt"]] &&
+            ![fm fileExistsAtPath:[prefRoot stringByAppendingPathComponent:@"plain.txt"]], @"保留子树裁剪只保护自身，独立范围继续清理");
+        // 删除失败回执：真实删除返回 EINVAL 时保留文件并准确记录调用阶段。
+        NSString *errorRoot=[sweepHome stringByAppendingPathComponent:@"Library/Caches/unlink-error"];
         require([fm createDirectoryAtPath:errorRoot withIntermediateDirectories:YES attributes:nil error:nil], @"失败回执夹具");
         writeMedia([errorRoot stringByAppendingPathComponent:@"old.png"]);
-        AxsCacheKeeperSweep *failureSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:errorRoot clock:^NSTimeInterval{return future;} unlinkFile:^int(int fd,const char *name) {
+        AxsCacheKeeperSweep *failureSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:errorRoot bundle:bundle version:@"1.0" containerPath:sweepHome state:@{} clock:^NSTimeInterval{return future;} unlinkFile:^int(int fd,const char *name) {
             struct stat parent;require(!fstat(fd,&parent) && S_ISDIR(parent.st_mode) && !strcmp(name,"old.png"), @"删除仍限定已打开父目录和单一文件名");
             errno=EINVAL;return -1;
         }];
@@ -471,22 +619,9 @@ int main(int argc, const char *argv[]) {
             [failureSweep.error containsString:@"unlinkat"] && [failureSweep.failureDetails.firstObject[@"code"] intValue]==EINVAL &&
             [failureSweep.failureDetails.firstObject[@"stage"] isEqual:@"unlinkat"] &&
             [fm fileExistsAtPath:[errorRoot stringByAppendingPathComponent:@"old.png"]], @"真实删除返回 EINVAL 时保留文件并准确记录调用阶段，不能冒充已清理");
-        require([fm fileExistsAtPath:outside] && [fm fileExistsAtPath:cache], @"保留根目录与链接外用户文件");
-        NSString *subfolder=[cache stringByAppendingPathComponent:@"later/deep"];
-        require([fm createDirectoryAtPath:subfolder withIntermediateDirectories:YES attributes:nil error:nil], @"已选父目录内新增子目录");
-        NSString *laterFile=[subfolder stringByAppendingPathComponent:@"later.cache"];
-        writeMedia(laterFile);
-        AxsCacheKeeperSweep *nextSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:cache clock:^NSTimeInterval{return NSDate.date.timeIntervalSince1970+120;}];
-        for (NSUInteger pass=0;!nextSweep.complete && pass<100;pass++) [nextSweep advance:2 shouldContinue:^BOOL{return YES;}];
-        require(nextSweep.complete && nextSweep.removed==1 && ![fm fileExistsAtPath:laterFile],
-            [NSString stringWithFormat:@"后续扫描自动覆盖父目录中新生子目录，无需新增配置（complete=%d removed=%lu failed=%lu protected=%lu recent=%lu changed=%lu inspected=%lu error=%@）",
-                nextSweep.complete,(unsigned long)nextSweep.removed,(unsigned long)nextSweep.failed,(unsigned long)nextSweep.protectedCount,
-                (unsigned long)nextSweep.recentCount,(unsigned long)nextSweep.changedCount,(unsigned long)nextSweep.inspected,nextSweep.error]);
-        require([fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"business.sqlite"]] &&
-            [fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"paired.png"]] &&
-            [fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"assets/attachment.png"]] && [fm fileExistsAtPath:disguised], @"数据库目录及配套媒体、后代整体保留，其他独立目录仍可清理");
+        // 深层快照键：大小批次都使用一致的父目录与快照键；平台规则下数据库后代同样删除。
         for (NSNumber *batchLimit in @[@1,@64]) {
-            NSString *deepRoot=[fixture stringByAppendingPathComponent:[NSString stringWithFormat:@"deep-keys-%@",batchLimit]];
+            NSString *deepRoot=[sweepHome stringByAppendingPathComponent:[NSString stringWithFormat:@"Library/Caches/deep-keys-%@",batchLimit]];
             require([fm createDirectoryAtPath:[deepRoot stringByAppendingPathComponent:@"a/b/c/d"] withIntermediateDirectories:YES attributes:nil error:nil], @"四级快照键夹具");
             writeMedia([deepRoot stringByAppendingPathComponent:@"root.png"]);
             writeMedia([deepRoot stringByAppendingPathComponent:@"a/b/c/d/image.png"]);
@@ -498,75 +633,71 @@ int main(int argc, const char *argv[]) {
             for (NSUInteger pass=0;!deepInspection.complete && pass<80;pass++) [deepInspection advance:batchLimit.unsignedIntegerValue];
             NSDictionary *deepProfile=[deepInspection report];
             require([deepProfile[@"coverageComplete"] boolValue] && [deepProfile[@"files"] unsignedIntegerValue]==4, @"深度检测用同一规范路径读取完整四级目录");
-            AxsCacheKeeperSweep *deepSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:deepRoot clock:^NSTimeInterval{return future;}];
+            AxsCacheKeeperSweep *deepSweep = makeSweep(deepRoot, @{});
             for (NSUInteger pass=0;!deepSweep.complete && pass<100;pass++) [deepSweep advance:batchLimit.unsignedIntegerValue shouldContinue:^BOOL{return YES;}];
-            require(deepSweep.complete && deepSweep.removed==2 && deepSweep.failed==0 && deepSweep.changedCount==0 &&
-                [fm fileExistsAtPath:attachment], @"大小批次都使用一致的父目录与快照键，数据库后代继续保留");
+            require(deepSweep.complete && deepSweep.removed==4 && deepSweep.failed==0 && deepSweep.changedCount==0 &&
+                ![fm fileExistsAtPath:attachment], @"大小批次都使用一致的父目录与快照键，平台缓存内数据库后代同样删除");
         }
-        NSString *replacedRoot=[fixture stringByAppendingPathComponent:@"replaced-root"];
+        // 根目录替换：预检完成后、删除前根被换成链接时停止清理，外部媒体仍保留。
+        // 根须为平台根——无候选时删除阶段直接完成，根身份核对不会触发。
+        NSString *replacedRoot=[sweepHome stringByAppendingPathComponent:@"Library/Caches/replaced-root"];
         NSString *externalRoot=[fixture stringByAppendingPathComponent:@"external-root"];
         require([fm createDirectoryAtPath:replacedRoot withIntermediateDirectories:YES attributes:nil error:nil] &&
             [fm createDirectoryAtPath:[externalRoot stringByAppendingPathComponent:@"child"] withIntermediateDirectories:YES attributes:nil error:nil], @"根目录替换夹具");
         NSString *externalMedia=[externalRoot stringByAppendingPathComponent:@"keep.png"];
         writeMedia(externalMedia);writeMedia([replacedRoot stringByAppendingPathComponent:@"old.png"]);
-        AxsCacheKeeperSweep *replaced=[[AxsCacheKeeperSweep alloc] initWithRoot:replacedRoot clock:^NSTimeInterval{return future;}];
-        for (NSUInteger pass=0;replaced.checking && !replaced.complete && pass<20;pass++) [replaced advance:1 shouldContinue:^BOOL{return YES;}];
+        AxsCacheKeeperSweep *replaced = makeSweep(replacedRoot, @{});
+        // 拆分接口直接建立“预检完成、尚未删除”的注入点（用户核对要求）：不再经兼容 advance:，
+        // 避免 wrapper 的单调用单阶段语义成为测试的前提。
+        for (NSUInteger pass=0;replaced.checking && !replaced.complete && pass<20;pass++) [replaced advancePreflight:1];
         require(!replaced.checking && !replaced.complete && replaced.removed==0, @"根替换发生在完整预检后且删除前");
         require([fm moveItemAtPath:replacedRoot toPath:[replacedRoot stringByAppendingString:@"-saved"] error:nil] &&
             !symlink(externalRoot.fileSystemRepresentation,replacedRoot.fileSystemRepresentation), @"预检后用链接替换根目录");
-        [replaced advance:64 shouldContinue:^BOOL{return YES;}];
+        [replaced advanceDeletion:64 shouldContinue:^BOOL{return YES;}];
         require(replaced.complete && replaced.removed==0 && replaced.failed>0 && [fm fileExistsAtPath:externalMedia], @"根目录被换成链接时停止清理，外部媒体仍保留");
         int linked=axs_cachekeeper_open_directory(replacedRoot);
         require(linked<0, @"共享访问函数继续拒绝末级目录链接");
         linked=axs_cachekeeper_open_directory([replacedRoot stringByAppendingPathComponent:@"child"]);
         require(linked>=0, @"中间目录链接按 #27 跟随（真机容器路径含 /var 等中间链接），仅末级链接拒绝；根替换安全由 sweep 的身份核对保证");
         if (linked>=0) close(linked);
-        NSString *fullRoot=[fixture stringByAppendingPathComponent:@"full-cache"];
+        // 平台缓存全量：同一根内媒体、无后缀、数据库、子目录数据库与媒体全部删除，目录本身保留。
+        // 旧 fullClear 开关已不存在——平台规则本身就是全量行为，不再有普通/全量对照。
+        NSString *fullRoot=[sweepHome stringByAppendingPathComponent:@"Library/Caches/full-cache"];
         require([fm createDirectoryAtPath:[fullRoot stringByAppendingPathComponent:@"store"] withIntermediateDirectories:YES attributes:nil error:nil], @"全量清理夹具");
         writeMedia([fullRoot stringByAppendingPathComponent:@"clip.mp4"]);
         writeFile([fullRoot stringByAppendingPathComponent:@"blob.bin"]);
         require([@"SQLite format 3\0payload" writeToFile:[fullRoot stringByAppendingPathComponent:@"state.sqlite"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"全量清理数据库夹具");
         writeFile([fullRoot stringByAppendingPathComponent:@"store/inner.sqlite"]);
         writeMedia([fullRoot stringByAppendingPathComponent:@"store/poster.png"]);
-        AxsCacheKeeperSweep *mediaOnly=[[AxsCacheKeeperSweep alloc] initWithRoot:fullRoot clock:^NSTimeInterval{return future;}];
-        for (NSUInteger pass=0;!mediaOnly.complete && pass<100;pass++) [mediaOnly advance:64 shouldContinue:^BOOL{return YES;}];
-        require(mediaOnly.complete && mediaOnly.removed==0 &&
-            [fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"clip.mp4"]] &&
-            [fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"state.sqlite"]], @"对照：根目录含数据库时普通模式整根保留");
-        AxsCacheKeeperSweep *fullSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:fullRoot clock:^NSTimeInterval{return future;} fullClear:YES];
+        AxsCacheKeeperSweep *fullSweep = makeSweep(fullRoot, @{});
         for (NSUInteger pass=0;!fullSweep.complete && pass<100;pass++) [fullSweep advance:64 shouldContinue:^BOOL{return YES;}];
         require(fullSweep.complete && fullSweep.failed==0 && fullSweep.removed==5,
-            [NSString stringWithFormat:@"全量清理删除根内全部普通文件（removed=%lu failed=%lu）",(unsigned long)fullSweep.removed,(unsigned long)fullSweep.failed]);
+            [NSString stringWithFormat:@"平台缓存删除根内全部普通文件（removed=%lu failed=%lu）",(unsigned long)fullSweep.removed,(unsigned long)fullSweep.failed]);
         require(![fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"clip.mp4"]] &&
             ![fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"blob.bin"]] &&
             ![fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"state.sqlite"]] &&
             ![fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"store/inner.sqlite"]] &&
             ![fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"store/poster.png"]] &&
-            [fm fileExistsAtPath:fullRoot] && [fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"store"]], @"全量清理后文件清空、目录本身保留");
-        // 真机形态（抖音 2026-11-11）：数据文件藏在子目录里而非根级——普通模式只删根级散落媒体、整棵数据子树保留；
-        // 全量清理必须能删净该子树内全部文件且不报阶段错误（此前真机 263 项 errno 22 全灭）。
-        NSString *nestedRoot=[fixture stringByAppendingPathComponent:@"nested-cache"];
+            [fm fileExistsAtPath:fullRoot] && [fm fileExistsAtPath:[fullRoot stringByAppendingPathComponent:@"store"]], @"平台缓存清理后文件清空、目录本身保留");
+        // 真机形态（抖音 2026-11-11）：数据文件藏在子目录里而非根级——平台规则删净
+        // 该子树内全部文件且不报阶段错误（此前真机 263 项 errno 22 全灭）。
+        NSString *nestedRoot=[sweepHome stringByAppendingPathComponent:@"Library/Caches/nested-cache"];
         require([fm createDirectoryAtPath:[nestedRoot stringByAppendingPathComponent:@"vault"] withIntermediateDirectories:YES attributes:nil error:nil], @"嵌套数据子树夹具");
         writeMedia([nestedRoot stringByAppendingPathComponent:@"loose.png"]);
         writeFile([nestedRoot stringByAppendingPathComponent:@"vault/inner.sqlite"]);
         writeMedia([nestedRoot stringByAppendingPathComponent:@"vault/photo.png"]);
         writeMedia([nestedRoot stringByAppendingPathComponent:@"vault/clip.mp4"]);
-        AxsCacheKeeperSweep *nestedMedia=[[AxsCacheKeeperSweep alloc] initWithRoot:nestedRoot clock:^NSTimeInterval{return future;}];
-        for (NSUInteger pass=0;!nestedMedia.complete && pass<100;pass++) [nestedMedia advance:64 shouldContinue:^BOOL{return YES;}];
-        require(nestedMedia.complete && nestedMedia.removed==1 && nestedMedia.failed==0 &&
+        AxsCacheKeeperSweep *nestedSweep = makeSweep(nestedRoot, @{});
+        for (NSUInteger pass=0;!nestedSweep.complete && pass<100;pass++) [nestedSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(nestedSweep.complete && nestedSweep.failed==0 && nestedSweep.removed==4 && !nestedSweep.error.length &&
             ![fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"loose.png"]] &&
-            [fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"vault/photo.png"]] &&
-            [fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"vault/inner.sqlite"]], @"普通模式删根级媒体、数据子树整棵保留");
-        AxsCacheKeeperSweep *nestedFull=[[AxsCacheKeeperSweep alloc] initWithRoot:nestedRoot clock:^NSTimeInterval{return future;} fullClear:YES];
-        for (NSUInteger pass=0;!nestedFull.complete && pass<100;pass++) [nestedFull advance:64 shouldContinue:^BOOL{return YES;}];
-        require(nestedFull.complete && nestedFull.failed==0 && nestedFull.removed==3 && !nestedFull.error.length &&
             ![fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"vault/inner.sqlite"]] &&
             ![fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"vault/photo.png"]] &&
             ![fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"vault/clip.mp4"]] &&
             [fm fileExistsAtPath:[nestedRoot stringByAppendingPathComponent:@"vault"]],
-            [NSString stringWithFormat:@"全量清理删净嵌套数据子树（removed=%lu failed=%lu error=%@）",(unsigned long)nestedFull.removed,(unsigned long)nestedFull.failed,nestedFull.error]);
-        // 日志定级通道（通用机制，2026-11-11）：定级只接受用途未知目录；日志模式只删日志特征文件，
-        // 媒体/文本保留，数据子树整棵保留（含其内日志文件）。
+            [NSString stringWithFormat:@"平台缓存删净嵌套数据子树（removed=%lu failed=%lu error=%@）",(unsigned long)nestedSweep.removed,(unsigned long)nestedSweep.failed,nestedSweep.error]);
+        // 日志定级通道（通用机制，2026-11-11）：定级只接受用途未知目录；日志规则只删日志特征文件，
+        // 媒体/文本保留，数据文件本体保留（含其内日志文件——数据证据否决）。
         require(axs_cachekeeper_log_file_name(@"BDALog_20261111_193314.alog.iOS.1128"), @"复合后缀日志名命中");
         require(axs_cachekeeper_log_file_name(@"app.log") && axs_cachekeeper_log_file_name(@"mm.xlog"), @"标准日志扩展名命中");
         require(!axs_cachekeeper_log_file_name(@"photo.jpg") && !axs_cachekeeper_log_file_name(@"notes.txt") && !axs_cachekeeper_log_file_name(@"catalog"), @"非日志名不命中");
@@ -593,17 +724,17 @@ int main(int argc, const char *argv[]) {
         writeFile([logRoot stringByAppendingPathComponent:@"top.alog"]);
         writeFile([logRoot stringByAppendingPathComponent:@"vault/inner.sqlite"]);
         writeFile([logRoot stringByAppendingPathComponent:@"vault/inside.log"]);
-        AxsCacheKeeperSweep *logSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:logRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:YES];
+        AxsCacheKeeperSweep *logSweep = makeFlatSweep(logRoot, @{@"logPaths": @[@"Library/alog"]});
         for (NSUInteger pass=0;!logSweep.complete && pass<100;pass++) [logSweep advance:64 shouldContinue:^BOOL{return YES;}];
         require(logSweep.complete && logSweep.failed==0 && logSweep.removed==4,
-            [NSString stringWithFormat:@"日志模式只删日志特征文件（removed=%lu failed=%lu error=%@）",(unsigned long)logSweep.removed,(unsigned long)logSweep.failed,logSweep.error]);
+            [NSString stringWithFormat:@"日志规则只删日志特征文件（removed=%lu failed=%lu error=%@）",(unsigned long)logSweep.removed,(unsigned long)logSweep.failed,logSweep.error]);
         require(![fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"ready/BDALog_20261111_193314.alog.iOS.1128"]] &&
             ![fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"ready/today.log"]] &&
             ![fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"top.alog"]] &&
             [fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"ready/poster.png"]] &&
             [fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"ready/notes.txt"]] &&
             [fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"vault/inner.sqlite"]] &&
-            ![fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"vault/inside.log"]], @"日志模式文件级保护：数据文件本体保留，其旁的日志文件照常清理");
+            ![fm fileExistsAtPath:[logRoot stringByAppendingPathComponent:@"vault/inside.log"]], @"日志规则文件级保护：数据文件本体保留，其旁的日志文件照常清理");
         // 混放目录（真机 alog 的 ready/ 形态）：数据名文件、SQLite 头文件与纯日志同目录时，
         // 数据文件只保护自身，不得整目录连坐；深层嵌套（四级）日志必须能走到删除（祖先链记录键回归）。
         NSString *mixedRoot=[fixture stringByAppendingPathComponent:@"mixed-log"];
@@ -613,7 +744,7 @@ int main(int argc, const char *argv[]) {
         writeFile([mixedRoot stringByAppendingPathComponent:@"ready/000003.log"]);
         require([@"SQLite format 3\0payload" writeToFile:[mixedRoot stringByAppendingPathComponent:@"ready/fake.alog"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"伪装日志名的数据库夹具");
         writeFile([mixedRoot stringByAppendingPathComponent:@"ready/plain.txt"]);
-        AxsCacheKeeperSweep *mixedSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:mixedRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:YES];
+        AxsCacheKeeperSweep *mixedSweep = makeFlatSweep(mixedRoot, @{@"logPaths": @[@"mixed-log"]});
         for (NSUInteger pass=0;!mixedSweep.complete && pass<100;pass++) [mixedSweep advance:64 shouldContinue:^BOOL{return YES;}];
         require(mixedSweep.complete && mixedSweep.failed==0 && mixedSweep.removed==2,
             [NSString stringWithFormat:@"混放目录只删纯日志（removed=%lu failed=%lu error=%@）",(unsigned long)mixedSweep.removed,(unsigned long)mixedSweep.failed,mixedSweep.error]);
@@ -626,44 +757,48 @@ int main(int argc, const char *argv[]) {
         require([fm createDirectoryAtPath:[deepRoot stringByAppendingPathComponent:@"a/b/c/d"] withIntermediateDirectories:YES attributes:nil error:nil], @"深层日志目录夹具");
         writeFile([deepRoot stringByAppendingPathComponent:@"a/b/c/d/deep.alog"]);
         writeFile([deepRoot stringByAppendingPathComponent:@"a/b/mid.log"]);
-        AxsCacheKeeperSweep *deepSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:deepRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:YES];
-        for (NSUInteger pass=0;!deepSweep.complete && pass<100;pass++) [deepSweep advance:64 shouldContinue:^BOOL{return YES;}];
-        require(deepSweep.complete && deepSweep.failed==0 && deepSweep.removed==2 &&
+        AxsCacheKeeperSweep *deepLogSweep = makeFlatSweep(deepRoot, @{@"logPaths": @[@"deep-log"]});
+        for (NSUInteger pass=0;!deepLogSweep.complete && pass<100;pass++) [deepLogSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(deepLogSweep.complete && deepLogSweep.failed==0 && deepLogSweep.removed==2 &&
             ![fm fileExistsAtPath:[deepRoot stringByAppendingPathComponent:@"a/b/c/d/deep.alog"]] &&
             ![fm fileExistsAtPath:[deepRoot stringByAppendingPathComponent:@"a/b/mid.log"]],
-            [NSString stringWithFormat:@"四级嵌套日志可删（removed=%lu failed=%lu error=%@）",(unsigned long)deepSweep.removed,(unsigned long)deepSweep.failed,deepSweep.error]);
+            [NSString stringWithFormat:@"四级嵌套日志可删（removed=%lu failed=%lu error=%@）",(unsigned long)deepLogSweep.removed,(unsigned long)deepLogSweep.failed,deepLogSweep.error]);
         // 热目录稳定性（2026-11-11 抖音 alog 真机：目录级门下 14 个目录判变化、整轮删除 0）：
-        // 预检后同目录兄弟文件被改写时，日志模式只跳过变化文件本身，其余预检通过的日志照常删除；
-        // 目录级模式（全量清理对照）则整目录跳过，两档差异必须保持。
+        // 预检后同目录兄弟文件被改写时，文件级稳定性门只跳过变化文件本身，其余预检通过的
+        // 日志照常删除。任务 1 后稳定性门是通用的——平台根同样只跳过变化文件本身。
         NSString *hotRoot=[fixture stringByAppendingPathComponent:@"hot-log"];
         require([fm createDirectoryAtPath:[hotRoot stringByAppendingPathComponent:@"ready"] withIntermediateDirectories:YES attributes:nil error:nil], @"热日志目录夹具");
         writeFile([hotRoot stringByAppendingPathComponent:@"ready/stable-one.alog"]);
         writeFile([hotRoot stringByAppendingPathComponent:@"ready/stable-two.log"]);
         writeFile([hotRoot stringByAppendingPathComponent:@"ready/keep-changing.log"]);
-        AxsCacheKeeperSweep *hotLog=[[AxsCacheKeeperSweep alloc] initWithRoot:hotRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:YES];
+        AxsCacheKeeperSweep *hotLog = makeFlatSweep(hotRoot, @{@"logPaths": @[@"hot-log"]});
         for (NSUInteger pass=0;hotLog.checking && !hotLog.complete && pass<100;pass++) [hotLog advance:1 shouldContinue:^BOOL{return YES;}];
         require(!hotLog.checking && hotLog.removed==0, @"热目录预检阶段不删除");
         writeFile([hotRoot stringByAppendingPathComponent:@"ready/keep-changing.log"]);
         for (NSUInteger pass=0;!hotLog.complete && pass<100;pass++) [hotLog advance:64 shouldContinue:^BOOL{return YES;}];
         require(hotLog.complete && hotLog.failed==0 && hotLog.removed==2 && hotLog.changedCount>0,
-            [NSString stringWithFormat:@"日志模式文件级稳定性门：兄弟变化只跳过自身（removed=%lu failed=%lu changed=%lu error=%@）",(unsigned long)hotLog.removed,(unsigned long)hotLog.failed,(unsigned long)hotLog.changedCount,hotLog.error]);
+            [NSString stringWithFormat:@"日志规则文件级稳定性门：兄弟变化只跳过自身（removed=%lu failed=%lu changed=%lu error=%@）",(unsigned long)hotLog.removed,(unsigned long)hotLog.failed,(unsigned long)hotLog.changedCount,hotLog.error]);
         require(![fm fileExistsAtPath:[hotRoot stringByAppendingPathComponent:@"ready/stable-one.alog"]] &&
             ![fm fileExistsAtPath:[hotRoot stringByAppendingPathComponent:@"ready/stable-two.log"]] &&
             [fm fileExistsAtPath:[hotRoot stringByAppendingPathComponent:@"ready/keep-changing.log"]], @"变化文件保留、稳定日志删除");
-        NSString *hotRoot2=[fixture stringByAppendingPathComponent:@"hot-full"];
-        require([fm createDirectoryAtPath:[hotRoot2 stringByAppendingPathComponent:@"ready"] withIntermediateDirectories:YES attributes:nil error:nil], @"热目录对照夹具");
+        // 同一场景换平台根：兄弟变化只跳过变化文件本身，不再整目录保留（旧目录级门已删除）。
+        NSString *hotRoot2=[sweepHome stringByAppendingPathComponent:@"Library/Caches/hot-full"];
+        require([fm createDirectoryAtPath:[hotRoot2 stringByAppendingPathComponent:@"ready"] withIntermediateDirectories:YES attributes:nil error:nil], @"热目录平台根夹具");
         writeFile([hotRoot2 stringByAppendingPathComponent:@"ready/stable-one.alog"]);
         writeFile([hotRoot2 stringByAppendingPathComponent:@"ready/stable-two.log"]);
         writeFile([hotRoot2 stringByAppendingPathComponent:@"ready/keep-changing.log"]);
-        AxsCacheKeeperSweep *hotFull=[[AxsCacheKeeperSweep alloc] initWithRoot:hotRoot2 clock:^NSTimeInterval{return future;} fullClear:YES];
-        for (NSUInteger pass=0;hotFull.checking && !hotFull.complete && pass<100;pass++) [hotFull advance:1 shouldContinue:^BOOL{return YES;}];
+        AxsCacheKeeperSweep *hotPlatform = makeSweep(hotRoot2, @{});
+        for (NSUInteger pass=0;hotPlatform.checking && !hotPlatform.complete && pass<100;pass++) [hotPlatform advance:1 shouldContinue:^BOOL{return YES;}];
+        require(!hotPlatform.checking && hotPlatform.removed==0, @"平台根预检阶段不删除");
         writeFile([hotRoot2 stringByAppendingPathComponent:@"ready/keep-changing.log"]);
-        for (NSUInteger pass=0;!hotFull.complete && pass<100;pass++) [hotFull advance:64 shouldContinue:^BOOL{return YES;}];
-        require(hotFull.complete && hotFull.removed==0 &&
-            [fm fileExistsAtPath:[hotRoot2 stringByAppendingPathComponent:@"ready/stable-one.alog"]], @"对照：目录级稳定性门下兄弟变化整目录保留");
-        // 未知目录自动清理（B 案，2026-11-12）：预检即全目录内容审查，任一数据证据整根出局；
-        // 零证据的目录按文件级稳定性门全清（含媒体、文本、运行时文件与配置类 .plist/.json）；
-        // 全新 APP 默认自动发现开启，只开总开关即全自动。
+        for (NSUInteger pass=0;!hotPlatform.complete && pass<100;pass++) [hotPlatform advance:64 shouldContinue:^BOOL{return YES;}];
+        require(hotPlatform.complete && hotPlatform.failed==0 && hotPlatform.removed==2 && hotPlatform.changedCount>0 &&
+            ![fm fileExistsAtPath:[hotRoot2 stringByAppendingPathComponent:@"ready/stable-one.alog"]] &&
+            ![fm fileExistsAtPath:[hotRoot2 stringByAppendingPathComponent:@"ready/stable-two.log"]] &&
+            [fm fileExistsAtPath:[hotRoot2 stringByAppendingPathComponent:@"ready/keep-changing.log"]], @"平台根文件级稳定性门：兄弟变化只跳过自身，稳定文件照常删除");
+        // 未知目录内容审查（B 案候选集口径仍有效）：清理候选集只取未定级未知目录；
+        // 全新 APP 默认自动发现开启，只开总开关即全自动。任务 1 后未知内容无规则即
+        // Unresolved，不自动删除——以下测试断言零删除与未确认计数。
         require(axs_cachekeeper_auto_discover(nil) && axs_cachekeeper_auto_discover(@{@"enabled":@YES}), @"全新 APP 默认自动发现开启");
         require(!axs_cachekeeper_auto_discover(@{@"autoDiscover":@NO}), @"已明确关闭自动发现的保持关闭");
         require([axs_cachekeeper_app_state(nil,YES)[@"autoDiscover"] boolValue], @"全新 APP 状态保存默认自动发现开启");
@@ -671,160 +806,200 @@ int main(int argc, const char *argv[]) {
         NSString *excludeFolder=[fixture stringByAppendingPathComponent:@"exclude-state"];
         require([fm createDirectoryAtPath:excludeFolder withIntermediateDirectories:YES attributes:nil error:nil], @"排除状态夹具");
         require(!axs_cachekeeper_set_excluded_path(excludeFolder,@"com.example.app",@"Library/tma",YES), @"未知目录可单独保留");
-        NSDictionary *excludedState=[NSDictionary dictionaryWithContentsOfFile:[excludeFolder stringByAppendingPathComponent:@"appEnabled.plist"]][@"com.example.app"];
-        require([axs_cachekeeper_exclusions(excludedState) containsObject:@"Library/tma"] &&
-            ![axs_cachekeeper_purge_paths(@[@"Library/tma",@"Library/Pitaya"],excludedState) containsObject:@"Library/tma"], @"保留的未知目录退出内容审查候选集");
-        require([axs_cachekeeper_exclusions(axs_cachekeeper_app_state(excludedState,YES)) containsObject:@"Library/tma"], @"切模式/总开关保留未知目录的保留选择");
+        NSDictionary *excludedState2=[NSDictionary dictionaryWithContentsOfFile:[excludeFolder stringByAppendingPathComponent:@"appEnabled.plist"]][@"com.example.app"];
+        require([axs_cachekeeper_exclusions(excludedState2) containsObject:@"Library/tma"] &&
+            ![axs_cachekeeper_purge_paths(@[@"Library/tma",@"Library/Pitaya"],excludedState2) containsObject:@"Library/tma"], @"保留的未知目录退出内容审查候选集");
+        require([axs_cachekeeper_exclusions(axs_cachekeeper_app_state(excludedState2,YES)) containsObject:@"Library/tma"], @"切模式/总开关保留未知目录的保留选择");
         require(!axs_cachekeeper_set_excluded_path(excludeFolder,@"com.example.app",@"Library/tma",NO), @"保留可取消，恢复自动审查");
         NSDictionary *unexcludedState=[NSDictionary dictionaryWithContentsOfFile:[excludeFolder stringByAppendingPathComponent:@"appEnabled.plist"]][@"com.example.app"];
         require(![axs_cachekeeper_exclusions(unexcludedState) containsObject:@"Library/tma"] &&
             [axs_cachekeeper_purge_paths(@[@"Library/tma",@"Library/Pitaya"],unexcludedState) containsObject:@"Library/tma"], @"取消保留后恢复为清理候选");
+        // 任务 6：排除子目录时未知候选父目录保留，文件级排除裁剪子树，不丢合法同级范围。
+        require([axs_cachekeeper_purge_paths(@[@"Library/tma",@"Library/Pitaya"],@{@"enabled":@YES,@"excludedPaths":@[@"Library/tma/keep"]}) containsObject:@"Library/tma"], @"排除子目录时未知候选父目录保留");
+        require(![axs_cachekeeper_purge_paths(@[@"Library/tma/keep"],@{@"enabled":@YES,@"excludedPaths":@[@"Library/tma/keep"]}) count], @"排除子树本身退出候选集");
+        // 未知目录零证据：4 个文件全部 Unresolved，零删除，残留占用与首条证据可见。
         NSString *purgeRoot=[fixture stringByAppendingPathComponent:@"purge-clean"];
         require([fm createDirectoryAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime"] withIntermediateDirectories:YES attributes:nil error:nil], @"清理目录夹具");
         writeMedia([purgeRoot stringByAppendingPathComponent:@"runtime/model.bin"]);
         writeFile([purgeRoot stringByAppendingPathComponent:@"runtime/config.json"]);
         writeFile([purgeRoot stringByAppendingPathComponent:@"runtime/settings.plist"]);
         writeFile([purgeRoot stringByAppendingPathComponent:@"top.txt"]);
-        AxsCacheKeeperSweep *purgeClean=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        AxsCacheKeeperSweep *purgeClean = makeFlatSweep(purgeRoot, @{});
         for (NSUInteger pass=0;!purgeClean.complete && pass<100;pass++) [purgeClean advance:64 shouldContinue:^BOOL{return YES;}];
-        require(purgeClean.complete && purgeClean.failed==0 && purgeClean.removed==0 && purgeClean.purgePaused && !purgeClean.purgeBlocked && !purgeClean.purgeEvidence,
-            [NSString stringWithFormat:@"过渡期零证据暂停：不自动删除（removed=%lu failed=%lu error=%@）",(unsigned long)purgeClean.removed,(unsigned long)purgeClean.failed,purgeClean.error]);
+        require(purgeClean.complete && purgeClean.failed==0 && purgeClean.removed==0 && purgeClean.unresolvedCount==4 && purgeClean.unresolvedBytes>0 && purgeClean.unresolvedEvidence.length>0 && !purgeClean.dependencyInvalidated,
+            [NSString stringWithFormat:@"未知目录零证据不自动删除，残留占用可见（removed=%lu unresolved=%lu bytes=%llu error=%@）",(unsigned long)purgeClean.removed,(unsigned long)purgeClean.unresolvedCount,purgeClean.unresolvedBytes,purgeClean.error]);
         require([fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime/model.bin"]] &&
             [fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime/config.json"]] &&
             [fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"runtime/settings.plist"]] &&
-            [fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"top.txt"]], @"过渡期零证据根文件全部保留，待专属识别规则");
+            [fm fileExistsAtPath:[purgeRoot stringByAppendingPathComponent:@"top.txt"]], @"未知目录零证据根文件全部保留，待专属识别规则");
+        // 未知目录含伪装数据库：数据证据不产生删除依据，2 个文件全部 Unresolved。
         NSString *purgeDb=[fixture stringByAppendingPathComponent:@"purge-db"];
         require([fm createDirectoryAtPath:purgeDb withIntermediateDirectories:YES attributes:nil error:nil], @"含数据库的清理目录夹具");
         writeMedia([purgeDb stringByAppendingPathComponent:@"thumb.png"]);
         require([@"SQLite format 3\0payload" writeToFile:[purgeDb stringByAppendingPathComponent:@"hidden.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"伪装数据库夹具");
-        AxsCacheKeeperSweep *purgeDbSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeDb clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        AxsCacheKeeperSweep *purgeDbSweep = makeFlatSweep(purgeDb, @{});
         for (NSUInteger pass=0;!purgeDbSweep.complete && pass<100;pass++) [purgeDbSweep advance:64 shouldContinue:^BOOL{return YES;}];
-        require(purgeDbSweep.complete && purgeDbSweep.failed==0 && purgeDbSweep.removed==0 && purgeDbSweep.purgeMixed && !purgeDbSweep.purgeBlocked && [purgeDbSweep.purgeEvidence isEqual:@"hidden.bin"] &&
+        require(purgeDbSweep.complete && purgeDbSweep.failed==0 && purgeDbSweep.removed==0 && purgeDbSweep.unresolvedCount==2 &&
             [fm fileExistsAtPath:[purgeDb stringByAppendingPathComponent:@"thumb.png"]] &&
-            [fm fileExistsAtPath:[purgeDb stringByAppendingPathComponent:@"hidden.bin"]], @"伪装数据库自动降级为日志门、非日志文件零删除");
+            [fm fileExistsAtPath:[purgeDb stringByAppendingPathComponent:@"hidden.bin"]], @"未知目录含数据库：全部未确认、零删除");
+        // 未知目录混放：未定级时 3 个文件全部 Unresolved；定级后只删纯日志。
         NSString *purgeMixedDir=[fixture stringByAppendingPathComponent:@"purge-mixed"];
         require([fm createDirectoryAtPath:purgeMixedDir withIntermediateDirectories:YES attributes:nil error:nil], @"日志与数据混放的清理目录夹具");
         writeFile([purgeMixedDir stringByAppendingPathComponent:@"app.log"]);
         require([@"SQLite format 3\0payload" writeToFile:[purgeMixedDir stringByAppendingPathComponent:@"data.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"混放数据库夹具");
         writeFile([purgeMixedDir stringByAppendingPathComponent:@"notes.txt"]);
-        AxsCacheKeeperSweep *purgeMixedSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeMixedDir clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        AxsCacheKeeperSweep *purgeMixedSweep = makeFlatSweep(purgeMixedDir, @{});
         for (NSUInteger pass=0;!purgeMixedSweep.complete && pass<100;pass++) [purgeMixedSweep advance:64 shouldContinue:^BOOL{return YES;}];
-        require(purgeMixedSweep.complete && purgeMixedSweep.failed==0 && purgeMixedSweep.removed==1 && purgeMixedSweep.purgeMixed && !purgeMixedSweep.purgeBlocked && [purgeMixedSweep.purgeEvidence isEqual:@"data.bin"] &&
+        require(purgeMixedSweep.complete && purgeMixedSweep.failed==0 && purgeMixedSweep.removed==0 && purgeMixedSweep.unresolvedCount==3 &&
+            [fm fileExistsAtPath:[purgeMixedDir stringByAppendingPathComponent:@"app.log"]] &&
+            [fm fileExistsAtPath:[purgeMixedDir stringByAppendingPathComponent:@"data.bin"]] &&
+            [fm fileExistsAtPath:[purgeMixedDir stringByAppendingPathComponent:@"notes.txt"]], @"未定级混放目录全部未确认、零删除");
+        AxsCacheKeeperSweep *purgeMixedGraded = makeFlatSweep(purgeMixedDir, @{@"logPaths": @[@"purge-mixed"]});
+        for (NSUInteger pass=0;!purgeMixedGraded.complete && pass<100;pass++) [purgeMixedGraded advance:64 shouldContinue:^BOOL{return YES;}];
+        require(purgeMixedGraded.complete && purgeMixedGraded.failed==0 && purgeMixedGraded.removed==1 &&
             ![fm fileExistsAtPath:[purgeMixedDir stringByAppendingPathComponent:@"app.log"]] &&
             [fm fileExistsAtPath:[purgeMixedDir stringByAppendingPathComponent:@"data.bin"]] &&
-            [fm fileExistsAtPath:[purgeMixedDir stringByAppendingPathComponent:@"notes.txt"]], @"混放目录自动仅清理日志文件、数据与未知内容保留");
+            [fm fileExistsAtPath:[purgeMixedDir stringByAppendingPathComponent:@"notes.txt"]], @"定级后混放目录仅删纯日志，数据与未知内容保留");
+        // 受保护子目录：Preferences 子树裁剪（不计入未确认），其余文件未确认。
         NSString *purgeNamed=[fixture stringByAppendingPathComponent:@"purge-named"];
         require([fm createDirectoryAtPath:[purgeNamed stringByAppendingPathComponent:@"Preferences"] withIntermediateDirectories:YES attributes:nil error:nil], @"含受保护子目录的清理夹具");
         writeFile([purgeNamed stringByAppendingPathComponent:@"Preferences/a.txt"]);
         writeFile([purgeNamed stringByAppendingPathComponent:@"plain.txt"]);
-        AxsCacheKeeperSweep *purgeNamedSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeNamed clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        AxsCacheKeeperSweep *purgeNamedSweep = makeFlatSweep(purgeNamed, @{});
         for (NSUInteger pass=0;!purgeNamedSweep.complete && pass<100;pass++) [purgeNamedSweep advance:64 shouldContinue:^BOOL{return YES;}];
-        require(purgeNamedSweep.complete && purgeNamedSweep.removed==0 && purgeNamedSweep.purgeBlocked && !purgeNamedSweep.purgeMixed && [purgeNamedSweep.purgeEvidence isEqual:@"Preferences"] &&
+        require(purgeNamedSweep.complete && purgeNamedSweep.removed==0 && purgeNamedSweep.unresolvedCount==1 &&
             [fm fileExistsAtPath:[purgeNamed stringByAppendingPathComponent:@"Preferences/a.txt"]] &&
-            [fm fileExistsAtPath:[purgeNamed stringByAppendingPathComponent:@"plain.txt"]], @"受保护子目录整根出局、连日志也不删（审计第 1 项：预检即按受保护路径否决）");
+            [fm fileExistsAtPath:[purgeNamed stringByAppendingPathComponent:@"plain.txt"]], @"受保护子目录裁剪不计入未确认，其余文件未确认保留");
+        // 数据标记子目录名：session-cache 子树裁剪（不计入未确认），其余文件未确认。
         NSString *purgeDirNamed=[fixture stringByAppendingPathComponent:@"purge-dirnamed"];
         require([fm createDirectoryAtPath:[purgeDirNamed stringByAppendingPathComponent:@"session-cache"] withIntermediateDirectories:YES attributes:nil error:nil], @"含数据标记子目录的清理夹具");
         writeFile([purgeDirNamed stringByAppendingPathComponent:@"session-cache/a.txt"]);
         writeFile([purgeDirNamed stringByAppendingPathComponent:@"run.log"]);
-        AxsCacheKeeperSweep *purgeDirNamedSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeDirNamed clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        AxsCacheKeeperSweep *purgeDirNamedSweep = makeFlatSweep(purgeDirNamed, @{});
         for (NSUInteger pass=0;!purgeDirNamedSweep.complete && pass<100;pass++) [purgeDirNamedSweep advance:64 shouldContinue:^BOOL{return YES;}];
-        require(purgeDirNamedSweep.complete && purgeDirNamedSweep.failed==0 && purgeDirNamedSweep.removed==0 && purgeDirNamedSweep.purgeBlocked && !purgeDirNamedSweep.purgeMixed && [purgeDirNamedSweep.purgeEvidence isEqual:@"session-cache"] &&
+        require(purgeDirNamedSweep.complete && purgeDirNamedSweep.failed==0 && purgeDirNamedSweep.removed==0 && purgeDirNamedSweep.unresolvedCount==1 &&
             [fm fileExistsAtPath:[purgeDirNamed stringByAppendingPathComponent:@"session-cache/a.txt"]] &&
-            [fm fileExistsAtPath:[purgeDirNamed stringByAppendingPathComponent:@"run.log"]], @"数据标记子目录名整根出局、连日志也不删");
-        // 数据安全（审计第 1 项）：混合目录日志门受保护路径否决。inbox.log 含受保护成分
-        //（inbox）但无数据标记，旧日志门只看名字会删掉它；现须保留，普通日志仍可删。
+            [fm fileExistsAtPath:[purgeDirNamed stringByAppendingPathComponent:@"run.log"]], @"数据标记子目录裁剪不计入未确认，其余文件未确认保留");
+        // 受保护文件名混放：未定级时 3 个文件全部 Unresolved；定级后只删普通日志，
+        // inbox.log（受保护成分）与数据库保留。
         NSString *purgeProtectedFile=[fixture stringByAppendingPathComponent:@"purge-protected-file"];
         require([fm createDirectoryAtPath:purgeProtectedFile withIntermediateDirectories:YES attributes:nil error:nil], @"受保护文件名混放的清理夹具");
         writeFile([purgeProtectedFile stringByAppendingPathComponent:@"app.log"]);
         writeFile([purgeProtectedFile stringByAppendingPathComponent:@"inbox.log"]);
         require([@"SQLite format 3\0payload" writeToFile:[purgeProtectedFile stringByAppendingPathComponent:@"data.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"受保护文件名混放数据库夹具");
-        AxsCacheKeeperSweep *purgeProtectedFileSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeProtectedFile clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        AxsCacheKeeperSweep *purgeProtectedFileSweep = makeFlatSweep(purgeProtectedFile, @{});
         for (NSUInteger pass=0;!purgeProtectedFileSweep.complete && pass<100;pass++) [purgeProtectedFileSweep advance:64 shouldContinue:^BOOL{return YES;}];
-        require(purgeProtectedFileSweep.complete && purgeProtectedFileSweep.failed==0 && purgeProtectedFileSweep.removed==1 && purgeProtectedFileSweep.purgeMixed && !purgeProtectedFileSweep.purgeBlocked && ([purgeProtectedFileSweep.purgeEvidence isEqual:@"inbox.log"] || [purgeProtectedFileSweep.purgeEvidence isEqual:@"data.bin"]) &&
+        require(purgeProtectedFileSweep.complete && purgeProtectedFileSweep.failed==0 && purgeProtectedFileSweep.removed==0 && purgeProtectedFileSweep.unresolvedCount==3 &&
+            [fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"app.log"]] &&
+            [fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"inbox.log"]] &&
+            [fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"data.bin"]], @"未定级混放目录全部未确认、零删除");
+        AxsCacheKeeperSweep *purgeProtectedFileGraded = makeFlatSweep(purgeProtectedFile, @{@"logPaths": @[@"purge-protected-file"]});
+        for (NSUInteger pass=0;!purgeProtectedFileGraded.complete && pass<100;pass++) [purgeProtectedFileGraded advance:64 shouldContinue:^BOOL{return YES;}];
+        require(purgeProtectedFileGraded.complete && purgeProtectedFileGraded.failed==0 && purgeProtectedFileGraded.removed==1 &&
             ![fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"app.log"]] &&
             [fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"inbox.log"]] &&
-            [fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"data.bin"]], @"混合目录日志门受保护路径否决：inbox.log 保留、普通日志删除");
-        // 数据安全（审计第 3 项）：清理模式读不到内容的文件须落盘保护（入 dataFiles、计失败），
-        // 否则混合后日志门会按名字删掉它；删除阶段亦查 dataFiles。
+            [fm fileExistsAtPath:[purgeProtectedFile stringByAppendingPathComponent:@"data.bin"]], @"定级后受保护路径否决：inbox.log 保留、普通日志删除");
+        // 不可读文件：读取不完整是保留决定（计保护、不计失败），不是删除依据也不是失败。
         NSString *purgeUnreadable=[fixture stringByAppendingPathComponent:@"purge-unreadable"];
         require([fm createDirectoryAtPath:purgeUnreadable withIntermediateDirectories:YES attributes:nil error:nil], @"含不可读文件的清理夹具");
         NSString *unreadableLog=[purgeUnreadable stringByAppendingPathComponent:@"secret.log"];
         writeFile(unreadableLog);
         writeMedia([purgeUnreadable stringByAppendingPathComponent:@"thumb.png"]);
         require(!chmod(unreadableLog.fileSystemRepresentation, 0000), @"不可读文件夹具");
-        AxsCacheKeeperSweep *purgeUnreadableSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeUnreadable clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        AxsCacheKeeperSweep *purgeUnreadableSweep = makeFlatSweep(purgeUnreadable, @{});
         for (NSUInteger pass=0;!purgeUnreadableSweep.complete && pass<100;pass++) [purgeUnreadableSweep advance:64 shouldContinue:^BOOL{return YES;}];
         chmod(unreadableLog.fileSystemRepresentation, 0644);
-        require(purgeUnreadableSweep.complete && purgeUnreadableSweep.failed>0 && purgeUnreadableSweep.removed==0 && purgeUnreadableSweep.purgeMixed && [purgeUnreadableSweep.purgeEvidence isEqual:@"secret.log"] &&
+        require(purgeUnreadableSweep.complete && purgeUnreadableSweep.failed==0 && purgeUnreadableSweep.removed==0 && purgeUnreadableSweep.protectedCount==1 && purgeUnreadableSweep.unresolvedCount==1 &&
             [fm fileExistsAtPath:unreadableLog] &&
-            [fm fileExistsAtPath:[purgeUnreadable stringByAppendingPathComponent:@"thumb.png"]], @"不可读文件落盘保护：计失败、入保护集、混合后不按名字删除");
-        // 数据安全（审计第 3 项）：日志门媒体头否决。photo.log.jpg 挂日志名但内容是图片，
-        // 旧日志门只看名字会删掉它；现按文件头否决，真日志仍可删。
+            [fm fileExistsAtPath:[purgeUnreadable stringByAppendingPathComponent:@"thumb.png"]], @"不可读文件读取不完整计保护、其余未确认，全部保留");
+        // 日志门媒体头否决：photo.log.jpg 挂日志名但内容是图片，按文件头否决，真日志仍可删。
         NSString *logMediaDir=[fixture stringByAppendingPathComponent:@"log-media"];
         require([fm createDirectoryAtPath:logMediaDir withIntermediateDirectories:YES attributes:nil error:nil], @"日志目录媒体夹具");
         writeFile([logMediaDir stringByAppendingPathComponent:@"app.log"]);
         writeMedia([logMediaDir stringByAppendingPathComponent:@"photo.log.jpg"]);
-        AxsCacheKeeperSweep *logMediaSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:logMediaDir clock:^NSTimeInterval{return future;} fullClear:NO logMode:YES purgeMode:NO];
+        AxsCacheKeeperSweep *logMediaSweep = makeFlatSweep(logMediaDir, @{@"logPaths": @[@"log-media"]});
         for (NSUInteger pass=0;!logMediaSweep.complete && pass<100;pass++) [logMediaSweep advance:64 shouldContinue:^BOOL{return YES;}];
         require(logMediaSweep.complete && logMediaSweep.failed==0 && logMediaSweep.removed==1 &&
             ![fm fileExistsAtPath:[logMediaDir stringByAppendingPathComponent:@"app.log"]] &&
             [fm fileExistsAtPath:[logMediaDir stringByAppendingPathComponent:@"photo.log.jpg"]], @"日志门媒体头否决：挂日志名的图片保留、真日志删除");
-        // 数据安全（审计第 2 项）：删除阶段重标混合。预检零证据后文件内容变为数据库，
-        // 删除时复核须重标混合、改走日志门（数据库保留、同目录日志仍可删）。文件级稳定
-        // 性门会拦下被改写的文件，故用白盒刷新预检记录以单独验证复核逻辑（见文件头注释）。
-        NSString *staleDir=[fixture stringByAppendingPathComponent:@"stale-classification"];
-        require([fm createDirectoryAtPath:staleDir withIntermediateDirectories:YES attributes:nil error:nil], @"分类过期夹具");
-        NSString *victim=[staleDir stringByAppendingPathComponent:@"victim.bin"];
-        writeMedia(victim);
-        writeFile([staleDir stringByAppendingPathComponent:@"other.log"]);
-        AxsCacheKeeperSweep *stale=[[AxsCacheKeeperSweep alloc] initWithRoot:staleDir clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
-        for (NSUInteger pass=0;stale.checking && !stale.complete && pass<100;pass++) [stale advance:1 shouldContinue:^BOOL{return YES;}];
-        require(!stale.checking && stale.removed==0 && !stale.purgeMixed, @"预检零证据：分类过期测试基线");
-        NSFileHandle *victimWriter=[NSFileHandle fileHandleForWritingAtPath:victim];
-        [victimWriter writeData:[@"SQLite format 3\0payload" dataUsingEncoding:NSUTF8StringEncoding]];
-        [victimWriter closeFile];
-        struct stat victimStat;
-        require(!stat(victim.fileSystemRepresentation,&victimStat), @"读取改写后文件状态");
-        stale.fileSnapshots[staleDir][@"victim.bin"]=[stale axs_cachekeeper_snapshot:victimStat];
-        for (NSUInteger pass=0;!stale.complete && pass<100;pass++) [stale advance:64 shouldContinue:^BOOL{return YES;}];
-        // 过渡期暂停下 removed 取决于枚举顺序：other.log 在重标前处理则本轮暂停（下轮以
-        // 混合根删除），在重标后处理则当即删除；0 或 1 均可接受。重标本身是本测试的断言核心，
-        // 混合根日志门由 hotPurge 测试确定性覆盖（removed==2）。
-        require(stale.complete && stale.purgeMixed && stale.removed<=1 && [stale.purgeEvidence isEqual:@"victim.bin"] &&
-            [fm fileExistsAtPath:victim] &&
-            (stale.removed==1 ? ![fm fileExistsAtPath:[staleDir stringByAppendingPathComponent:@"other.log"]] : [fm fileExistsAtPath:[staleDir stringByAppendingPathComponent:@"other.log"]]), @"删除阶段检出新数据证据重标混合：数据库保留、同目录日志仍可删");
+        // 热目录日志门（确定性覆盖）：预检后改写的日志只跳过自身，稳定日志删除，数据库保留。
         NSString *hotPurgeRoot=[fixture stringByAppendingPathComponent:@"hot-purge"];
         require([fm createDirectoryAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready"] withIntermediateDirectories:YES attributes:nil error:nil], @"热清理目录夹具");
         writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-one.log"]);
         writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-two.log"]);
         writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/keep-changing.log"]);
-        require([@"SQLite format 3\\0payload" writeToFile:[hotPurgeRoot stringByAppendingPathComponent:@"ready/data.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"热清理混合证据");
-        AxsCacheKeeperSweep *hotPurge=[[AxsCacheKeeperSweep alloc] initWithRoot:hotPurgeRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        require([@"SQLite format 3\0payload" writeToFile:[hotPurgeRoot stringByAppendingPathComponent:@"ready/data.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"热清理混合证据");
+        AxsCacheKeeperSweep *hotPurge = makeFlatSweep(hotPurgeRoot, @{@"logPaths": @[@"hot-purge"]});
         for (NSUInteger pass=0;hotPurge.checking && !hotPurge.complete && pass<100;pass++) [hotPurge advance:1 shouldContinue:^BOOL{return YES;}];
         require(!hotPurge.checking && hotPurge.removed==0, @"清理模式预检阶段不删除");
         writeFile([hotPurgeRoot stringByAppendingPathComponent:@"ready/keep-changing.log"]);
         for (NSUInteger pass=0;!hotPurge.complete && pass<100;pass++) [hotPurge advance:64 shouldContinue:^BOOL{return YES;}];
-        require(hotPurge.complete && hotPurge.failed==0 && hotPurge.removed==2 && hotPurge.changedCount>0 && hotPurge.purgeMixed,
-            [NSString stringWithFormat:@"清理模式文件级稳定性门：兄弟变化只跳过自身（removed=%lu failed=%lu changed=%lu error=%@）",(unsigned long)hotPurge.removed,(unsigned long)hotPurge.failed,(unsigned long)hotPurge.changedCount,hotPurge.error]);
+        require(hotPurge.complete && hotPurge.failed==0 && hotPurge.removed==2 && hotPurge.changedCount>0,
+            [NSString stringWithFormat:@"日志门文件级稳定性门：兄弟变化只跳过自身（removed=%lu failed=%lu changed=%lu error=%@）",(unsigned long)hotPurge.removed,(unsigned long)hotPurge.failed,(unsigned long)hotPurge.changedCount,hotPurge.error]);
         require(![fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-one.log"]] &&
             ![fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/stable-two.log"]] &&
             [fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/keep-changing.log"]] &&
             [fm fileExistsAtPath:[hotPurgeRoot stringByAppendingPathComponent:@"ready/data.bin"]], @"变化文件保留、稳定日志删除、数据库保留");
+        // 任务 1：APP 专属规则扫除。非标准目录命中经过验证的资源规则时，可清资源删除，
+        // 草稿与资源索引与消息记录保留；根为 Downloads 名目录——已验证规则优先于名称启发式。
+        AxsCacheKeeperAppRule *appRule = [[AxsCacheKeeperAppRule alloc] initWithRuleID:@"test-downloads" revision:@"1" appVersion:@"1.0" cleanablePaths:@[@"Library/Downloads/cache"] retentionPaths:@[@"Library/Downloads/drafts"] dependencyPaths:@[@"Library/Downloads/index.json"]];
+        [AxsCacheKeeperCleanupRules registerRule:appRule forBundle:bundle];
+        NSString *downloadsRoot=[sweepHome stringByAppendingPathComponent:@"Library/Downloads"];
+        require([fm createDirectoryAtPath:[downloadsRoot stringByAppendingPathComponent:@"cache"] withIntermediateDirectories:YES attributes:nil error:nil] &&
+            [fm createDirectoryAtPath:[downloadsRoot stringByAppendingPathComponent:@"drafts"] withIntermediateDirectories:YES attributes:nil error:nil], @"APP 规则夹具");
+        writeMedia([downloadsRoot stringByAppendingPathComponent:@"cache/res1.bin"]);
+        writeMedia([downloadsRoot stringByAppendingPathComponent:@"cache/res2.bin"]);
+        writeFile([downloadsRoot stringByAppendingPathComponent:@"drafts/draft1.txt"]);
+        writeFile([downloadsRoot stringByAppendingPathComponent:@"index.json"]);
+        require([@"SQLite format 3\0payload" writeToFile:[downloadsRoot stringByAppendingPathComponent:@"messages.db"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"APP 规则消息库夹具");
+        AxsCacheKeeperSweep *appSweep = makeSweep(downloadsRoot, @{});
+        for (NSUInteger pass=0;!appSweep.complete && pass<100;pass++) [appSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(appSweep.complete && appSweep.failed==0 && appSweep.removed==2 && appSweep.unresolvedCount==1 && !appSweep.dependencyInvalidated &&
+            ![fm fileExistsAtPath:[downloadsRoot stringByAppendingPathComponent:@"cache/res1.bin"]] &&
+            ![fm fileExistsAtPath:[downloadsRoot stringByAppendingPathComponent:@"cache/res2.bin"]] &&
+            [fm fileExistsAtPath:[downloadsRoot stringByAppendingPathComponent:@"drafts/draft1.txt"]] &&
+            [fm fileExistsAtPath:[downloadsRoot stringByAppendingPathComponent:@"index.json"]] &&
+            [fm fileExistsAtPath:[downloadsRoot stringByAppendingPathComponent:@"messages.db"]], @"APP 规则：可清资源删除、草稿与资源索引与消息记录保留");
+        // 预检后修改规则依赖（资源索引）：相关范围失效、本轮延期，依赖路径可见。
+        writeMedia([downloadsRoot stringByAppendingPathComponent:@"cache/res1.bin"]);
+        writeMedia([downloadsRoot stringByAppendingPathComponent:@"cache/res2.bin"]);
+        AxsCacheKeeperSweep *appDepSweep = makeSweep(downloadsRoot, @{});
+        for (NSUInteger pass=0;appDepSweep.checking && !appDepSweep.complete && pass<100;pass++) [appDepSweep advance:1 shouldContinue:^BOOL{return YES;}];
+        require(!appDepSweep.checking && appDepSweep.removed==0, @"依赖测试基线：预检完成、未删除");
+        writeFile([downloadsRoot stringByAppendingPathComponent:@"index.json"]);
+        for (NSUInteger pass=0;!appDepSweep.complete && pass<100;pass++) [appDepSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(appDepSweep.complete && appDepSweep.dependencyInvalidated && [appDepSweep.invalidEvidence isEqual:@"Library/Downloads/index.json"] && appDepSweep.removed==0 && appDepSweep.changedCount==2 &&
+            [fm fileExistsAtPath:[downloadsRoot stringByAppendingPathComponent:@"cache/res1.bin"]] &&
+            [fm fileExistsAtPath:[downloadsRoot stringByAppendingPathComponent:@"cache/res2.bin"]], @"预检后规则依赖变化：相关范围失效、本轮延期");
+        // 规则依赖缺失：决定不成立，相关文件本轮延期（计变化），下轮重新预检时重建决定。
+        NSString *downloadsMissing=[sweepHome stringByAppendingPathComponent:@"Library/Downloads2"];
+        require([fm createDirectoryAtPath:[downloadsMissing stringByAppendingPathComponent:@"cache"] withIntermediateDirectories:YES attributes:nil error:nil], @"依赖缺失夹具");
+        writeMedia([downloadsMissing stringByAppendingPathComponent:@"cache/res1.bin"]);
+        writeMedia([downloadsMissing stringByAppendingPathComponent:@"cache/res2.bin"]);
+        AxsCacheKeeperAppRule *missingRule = [[AxsCacheKeeperAppRule alloc] initWithRuleID:@"test-downloads-missing" revision:@"1" appVersion:@"1.0" cleanablePaths:@[@"Library/Downloads2/cache"] retentionPaths:@[] dependencyPaths:@[@"Library/Downloads2/index.json"]];
+        [AxsCacheKeeperCleanupRules registerRule:missingRule forBundle:bundle];
+        AxsCacheKeeperSweep *appMissingSweep = makeSweep(downloadsMissing, @{});
+        for (NSUInteger pass=0;!appMissingSweep.complete && pass<100;pass++) [appMissingSweep advance:64 shouldContinue:^BOOL{return YES;}];
+        require(appMissingSweep.complete && appMissingSweep.dependencyInvalidated && [appMissingSweep.invalidEvidence isEqual:@"Library/Downloads2/index.json"] && appMissingSweep.removed==0 && appMissingSweep.changedCount==2 &&
+            [fm fileExistsAtPath:[downloadsMissing stringByAppendingPathComponent:@"cache/res1.bin"]] &&
+            [fm fileExistsAtPath:[downloadsMissing stringByAppendingPathComponent:@"cache/res2.bin"]], @"规则依赖缺失：相关文件本轮延期");
+        [AxsCacheKeeperCleanupRules removeAllRulesForTesting];
         // 方案任务 3（P1-3）：CleanupJob 状态机与期限/预算。作业时钟注入 jobNow（手动推进），
         // 根时钟用 future（文件已够 60 秒，可删）；近期文件测试的根用真实时钟。
+        // 作业根均为平台根（Library/Caches 下）——未知根无可删候选，无法验证删除推进。
         __block NSTimeInterval jobNow = 1000;
         NSTimeInterval (^jobClock)(void) = ^NSTimeInterval { return jobNow; };
         BOOL (^jobGate)(void) = ^BOOL { return YES; };
         // 1. 非对称双根：A 10 文件、B 1 文件。B 先完成预检时 A 仍在预检，B 不得删除；
         // 全部预检完成前期限不得启动；Ready 时零删除、文件完好。
-        NSString *jobRootA=[fixture stringByAppendingPathComponent:@"job-a"];
-        NSString *jobRootB=[fixture stringByAppendingPathComponent:@"job-b"];
+        NSString *jobRootA=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-a"];
+        NSString *jobRootB=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-b"];
         require([fm createDirectoryAtPath:jobRootA withIntermediateDirectories:YES attributes:nil error:nil], @"作业根 A 夹具");
         require([fm createDirectoryAtPath:jobRootB withIntermediateDirectories:YES attributes:nil error:nil], @"作业根 B 夹具");
         for (int i=0;i<10;i++) writeMedia([jobRootA stringByAppendingPathComponent:[NSString stringWithFormat:@"a%d.png",i]]);
         writeMedia([jobRootB stringByAppendingPathComponent:@"b0.png"]);
-        AxsCacheKeeperSweep *jobSweepA=[[AxsCacheKeeperSweep alloc] initWithRoot:jobRootA clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO];
-        AxsCacheKeeperSweep *jobSweepB=[[AxsCacheKeeperSweep alloc] initWithRoot:jobRootB clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO];
+        AxsCacheKeeperSweep *jobSweepA = makeSweep(jobRootA, @{});
+        AxsCacheKeeperSweep *jobSweepB = makeSweep(jobRootB, @{});
         AxsCacheKeeperCleanupJob *job=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[jobSweepA,jobSweepB] signature:@"job-sig" instance:@"1:100" clock:jobClock];
         for (NSUInteger pass=0;pass<3;pass++) [job advanceCycleWithPerRootLimit:1 gate:jobGate];
         require(job.phase==AxsCacheKeeperCleanupPhaseChecking && !jobSweepB.checking && jobSweepA.checking && jobSweepB.removed==0 && job.removed==0 && job.deleteDeadline==0, @"任一根在预检时，任何根都不删除、期限不启动");
@@ -844,44 +1019,60 @@ int main(int argc, const char *argv[]) {
         require(job.phase==AxsCacheKeeperCleanupPhaseFinished && job.endReason==AxsCacheKeeperCleanupEndReasonLimitReached && job.removed==3 &&
             [[fm contentsOfDirectoryAtPath:jobRootA error:nil] count]==7, @"期限到达即触顶收尾，剩余 7 个文件保留");
         // 4. 空根不启动计时：空根 E＋有文件根 F。Ready 时期限仍为 0；首次删除推进（F）才启动。
-        NSString *jobRootE=[fixture stringByAppendingPathComponent:@"job-e"];
-        NSString *jobRootF=[fixture stringByAppendingPathComponent:@"job-f"];
+        NSString *jobRootE=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-e"];
+        NSString *jobRootF=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-f"];
         require([fm createDirectoryAtPath:jobRootE withIntermediateDirectories:YES attributes:nil error:nil], @"作业空根夹具");
         require([fm createDirectoryAtPath:jobRootF withIntermediateDirectories:YES attributes:nil error:nil], @"作业有文件根夹具");
         writeMedia([jobRootF stringByAppendingPathComponent:@"f0.png"]);
         writeMedia([jobRootF stringByAppendingPathComponent:@"f1.png"]);
-        AxsCacheKeeperSweep *jobSweepE=[[AxsCacheKeeperSweep alloc] initWithRoot:jobRootE clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO];
-        AxsCacheKeeperSweep *jobSweepF=[[AxsCacheKeeperSweep alloc] initWithRoot:jobRootF clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO];
+        AxsCacheKeeperSweep *jobSweepE = makeSweep(jobRootE, @{});
+        AxsCacheKeeperSweep *jobSweepF = makeSweep(jobRootF, @{});
         jobNow=2000;
         AxsCacheKeeperCleanupJob *jobEF=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[jobSweepE,jobSweepF] signature:@"job-ef" instance:@"1:100" clock:jobClock];
         for (NSUInteger pass=0;jobEF.phase==AxsCacheKeeperCleanupPhaseChecking && pass<100;pass++) [jobEF advanceCycleWithPerRootLimit:64 gate:jobGate];
         require(jobEF.phase==AxsCacheKeeperCleanupPhaseReady && jobEF.deleteDeadline==0 && jobSweepE.inspected==0, @"空根预检 0 项，不启动计时");
         [jobEF advanceCycleWithPerRootLimit:64 gate:jobGate];
-        require(jobEF.deleteDeadline==2120 && jobSweepE.complete && jobEF.removed==2, @"有文件根首次删除推进启动期限，空根同时完成");
+        require(jobEF.deleteDeadline==2120 && jobSweepE.complete && jobEF.removed==2 && jobEF.endReason==AxsCacheKeeperCleanupEndReasonCompleted && !jobEF.partial, @"有文件根首次删除推进启动期限，空根同时完成；干净轮 Completed 且非部分完成");
+        // 4b. 仅含未确认内容的根不启动计时：U 根 3 个未知文件（无可删候选），V 根 1 个平台文件。
+        // Ready 时期限为 0；首次删除推进（V）才启动；U 完成时零删除、未确认计数聚合进作业。
+        NSString *jobRootU=[sweepHome stringByAppendingPathComponent:@"Library/Pitaya"];
+        NSString *jobRootV=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-v"];
+        require([fm createDirectoryAtPath:jobRootU withIntermediateDirectories:YES attributes:nil error:nil], @"作业未确认根夹具");
+        require([fm createDirectoryAtPath:jobRootV withIntermediateDirectories:YES attributes:nil error:nil], @"作业有候选根夹具");
+        for (int i=0;i<3;i++) writeMedia([jobRootU stringByAppendingPathComponent:[NSString stringWithFormat:@"u%d.png",i]]);
+        writeMedia([jobRootV stringByAppendingPathComponent:@"v0.png"]);
+        AxsCacheKeeperSweep *jobSweepU = makeSweep(jobRootU, @{});
+        AxsCacheKeeperSweep *jobSweepV = makeSweep(jobRootV, @{});
+        jobNow=2500;
+        AxsCacheKeeperCleanupJob *jobUV=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[jobSweepU,jobSweepV] signature:@"job-uv" instance:@"1:100" clock:jobClock];
+        for (NSUInteger pass=0;jobUV.phase==AxsCacheKeeperCleanupPhaseChecking && pass<100;pass++) [jobUV advanceCycleWithPerRootLimit:64 gate:jobGate];
+        require(jobUV.phase==AxsCacheKeeperCleanupPhaseReady && jobUV.deleteDeadline==0 && jobSweepU.unresolvedCount==3 && !jobSweepU.hasDeleteCandidates, @"未确认根预检完成、无可删候选、不启动期限");
+        [jobUV advanceCycleWithPerRootLimit:64 gate:jobGate];
+        require(jobUV.deleteDeadline==2620 && jobUV.removed==1 && jobSweepU.complete && jobSweepU.removed==0 && jobSweepU.unresolvedCount==3 && jobUV.unresolvedCount==3 && jobUV.endReason==AxsCacheKeeperCleanupEndReasonUnresolved && jobUV.partial, @"有候选根首次删除推进启动期限，未确认根完成且零删除、未确认计数聚合；残留轮报 Unresolved 部分完成");
         // 5. 2000 项全作业共享硬上限：2005 文件单根，触顶收尾，剩 5 个。
-        NSString *capRoot=[fixture stringByAppendingPathComponent:@"job-cap"];
+        NSString *capRoot=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-cap"];
         require([fm createDirectoryAtPath:capRoot withIntermediateDirectories:YES attributes:nil error:nil], @"预算上限夹具");
         for (int i=0;i<2005;i++) writeMedia([capRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"f%d.png",i]]);
-        AxsCacheKeeperSweep *capSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:capRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO];
+        AxsCacheKeeperSweep *capSweep = makeSweep(capRoot, @{});
         jobNow=3000;
         AxsCacheKeeperCleanupJob *capJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[capSweep] signature:@"job-cap" instance:@"1:100" clock:jobClock];
         for (NSUInteger pass=0;capJob.phase!=AxsCacheKeeperCleanupPhaseFinished && pass<100;pass++) [capJob advanceCycleWithPerRootLimit:256 gate:jobGate];
-        require(capJob.endReason==AxsCacheKeeperCleanupEndReasonLimitReached && capJob.removed==AxsCacheKeeperCleanupRoundItemCap &&
-            [[fm contentsOfDirectoryAtPath:capRoot error:nil] count]==5, @"2000 项硬封顶，剩余 5 个顺延下轮");
+        require(capJob.endReason==AxsCacheKeeperCleanupEndReasonLimitReached && capJob.removed==AxsCacheKeeperCleanupRoundItemCap && capJob.inspected==2005 && !capJob.partial && capSweep.remainingCandidates==5 && capSweep.remainingBytes==60 &&
+            [[fm contentsOfDirectoryAtPath:capRoot error:nil] count]==5, @"2000 项硬封顶，剩余 5 个顺延下轮；预检实际访问 2005 项，触顶不是部分完成");
         // 6. 近期文件根：真实时钟下新建文件均未满 60 秒，整轮完成但 0 删除、recent>0。
-        NSString *recentRoot=[fixture stringByAppendingPathComponent:@"job-recent"];
+        NSString *recentRoot=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-recent"];
         require([fm createDirectoryAtPath:recentRoot withIntermediateDirectories:YES attributes:nil error:nil], @"近期文件根夹具");
         for (int i=0;i<3;i++) writeMedia([recentRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"r%d.png",i]]);
-        AxsCacheKeeperSweep *recentSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:recentRoot fullClear:NO logMode:NO];
+        AxsCacheKeeperSweep *recentSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:recentRoot bundle:bundle version:@"1.0" containerPath:sweepHome state:@{}];
         jobNow=4000;
         AxsCacheKeeperCleanupJob *recentJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[recentSweep] signature:@"job-recent" instance:@"1:100" clock:jobClock];
         for (NSUInteger pass=0;recentJob.phase!=AxsCacheKeeperCleanupPhaseFinished && pass<100;pass++) [recentJob advanceCycleWithPerRootLimit:64 gate:jobGate];
-        require(recentJob.endReason==AxsCacheKeeperCleanupEndReasonCompleted && recentJob.removed==0 && recentJob.recentCount==3, @"近期文件整轮完成但 0 删除，recent 计数供静默期判定");
+        require(recentJob.endReason==AxsCacheKeeperCleanupEndReasonCompleted && recentJob.removed==0 && recentJob.recentCount==3 && recentSweep.deferredCount==3 && recentSweep.deferredBytes==36, @"近期文件整轮完成但 0 删除，recent 计数供静默期判定；延期类 3 项 · 36 字节");
         // 7. 门控关闭取消轮次：Ready 后门控关闭，作业取消收尾。
-        NSString *cancelRoot=[fixture stringByAppendingPathComponent:@"job-cancel"];
+        NSString *cancelRoot=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-cancel"];
         require([fm createDirectoryAtPath:cancelRoot withIntermediateDirectories:YES attributes:nil error:nil], @"取消轮次夹具");
         writeMedia([cancelRoot stringByAppendingPathComponent:@"c0.png"]);
-        AxsCacheKeeperSweep *cancelSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:cancelRoot clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO];
+        AxsCacheKeeperSweep *cancelSweep = makeSweep(cancelRoot, @{});
         __block BOOL gateOpen = YES;
         BOOL (^cancelGate)(void) = ^BOOL { return gateOpen; };
         jobNow=5000;
@@ -891,152 +1082,238 @@ int main(int argc, const char *argv[]) {
         gateOpen = NO;
         [cancelJob advanceCycleWithPerRootLimit:64 gate:cancelGate];
         require(cancelJob.phase==AxsCacheKeeperCleanupPhaseFinished && cancelJob.endReason==AxsCacheKeeperCleanupEndReasonCancelled && cancelJob.removed==0, @"门控关闭取消轮次，不删除");
-        // 方案任务 1（P1-1）：根分类失效黑盒测试。预检后内容变化（新增数据库、原地改写、
-        // 新增受保护子树、新增近期/硬链接证据、条目缺失、读失败）须使零证据分类失效，
-        // 本轮延期、稳定文件保留；自身删除不误判。测试只通过 advance 推进与文件操作，
-        // 不碰私有 fileSnapshots（已有白盒 stale 测试保留为窄分支测试）。
-        NSString *invalNewDb=[fixture stringByAppendingPathComponent:@"inval-newdb"];
+        // 8. 预检耗时不触发删除期限：10 文件根，perRootLimit=1，每预检周期作业时钟推进 30 秒。
+        // 预检走满 300 秒以上；Ready 时期限仍为 0；首次删除推进才从当前时刻起算 120 秒。
+        NSString *slowRoot=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-slow"];
+        require([fm createDirectoryAtPath:slowRoot withIntermediateDirectories:YES attributes:nil error:nil], @"慢预检夹具");
+        for (int i=0;i<10;i++) writeMedia([slowRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"s%d.png",i]]);
+        AxsCacheKeeperSweep *slowSweep = makeSweep(slowRoot, @{});
+        jobNow=6000;
+        NSTimeInterval slowStart = jobNow;
+        AxsCacheKeeperCleanupJob *slowJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[slowSweep] signature:@"job-slow" instance:@"1:100" clock:jobClock];
+        for (NSUInteger pass=0;slowJob.phase==AxsCacheKeeperCleanupPhaseChecking && pass<100;pass++) { [slowJob advanceCycleWithPerRootLimit:1 gate:jobGate]; jobNow += 30; }
+        require(slowJob.phase==AxsCacheKeeperCleanupPhaseReady && slowJob.deleteDeadline==0 && jobNow - slowStart >= 300, @"预检耗时 300 秒以上，期限仍未启动");
+        [slowJob advanceCycleWithPerRootLimit:1 gate:jobGate];
+        require(slowJob.deleteDeadline==jobNow+120 && slowJob.removed==1, @"首次删除推进从当前时刻起算 120 秒期限");
+        // 9. 预算跨根共享：A 根 1999 文件＋B 根 10 文件，perRootLimit=2000 时单删除周期内
+        // A 删完 1999 后 B 只删 1 个、剩 9 个——2000 上限是全作业共享，不是每根一份。
+        NSString *shareRootA=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-share-a"];
+        NSString *shareRootB=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-share-b"];
+        require([fm createDirectoryAtPath:shareRootA withIntermediateDirectories:YES attributes:nil error:nil], @"跨根预算夹具 A");
+        require([fm createDirectoryAtPath:shareRootB withIntermediateDirectories:YES attributes:nil error:nil], @"跨根预算夹具 B");
+        for (int i=0;i<1999;i++) writeMedia([shareRootA stringByAppendingPathComponent:[NSString stringWithFormat:@"a%d.png",i]]);
+        for (int i=0;i<10;i++) writeMedia([shareRootB stringByAppendingPathComponent:[NSString stringWithFormat:@"b%d.png",i]]);
+        AxsCacheKeeperSweep *shareSweepA = makeSweep(shareRootA, @{});
+        AxsCacheKeeperSweep *shareSweepB = makeSweep(shareRootB, @{});
+        jobNow=7000;
+        AxsCacheKeeperCleanupJob *shareJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[shareSweepA,shareSweepB] signature:@"job-share" instance:@"1:100" clock:jobClock];
+        for (NSUInteger pass=0;shareJob.phase!=AxsCacheKeeperCleanupPhaseFinished && pass<100;pass++) [shareJob advanceCycleWithPerRootLimit:2000 gate:jobGate];
+        require(shareJob.endReason==AxsCacheKeeperCleanupEndReasonLimitReached && shareJob.removed==2000 && shareSweepA.removed==1999 && shareSweepB.removed==1 &&
+            [[fm contentsOfDirectoryAtPath:shareRootA error:nil] count]==0 && [[fm contentsOfDirectoryAtPath:shareRootB error:nil] count]==9, @"预算全作业共享：1999＋1 封顶，B 根剩 9 个");
+        // 10. 多轮精确累计：同一根 4500 文件，分三轮 2000＋2000＋500 删完，合计精确 4500，根清空。
+        NSString *multiRoot=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-multi"];
+        require([fm createDirectoryAtPath:multiRoot withIntermediateDirectories:YES attributes:nil error:nil], @"多轮累计夹具");
+        for (int i=0;i<4500;i++) writeMedia([multiRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"m%d.png",i]]);
+        jobNow=8000;
+        NSUInteger multiTotal = 0;
+        AxsCacheKeeperSweep *multiSweep1 = makeSweep(multiRoot, @{});
+        AxsCacheKeeperCleanupJob *multiJob1=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[multiSweep1] signature:@"job-multi-1" instance:@"1:100" clock:jobClock];
+        for (NSUInteger pass=0;multiJob1.phase!=AxsCacheKeeperCleanupPhaseFinished && pass<100;pass++) [multiJob1 advanceCycleWithPerRootLimit:256 gate:jobGate];
+        require(multiJob1.endReason==AxsCacheKeeperCleanupEndReasonLimitReached && multiJob1.removed==2000 && multiJob1.inspected==4500 && multiSweep1.remainingCandidates==2500 && multiSweep1.remainingBytes==30000, @"多轮其一：触顶 2000，预检实际访问 4500 项，剩余 2500 项 · 30000 字节");
+        multiTotal += multiJob1.removed;
+        AxsCacheKeeperSweep *multiSweep2 = makeSweep(multiRoot, @{});
+        AxsCacheKeeperCleanupJob *multiJob2=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[multiSweep2] signature:@"job-multi-2" instance:@"1:100" clock:jobClock];
+        for (NSUInteger pass=0;multiJob2.phase!=AxsCacheKeeperCleanupPhaseFinished && pass<100;pass++) [multiJob2 advanceCycleWithPerRootLimit:256 gate:jobGate];
+        require(multiJob2.endReason==AxsCacheKeeperCleanupEndReasonLimitReached && multiJob2.removed==2000 && multiSweep2.remainingCandidates==500 && multiSweep2.remainingBytes==6000, @"多轮其二：触顶 2000，剩余 500 项 · 6000 字节");
+        multiTotal += multiJob2.removed;
+        AxsCacheKeeperSweep *multiSweep3 = makeSweep(multiRoot, @{});
+        AxsCacheKeeperCleanupJob *multiJob3=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[multiSweep3] signature:@"job-multi-3" instance:@"1:100" clock:jobClock];
+        for (NSUInteger pass=0;multiJob3.phase!=AxsCacheKeeperCleanupPhaseFinished && pass<100;pass++) [multiJob3 advanceCycleWithPerRootLimit:256 gate:jobGate];
+        require(multiJob3.endReason==AxsCacheKeeperCleanupEndReasonCompleted && multiJob3.removed==500 && multiTotal + multiJob3.removed == 4500 &&
+            [[fm contentsOfDirectoryAtPath:multiRoot error:nil] count]==0 && !multiSweep3.hasDeleteCandidates && multiSweep3.remainingCandidates==0, @"多轮其三：删完剩余 500，合计精确 4500，根清空、无候选");
+        // 11. 近期文件成熟后处理：复用近期根（3 文件，首轮因未满 60 秒 0 删除），
+        // 第二轮用新鲜 future 时钟重新判定，3 个全部删除——近期候选不永久挂起。
+        NSTimeInterval future2 = [[NSDate date] timeIntervalSince1970] + 120;
+        AxsCacheKeeperSweep *matureSweep = [[AxsCacheKeeperSweep alloc] initWithRoot:recentRoot bundle:bundle version:@"1.0" containerPath:sweepHome state:@{} clock:^NSTimeInterval { return future2; }];
+        jobNow=9000;
+        AxsCacheKeeperCleanupJob *matureJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[matureSweep] signature:@"job-mature" instance:@"1:100" clock:jobClock];
+        for (NSUInteger pass=0;matureJob.phase!=AxsCacheKeeperCleanupPhaseFinished && pass<100;pass++) [matureJob advanceCycleWithPerRootLimit:64 gate:jobGate];
+        require(matureJob.endReason==AxsCacheKeeperCleanupEndReasonCompleted && matureJob.removed==3 && matureJob.recentCount==0 &&
+            [[fm contentsOfDirectoryAtPath:recentRoot error:nil] count]==0, @"近期文件成熟后第二轮全部删除");
+        // 12. 批次中跨越期限：10 文件根单批删除，作业时钟每次调用推进 20 秒。
+        // 期限由首次删除推进的调用定为 10000＋120＝10120；逐 unlink 复核时时钟
+        // 10020/10040/10060/10080/10100 均未到期（删 5 个），第 7 次调用达 10120
+        // 即停手——期限落在每次删除前，不是只在整批前后。若 shouldContinue 恒 YES，
+        // 单批会删完 10 个、整轮 Completed，此测试即失败。
+        NSString *midRoot=[sweepHome stringByAppendingPathComponent:@"Library/Caches/job-midbatch"];
+        require([fm createDirectoryAtPath:midRoot withIntermediateDirectories:YES attributes:nil error:nil], @"批次中期限夹具");
+        for (int i=0;i<10;i++) writeMedia([midRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"d%d.png",i]]);
+        AxsCacheKeeperSweep *midSweep = makeSweep(midRoot, @{});
+        __block NSTimeInterval midNow = 10000;
+        __block NSUInteger midCalls = 0;
+        NSTimeInterval (^midClock)(void) = ^NSTimeInterval { midCalls++; return midNow + (midCalls - 1) * 20; };
+        AxsCacheKeeperCleanupJob *midJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[midSweep] signature:@"job-midbatch" instance:@"1:100" clock:midClock];
+        for (NSUInteger pass=0;midJob.phase!=AxsCacheKeeperCleanupPhaseFinished && pass<100;pass++) [midJob advanceCycleWithPerRootLimit:64 gate:jobGate];
+        require(midJob.endReason==AxsCacheKeeperCleanupEndReasonLimitReached && midJob.removed==5 && midJob.deleteDeadline==10120 &&
+            [[fm contentsOfDirectoryAtPath:midRoot error:nil] count]==5, @"批次中期限到达即停手：删 5 个、剩 5 个、触顶收尾");
+        // 任务 1：预检后变化的黑盒语义（候选列表模型）。删除阶段只遍历预检产生的
+        // 候选列表：预检后新增的文件不混入旧候选；预检后被改写的文件只跳过自身；
+        // 预检后被删的文件计变化；自身删除不误判。无白盒 fileSnapshots 操作。
+        NSString *invalNewDb=[sweepHome stringByAppendingPathComponent:@"Library/Caches/inval-newdb"];
         require([fm createDirectoryAtPath:invalNewDb withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效新数据库夹具");
         writeMedia([invalNewDb stringByAppendingPathComponent:@"victim.bin"]);
         writeFile([invalNewDb stringByAppendingPathComponent:@"other.log"]);
-        AxsCacheKeeperSweep *invalDb=[[AxsCacheKeeperSweep alloc] initWithRoot:invalNewDb clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
-        for (NSUInteger pass=0;!invalDb.verifying && !invalDb.complete && pass<100;pass++) [invalDb advance:1 shouldContinue:^BOOL{return YES;}];
-        require(invalDb.verifying, @"预检完成进入验证阶段");
-        require([@"SQLite format 3\\0payload" writeToFile:[invalNewDb stringByAppendingPathComponent:@"state.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"验证中新增伪装数据库");
+        AxsCacheKeeperSweep *invalDb = makeSweep(invalNewDb, @{});
+        for (NSUInteger pass=0;invalDb.checking && !invalDb.complete && pass<100;pass++) [invalDb advance:1 shouldContinue:^BOOL{return YES;}];
+        require(!invalDb.checking && invalDb.removed==0, @"预检完成、未删除");
+        require([@"SQLite format 3\0payload" writeToFile:[invalNewDb stringByAppendingPathComponent:@"state.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"预检后新增伪装数据库");
         for (NSUInteger pass=0;!invalDb.complete && pass<100;pass++) [invalDb advance:64 shouldContinue:^BOOL{return YES;}];
-        require(invalDb.complete && invalDb.purgeInvalid && invalDb.removed==0 && [invalDb.purgeEvidence isEqual:@"state.bin"] &&
-            [fm fileExistsAtPath:[invalNewDb stringByAppendingPathComponent:@"victim.bin"]] &&
-            [fm fileExistsAtPath:[invalNewDb stringByAppendingPathComponent:@"other.log"]], @"预检后新增数据库使分类失效：本轮延期、稳定文件保留");
+        require(invalDb.complete && invalDb.removed==2 && invalDb.changedCount==0 &&
+            ![fm fileExistsAtPath:[invalNewDb stringByAppendingPathComponent:@"victim.bin"]] &&
+            ![fm fileExistsAtPath:[invalNewDb stringByAppendingPathComponent:@"other.log"]] &&
+            [fm fileExistsAtPath:[invalNewDb stringByAppendingPathComponent:@"state.bin"]], @"预检后新增文件不混入旧候选：预检文件照常删除，新增文件保留待下轮");
         // 枚举顺序调换：创建顺序相反，同一断言。
-        NSString *invalNewDbRev=[fixture stringByAppendingPathComponent:@"inval-newdb-rev"];
+        NSString *invalNewDbRev=[sweepHome stringByAppendingPathComponent:@"Library/Caches/inval-newdb-rev"];
         require([fm createDirectoryAtPath:invalNewDbRev withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效顺序夹具");
         writeFile([invalNewDbRev stringByAppendingPathComponent:@"other.log"]);
         writeMedia([invalNewDbRev stringByAppendingPathComponent:@"victim.bin"]);
-        AxsCacheKeeperSweep *invalDbRev=[[AxsCacheKeeperSweep alloc] initWithRoot:invalNewDbRev clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
-        for (NSUInteger pass=0;!invalDbRev.verifying && !invalDbRev.complete && pass<100;pass++) [invalDbRev advance:1 shouldContinue:^BOOL{return YES;}];
-        require(invalDbRev.verifying, @"顺序夹具进入验证阶段");
-        require([@"SQLite format 3\\0payload" writeToFile:[invalNewDbRev stringByAppendingPathComponent:@"state.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"顺序夹具新增数据库");
+        AxsCacheKeeperSweep *invalDbRev = makeSweep(invalNewDbRev, @{});
+        for (NSUInteger pass=0;invalDbRev.checking && !invalDbRev.complete && pass<100;pass++) [invalDbRev advance:1 shouldContinue:^BOOL{return YES;}];
+        require(!invalDbRev.checking && invalDbRev.removed==0, @"顺序夹具预检完成、未删除");
+        require([@"SQLite format 3\0payload" writeToFile:[invalNewDbRev stringByAppendingPathComponent:@"state.bin"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"顺序夹具新增数据库");
         for (NSUInteger pass=0;!invalDbRev.complete && pass<100;pass++) [invalDbRev advance:64 shouldContinue:^BOOL{return YES;}];
-        require(invalDbRev.complete && invalDbRev.purgeInvalid && invalDbRev.removed==0 &&
-            [fm fileExistsAtPath:[invalNewDbRev stringByAppendingPathComponent:@"victim.bin"]] &&
-            [fm fileExistsAtPath:[invalNewDbRev stringByAppendingPathComponent:@"other.log"]], @"调换创建顺序后新增数据库仍使分类失效");
-        NSString *invalRewrite=[fixture stringByAppendingPathComponent:@"inval-rewrite"];
+        require(invalDbRev.complete && invalDbRev.removed==2 && invalDbRev.changedCount==0 &&
+            ![fm fileExistsAtPath:[invalNewDbRev stringByAppendingPathComponent:@"victim.bin"]] &&
+            ![fm fileExistsAtPath:[invalNewDbRev stringByAppendingPathComponent:@"other.log"]] &&
+            [fm fileExistsAtPath:[invalNewDbRev stringByAppendingPathComponent:@"state.bin"]], @"调换创建顺序后预检后新增文件仍不混入旧候选");
+        NSString *invalRewrite=[sweepHome stringByAppendingPathComponent:@"Library/Caches/inval-rewrite"];
         require([fm createDirectoryAtPath:invalRewrite withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效改写夹具");
         NSString *rewriteVictim=[invalRewrite stringByAppendingPathComponent:@"victim.bin"];
         writeMedia(rewriteVictim);
         writeFile([invalRewrite stringByAppendingPathComponent:@"other.log"]);
-        AxsCacheKeeperSweep *invalRw=[[AxsCacheKeeperSweep alloc] initWithRoot:invalRewrite clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
-        for (NSUInteger pass=0;!invalRw.verifying && !invalRw.complete && pass<100;pass++) [invalRw advance:1 shouldContinue:^BOOL{return YES;}];
-        require(invalRw.verifying, @"改写夹具进入验证阶段");
+        AxsCacheKeeperSweep *invalRw = makeSweep(invalRewrite, @{});
+        for (NSUInteger pass=0;invalRw.checking && !invalRw.complete && pass<100;pass++) [invalRw advance:1 shouldContinue:^BOOL{return YES;}];
+        require(!invalRw.checking && invalRw.removed==0, @"改写夹具预检完成、未删除");
         NSFileHandle *rewriteWriter=[NSFileHandle fileHandleForWritingAtPath:rewriteVictim];
-        [rewriteWriter writeData:[@"SQLite format 3\\0payload" dataUsingEncoding:NSUTF8StringEncoding]];
+        [rewriteWriter writeData:[@"SQLite format 3\0payload" dataUsingEncoding:NSUTF8StringEncoding]];
         [rewriteWriter closeFile];
         for (NSUInteger pass=0;!invalRw.complete && pass<100;pass++) [invalRw advance:64 shouldContinue:^BOOL{return YES;}];
-        require(invalRw.complete && invalRw.purgeInvalid && invalRw.removed==0 && [invalRw.purgeEvidence isEqual:@"victim.bin"] &&
+        require(invalRw.complete && invalRw.removed==1 && invalRw.changedCount==1 && invalRw.changedBytes==12 && invalRw.deferredCount==1 && invalRw.deferredBytes==12 &&
             [fm fileExistsAtPath:rewriteVictim] &&
-            [fm fileExistsAtPath:[invalRewrite stringByAppendingPathComponent:@"other.log"]], @"原地改写为数据库使分类失效：改写文件与稳定文件均保留");
-        NSString *invalPrefs=[fixture stringByAppendingPathComponent:@"inval-prefs"];
+            ![fm fileExistsAtPath:[invalRewrite stringByAppendingPathComponent:@"other.log"]], @"原地改写只跳过自身：改写文件保留，稳定文件删除；延期类 1 项 · 12 字节（预检快照大小）");
+        NSString *invalPrefs=[sweepHome stringByAppendingPathComponent:@"Library/Caches/inval-prefs"];
         require([fm createDirectoryAtPath:invalPrefs withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效受保护子树夹具");
         writeFile([invalPrefs stringByAppendingPathComponent:@"plain.txt"]);
-        AxsCacheKeeperSweep *invalPf=[[AxsCacheKeeperSweep alloc] initWithRoot:invalPrefs clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
-        for (NSUInteger pass=0;!invalPf.verifying && !invalPf.complete && pass<100;pass++) [invalPf advance:1 shouldContinue:^BOOL{return YES;}];
-        require(invalPf.verifying, @"受保护子树夹具进入验证阶段");
-        require([fm createDirectoryAtPath:[invalPrefs stringByAppendingPathComponent:@"Preferences"] withIntermediateDirectories:YES attributes:nil error:nil], @"验证中新增 Preferences 子树");
+        AxsCacheKeeperSweep *invalPf = makeSweep(invalPrefs, @{});
+        for (NSUInteger pass=0;invalPf.checking && !invalPf.complete && pass<100;pass++) [invalPf advance:1 shouldContinue:^BOOL{return YES;}];
+        require(!invalPf.checking && invalPf.removed==0, @"受保护子树夹具预检完成、未删除");
+        require([fm createDirectoryAtPath:[invalPrefs stringByAppendingPathComponent:@"Preferences"] withIntermediateDirectories:YES attributes:nil error:nil], @"预检后新增 Preferences 子树");
         writeFile([invalPrefs stringByAppendingPathComponent:@"Preferences/a.txt"]);
         for (NSUInteger pass=0;!invalPf.complete && pass<100;pass++) [invalPf advance:64 shouldContinue:^BOOL{return YES;}];
-        require(invalPf.complete && invalPf.purgeInvalid && invalPf.removed==0 &&
-            [fm fileExistsAtPath:[invalPrefs stringByAppendingPathComponent:@"plain.txt"]], @"新增受保护子树使分类失效");
+        require(invalPf.complete && invalPf.removed==1 &&
+            ![fm fileExistsAtPath:[invalPrefs stringByAppendingPathComponent:@"plain.txt"]] &&
+            [fm fileExistsAtPath:[invalPrefs stringByAppendingPathComponent:@"Preferences/a.txt"]], @"预检后新增保留子树不影响已预检文件，子树内容保留待下轮");
+        // 近期文件的数据证据不受年龄过滤：近期带数据库头的日志在预检即判未确认
+        //（计未确认、不计近期），而不是先当候选、删除时才按年龄跳过。
         NSString *invalRecent=[fixture stringByAppendingPathComponent:@"inval-recent"];
         require([fm createDirectoryAtPath:invalRecent withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效近期证据夹具");
-        writeMedia([invalRecent stringByAppendingPathComponent:@"stable.bin"]);
-        AxsCacheKeeperSweep *invalRc=[[AxsCacheKeeperSweep alloc] initWithRoot:invalRecent clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
-        for (NSUInteger pass=0;!invalRc.verifying && !invalRc.complete && pass<100;pass++) [invalRc advance:1 shouldContinue:^BOOL{return YES;}];
-        require(invalRc.verifying, @"近期证据夹具进入验证阶段");
-        NSString *recentDb=[invalRecent stringByAppendingPathComponent:@"session.db"];
-        writeFile(recentDb);
+        writeFile([invalRecent stringByAppendingPathComponent:@"stable.log"]);
+        NSString *recentDb=[invalRecent stringByAppendingPathComponent:@"fresh.log"];
+        require([@"SQLite format 3\0payload" writeToFile:recentDb atomically:YES encoding:NSUTF8StringEncoding error:nil], @"近期数据库头日志");
         require([fm setAttributes:@{NSFileModificationDate:[NSDate dateWithTimeIntervalSince1970:future-30]} ofItemAtPath:recentDb error:nil], @"近期证据改时间戳");
+        AxsCacheKeeperSweep *invalRc = makeFlatSweep(invalRecent, @{@"logPaths": @[@"inval-recent"]});
         for (NSUInteger pass=0;!invalRc.complete && pass<100;pass++) [invalRc advance:64 shouldContinue:^BOOL{return YES;}];
-        require(invalRc.complete && invalRc.purgeInvalid && invalRc.removed==0 &&
-            [fm fileExistsAtPath:[invalRecent stringByAppendingPathComponent:@"stable.bin"]], @"近期文件的数据证据不受年龄过滤：仍使分类失效");
+        require(invalRc.complete && invalRc.removed==1 && invalRc.unresolvedCount==1 && invalRc.recentCount==0 &&
+            ![fm fileExistsAtPath:[invalRecent stringByAppendingPathComponent:@"stable.log"]] &&
+            [fm fileExistsAtPath:recentDb], @"近期文件的数据证据不受年龄过滤：预检即判未确认");
+        // 硬链接的数据证据不受 nlink 过滤：硬链接数据库头日志在预检即判未确认
+        //（计未确认、不计保护），而不是先当候选、删除时才按 nlink 跳过。
         NSString *invalHardlink=[fixture stringByAppendingPathComponent:@"inval-hardlink"];
         require([fm createDirectoryAtPath:invalHardlink withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效硬链接夹具");
-        writeMedia([invalHardlink stringByAppendingPathComponent:@"stable.bin"]);
+        writeFile([invalHardlink stringByAppendingPathComponent:@"stable.log"]);
         NSString *hardlinkSource=[fixture stringByAppendingPathComponent:@"inval-hardlink-source.bin"];
-        require([@"SQLite format 3\\0payload" writeToFile:hardlinkSource atomically:YES encoding:NSUTF8StringEncoding error:nil], @"硬链接源文件");
-        AxsCacheKeeperSweep *invalHl=[[AxsCacheKeeperSweep alloc] initWithRoot:invalHardlink clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
-        for (NSUInteger pass=0;!invalHl.verifying && !invalHl.complete && pass<100;pass++) [invalHl advance:1 shouldContinue:^BOOL{return YES;}];
-        require(invalHl.verifying, @"硬链接夹具进入验证阶段");
-        require(!link(hardlinkSource.fileSystemRepresentation,[invalHardlink stringByAppendingPathComponent:@"linked.bin"].fileSystemRepresentation), @"验证中新增硬链接数据库");
+        require([@"SQLite format 3\0payload" writeToFile:hardlinkSource atomically:YES encoding:NSUTF8StringEncoding error:nil], @"硬链接源文件");
+        require(!link(hardlinkSource.fileSystemRepresentation,[invalHardlink stringByAppendingPathComponent:@"linked.log"].fileSystemRepresentation), @"预检前建立硬链接数据库头日志");
+        AxsCacheKeeperSweep *invalHl = makeFlatSweep(invalHardlink, @{@"logPaths": @[@"inval-hardlink"]});
         for (NSUInteger pass=0;!invalHl.complete && pass<100;pass++) [invalHl advance:64 shouldContinue:^BOOL{return YES;}];
-        require(invalHl.complete && invalHl.purgeInvalid && invalHl.removed==0 &&
-            [fm fileExistsAtPath:[invalHardlink stringByAppendingPathComponent:@"stable.bin"]], @"硬链接的数据证据不受 nlink 过滤：仍使分类失效");
-        NSString *invalMissing=[fixture stringByAppendingPathComponent:@"inval-missing"];
+        require(invalHl.complete && invalHl.removed==1 && invalHl.unresolvedCount==1 && invalHl.protectedCount==0 &&
+            ![fm fileExistsAtPath:[invalHardlink stringByAppendingPathComponent:@"stable.log"]] &&
+            [fm fileExistsAtPath:[invalHardlink stringByAppendingPathComponent:@"linked.log"]], @"硬链接的数据证据不受 nlink 过滤：预检即判未确认");
+        NSString *invalMissing=[sweepHome stringByAppendingPathComponent:@"Library/Caches/inval-missing"];
         require([fm createDirectoryAtPath:invalMissing withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效缺失夹具");
         writeMedia([invalMissing stringByAppendingPathComponent:@"a.bin"]);
         writeFile([invalMissing stringByAppendingPathComponent:@"b.bin"]);
-        AxsCacheKeeperSweep *invalMs=[[AxsCacheKeeperSweep alloc] initWithRoot:invalMissing clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
-        for (NSUInteger pass=0;!invalMs.verifying && !invalMs.complete && pass<100;pass++) [invalMs advance:1 shouldContinue:^BOOL{return YES;}];
-        require(invalMs.verifying, @"缺失夹具进入验证阶段");
-        require([fm removeItemAtPath:[invalMissing stringByAppendingPathComponent:@"b.bin"] error:nil], @"验证中删除快照文件");
+        AxsCacheKeeperSweep *invalMs = makeSweep(invalMissing, @{});
+        for (NSUInteger pass=0;invalMs.checking && !invalMs.complete && pass<100;pass++) [invalMs advance:1 shouldContinue:^BOOL{return YES;}];
+        require(!invalMs.checking && invalMs.removed==0, @"缺失夹具预检完成、未删除");
+        require([fm removeItemAtPath:[invalMissing stringByAppendingPathComponent:@"b.bin"] error:nil], @"预检后删除快照文件");
         for (NSUInteger pass=0;!invalMs.complete && pass<100;pass++) [invalMs advance:64 shouldContinue:^BOOL{return YES;}];
-        require(invalMs.complete && invalMs.purgeInvalid && invalMs.removed==0 &&
-            [fm fileExistsAtPath:[invalMissing stringByAppendingPathComponent:@"a.bin"]], @"预检后条目缺失使分类失效");
-        NSString *invalUnreadable=[fixture stringByAppendingPathComponent:@"inval-unreadable"];
+        require(invalMs.complete && invalMs.removed==1 && invalMs.changedCount>0 &&
+            ![fm fileExistsAtPath:[invalMissing stringByAppendingPathComponent:@"a.bin"]], @"预检后条目缺失计变化，其余文件照常删除");
+        NSString *invalUnreadable=[sweepHome stringByAppendingPathComponent:@"Library/Caches/inval-unreadable"];
         require([fm createDirectoryAtPath:invalUnreadable withIntermediateDirectories:YES attributes:nil error:nil], @"分类失效读失败夹具");
         writeMedia([invalUnreadable stringByAppendingPathComponent:@"stable.bin"]);
-        AxsCacheKeeperSweep *invalUr=[[AxsCacheKeeperSweep alloc] initWithRoot:invalUnreadable clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
-        for (NSUInteger pass=0;!invalUr.verifying && !invalUr.complete && pass<100;pass++) [invalUr advance:1 shouldContinue:^BOOL{return YES;}];
-        require(invalUr.verifying, @"读失败夹具进入验证阶段");
+        AxsCacheKeeperSweep *invalUr = makeSweep(invalUnreadable, @{});
+        for (NSUInteger pass=0;invalUr.checking && !invalUr.complete && pass<100;pass++) [invalUr advance:1 shouldContinue:^BOOL{return YES;}];
+        require(!invalUr.checking && invalUr.removed==0, @"读失败夹具预检完成、未删除");
         NSString *unreadableNew=[invalUnreadable stringByAppendingPathComponent:@"secret2.bin"];
-        require([@"SQLite format 3\\0payload" writeToFile:unreadableNew atomically:YES encoding:NSUTF8StringEncoding error:nil], @"验证中新增不可读文件");
+        require([@"SQLite format 3\0payload" writeToFile:unreadableNew atomically:YES encoding:NSUTF8StringEncoding error:nil], @"预检后新增不可读文件");
         require(!chmod(unreadableNew.fileSystemRepresentation, 0000), @"不可读文件改权限");
         for (NSUInteger pass=0;!invalUr.complete && pass<100;pass++) [invalUr advance:64 shouldContinue:^BOOL{return YES;}];
         chmod(unreadableNew.fileSystemRepresentation, 0644);
-        require(invalUr.complete && invalUr.purgeInvalid && invalUr.removed==0 &&
-            [fm fileExistsAtPath:[invalUnreadable stringByAppendingPathComponent:@"stable.bin"]], @"读失败按不完整处理：仍使分类失效");
-        NSString *invalOwn=[fixture stringByAppendingPathComponent:@"inval-own"];
+        require(invalUr.complete && invalUr.removed==1 && invalUr.failed==0 &&
+            ![fm fileExistsAtPath:[invalUnreadable stringByAppendingPathComponent:@"stable.bin"]] &&
+            [fm fileExistsAtPath:unreadableNew], @"预检后新增不可读文件不混入旧候选，预检文件照常删除");
+        // 自身删除不误判：无外部变化时分批删除全部文件，变化与失败均为 0。
+        NSString *invalOwn=[sweepHome stringByAppendingPathComponent:@"Library/Caches/inval-own"];
         require([fm createDirectoryAtPath:invalOwn withIntermediateDirectories:YES attributes:nil error:nil], @"自身删除不误判夹具");
         writeMedia([invalOwn stringByAppendingPathComponent:@"a.bin"]);
         writeFile([invalOwn stringByAppendingPathComponent:@"b.bin"]);
-        AxsCacheKeeperSweep *invalOw=[[AxsCacheKeeperSweep alloc] initWithRoot:invalOwn clock:^NSTimeInterval{return future;} fullClear:NO logMode:NO purgeMode:YES];
+        AxsCacheKeeperSweep *invalOw = makeSweep(invalOwn, @{});
         for (NSUInteger pass=0;!invalOw.complete && pass<100;pass++) [invalOw advance:64 shouldContinue:^BOOL{return YES;}];
-        require(invalOw.complete && !invalOw.purgeInvalid && invalOw.purgePaused && invalOw.removed==0 && invalOw.failed==0 &&
-            [fm fileExistsAtPath:[invalOwn stringByAppendingPathComponent:@"a.bin"]] &&
-            [fm fileExistsAtPath:[invalOwn stringByAppendingPathComponent:@"b.bin"]], @"无外部变化时不误判失效；过渡期零证据暂停，不删除");
-        NSString *lateDir=[fixture stringByAppendingPathComponent:@"late-database"];
+        require(invalOw.complete && invalOw.removed==2 && invalOw.changedCount==0 && invalOw.failed==0 &&
+            ![fm fileExistsAtPath:[invalOwn stringByAppendingPathComponent:@"a.bin"]] &&
+            ![fm fileExistsAtPath:[invalOwn stringByAppendingPathComponent:@"b.bin"]], @"无外部变化时自身删除不误判，全部删除");
+        // 平台缓存不做跨文件保护：同一根内数据库不连坐同目录媒体，分批预检未完成前不得删除。
+        NSString *lateDir=[sweepHome stringByAppendingPathComponent:@"Library/Caches/late-database"];
         require([fm createDirectoryAtPath:lateDir withIntermediateDirectories:YES attributes:nil error:nil], @"延迟发现数据库夹具");
         writeMedia([lateDir stringByAppendingPathComponent:@"a.png"]);
         writeFile([lateDir stringByAppendingPathComponent:@"z.sqlite"]);
-        AxsCacheKeeperSweep *late=[[AxsCacheKeeperSweep alloc] initWithRoot:lateDir clock:^NSTimeInterval{return future;}];
+        AxsCacheKeeperSweep *late = makeSweep(lateDir, @{});
         [late advance:1 shouldContinue:^BOOL{return YES;}];
         require(late.removed==0, @"分批预检未完成之前不得删除同目录文件");
         for (NSUInteger pass=0;!late.complete && pass<30;pass++) [late advance:1 shouldContinue:^BOOL{return YES;}];
-        require(late.complete && late.removed==0 && [fm fileExistsAtPath:[lateDir stringByAppendingPathComponent:@"a.png"]], @"晚发现数据库仍保护早枚举文件");
-        NSString *changedDir=[fixture stringByAppendingPathComponent:@"changed"];
+        require(late.complete && late.removed==2 && ![fm fileExistsAtPath:[lateDir stringByAppendingPathComponent:@"a.png"]] &&
+            ![fm fileExistsAtPath:[lateDir stringByAppendingPathComponent:@"z.sqlite"]], @"平台缓存内数据库不连坐同目录媒体，全部删除");
+        NSString *changedDir=[sweepHome stringByAppendingPathComponent:@"Library/Caches/changed"];
         require([fm createDirectoryAtPath:changedDir withIntermediateDirectories:YES attributes:nil error:nil], @"变化目录夹具");
         writeMedia([changedDir stringByAppendingPathComponent:@"image.png"]);
-        AxsCacheKeeperSweep *changed=[[AxsCacheKeeperSweep alloc] initWithRoot:changedDir clock:^NSTimeInterval{return future;}];
+        AxsCacheKeeperSweep *changed = makeSweep(changedDir, @{});
         for (NSUInteger pass=0;changed.checking && !changed.complete && pass<20;pass++) [changed advance:1 shouldContinue:^BOOL{return YES;}];
         require(!changed.checking && changed.removed==0, @"预检阶段与删除阶段明确分开");
         writeFile([changedDir stringByAppendingPathComponent:@"new.sqlite"]);
         for (NSUInteger pass=0;!changed.complete && pass<20;pass++) [changed advance:1 shouldContinue:^BOOL{return YES;}];
-        require(changed.complete && changed.removed==0 && changed.changedCount>0 && [fm fileExistsAtPath:[changedDir stringByAppendingPathComponent:@"image.png"]], @"预检后加入数据库时保留原目录文件并报告跳过");
-        NSString *inplaceDir=[fixture stringByAppendingPathComponent:@"inplace"];
+        require(changed.complete && changed.removed==1 && changed.changedCount==0 && ![fm fileExistsAtPath:[changedDir stringByAppendingPathComponent:@"image.png"]] &&
+            [fm fileExistsAtPath:[changedDir stringByAppendingPathComponent:@"new.sqlite"]], @"预检后加入文件不混入旧候选：已预检文件删除，新增文件保留");
+        NSString *inplaceDir=[sweepHome stringByAppendingPathComponent:@"Library/Caches/inplace"];
         require([fm createDirectoryAtPath:inplaceDir withIntermediateDirectories:YES attributes:nil error:nil], @"原地变化夹具");
         writeMedia([inplaceDir stringByAppendingPathComponent:@"image.png"]);
         NSString *opaque=[inplaceDir stringByAppendingPathComponent:@"opaque"];
         writeFile(opaque);
-        AxsCacheKeeperSweep *inplace=[[AxsCacheKeeperSweep alloc] initWithRoot:inplaceDir clock:^NSTimeInterval{return future;}];
+        AxsCacheKeeperSweep *inplace = makeSweep(inplaceDir, @{});
         for (NSUInteger pass=0;inplace.checking && !inplace.complete && pass<20;pass++) [inplace advance:1 shouldContinue:^BOOL{return YES;}];
         NSFileHandle *writer=[NSFileHandle fileHandleForWritingAtPath:opaque];
         [writer writeData:[@"SQLite format 3\0payload" dataUsingEncoding:NSUTF8StringEncoding]];[writer closeFile];
         for (NSUInteger pass=0;!inplace.complete && pass<20;pass++) [inplace advance:1 shouldContinue:^BOOL{return YES;}];
-        require(inplace.complete && inplace.removed==0 && [fm fileExistsAtPath:[inplaceDir stringByAppendingPathComponent:@"image.png"]], @"已有未知文件原地变为数据库仍保护同目录媒体");
-        require([fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"000003.log"]], @"未知数据库 WAL 不因 log 后缀删除");
+        require(inplace.complete && inplace.removed==1 && inplace.changedCount>0 && ![fm fileExistsAtPath:[inplaceDir stringByAppendingPathComponent:@"image.png"]] &&
+            [fm fileExistsAtPath:opaque], @"原地改写只跳过自身：改写文件保留，稳定媒体删除");
+        // 取消：预检与删除分开推进——预检用 shouldContinue=YES 完成，删除阶段门控关闭即取消。
         NSString *pending = [cache stringByAppendingPathComponent:@"pending"];
         writeFile(pending);
-        AxsCacheKeeperSweep *cancelled = [[AxsCacheKeeperSweep alloc] initWithRoot:cache];
-        [cancelled advance:10 shouldContinue:^BOOL { return NO; }];
+        AxsCacheKeeperSweep *cancelled = [[AxsCacheKeeperSweep alloc] initWithRoot:cache bundle:bundle version:@"1.0" containerPath:sweepHome state:@{}];
+        for (NSUInteger pass=0;cancelled.checking && !cancelled.complete && pass<20;pass++) [cancelled advancePreflight:10];
+        require(!cancelled.checking && !cancelled.complete && cancelled.removed==0, @"取消测试基线：预检完成、未删除");
+        [cancelled advanceDeletion:10 shouldContinue:^BOOL { return NO; }];
         require(cancelled.cancelled && [fm fileExistsAtPath:pending], @"APP 重启或开关关闭后停止删除");
 
         NSString *journal = [fixture stringByAppendingPathComponent:@"permissions.plist"];
@@ -1082,13 +1359,13 @@ int main(int argc, const char *argv[]) {
         NSString *viaUnresolved = axs_cachekeeper_enumerated_path([aliasLink stringByAppendingPathComponent:@"y.txt"], aliasTarget, targetAliases);
         require([viaUnresolved isEqual:[aliasTarget stringByAppendingPathComponent:@"y.txt"]], @"枚举路径经解析兜底还原为根形态");
         require(!axs_cachekeeper_enumerated_path(@"/etc/passwd", aliasLink, linkAliases), @"根外路径仍被边界核对拒绝");
-        NSString *backslashRoot = [fixture stringByAppendingPathComponent:@"backslash"];
+        NSString *backslashRoot = [sweepHome stringByAppendingPathComponent:@"Library/Caches/backslash"];
         require([fm createDirectoryAtPath:backslashRoot withIntermediateDirectories:YES attributes:nil error:nil], @"反斜杠夹具");
         NSString *backslashFile = [backslashRoot stringByAppendingPathComponent:@"a\\b.txt"];
         writeFile(backslashFile);
         NSString *plainFile = [backslashRoot stringByAppendingPathComponent:@"plain.txt"];
         writeFile(plainFile);
-        AxsCacheKeeperSweep *backslashSweep = [[AxsCacheKeeperSweep alloc] initWithRoot:backslashRoot clock:^NSTimeInterval{return future;} fullClear:YES logMode:NO];
+        AxsCacheKeeperSweep *backslashSweep = makeSweep(backslashRoot, @{});
         for (NSUInteger pass=0;!backslashSweep.complete && pass<100;pass++) [backslashSweep advance:64 shouldContinue:^BOOL{return YES;}];
         require(backslashSweep.complete && backslashSweep.failed == 0 && backslashSweep.removed == 2 &&
             ![fm fileExistsAtPath:backslashFile] && ![fm fileExistsAtPath:plainFile],
@@ -1215,7 +1492,85 @@ int main(int argc, const char *argv[]) {
             if ([twin[@"twin"] containsString:@"本目录/"]) innerTwins++;
         }
         require(crossTwins==1 && innerTwins==2, @"孪生位置按搜索根标注");
-        require([twinProfile[@"twinBytes"] unsignedLongLongValue]==36, @"孪生涉及字节按有孪生的源文件计");
+        // 任务 7：关联字节按 (设备, inode) 去重——inner.bin 与 inner-copy.bin 是同一份数据，
+        // 只计一次：2 个 inode × 12 字节 = 24（旧按源路径计为 3 × 12 = 36）。
+        require([twinProfile[@"twinBytes"] unsignedLongLongValue]==24, @"孪生涉及字节按 (设备, inode) 去重");
+        require([twinProfile[@"twinCoverageComplete"] boolValue] && [twinProfile[@"twinFailures"] unsignedIntegerValue]==0 &&
+            ![twinProfile[@"linkFilesTruncated"] boolValue] && ![twinProfile[@"twinScanTruncated"] boolValue] &&
+            ![twinProfile[@"twinDisplayTruncated"] boolValue], @"孪生搜索覆盖完整且无失败、无截断");
+        // 任务 7：三链接部分找到——第三个链接所在的目录不在搜索根内，只找到已覆盖的孪生。
+        NSString *partialRoot=[fixture stringByAppendingPathComponent:@"twin-partial"];
+        NSString *partialSeen=[fixture stringByAppendingPathComponent:@"twin-partial-seen"];
+        NSString *partialHidden=[fixture stringByAppendingPathComponent:@"twin-partial-hidden"];
+        require([fm createDirectoryAtPath:partialRoot withIntermediateDirectories:YES attributes:nil error:nil] &&
+            [fm createDirectoryAtPath:partialSeen withIntermediateDirectories:YES attributes:nil error:nil] &&
+            [fm createDirectoryAtPath:partialHidden withIntermediateDirectories:YES attributes:nil error:nil], @"三链接部分夹具");
+        NSString *partialFile=[partialRoot stringByAppendingPathComponent:@"triple.bin"];
+        writeMedia(partialFile);
+        require(!link(partialFile.fileSystemRepresentation, [[partialSeen stringByAppendingPathComponent:@"seen.bin"] fileSystemRepresentation]) &&
+            !link(partialFile.fileSystemRepresentation, [[partialHidden stringByAppendingPathComponent:@"hidden.bin"] fileSystemRepresentation]), @"建立三链接夹具");
+        AxsCacheKeeperInspection *partialInspection=[[AxsCacheKeeperInspection alloc] initWithRoot:partialRoot searchRoots:@[@{@"path":partialRoot,@"label":@"本目录"},@{@"path":partialSeen,@"label":@"已覆盖"}]];
+        for (NSUInteger pass=0;!partialInspection.complete && pass<100;pass++) [partialInspection advance:32];
+        NSDictionary *partialProfile=[partialInspection report];
+        require(partialInspection.complete && [partialProfile[@"linkTwins"] count]==1 &&
+            [partialProfile[@"linkTwins"][0][@"twin"] containsString:@"已覆盖/seen.bin"] &&
+            [partialProfile[@"twinCoverageComplete"] boolValue], @"三链接只找到搜索根覆盖的一处，未覆盖的目录不产生孪生");
+        // 任务 7：搜索根不可读——不存在的搜索根计入孪生失败，覆盖标记为不完整。
+        AxsCacheKeeperInspection *badRootInspection=[[AxsCacheKeeperInspection alloc] initWithRoot:twinRoot searchRoots:@[@{@"path":twinRoot,@"label":@"本目录"},@{@"path":[fixture stringByAppendingPathComponent:@"twin-missing"],@"label":@"缺失"}]];
+        for (NSUInteger pass=0;!badRootInspection.complete && pass<100;pass++) [badRootInspection advance:32];
+        NSDictionary *badRootProfile=[badRootInspection report];
+        require(badRootInspection.complete && [badRootProfile[@"twinFailures"] unsignedIntegerValue]==1 &&
+            ![badRootProfile[@"twinCoverageComplete"] boolValue] && [badRootProfile[@"linkTwins"] count]==2, @"不可读搜索根计入孪生失败且覆盖不完整，已覆盖的孪生仍找到");
+        // 任务 7：展示截断（每源 3 条）——同一源有 4 个孪生时只记 3 条并标记截断。
+        NSString *capRoot=[fixture stringByAppendingPathComponent:@"twin-cap"];
+        require([fm createDirectoryAtPath:capRoot withIntermediateDirectories:YES attributes:nil error:nil], @"展示截断夹具");
+        NSString *capFile=[capRoot stringByAppendingPathComponent:@"many.bin"];
+        writeMedia(capFile);
+        NSMutableArray *capRoots=[NSMutableArray arrayWithObject:@{@"path":capRoot,@"label":@"本目录"}];
+        for (NSUInteger i=0;i<4;i++) {
+            NSString *capOther=[fixture stringByAppendingPathComponent:[NSString stringWithFormat:@"twin-cap-%lu",(unsigned long)i]];
+            require([fm createDirectoryAtPath:capOther withIntermediateDirectories:YES attributes:nil error:nil], @"展示截断搜索根夹具");
+            require(!link(capFile.fileSystemRepresentation, [[capOther stringByAppendingPathComponent:@"copy.bin"] fileSystemRepresentation]), @"建立多链接夹具");
+            [capRoots addObject:@{@"path":capOther,@"label":[NSString stringWithFormat:@"别处%lu",(unsigned long)i]}];
+        }
+        AxsCacheKeeperInspection *capInspection=[[AxsCacheKeeperInspection alloc] initWithRoot:capRoot searchRoots:capRoots];
+        for (NSUInteger pass=0;!capInspection.complete && pass<100;pass++) [capInspection advance:32];
+        NSDictionary *capProfile=[capInspection report];
+        require(capInspection.complete && [capProfile[@"linkTwins"] count]==3 && [capProfile[@"twinDisplayTruncated"] boolValue] &&
+            ![capProfile[@"twinCoverageComplete"] boolValue] && [capProfile[@"twinBytes"] unsignedLongLongValue]==12, @"每源 3 条展示截断并标记，关联字节仍按单 inode 计");
+        // 任务 7：展示截断（总 50 条）——20 个源各 3 个孪生时只记 50 条并标记截断，源收集未截断。
+        NSString *totalRoot=[fixture stringByAppendingPathComponent:@"twin-total"];
+        NSString *totalOther=[fixture stringByAppendingPathComponent:@"twin-total-other"];
+        require([fm createDirectoryAtPath:totalRoot withIntermediateDirectories:YES attributes:nil error:nil] &&
+            [fm createDirectoryAtPath:totalOther withIntermediateDirectories:YES attributes:nil error:nil], @"总展示截断夹具");
+        for (NSUInteger i=0;i<20;i++) {
+            NSString *totalFile=[totalRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"f%lu.bin",(unsigned long)i]];
+            writeMedia(totalFile);
+            for (NSUInteger j=0;j<3;j++)
+                require(!link(totalFile.fileSystemRepresentation, [[totalOther stringByAppendingPathComponent:[NSString stringWithFormat:@"f%lu-%lu.bin",(unsigned long)i,(unsigned long)j]] fileSystemRepresentation]), @"建立多源多链接夹具");
+        }
+        AxsCacheKeeperInspection *totalInspection=[[AxsCacheKeeperInspection alloc] initWithRoot:totalRoot searchRoots:@[@{@"path":totalRoot,@"label":@"本目录"},@{@"path":totalOther,@"label":@"别处"}]];
+        for (NSUInteger pass=0;!totalInspection.complete && pass<200;pass++) [totalInspection advance:32];
+        NSDictionary *totalProfile=[totalInspection report];
+        require(totalInspection.complete && [totalProfile[@"linkTwins"] count]==50 && [totalProfile[@"twinDisplayTruncated"] boolValue] &&
+            ![totalProfile[@"linkFilesTruncated"] boolValue] && ![totalProfile[@"twinCoverageComplete"] boolValue], @"总 50 条展示截断并标记，源收集未截断");
+        // 任务 7：源收集截断——101 个硬链接源文件只记前 100，标记截断。
+        NSString *sourceRoot=[fixture stringByAppendingPathComponent:@"twin-source"];
+        NSString *sourceOther=[fixture stringByAppendingPathComponent:@"twin-source-other"];
+        require([fm createDirectoryAtPath:sourceRoot withIntermediateDirectories:YES attributes:nil error:nil] &&
+            [fm createDirectoryAtPath:sourceOther withIntermediateDirectories:YES attributes:nil error:nil], @"源收集截断夹具");
+        for (NSUInteger i=0;i<101;i++) {
+            NSString *sourceFile=[sourceRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"s%lu.bin",(unsigned long)i]];
+            writeMedia(sourceFile);
+            require(!link(sourceFile.fileSystemRepresentation, [[sourceOther stringByAppendingPathComponent:[NSString stringWithFormat:@"s%lu.bin",(unsigned long)i]] fileSystemRepresentation]), @"建立多源夹具");
+        }
+        AxsCacheKeeperInspection *sourceInspection=[[AxsCacheKeeperInspection alloc] initWithRoot:sourceRoot searchRoots:@[@{@"path":sourceRoot,@"label":@"本目录"},@{@"path":sourceOther,@"label":@"别处"}]];
+        for (NSUInteger pass=0;!sourceInspection.complete && pass<200;pass++) [sourceInspection advance:32];
+        NSDictionary *sourceProfile=[sourceInspection report];
+        require(sourceInspection.complete && [sourceProfile[@"hardLinks"] unsignedIntegerValue]==101 &&
+            [sourceProfile[@"linkFilesTruncated"] boolValue] && ![sourceProfile[@"twinCoverageComplete"] boolValue], @"硬链接源文件超 100 截断并标记");
+        // 注：搜索截断（扫描超 10 万项）与孪生搜索的 lstat 竞态失败无法在原生测试里确定性触发，
+        // 前者需 10 万个文件，后者需枚举与删除的时序竞态；两者与已测路径共用同一计数/标记机制。
         NSDictionary *h1=@{@"updated":NSDate.date,@"home":@"same",@"rows":@[@{@"path":@"tmp",@"bytes":@1,@"complete":@YES}]};
         NSDictionary *h2=@{@"updated":NSDate.date,@"home":@"same",@"rows":@[@{@"path":@"tmp",@"bytes":@2,@"complete":@YES}]};
         NSDictionary *h3=@{@"updated":NSDate.date,@"home":@"same",@"rows":@[@{@"path":@"tmp",@"bytes":@3,@"complete":@YES}]};
@@ -1238,7 +1593,83 @@ int main(int argc, const char *argv[]) {
         require(axs_cachekeeper_configure_network_cache(NO) && network.diskCapacity==16777216, @"关闭后恢复 APP 最新请求的容量");
         network.diskCapacity=33554432;
         require(axs_cachekeeper_configure_network_cache(NO) && network.diskCapacity==33554432, @"关闭后重复刷新不得重写 APP 容量");
-        puts("PASS: configuration, modes, deduplication, age, protected files, cleanup, cancellation, permission restoration and URLCache");
+        // 方案任务 4（P2-1）：Receipts 回执模块——roundID 幂等核算、写失败滞留与恢复、
+        // 损坏回执不覆盖、展示更新不改累计。Status 目录指向临时夹具子目录。
+        require(job.roundID.length > 0 && jobEF.roundID.length > 0 && ![job.roundID isEqual:jobEF.roundID], @"作业 roundID 唯一且非空");
+        NSString *receiptsFolder = [fixture stringByAppendingPathComponent:@"receipts-status"];
+        require([fm createDirectoryAtPath:receiptsFolder withIntermediateDirectories:YES attributes:nil error:nil], @"回执夹具目录");
+        [AxsCacheKeeperReceipts resetForTesting];
+        [AxsCacheKeeperReceipts configureWithStatusFolder:receiptsFolder];
+        NSString *receiptBundle = @"test.receipts.app";
+        NSString *receiptPath = [[receiptsFolder stringByAppendingPathComponent:receiptBundle] stringByAppendingString:@".auto.plist"];
+        // 1. 同轮累计与幂等：r1 100→150，重复提交 150 不重复计入。
+        require([AxsCacheKeeperReceipts submitRoundForBundle:receiptBundle roundID:@"r1" removed:100 bytes:1000 endReason:1 phase:@"cleaning" message:@"m1" failed:0 effectivePaths:@[@"Library/Caches"] discoveredPaths:nil directories:nil round:nil coverageComplete:YES], @"回执首轮提交");
+        NSDictionary *receipt = [NSDictionary dictionaryWithContentsOfFile:receiptPath];
+        require([receipt[@"removed"] unsignedIntegerValue]==100 && [receipt[@"bytes"] unsignedLongLongValue]==1000 && [receipt[@"confirmedRoundID"] isEqual:@"r1"] && [receipt[@"confirmedRemoved"] unsignedIntegerValue]==100 && [receipt[@"coverageComplete"] boolValue], @"首轮累计与已确认轮次，覆盖完整标记落盘");
+        require([AxsCacheKeeperReceipts submitRoundForBundle:receiptBundle roundID:@"r1" removed:150 bytes:1500 endReason:1 phase:@"cleaning" message:@"m2" failed:0 effectivePaths:@[@"Library/Caches"] discoveredPaths:nil directories:nil round:nil coverageComplete:YES], @"回执同轮追加提交");
+        receipt = [NSDictionary dictionaryWithContentsOfFile:receiptPath];
+        require([receipt[@"removed"] unsignedIntegerValue]==150 && [receipt[@"bytes"] unsignedLongLongValue]==1500 && [receipt[@"confirmedRemoved"] unsignedIntegerValue]==150, @"同轮只计差额");
+        require([AxsCacheKeeperReceipts submitRoundForBundle:receiptBundle roundID:@"r1" removed:150 bytes:1500 endReason:1 phase:@"cleaning" message:@"m2" failed:0 effectivePaths:@[@"Library/Caches"] discoveredPaths:nil directories:nil round:nil coverageComplete:YES], @"回执重复提交返回成功");
+        receipt = [NSDictionary dictionaryWithContentsOfFile:receiptPath];
+        require([receipt[@"removed"] unsignedIntegerValue]==150, @"重复提交不重复计入");
+        // 2. 新轮次计全量：r2 50 → 累计 200，退役记上次清理。
+        require([AxsCacheKeeperReceipts submitRoundForBundle:receiptBundle roundID:@"r2" removed:50 bytes:500 endReason:1 phase:@"complete" message:@"m3" failed:0 effectivePaths:@[@"Library/Caches"] discoveredPaths:nil directories:nil round:@{@"removed":@50, @"bytes":@500} coverageComplete:YES], @"回执新轮提交");
+        receipt = [NSDictionary dictionaryWithContentsOfFile:receiptPath];
+        require([receipt[@"removed"] unsignedIntegerValue]==200 && [receipt[@"confirmedRoundID"] isEqual:@"r2"] && [receipt[@"lastRemoved"] unsignedIntegerValue]==50 && [receipt[@"lastBytes"] unsignedLongLongValue]==500, @"新轮计全量且退役记上次清理");
+        // 3. 非退役提交不改上次清理：r2 追加到 60，累计 210，上次清理仍为 50。
+        require([AxsCacheKeeperReceipts submitRoundForBundle:receiptBundle roundID:@"r2" removed:60 bytes:600 endReason:0 phase:@"cleaning" message:@"m4" failed:0 effectivePaths:@[@"Library/Caches"] discoveredPaths:nil directories:nil round:nil coverageComplete:YES], @"回执中途提交");
+        receipt = [NSDictionary dictionaryWithContentsOfFile:receiptPath];
+        require([receipt[@"removed"] unsignedIntegerValue]==210 && [receipt[@"lastRemoved"] unsignedIntegerValue]==50, @"中途提交不改上次清理");
+        // 4. 写失败滞留与恢复：指向不存在的目录，提交失败且待处理；作业替换后新轮提交同样滞留；
+        // 建目录后落盘，两轮按序补记，累计精确，不丢不重；一 APP 的待处理不影响其他 APP。
+        NSString *missingFolder = [fixture stringByAppendingPathComponent:@"receipts-missing"];
+        NSString *failBundle = @"test.receipts.fail";
+        [AxsCacheKeeperReceipts resetForTesting];
+        [AxsCacheKeeperReceipts configureWithStatusFolder:missingFolder];
+        require(![AxsCacheKeeperReceipts submitRoundForBundle:failBundle roundID:@"f1" removed:70 bytes:700 endReason:1 phase:@"complete" message:@"f1" failed:0 effectivePaths:@[] discoveredPaths:nil directories:nil round:@{@"removed":@70, @"bytes":@700} coverageComplete:NO] && [AxsCacheKeeperReceipts hasPendingForBundle:failBundle], @"写失败返回 NO 且待处理");
+        require(![AxsCacheKeeperReceipts submitRoundForBundle:failBundle roundID:@"f2" removed:30 bytes:300 endReason:1 phase:@"complete" message:@"f2" failed:0 effectivePaths:@[] discoveredPaths:nil directories:nil round:@{@"removed":@30, @"bytes":@300} coverageComplete:NO] && [AxsCacheKeeperReceipts hasPendingForBundle:failBundle], @"作业替换后新轮提交同样滞留");
+        require(![AxsCacheKeeperReceipts hasPendingForBundle:receiptBundle], @"一 APP 的待处理不影响其他 APP");
+        require([fm createDirectoryAtPath:missingFolder withIntermediateDirectories:YES attributes:nil error:nil], @"恢复写目录");
+        require([AxsCacheKeeperReceipts flushPendingForBundle:failBundle] && ![AxsCacheKeeperReceipts hasPendingForBundle:failBundle], @"恢复后落盘成功");
+        NSDictionary *failReceipt = [NSDictionary dictionaryWithContentsOfFile:[[missingFolder stringByAppendingPathComponent:failBundle] stringByAppendingString:@".auto.plist"]];
+        require([failReceipt[@"removed"] unsignedIntegerValue]==100 && [failReceipt[@"bytes"] unsignedLongLongValue]==1000 && [failReceipt[@"confirmedRoundID"] isEqual:@"f2"] && [failReceipt[@"lastRemoved"] unsignedIntegerValue]==30 && ![failReceipt[@"coverageComplete"] boolValue], @"两轮按序补记，累计精确 100，上次清理为后一轮，覆盖不完整如实落盘");
+        // 5. 同轮失败后重复提交只计一次：c1 100 失败、c1 150 失败，恢复后落盘计 150。
+        NSString *missingFolder2 = [fixture stringByAppendingPathComponent:@"receipts-missing2"];
+        NSString *coalesceBundle = @"test.receipts.coalesce";
+        [AxsCacheKeeperReceipts resetForTesting];
+        [AxsCacheKeeperReceipts configureWithStatusFolder:missingFolder2];
+        require(![AxsCacheKeeperReceipts submitRoundForBundle:coalesceBundle roundID:@"c1" removed:100 bytes:1000 endReason:0 phase:@"cleaning" message:@"c1" failed:0 effectivePaths:@[] discoveredPaths:nil directories:nil round:nil coverageComplete:YES], @"同轮首次提交失败滞留");
+        require(![AxsCacheKeeperReceipts submitRoundForBundle:coalesceBundle roundID:@"c1" removed:150 bytes:1500 endReason:0 phase:@"cleaning" message:@"c2" failed:0 effectivePaths:@[] discoveredPaths:nil directories:nil round:nil coverageComplete:YES], @"同轮追加提交失败滞留");
+        require([fm createDirectoryAtPath:missingFolder2 withIntermediateDirectories:YES attributes:nil error:nil], @"恢复写目录二");
+        require([AxsCacheKeeperReceipts flushPendingForBundle:coalesceBundle], @"同轮滞留落盘成功");
+        NSDictionary *coalesceReceipt = [NSDictionary dictionaryWithContentsOfFile:[[missingFolder2 stringByAppendingPathComponent:coalesceBundle] stringByAppendingString:@".auto.plist"]];
+        require([coalesceReceipt[@"removed"] unsignedIntegerValue]==150, @"同轮失败后重复提交只计最新累计一次");
+        // 6. 损坏回执不覆盖：写入非 plist 内容后提交失败、文件原样；删除损坏文件后落盘成功。
+        NSString *corruptFolder = [fixture stringByAppendingPathComponent:@"receipts-corrupt"];
+        require([fm createDirectoryAtPath:corruptFolder withIntermediateDirectories:YES attributes:nil error:nil], @"损坏回执夹具目录");
+        NSString *corruptBundle = @"test.receipts.corrupt";
+        NSString *corruptPath = [[corruptFolder stringByAppendingPathComponent:corruptBundle] stringByAppendingString:@".auto.plist"];
+        require([@"this is not a plist" writeToFile:corruptPath atomically:YES encoding:NSUTF8StringEncoding error:nil], @"写入损坏回执文件");
+        [AxsCacheKeeperReceipts resetForTesting];
+        [AxsCacheKeeperReceipts configureWithStatusFolder:corruptFolder];
+        require(![AxsCacheKeeperReceipts submitRoundForBundle:corruptBundle roundID:@"x1" removed:10 bytes:100 endReason:1 phase:@"complete" message:@"x1" failed:0 effectivePaths:@[] discoveredPaths:nil directories:nil round:@{@"removed":@10, @"bytes":@100} coverageComplete:YES] && [AxsCacheKeeperReceipts hasPendingForBundle:corruptBundle], @"损坏回执提交失败且待处理");
+        require([[NSString stringWithContentsOfFile:corruptPath encoding:NSUTF8StringEncoding error:nil] isEqual:@"this is not a plist"], @"损坏回执文件未被覆盖");
+        require(![AxsCacheKeeperReceipts flushPendingForBundle:corruptBundle], @"损坏未修复时落盘仍失败");
+        require([fm removeItemAtPath:corruptPath error:nil], @"删除损坏回执文件");
+        require([AxsCacheKeeperReceipts flushPendingForBundle:corruptBundle] && ![AxsCacheKeeperReceipts hasPendingForBundle:corruptBundle], @"删除损坏文件后落盘成功");
+        NSDictionary *corruptReceipt = [NSDictionary dictionaryWithContentsOfFile:corruptPath];
+        require([corruptReceipt[@"removed"] unsignedIntegerValue]==10 && [corruptReceipt[@"confirmedRoundID"] isEqual:@"x1"], @"损坏修复后累计正确");
+        // 7. 展示更新不改累计：对已有回执更新状态，累计与已确认轮次原样保留。
+        [AxsCacheKeeperReceipts resetForTesting];
+        [AxsCacheKeeperReceipts configureWithStatusFolder:receiptsFolder];
+        require([AxsCacheKeeperReceipts updateStatusForBundle:receiptBundle phase:@"waiting" message:@"wait" failed:0 effectivePaths:@[@"Library/Caches"] discoveredPaths:nil directories:nil], @"展示更新成功");
+        receipt = [NSDictionary dictionaryWithContentsOfFile:receiptPath];
+        require([receipt[@"removed"] unsignedIntegerValue]==210 && [receipt[@"confirmedRoundID"] isEqual:@"r2"] && [receipt[@"phase"] isEqual:@"waiting"] && [receipt[@"coverageComplete"] boolValue], @"展示更新不改累计与已确认轮次，覆盖标记原样保留");
+        // 8. 覆盖完整性变化打破去重：同轮同累计、展示内容完全相同，仅覆盖标记翻转，仍落盘且累计不重复计入。
+        require([AxsCacheKeeperReceipts submitRoundForBundle:receiptBundle roundID:@"r2" removed:60 bytes:600 endReason:0 phase:@"waiting" message:@"wait" failed:0 effectivePaths:@[@"Library/Caches"] discoveredPaths:nil directories:nil round:nil coverageComplete:NO], @"覆盖翻转提交");
+        receipt = [NSDictionary dictionaryWithContentsOfFile:receiptPath];
+        require([receipt[@"removed"] unsignedIntegerValue]==210 && ![receipt[@"coverageComplete"] boolValue], @"覆盖翻转落盘，累计不重复计入");
+        puts("PASS: configuration, modes, deduplication, age, protected files, cleanup, cancellation, permission restoration, receipts and URLCache");
     }
     return 0;
 }

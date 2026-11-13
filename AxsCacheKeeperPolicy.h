@@ -35,6 +35,22 @@ static inline BOOL axs_cachekeeper_protected_path(NSString *path) {
     }
     return NO;
 }
+// 保留子树判定（修订方案任务 1）：相对路径的任一目录成分命中必要状态词，即为已确认
+// 保留范围——其下文件不删，其余独立范围继续。与 protected_path 的区别：只含状态词
+//（偏好/登录/凭据/下载/收件等必要状态），不含格式词（database/sqlite/realm）与文件
+// 后缀规则——数据库格式不能单独证明必须保留，平台缓存内的 SQLite 按平台规则可清。
+// 调用方只对目录成分使用本函数，不对文件名使用（文件名命中状态词不等于整目录保留）。
+static inline BOOL axs_cachekeeper_retention_path(NSString *path) {
+    if (!axs_cachekeeper_relative_path(path)) return YES;
+    for (NSString *part in [path.lowercaseString componentsSeparatedByString:@"/"]) {
+        for (NSString *word in @[@"documents", @"preferences", @"webkit", @"cookie",
+            @"keychain", @"credential", @"login", @"account", @"auth", @"session", @"token",
+            @"downloads", @"offline", @"inbox"]) {
+            if ([part containsString:word]) return YES;
+        }
+    }
+    return NO;
+}
 static inline BOOL axs_cachekeeper_data_marker(NSString *name) {
     NSString *n=name.lowercaseString;
     if ([n hasSuffix:@".db"] || [n containsString:@".db-"] || [n containsString:@"sqlite"] ||
@@ -191,7 +207,8 @@ static inline NSString *axs_cachekeeper_mode(id state) {
     return @"auto";
 }
 static inline BOOL axs_cachekeeper_wants_restriction(id state) { return ![axs_cachekeeper_mode(state) isEqual:@"clean"]; }
-static inline BOOL axs_cachekeeper_wants_cleanup(id state) { return ![axs_cachekeeper_mode(state) isEqual:@"prevent"]; }
+// 三种模式共用同一删除引擎（方案任务 9）：模式只决定是否限制网络缓存，不再决定是否清理。
+// 旧 wants_cleanup（prevent 不清理）已删除：prevent 同样清理存量与新增缓存。
 static inline BOOL axs_cachekeeper_url_cache_enabled(id state) {
     if ([state isKindOfClass:NSDictionary.class] && state[@"urlCache"] != nil)
         return [state[@"urlCache"] isKindOfClass:NSNumber.class] && [state[@"urlCache"] boolValue];
@@ -208,21 +225,11 @@ static inline BOOL axs_cachekeeper_auto_discover(id state) {
         return [state[@"autoDiscover"] boolValue];
     return YES;
 }
-// 标准缓存全量清理（按 APP 开关，默认关闭）：开启后该 APP 的平台缓存契约目录在完全退出后清空全部文件。
-// 一键开启与模式切换不写此键，只能由用户在详情页逐个 APP 打开。
-static inline BOOL axs_cachekeeper_full_clear(id state) {
-    return [state isKindOfClass:NSDictionary.class] && [state[@"fullClear"] isKindOfClass:NSNumber.class] && [state[@"fullClear"] boolValue];
-}
-// 全量清理只作用于平台缓存契约目录 Library/Caches 与 tmp；顶层 Caches/Cache/cache/.cache
-// 虽属 kind=cache 白名单根，但非苹果缓存契约目录，不做全量清理（审计第 4 项）。
-// Library/Logs 自 0.7.0 起归混合类（可能含数据库 WAL），不在此列。
-static inline BOOL axs_cachekeeper_full_clear_path(id state, NSString *path) {
-    if (!axs_cachekeeper_full_clear(state)) return NO;
-    for (NSString *root in @[@"Library/Caches", @"tmp"]) {
-        if ([path isEqual:root] || [path hasPrefix:[root stringByAppendingString:@"/"]]) return YES;
-    }
-    return NO;
-}
+// 标准缓存按用途清理已成为已启用 APP 的统一行为（方案任务 8/9）：平台缓存契约目录
+// Library/Caches 与 tmp 按 CleanupRules 平台规则处理，不再需要逐 APP 的全量开关。
+// 旧 fullClear 键只作面板迁移识别：状态归一化时丢弃，产品判定永不读取。
+// 顶层 Caches/Cache/cache/.cache 虽属 kind=cache 白名单根，但非苹果缓存契约目录，
+// 不按平台规则全量清理（审计第 4 项）；Library/Logs 自 0.7.0 起归混合类，不在此列。
 static inline BOOL axs_cachekeeper_log_file_name(NSString *name) {
     // 日志特征文件名（定级日志目录内的删除门）：常见日志扩展名及其复合后缀形态
     //（如 BDALog_20261111.alog.iOS.1128、微信 *.xlog）。仅名字特征，不读内容另行判断。
@@ -281,6 +288,12 @@ static inline BOOL axs_cachekeeper_paths_overlap(NSString *left, NSString *right
     return [left isEqual:right] || [left hasPrefix:[right stringByAppendingString:@"/"]] ||
         [right hasPrefix:[left stringByAppendingString:@"/"]];
 }
+// 单向包含判定（方案任务 6）：path 在 ancestor 子树内（相等也算）。排除剪枝只用单向判定——
+// 候选在排除子树内才移除；排除是候选的子树时保留候选，Sweep 按文件级排除决定裁剪子树，
+// 不丢弃排除外的合法同级范围（旧双向 overlap 会把整个父根删掉）。
+static inline BOOL axs_cachekeeper_path_inside(NSString *path, NSString *ancestor) {
+    return [path isEqual:ancestor] || [path hasPrefix:[ancestor stringByAppendingString:@"/"]];
+}
 // 须置于 exclusions/paths_overlap 定义之后：C 不允许先用后定义（#34 即因此编译失败）。
 static inline NSArray<NSString *> *axs_cachekeeper_purge_paths(NSArray *candidates, id state) {
     // 未知目录自动清理候选集：用途未知类、未定级为日志、未被手动排除；父目录优先去重。
@@ -291,7 +304,7 @@ static inline NSArray<NSString *> *axs_cachekeeper_purge_paths(NSArray *candidat
         if (!axs_cachekeeper_log_path_valid(path)) continue;
         if ([logs containsObject:path]) continue;
         BOOL hit=NO;
-        for (NSString *ex in excluded) if (axs_cachekeeper_paths_overlap(path,ex)) { hit=YES; break; }
+        for (NSString *ex in excluded) if (axs_cachekeeper_path_inside(path,ex)) { hit=YES; break; }
         if (!hit) [paths addObject:path];
     }
     return axs_cachekeeper_parent_paths(paths);
@@ -304,17 +317,21 @@ static inline NSArray<NSString *> *axs_cachekeeper_effective_paths(NSArray *sele
     }
     // 用户逐项定级的日志目录与缓存根并列为有效根（定级只存于状态，永不由一键开启/自动发现写入）。
     [paths addObjectsFromArray:axs_cachekeeper_log_paths(state)];
-    // 不能通过加入父目录绕过子目录的手动排除。
+    // 手动排除的剪枝只按单向包含（任务 6）：候选在排除子树内才移除；排除是候选的子树时
+    // 保留候选——Sweep 按文件级排除决定裁剪子树，排除外的合法同级范围继续处理。
+    // 父范围不能绕过子排除（文件级决定保证），也不因一个子排除丢掉整个父根。
     for (NSString *path in [paths copy]) for (NSString *excluded in axs_cachekeeper_exclusions(state)) {
-        if (axs_cachekeeper_paths_overlap(path,excluded)) { [paths removeObject:path];break; }
+        if (axs_cachekeeper_path_inside(path,excluded)) { [paths removeObject:path];break; }
     }
     NSMutableArray *result=[axs_cachekeeper_cache_paths(paths) mutableCopy];
     for (NSString *path in paths) if (axs_cachekeeper_log_path_valid(path) && ![result containsObject:path]) [result addObject:path];
     return axs_cachekeeper_parent_paths(result);
 }
 static inline NSMutableDictionary *axs_cachekeeper_app_state(id previous, BOOL enabled) {
+    // 唯一状态归一化入口（方案任务 8）：旧 fullClear 键在此丢弃（不再写入新状态），
+    // 其余选择（模式、网络选项、自动发现、日志定级、手动排除）原样保留；Tweak 不写用户配置。
     return [@{@"enabled":@(enabled), @"mode":axs_cachekeeper_mode(previous), @"urlCache":@(axs_cachekeeper_url_cache_enabled(previous)),
-        @"autoDiscover":@(axs_cachekeeper_auto_discover(previous)), @"fullClear":@(axs_cachekeeper_full_clear(previous)),
+        @"autoDiscover":@(axs_cachekeeper_auto_discover(previous)),
         @"logPaths":axs_cachekeeper_log_paths(previous),
         @"excludedPaths":axs_cachekeeper_exclusions(previous)} mutableCopy];
 }
@@ -329,7 +346,7 @@ static inline NSArray<NSString *> *axs_cachekeeper_selected_paths(NSDictionary *
 }
 static inline BOOL axs_cachekeeper_can_clean(NSDictionary *directories, NSDictionary *states, NSString *bundle) {
     return axs_cachekeeper_bundle_id(bundle) && [states isKindOfClass:NSDictionary.class] &&
-        axs_cachekeeper_app_enabled(states[bundle]) && axs_cachekeeper_wants_cleanup(states[bundle]) &&
+        axs_cachekeeper_app_enabled(states[bundle]) &&
         (axs_cachekeeper_selected_paths(directories,states,bundle).count > 0 || axs_cachekeeper_auto_discover(states[bundle]));
 }
 // 界面时间统一按设备本地时区显示；NSDate 的 %@ 描述恒为 UTC（+0000），会与机器时间差出时区小时数。

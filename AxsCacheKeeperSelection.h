@@ -81,8 +81,10 @@ static inline NSString *axs_cachekeeper_save_selection(NSString *folder, NSStrin
         }
     }
     if (enable) {
+        // 开启目录时只清除被开启路径覆盖的排除（任务 6）：开启父目录不清除子目录的排除，
+        // 子排除由文件级决定继续执行；只有开启的路径本身在排除子树内（含相等）才清除该排除。
         for (NSString *excluded in [exclusions copy]) for (NSString *added in changes) {
-            if (axs_cachekeeper_paths_overlap(excluded,added)) { [exclusions removeObject:excluded];break; }
+            if (axs_cachekeeper_path_inside(added,excluded)) { [exclusions removeObject:excluded];break; }
         }
     } else [exclusions addObjectsFromArray:changes];
     state[@"excludedPaths"]=axs_cachekeeper_parent_paths(exclusions);

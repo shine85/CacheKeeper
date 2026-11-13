@@ -35,6 +35,7 @@
 @property(nonatomic) unsigned long long twinBytes;
 @property(nonatomic) NSUInteger twinScanned;
 @property(nonatomic) BOOL twinTruncated;
+@property(nonatomic) BOOL twinDisplayTruncated;
 @property(nonatomic) NSUInteger twinSkipped;
 @end
 
@@ -151,6 +152,11 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
         self.searchIndex++;
         NSString *path=candidate[@"path"];
         if (![path isKindOfClass:NSString.class] || !path.length) { self.twinSkipped++;continue; }
+        // 先预校验目录可读（任务 7）：enumeratorAtURL 对缺失路径是否返回 nil 未定，
+        // 不预校验会让不可读搜索根静默漏计失败；open_directory 失败即计入孪生失败。
+        int fd=axs_cachekeeper_open_directory(path);
+        if (fd<0) { self.twinSkipped++;continue; }
+        close(fd);
         __weak typeof(self) weak=self;
         NSDirectoryEnumerator *entries=[NSFileManager.defaultManager enumeratorAtURL:[NSURL fileURLWithPath:path] includingPropertiesForKeys:nil options:0 errorHandler:^BOOL(NSURL *url,NSError *error) { (void)error;weak.twinSkipped++;return YES; }];
         if (entries) { self.searchEntries=entries;self.searchCurrent=candidate;return; }
@@ -163,7 +169,8 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
     if (!enumerated) { [self axs_cachekeeper_open_search_root];if (!self.searchEntries) self.complete=YES;return; }
     self.twinScanned++;
     struct stat info;
-    if (lstat(enumerated.path.fileSystemRepresentation,&info)) return;
+    // 孪生搜索的 lstat 失败计入孪生失败（任务 7）：静默跳过会让 0 匹配看起来像"已确认无孪生"。
+    if (lstat(enumerated.path.fileSystemRepresentation,&info)) { self.twinSkipped++;return; }
     if (!S_ISREG(info.st_mode) || info.st_nlink==1) return;
     NSString *key=axs_cachekeeper_inode_key(info.st_dev,info.st_ino);
     NSArray *sources=self.linkIndex[key];
@@ -175,18 +182,24 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
         if ([twinResolved isEqual:sourceResolved]) continue;
         NSUInteger existing=0;
         for (NSDictionary *twin in self.twinEntries) if ([twin[@"source"] isEqual:source[@"path"]]) existing++;
-        if (existing>=3 || self.twinEntries.count>=50) continue;
+        // 展示截断（任务 7）：每源 3 条或总 50 条上限丢掉的孪生须标记，不能静默少报。
+        if (existing>=3 || self.twinEntries.count>=50) { self.twinDisplayTruncated=YES;continue; }
         NSString *base=self.searchCurrent[@"path"];
         NSString *label=self.searchCurrent[@"label"] ?: @"";
         NSString *shown=[enumerated.path hasPrefix:[base stringByAppendingString:@"/"]] ?
             [NSString stringWithFormat:@"%@/%@",label,[enumerated.path substringFromIndex:base.length+1]] :
             [NSString stringWithFormat:@"%@/%@",label,enumerated.path.lastPathComponent];
         [self.twinEntries addObject:@{@"source":source[@"path"],@"twin":shown,@"bytes":source[@"bytes"]}];
-        if (![self.twinnedKeys containsObject:source[@"path"]]) { [self.twinnedKeys addObject:source[@"path"]];self.twinBytes+=[source[@"bytes"] unsignedLongLongValue]; }
+        // 关联大小按 (设备, inode) 去重（任务 7）：同一 inode 的多个源路径只计一次，
+        // 否则同目录双链接会把同一份数据算两遍。twinBytes 是逻辑关联大小，非实测释放空间。
+        if (![self.twinnedKeys containsObject:key]) { [self.twinnedKeys addObject:key];self.twinBytes+=[source[@"bytes"] unsignedLongLongValue]; }
     }
 }
 - (NSDictionary *)report {
     BOOL covered=self.complete && !self.failures && !self.changed;
+    // 孪生搜索完整性与主扫描分开报告（任务 7）：主扫描未完成时孪生源清单本身不完整，
+    // 不能声称孪生已覆盖；无硬链接时孪生阶段不启动，各项计数为 0，完整性自然成立。
+    BOOL twinCovered=self.complete && !self.twinSkipped && !self.twinTruncated && !self.linkFilesTruncated && !self.twinDisplayTruncated;
     NSString *evidence=@"用途仍未确认；请结合文件类型与实际功能继续核查";
     if (self.markers || self.types[@"SQLite 数据库"] || self.types[@"二进制 plist"] || self.types[@"JSON 数据"])
         evidence=@"检出数据格式或数据名称特征；不代表整个目录都是必需数据，也不能直接清空";
@@ -195,7 +208,8 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
     return @{@"complete":@(self.complete),@"coverageComplete":@(covered),@"files":@(self.files),@"bytes":@(self.bytes),
         @"failures":@(self.failures),@"changed":@(self.changed),@"links":@(self.links),@"hidden":@(self.hidden),
         @"hardLinks":@(self.hardLinks),@"symlinks":@(self.symlinks),@"linkTwins":[self.twinEntries copy],@"twinBytes":@(self.twinBytes),
-        @"twinScanTruncated":@(self.twinTruncated),@"linkFilesTruncated":@(self.linkFilesTruncated),@"twinScanned":@(self.twinScanned),
+        @"twinCoverageComplete":@(twinCovered),@"twinFailures":@(self.twinSkipped),
+        @"twinScanTruncated":@(self.twinTruncated),@"twinDisplayTruncated":@(self.twinDisplayTruncated),@"linkFilesTruncated":@(self.linkFilesTruncated),@"twinScanned":@(self.twinScanned),
         @"types":[self.types copy],@"ages":[self.ages copy],@"largest":[self.largest copy],@"evidence":evidence,
         @"error":self.error ?: @"",@"started":self.started,@"updated":NSDate.date};
 }

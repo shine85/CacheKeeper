@@ -8,9 +8,11 @@
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperSweep.h"
 #import "AxsCacheKeeperCleanupJob.h"
+#import "AxsCacheKeeperCleanupRules.h"
 #import "AxsCacheKeeperDirectories.h"
 #import "AxsCacheKeeperProcess.h"
 #import "AxsCacheKeeperProcessObservation.h"
+#import "AxsCacheKeeperReceipts.h"
 #import "AxsCacheKeeperInspection.h"
 static id SRead(id target,NSString *name) { SEL s=NSSelectorFromString(name);return [target respondsToSelector:s]?((id(*)(id,SEL))objc_msgSend)(target,s):nil; }
 static NSURL *Container(NSString *bundle) {
@@ -177,28 +179,9 @@ static BOOL axs_cachekeeper_gate_open(NSString *bundle, NSString *jobInstance) {
     return [AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:bundle identity:identity atMonotonicTime:axs_cachekeeper_monotonic_seconds()];
 }
 static NSString *axs_cachekeeper_folder(void) { return jbroot(@"/var/mobile/Library/CacheKeeper"); }
-static BOOL axs_cachekeeper_report(NSString *bundle, NSString *phase, NSString *message,
-                                  NSUInteger removed, unsigned long long bytes, NSUInteger failed, NSArray *effectivePaths, NSArray *discoveredPaths, NSDictionary *directories, NSDictionary *round) {
-    // 主线程快捷操作与清理队列共享同一个原子读改写区，避免累计量丢失。
-    // 返回是否落盘成功：调用方据此决定是否推进累计与退役作业（审计第 9 项）。
-    // round 非空时表示一轮退役（完成/触顶/取消），其 removed/bytes 为本轮总量，记为上次清理；其余调用传 nil，沿用旧值。
-    @synchronized (AxsCacheKeeperSweep.class) {
-        NSString *path = [[axs_cachekeeper_folder() stringByAppendingPathComponent:@"Status"]
-            stringByAppendingPathComponent:[bundle stringByAppendingString:@".auto.plist"]];
-        NSDictionary *previous = [NSDictionary dictionaryWithContentsOfFile:path];
-        NSArray *known=discoveredPaths ?: (previous[@"discoveredPaths"] ?: @[]);
-        if (!round && !removed && !bytes && [previous[@"phase"] isEqual:phase] && [previous[@"message"] isEqual:message] &&
-            [previous[@"failed"] unsignedIntegerValue] == failed && [previous[@"effectivePaths"] isEqual:effectivePaths] &&
-            [previous[@"discoveredPaths"] isEqual:known] && !directories && -[previous[@"updated"] timeIntervalSinceNow]<30) return YES;
-        NSDictionary *report = @{@"updated":NSDate.date, @"phase":phase, @"message":message,
-            @"removed":@([previous[@"removed"] unsignedIntegerValue]+removed),
-            @"bytes":@([previous[@"bytes"] unsignedLongLongValue]+bytes), @"failed":@(failed),
-            @"lastRemoved":round ? round[@"removed"] : (previous[@"lastRemoved"] ?: @0),
-            @"lastBytes":round ? round[@"bytes"] : (previous[@"lastBytes"] ?: @0),
-            @"effectivePaths":effectivePaths ?: @[], @"discoveredPaths":known, @"directories":directories ?: previous[@"directories"] ?: @{}};
-        if (![report writeToFile:path atomically:YES]) { NSLog(@"[CacheKeeper] 无法保存 %@ 清理状态", bundle); return NO; }
-        return YES;
-    }
+// 回执模块配置（幂等）：Status 目录只由调用方给定，模块本身不依赖 jbroot。
+static void axs_cachekeeper_configure_receipts(void) {
+    [AxsCacheKeeperReceipts configureWithStatusFolder:[[axs_cachekeeper_folder() stringByAppendingPathComponent:@"Status"]]];
 }
 static NSString *axs_cachekeeper_network_status(NSString *bundle) {
     NSString *path = [[axs_cachekeeper_folder() stringByAppendingPathComponent:@"Status"]
@@ -214,12 +197,11 @@ static NSString *axs_cachekeeper_network_status(NSString *bundle) {
 }
 void axs_cachekeeper_request_cleanup(NSString *bundle) {
     if (!axs_cachekeeper_bundle_id(bundle)) return;
+    axs_cachekeeper_configure_receipts();
     NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:[axs_cachekeeper_folder() stringByAppendingPathComponent:@"directories.plist"]];
     NSDictionary *states = [NSDictionary dictionaryWithContentsOfFile:[axs_cachekeeper_folder() stringByAppendingPathComponent:@"appEnabled.plist"]];
     if (!axs_cachekeeper_app_enabled(states[bundle])) return;
-    if ([axs_cachekeeper_mode(states[bundle]) isEqual:@"prevent"]) {
-        axs_cachekeeper_report(bundle, @"prevent", @"当前为只禁止模式，不删除缓存文件", 0, 0, 0, @[], nil, nil, nil); return;
-    }
+    // 任务 9：三种模式共用清理引擎，prevent 不再短路——手动检测目录同样走门控与清理流程。
     if (!axs_cachekeeper_can_clean(selection,states,bundle)) return;
     if (!axs_cachekeeper_manual) axs_cachekeeper_manual = [NSMutableSet new];
     NSString *reason=nil;
@@ -227,14 +209,14 @@ void axs_cachekeeper_request_cleanup(NSString *bundle) {
         NSString *execReason=nil;
         if (axs_cachekeeper_exec(bundle,nil,NULL,&execReason)==AxsCacheKeeperExecSuspended)
             execReason=@"APP 进程已被系统挂起（未在执行），稳定确认中；持续挂起满 60 秒后自动清理";
-        axs_cachekeeper_report(bundle, @"waiting", execReason ?: reason, 0, 0, 0, @[], nil, nil, nil); return;
+        [AxsCacheKeeperReceipts updateStatusForBundle:bundle phase:@"waiting" message:execReason ?: reason failed:0 effectivePaths:@[] discoveredPaths:nil directories:nil]; return;
     }
     [axs_cachekeeper_manual addObject:bundle];
 }
 void CKApplyDirectorySwitches(void) {
     static BOOL busy;
     static dispatch_queue_t queue;
-    static NSMutableDictionary *jobs, *finished, *discovery, *lockChecks, *purgeDiscovery;
+    static NSMutableDictionary *jobs, *finished, *discovery, *purgeDiscovery, *unresolvedRanges;
     // 实例观测独立于清理忙碌状态：每轮入口先记录各已启用 APP 当前运行实例，
     // 使长任务存续期间发生的新实例启停也能被门控采样的绑定比对发现；
     // 同时维护挂起稳定跟踪（同一实例被系统挂起的起始时刻），供放行判定使用。
@@ -259,7 +241,13 @@ void CKApplyDirectorySwitches(void) {
     if (busy) return;
     if (!queue) {
         queue = dispatch_queue_create("dev.local.cachekeeper.cleanup", DISPATCH_QUEUE_SERIAL);
-        jobs = [NSMutableDictionary new]; finished = [NSMutableDictionary new]; discovery = [NSMutableDictionary new]; lockChecks = [NSMutableDictionary new]; purgeDiscovery = [NSMutableDictionary new];
+        jobs = [NSMutableDictionary new]; finished = [NSMutableDictionary new]; discovery = [NSMutableDictionary new]; purgeDiscovery = [NSMutableDictionary new];
+        // 未确认范围登记（方案任务 3 扩展）：bundle → 相对路径 → 登记记录
+        // {rulesVersion, appVersion, exclusions, mtime, ctime, unresolved, unresolvedBytes, evidence}。
+        // 未确认内容不阻塞其他根；登记的范围在规则/版本/排除/内容均未变且非手动重查时，
+        // 跳过深度复查（不建 sweep），沿用登记的残留计数；任一触发条件变化即重新分析。
+        unresolvedRanges = [NSMutableDictionary new];
+        axs_cachekeeper_configure_receipts();
     }
     NSString *folder = axs_cachekeeper_folder();
     NSString *selectionFile = [folder stringByAppendingPathComponent:@"directories.plist"];
@@ -321,73 +309,41 @@ void CKApplyDirectorySwitches(void) {
     }
     busy = YES;
     dispatch_async(queue, ^{
-        // 权限记录只恢复「不再被期望锁定」的部分：期望集合 = 已启用且只禁止模式的 APP 的已选缓存根；
-        // 其余记录（含旧版残留、已切换模式或关闭总开关的 APP）每轮在此恢复，期望内条目保持锁定。
+        // 旧写锁恢复（方案任务 9）：生产侧不再新施加写锁，全部记录每轮在此恢复
+        //（只恢复与当前 inode/路径匹配的记录，身份不符的记录丢弃，见 restore 实现）。
+        // 恢复失败只拦受影响的 APP：失败路径落在其容器内的 bundle 本轮跳过，其他 APP 照常。
         NSString *journal = [folder stringByAppendingPathComponent:@"permissions.plist"];
-        NSDictionary *journalRecords = [NSDictionary dictionaryWithContentsOfFile:journal];
-        NSMutableArray *desiredRoots = [NSMutableArray new];
-        for (NSString *bundle in targets) if ([targets[bundle][@"mode"] isEqual:@"prevent"]) {
-            // 只禁止的写锁只作用于标准缓存根；定级日志目录不因只禁止模式被上锁（其语义是退出后清理）。
-            NSArray *targetPaths = targets[bundle][@"paths"], *targetRoots = targets[bundle][@"roots"];
-            for (NSUInteger index = 0; index < targetPaths.count && index < targetRoots.count; index++)
-                if ([axs_cachekeeper_directory_kind(targetPaths[index]) isEqual:@"cache"]) [desiredRoots addObject:targetRoots[index]];
+        NSDictionary *restored = axs_cachekeeper_restore_paths(nil, journal);
+        NSMutableDictionary *restoreFailed = [NSMutableDictionary new]; // bundle → 该 bundle 容器内恢复失败的条目数
+        for (NSString *failedPath in restored[@"failedPaths"]) {
+            for (NSString *bundle in targets) {
+                NSString *home = targets[bundle][@"home"];
+                if (home.length && [failedPath hasPrefix:[home stringByAppendingString:@"/"]])
+                    restoreFailed[bundle] = @([restoreFailed[bundle] unsignedIntegerValue] + 1);
+            }
         }
-        NSMutableArray *undesired = [NSMutableArray new];
-        for (NSString *path in journalRecords) {
-            BOOL wanted = NO;
-            for (NSString *root in desiredRoots)
-                if ([path isEqual:root] || [path hasPrefix:[root stringByAppendingString:@"/"]]) { wanted = YES; break; }
-            if (!wanted) [undesired addObject:path];
-        }
-        NSDictionary *restored = undesired.count ? axs_cachekeeper_restore_paths(undesired, journal) :
-            @{@"failed":@0, @"applied":@0, @"error":@""};
-        for (NSString *bundle in lockChecks.allKeys) if (!targets[bundle]) [lockChecks removeObjectForKey:bundle];
+        if ([restored[@"failed"] unsignedIntegerValue] && [restored[@"error"] length]) NSLog(@"[CacheKeeper] 权限恢复：%@", restored[@"error"]);
         for (NSString *bundle in jobs.allKeys) if (!targets[bundle]) [jobs removeObjectForKey:bundle];
         for (NSString *bundle in finished.allKeys) if (!targets[bundle]) [finished removeObjectForKey:bundle];
         for (NSString *bundle in discovery.allKeys) if (!targets[bundle]) [discovery removeObjectForKey:bundle];
         for (NSString *bundle in purgeDiscovery.allKeys) if (!targets[bundle]) [purgeDiscovery removeObjectForKey:bundle];
+        for (NSString *bundle in unresolvedRanges.allKeys) if (!targets[bundle]) [unresolvedRanges removeObjectForKey:bundle];
         for (NSString *bundle in targets) {
             NSDictionary *target = targets[bundle];
             NSArray *roots = target[@"roots"], *paths = target[@"paths"];
             BOOL manual = [target[@"manual"] boolValue];
             NSString *mode = target[@"mode"];
-            if ([restored[@"failed"] unsignedIntegerValue]) {
-                axs_cachekeeper_report(bundle, @"error", restored[@"error"], 0, 0, [restored[@"failed"] unsignedIntegerValue], paths, nil, nil, nil);
+            if ([restoreFailed[bundle] unsignedIntegerValue]) {
+                [AxsCacheKeeperReceipts updateStatusForBundle:bundle phase:@"error" message:restored[@"error"] failed:[restoreFailed[bundle] unsignedIntegerValue] effectivePaths:paths discoveredPaths:nil directories:nil];
                 continue;
             }
-            if ([mode isEqual:@"prevent"]) {
-                [jobs removeObjectForKey:bundle]; [finished removeObjectForKey:bundle];
-                NSString *network=axs_cachekeeper_url_cache_enabled(states[bundle]) ? axs_cachekeeper_network_status(bundle) : @"网络缓存开关已关闭，当前不执行缓存干预";
-                NSString *lockMessage;
-                NSUInteger lockFailed = 0;
-                if ([target[@"process"] integerValue] != AxsCacheKeeperProcessStopped) {
-                    lockMessage = @"只禁止模式：限制网络缓存并锁定已选缓存目录写入；APP 未完全退出，上锁将在退出后自动执行。";
-                } else if (!roots.count) {
-                    lockMessage = @"只禁止模式：限制网络缓存，不删除文件；尚未选择缓存目录，没有可锁定的目录。";
-                } else {
-                    NSString *signature = [roots componentsJoinedByString:@"\n"];
-                    NSDictionary *last = lockChecks[bundle];
-                    NSDictionary *result = ([last[@"signature"] isEqual:signature] && -[last[@"time"] timeIntervalSinceNow] < 30) ? last[@"result"] : nil;
-                    if (!result) {
-                        result = axs_cachekeeper_lock_paths(roots, journal);
-                        lockChecks[bundle] = @{@"signature":signature, @"time":NSDate.date, @"result":result};
-                    }
-                    lockFailed = [result[@"failed"] unsignedIntegerValue];
-                    lockMessage = lockFailed ?
-                        [NSString stringWithFormat:@"只禁止模式：目录写入锁定失败：%@；网络缓存限制照常执行。", result[@"error"]] :
-                        [NSString stringWithFormat:@"只禁止模式：已锁定 %lu 个缓存目录的写入（新打开不可写，已打开的句柄仍可写），不删除已有文件。", (unsigned long)roots.count];
-                }
-                axs_cachekeeper_report(bundle, @"prevent", [lockMessage stringByAppendingFormat:@"\n%@", network], 0, 0, lockFailed, paths, nil, nil, nil);
-                if (manual) dispatch_async(dispatch_get_main_queue(), ^{ [axs_cachekeeper_manual removeObject:bundle]; });
-                continue;
-            }
-            if (![target[@"home"] length]) { axs_cachekeeper_report(bundle, @"error", @"无法解析 APP 数据容器", 0, 0, 1, paths, nil, nil, nil); continue; }
+            if (![target[@"home"] length]) { [AxsCacheKeeperReceipts updateStatusForBundle:bundle phase:@"error" message:@"无法解析 APP 数据容器" failed:1 effectivePaths:paths discoveredPaths:nil directories:nil]; continue; }
             if ([target[@"process"] integerValue] != AxsCacheKeeperProcessStopped ||
                 [target[@"confidence"] integerValue] != AxsCacheKeeperSignalStrong) {
                 [jobs removeObjectForKey:bundle]; [finished removeObjectForKey:bundle];
                 NSString *message = target[@"processReason"];
-                if ([mode isEqual:@"auto"] && axs_cachekeeper_url_cache_enabled(states[bundle])) message = [message stringByAppendingFormat:@"\n%@", axs_cachekeeper_network_status(bundle)];
-                axs_cachekeeper_report(bundle, @"waiting", message, 0, 0, 0, paths, nil, nil, nil); continue;
+                if (axs_cachekeeper_should_prevent(states[bundle])) message = [message stringByAppendingFormat:@"\n%@", axs_cachekeeper_network_status(bundle)];
+                [AxsCacheKeeperReceipts updateStatusForBundle:bundle phase:@"waiting" message:message failed:0 effectivePaths:paths discoveredPaths:nil directories:nil]; continue;
             }
             NSArray *discovered=@[];
             NSString *discoveryError=@"";
@@ -397,6 +353,9 @@ void CKApplyDirectorySwitches(void) {
                 if (![known[@"home"] isEqual:target[@"home"]] || now-[known[@"time"] doubleValue]>=30) {
                     NSError *error=nil;
                     NSArray *found=axs_cachekeeper_discover_cache_roots([NSURL fileURLWithPath:target[@"home"]],&error);
+                    // 读取失败永不缓存为"无内容"（任务 6）：本次返回空且旧缓存有根时沿用旧根，
+                    // 错误照常记录并上报；30 秒后重试，恢复后新结果替换。
+                    if (error && !found.count && [known[@"paths"] count]) found=known[@"paths"];
                     known=@{@"home":target[@"home"],@"time":@(now),@"paths":found,@"error":error.localizedDescription ?: @""};
                     discovery[bundle]=known;
                 }
@@ -417,44 +376,96 @@ void CKApplyDirectorySwitches(void) {
                 // 注意：不能用 scan_targets 的 readOnly 过滤——它标记的是“非标准缓存路径”，
                 // 未知目录全是 readOnly=YES，过滤后 B 案候选集恒为空（#37 真机静默失效）。
                 NSArray *found=axs_cachekeeper_purge_candidates([NSURL fileURLWithPath:target[@"home"]], &purgeError);
+                // 读取失败永不缓存为"无内容"（任务 6）：同标准根发现，空结果时沿用旧候选。
+                if (purgeError && !found.count && [knownPurge[@"paths"] count]) found=knownPurge[@"paths"];
                 knownPurge=@{@"home":target[@"home"],@"time":@(nowPurge),@"paths":found ?: @[],@"error":purgeError.localizedDescription ?: @""};
                 purgeDiscovery[bundle]=knownPurge;
             }
             purgeCandidates=knownPurge[@"paths"];
             NSArray *purgePaths=axs_cachekeeper_purge_paths(purgeCandidates, states[bundle]);
+            // 发现错误合并（任务 6）：标准根与未知候选的发现错误同进消息与失败计数，
+            // 不只报其一；覆盖完整性已在提交时合并两路错误。
+            NSString *purgeErrorMessage = knownPurge[@"error"] ?: @"";
+            NSString *discoveryErrors = discoveryError.length && purgeErrorMessage.length ?
+                [NSString stringWithFormat:@"%@\n%@", discoveryError, purgeErrorMessage] :
+                (discoveryError.length ? discoveryError : purgeErrorMessage);
+            // 未确认登记剪枝：不再是候选的范围移除登记（下次重入候选时重新分析）。
+            NSMutableDictionary *bundleRanges = unresolvedRanges[bundle];
+            if (bundleRanges.count) {
+                NSMutableSet *candidates = [NSMutableSet setWithArray:paths];
+                [candidates addObjectsFromArray:purgePaths];
+                for (NSString *registered in bundleRanges.allKeys) if (![candidates containsObject:registered]) [bundleRanges removeObjectForKey:registered];
+            }
             if (!paths.count && !purgePaths.count) {
                 [jobs removeObjectForKey:bundle];[finished removeObjectForKey:bundle];
-                NSString *message=discoveryError.length ? discoveryError : @"没有可处理的缓存目录；已尊重手动排除，网络限制按独立选项执行";
-                axs_cachekeeper_report(bundle,@"waiting",message,0,0,discoveryError.length ? 1 : 0,@[],axs_cachekeeper_auto_discover(states[bundle]) ? discovered : nil,nil,nil);continue;
+                NSString *message=discoveryErrors.length ? discoveryErrors : @"没有可处理的缓存目录；已尊重手动排除，网络限制按独立选项执行";
+                [AxsCacheKeeperReceipts updateStatusForBundle:bundle phase:@"waiting" message:message failed:discoveryErrors.length ? 1 : 0 effectivePaths:@[] discoveredPaths:axs_cachekeeper_auto_discover(states[bundle]) ? discovered : nil directories:nil];continue;
             }
-            BOOL fullClear = axs_cachekeeper_full_clear(states[bundle]);
             BOOL hasLogRoot = NO;
-            for (NSString *path in paths) if ([axs_cachekeeper_log_paths(states[bundle]) containsObject:path]) { hasLogRoot = YES; break; }
+            BOOL hasPlatformRoot = NO;
+            for (NSString *path in paths) {
+                if ([axs_cachekeeper_log_paths(states[bundle]) containsObject:path]) hasLogRoot = YES;
+                if ([path isEqual:@"Library/Caches"] || [path isEqual:@"tmp"] ||
+                    [path hasPrefix:@"Library/Caches/"] || [path hasPrefix:@"tmp/"]) hasPlatformRoot = YES;
+            }
             BOOL hasPurgeRoot = purgePaths.count > 0;
-            NSString *signature = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\n%@", [roots componentsJoinedByString:@"\n"], mode, fullClear ? @"full" : @"media", target[@"instance"], [purgePaths componentsJoinedByString:@"\n"]];
+            // 排除边界与规则版本参与 job 签名：排除变化或规则升级使旧 job 失效，下轮重建决定。
+            // 容器路径已在签名内（roots 为绝对路径，含 home 前缀）：重装换容器即签名变化，静默期失效。
+            // 任务 8 起签名不再含 fullClear（该键已废止，标准缓存统一按平台规则处理）。
+            NSString *exclusionsString = [axs_cachekeeper_exclusions(states[bundle]) componentsJoinedByString:@"\n"] ?: @"";
+            NSString *signature = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\n%@\n%@", [roots componentsJoinedByString:@"\n"], mode, target[@"instance"], [purgePaths componentsJoinedByString:@"\n"], exclusionsString, [AxsCacheKeeperCleanupRules rulesVersion]];
             NSDictionary *done = finished[bundle];
-            // 静默期（方案任务 3，P1-3）：1800 秒只给真正干净的完成轮——结束原因 Completed
-            //（触顶轮不算，哪怕 0 删除）、无删除、无失败、无变化、无近期待处理文件、
-            // 发现覆盖完整。任一条件不满足都按 30 秒重试；APP 再次运行（新实例→签名变化）
-            // 或配置改变时不受限；手动清理不受限。
-            NSTimeInterval quiet = (done && [done[@"endReason"] integerValue] == AxsCacheKeeperCleanupEndReasonCompleted && [done[@"removed"] unsignedIntegerValue] == 0 && [done[@"failed"] unsignedIntegerValue] == 0 && [done[@"changed"] unsignedIntegerValue] == 0 && [done[@"recent"] unsignedIntegerValue] == 0 && [done[@"coverageComplete"] boolValue]) ? 1800 : 30;
+            // 静默期（方案任务 3，P1-3＋扩展）：1800 秒只给真正干净的完成轮——结束原因 Completed
+            //（触顶/未确认轮不算，哪怕 0 删除）、无删除、无失败、无变化、无近期待处理文件、
+            // 无未确认残留、发现覆盖完整。任一条件不满足都按 30 秒重试；APP 再次运行
+            //（新实例→签名变化）、规则升级、排除改变或容器改变时不受限；手动清理不受限。
+            NSTimeInterval quiet = (done && [done[@"endReason"] integerValue] == AxsCacheKeeperCleanupEndReasonCompleted && [done[@"removed"] unsignedIntegerValue] == 0 && [done[@"failed"] unsignedIntegerValue] == 0 && [done[@"changed"] unsignedIntegerValue] == 0 && [done[@"recent"] unsignedIntegerValue] == 0 && [done[@"unresolved"] unsignedIntegerValue] == 0 && [done[@"coverageComplete"] boolValue]) ? 1800 : 30;
             if (!manual && [done[@"signature"] isEqual:signature] && -[done[@"time"] timeIntervalSinceNow] < quiet) continue;
+            // 回执待处理暂停（方案任务 4，P2-1）：该 APP 有未落盘的回执快照时先重试落盘；
+            // 仍未落盘则本周期不推进删除、不建新作业（其他 APP 不受影响）。快照由 Receipts
+            // 模块持有，作业替换/取消不清除；落盘后下周期恢复。暂停状态由任务 5 在详情页展示。
+            if ([AxsCacheKeeperReceipts hasPendingForBundle:bundle] && ![AxsCacheKeeperReceipts flushPendingForBundle:bundle]) continue;
             AxsCacheKeeperCleanupJob *job = jobs[bundle];
-            if (![job.signature isEqual:signature]) {
+            // 手动重查（用户点检测目录）强制重建作业并清空未确认登记：完整重查，
+            // 不受静默期与登记跳过约束。重建即消耗手动请求（异步清标志，避免下周期
+            // 重复重建）；重建不丢失已上报增量（每周期末已写回执，新作业从 0 起计）。
+            if (manual) {
+                [unresolvedRanges removeObjectForKey:bundle];
+                dispatch_async(dispatch_get_main_queue(), ^{ [axs_cachekeeper_manual removeObject:bundle]; });
+            }
+            if (manual || ![job.signature isEqual:signature]) {
                 NSMutableArray *sweeps = [NSMutableArray new];
+                // 决策上下文：bundle＋容器＋状态由调用方提供，删除依据只由 CleanupRules 决定。
+                // 版本暂传 nil（任务 10 接入真实版本后 APP 规则按版本匹配；无版本时带版本规则不匹配）。
+                // 未确认范围跳过：登记未变的范围不建 sweep（沿用登记的残留报告，见目录报告合并处）；
+                // 规则/版本/排除/目录内容任一变化即重新分析。目录 mtime/ctime 只反映条目增删，
+                // 原地改写文件内容不触发——未确认判定不依赖文件内容，原地改写不改变决定。
+                NSString *currentRulesVersion = [AxsCacheKeeperCleanupRules rulesVersion];
+                NSString *currentAppVersion = @""; // 任务 10 接入真实 APP 版本后参与触发比对
                 for (NSUInteger index = 0; index < roots.count; index++) {
                     NSString *root = roots[index];
                     struct stat info;
                     if (lstat(root.fileSystemRepresentation, &info) && errno == ENOENT) continue;
-                    BOOL rootFullClear = index < paths.count && axs_cachekeeper_full_clear_path(states[bundle], paths[index]);
-                    BOOL rootLog = index < paths.count && [axs_cachekeeper_log_paths(states[bundle]) containsObject:paths[index]];
-                    [sweeps addObject:[[AxsCacheKeeperSweep alloc] initWithRoot:root fullClear:rootFullClear logMode:rootLog]];
+                    NSString *relative = [root substringFromIndex:[target[@"home"] length]+1];
+                    NSDictionary *registered = unresolvedRanges[bundle][relative];
+                    if (registered && [registered[@"rulesVersion"] isEqual:currentRulesVersion] &&
+                        [registered[@"appVersion"] isEqual:currentAppVersion] &&
+                        [registered[@"exclusions"] isEqual:exclusionsString] &&
+                        info.st_mtimespec.tv_sec == [registered[@"mtime"] longLongValue] &&
+                        info.st_ctimespec.tv_sec == [registered[@"ctime"] longLongValue]) continue;
+                    [sweeps addObject:[[AxsCacheKeeperSweep alloc] initWithRoot:root bundle:bundle version:nil containerPath:target[@"home"] state:states[bundle]]];
                 }
                 for (NSString *relative in purgePaths) {
                     NSString *purgeRoot=[target[@"home"] stringByAppendingPathComponent:relative];
                     struct stat info;
                     if (lstat(purgeRoot.fileSystemRepresentation, &info) && errno == ENOENT) continue;
-                    [sweeps addObject:[[AxsCacheKeeperSweep alloc] initWithRoot:purgeRoot fullClear:NO logMode:NO purgeMode:YES]];
+                    NSDictionary *registered = unresolvedRanges[bundle][relative];
+                    if (registered && [registered[@"rulesVersion"] isEqual:currentRulesVersion] &&
+                        [registered[@"appVersion"] isEqual:currentAppVersion] &&
+                        [registered[@"exclusions"] isEqual:exclusionsString] &&
+                        info.st_mtimespec.tv_sec == [registered[@"mtime"] longLongValue] &&
+                        info.st_ctimespec.tv_sec == [registered[@"ctime"] longLongValue]) continue;
+                    [sweeps addObject:[[AxsCacheKeeperSweep alloc] initWithRoot:purgeRoot bundle:bundle version:nil containerPath:target[@"home"] state:states[bundle]]];
                 }
                 job = [[AxsCacheKeeperCleanupJob alloc] initWithSweeps:sweeps signature:signature instance:target[@"instance"] ?: @"" clock:^NSTimeInterval { return axs_cachekeeper_monotonic_seconds(); }];
                 jobs[bundle] = job;
@@ -473,8 +484,7 @@ void CKApplyDirectorySwitches(void) {
                     BOOL readable = (currentSelection || ![NSFileManager.defaultManager fileExistsAtPath:selectionFile]) &&
                         (currentStates || ![NSFileManager.defaultManager fileExistsAtPath:stateFile]);
                     NSArray *currentPaths = axs_cachekeeper_effective_paths(currentSelection[bundle],currentStates[bundle],discovered);
-                    BOOL selected = [currentPaths isEqual:paths] && [axs_cachekeeper_mode(currentStates[bundle]) isEqual:mode] &&
-                        axs_cachekeeper_full_clear(currentStates[bundle]) == fullClear;
+                    BOOL selected = [currentPaths isEqual:paths] && [axs_cachekeeper_mode(currentStates[bundle]) isEqual:mode];
                     // 未知目录候选集须同步复核：中途被定级为日志或手动排除的目录，本轮立即停手，下一轮改走日志模式。
                     NSArray *currentPurgePaths = axs_cachekeeper_purge_paths(purgeCandidates, currentStates[bundle]);
                     BOOL purgeOK = [currentPurgePaths isEqual:purgePaths];
@@ -482,7 +492,8 @@ void CKApplyDirectorySwitches(void) {
                     NSString *seen = [AxsCacheKeeperProcessObservation lastExecutingIdentityForBundle:bundle];
                     BOOL instanceOK = ![jobInstance length] || ![seen length] || [seen isEqual:jobInstance];
                     // 仅清理未知目录的任务没有缓存根，currentPaths 为空是正常态：任一根存在即放行。
-                    allowed = readable && selected && (currentPaths.count || currentPurgePaths.count) && axs_cachekeeper_wants_cleanup(currentStates[bundle]) && [Container(bundle).path isEqual:target[@"home"]] &&
+                    // 任务 9：三种模式共用引擎，门控不再按模式拦截清理（模式只决定网络限制）。
+                    allowed = readable && selected && (currentPaths.count || currentPurgePaths.count) && [Container(bundle).path isEqual:target[@"home"]] &&
                         axs_cachekeeper_gate_open(bundle, jobInstance) && instanceOK && purgeOK;
                 });
                 return allowed;
@@ -490,68 +501,87 @@ void CKApplyDirectorySwitches(void) {
             // 单周期推进由作业驱动：Checking 阶段只预检全部根；全部预检完成才转入删除，
             // 120 秒期限从首次真实删除推进起算；2000 项全作业共享硬上限（方案任务 3）。
             [job advanceCycleWithPerRootLimit:256 gate:sampleGate];
-            NSUInteger removed = job.removed, failures = job.failed, protectedCount = job.protectedCount, recentCount = job.recentCount, inspected = job.inspected, changedCount = job.changedCount, mixedPurgeRemoved = job.mixedPurgeRemoved;
-            unsigned long long bytes = job.bytes;
+            NSUInteger removed = job.removed, failures = job.failed, protectedCount = job.protectedCount, recentCount = job.recentCount, inspected = job.inspected, changedCount = job.changedCount, unresolvedCount = job.unresolvedCount;
+            unsigned long long bytes = job.bytes, unresolvedBytes = job.unresolvedBytes;
             BOOL complete = job.endReason == AxsCacheKeeperCleanupEndReasonCompleted;
             BOOL cancelled = job.endReason == AxsCacheKeeperCleanupEndReasonCancelled;
             BOOL capHit = job.endReason == AxsCacheKeeperCleanupEndReasonLimitReached;
+            BOOL unresolvedEnd = job.endReason == AxsCacheKeeperCleanupEndReasonUnresolved;
             BOOL checking = job.phase == AxsCacheKeeperCleanupPhaseChecking;
-            BOOL hasMixedPurge = job.hasMixedPurge;
+            BOOL hasUnresolved = job.hasUnresolved;
             NSString *error = @"";
             NSMutableDictionary *directoryReports=[NSMutableDictionary new];
             for (AxsCacheKeeperSweep *sweep in job.sweeps) {
                 if (sweep.error.length) error = sweep.error;
                 NSString *relative=[sweep.root substringFromIndex:[target[@"home"] length]+1];
-                // 分类与首条证据独立落盘（审计第 10 项）：error 会被后续失败覆盖，不能作为证据载体；
-                // 完整性由已有的 complete/checking/cancelled 三键表达（分类在预检完成时定型，删除阶段可重标混合）。
+                // 分类与首条证据独立落盘（审计第 10 项）：error 会被后续失败覆盖，不能作为证据载体。
+                // 任务 1 新版分类：invalid=规则依赖失效（本轮延期），paused=有未确认内容（待识别）。
                 NSString *purgeClassification = @"";
-                if (sweep.purgeBlocked) purgeClassification = @"blocked";
-                else if (sweep.purgeMixed) purgeClassification = @"mixed";
-                else if (sweep.purgeInvalid) purgeClassification = @"invalid";
-                else if (sweep.purgePaused) purgeClassification = @"paused";
-                else if (sweep.purgeMode) purgeClassification = @"clean";
+                NSString *purgeEvidence = @"";
+                if (sweep.dependencyInvalidated) { purgeClassification = @"invalid"; purgeEvidence = sweep.invalidEvidence ?: @""; }
+                else if (sweep.unresolvedCount > 0) { purgeClassification = @"paused"; purgeEvidence = sweep.unresolvedEvidence ?: @""; }
                 directoryReports[relative]=@{@"updated":NSDate.date,@"complete":@(sweep.complete),@"checking":@(sweep.checking),@"cancelled":@(sweep.cancelled),
-                    @"removed":@(sweep.removed),@"bytes":@(sweep.bytes),@"protected":@(sweep.protectedCount),@"recent":@(sweep.recentCount),@"changed":@(sweep.changedCount),@"failed":@(sweep.failed),@"error":sweep.error ?: @"",@"failureDetails":sweep.failureDetails ?: @[],@"purgeClassification":purgeClassification,@"purgeEvidence":sweep.purgeEvidence ?: @""};
+                    @"removed":@(sweep.removed),@"bytes":@(sweep.bytes),@"protected":@(sweep.protectedCount),@"recent":@(sweep.recentCount),@"changed":@(sweep.changedCount),@"failed":@(sweep.failed),@"remaining":@(sweep.remainingCandidates),@"remainingBytes":@(sweep.remainingBytes),@"deferred":@(sweep.deferredCount),@"deferredBytes":@(sweep.deferredBytes),@"unresolved":@(sweep.unresolvedCount),@"unresolvedBytes":@(sweep.unresolvedBytes),@"error":sweep.error ?: @"",@"failureDetails":sweep.failureDetails ?: @[],@"purgeClassification":purgeClassification,@"purgeEvidence":purgeEvidence};
             }
-            NSUInteger deltaRemoved = removed-job.reportedRemoved;
-            unsigned long long deltaBytes = bytes-job.reportedBytes;
-            // 累计不在此推进：须等回执写成功后再推进，写失败时保留增量与作业以便下周期重试（审计第 9 项）。
+            // 跳过复查的已登记范围：沿用登记的残留报告（未变化，不重扫大树），标记 skipped
+            // 供详情页区分“本次复查”与“沿用登记”；有 sweep 的根已有新鲜报告，不覆盖。
+            for (NSString *relative in unresolvedRanges[bundle]) {
+                if (directoryReports[relative]) continue;
+                if (![paths containsObject:relative] && ![purgePaths containsObject:relative]) continue;
+                NSDictionary *entry = unresolvedRanges[bundle][relative];
+                // 结转报告（任务 5）：本轮未重扫的根只结转已登记的未确认残留；未测量的字段
+                // （受保护/近期/变化/失败/待处理及字节数）不写 0 冒充已知，缺键即未知。
+                // 删除 0 是真值（本轮未运行删除），未确认残留是上轮登记（skipped 标记）。
+                directoryReports[relative]=@{@"updated":NSDate.date,@"complete":@YES,@"checking":@NO,@"cancelled":@NO,
+                    @"removed":@0,@"bytes":@0,@"unresolved":entry[@"unresolved"] ?: @0,@"unresolvedBytes":entry[@"unresolvedBytes"] ?: @0,@"error":@"",@"failureDetails":@[],@"purgeClassification":@"paused",@"purgeEvidence":entry[@"evidence"] ?: @"",@"skipped":@YES};
+            }
+            // 回执按 roundID 幂等提交本轮累计（任务 4）：模块内部按轮次核算增量，重复提交不重复计入；
+            // 写失败时快照滞留模块待处理队列，作业替换/取消不清除，下周期重试落盘。
             NSString *phase = @"cleaning", *message = @"正在分批清理；无需重新检测目录";
             if (checking) message=[NSString stringWithFormat:@"正在检查数据目录，已检查 %lu 项；预检完成后才删除",(unsigned long)inspected];
             if (cancelled) {
                 phase = @"waiting"; message = @"APP 重新运行或配置改变，已停止清理";
                 if (removed) message = [message stringByAppendingFormat:@"；已清理 %lu 项 · %.2f MB", (unsigned long)removed, bytes / 1048576.0];
-            } else if (complete || capHit) {
+            } else if (complete || capHit || unresolvedEnd) {
                 phase = failures ? @"error" : @"complete";
+                // 部分完成：未确认残留的轮次只报部分完成（任务 3 扩展），不冒充“已经干净”。
+                NSString *lead = unresolvedEnd ? @"本轮部分完成" : @"本轮检查完成";
                 message = failures ? [@"本轮未全部完成：" stringByAppendingString:error] :
                     (capHit ? [NSString stringWithFormat:@"本轮已达单轮上限（2000 项或 120 秒），已清理 %lu 项 · %.2f MB；剩余内容顺延下轮继续", (unsigned long)removed, bytes / 1048576.0] :
-                    [NSString stringWithFormat:@"本轮检查完成；已清理 %lu 项 · %.2f MB；保留 %lu 项受保护/未知内容、%lu 项近期文件", (unsigned long)removed, bytes / 1048576.0, (unsigned long)protectedCount, (unsigned long)recentCount]);
-                if (changedCount) message=[message stringByAppendingFormat:@"；%lu 个目录在预检后变化，已跳过等待下轮",(unsigned long)changedCount];
-                if (fullClear) message=[message stringByAppendingString:@"\n全量清理开启：标准缓存目录内的文件按平台缓存契约处理，不按类型保留（60 秒内新文件除外）"];
+                    [NSString stringWithFormat:@"%@；已清理 %lu 项 · %.2f MB；保留 %lu 项受保护内容、%lu 项未知内容待识别、%lu 项近期文件", lead, (unsigned long)removed, bytes / 1048576.0, (unsigned long)protectedCount, (unsigned long)unresolvedCount, (unsigned long)recentCount]);
+                if (changedCount) message=[message stringByAppendingFormat:@"；%lu 项在预检后变化，已跳过等待下轮",(unsigned long)changedCount];
+                if (hasPlatformRoot) message=[message stringByAppendingString:@"\n标准缓存目录（Library/Caches、tmp）内的文件按平台缓存用途约定处理，不按类型保留（60 秒内新文件除外）"];
                 if (hasLogRoot) message=[message stringByAppendingString:@"\n含用户定级的日志目录：仅清理日志特征文件（.log/.alog/.xlog)，数据与未知内容保留"];
-                if (hasPurgeRoot) message=[message stringByAppendingString:@"\n未知目录已按内容审查处理：检出数据证据的目录自动仅清理其中的日志文件；无数据证据的目录暂不自动清理，待专属识别规则"];
-                if (hasMixedPurge) {
-                    // 混合行按实际删除数表述，不只按策略启用（审计第 10 项）：0 删除时明确说未删。
-                    if (mixedPurgeRemoved) message=[message stringByAppendingFormat:@"\n本轮有未知目录检出数据证据，已自动仅清理其中的日志文件 %lu 个（数据与未知内容保留）",(unsigned long)mixedPurgeRemoved];
-                    else message=[message stringByAppendingString:@"\n本轮有未知目录检出数据证据，未删除其中任何文件（数据与未知内容保留）"];
-                }
-                if ([mode isEqual:@"auto"] && axs_cachekeeper_url_cache_enabled(states[bundle])) message = [message stringByAppendingFormat:@"\n%@", axs_cachekeeper_network_status(bundle)];
+                if (hasPurgeRoot) message=[message stringByAppendingString:@"\n未知目录暂不自动清理（用途未确认），待专属识别规则按占用适配"];
+                if (hasUnresolved) message=[message stringByAppendingFormat:@"\n未知内容残留 %lu 项 · %.2f MB（用途未确认，暂不自动清理）", (unsigned long)unresolvedCount, unresolvedBytes / 1048576.0];
+                if (axs_cachekeeper_should_prevent(states[bundle])) message = [message stringByAppendingFormat:@"\n%@", axs_cachekeeper_network_status(bundle)];
             }
             if (axs_cachekeeper_auto_discover(states[bundle])) message=[message stringByAppendingFormat:@"\n自动识别已纳入 %lu 个缓存根（手动排除保持关闭）",(unsigned long)paths.count];
-            if (discoveryError.length) message=[message stringByAppendingFormat:@"\n%@",discoveryError];
-            // 回执写成功后才推进累计并退役作业；写失败时保留增量与已完成作业，
-            // 下周期重试同一增量与同一分目录回执（审计第 9 项，用户 12:19 定）。
-            // 一轮退役时把本轮总量记为上次清理；中途周期传 nil，沿用上一轮的值。
-            NSDictionary *round = (complete || capHit || cancelled) ? @{@"removed":@(removed), @"bytes":@(bytes)} : nil;
-            BOOL reported = axs_cachekeeper_report(bundle, phase, message, deltaRemoved, deltaBytes, failures, paths, axs_cachekeeper_auto_discover(states[bundle]) ? discovered : nil, directoryReports, round);
+            if (discoveryErrors.length) message=[message stringByAppendingFormat:@"\n%@",discoveryErrors];
+            // 回执写成功后才退役作业；写失败时保留已完成作业，下周期先重试落盘再推进
+            //（暂停检查在作业构建前，见上）。一轮退役时把本轮总量记为上次清理；中途周期传 nil，沿用上一轮的值。
+            NSDictionary *round = (complete || capHit || cancelled || unresolvedEnd) ? @{@"removed":@(removed), @"bytes":@(bytes)} : nil;
+            BOOL reported = [AxsCacheKeeperReceipts submitRoundForBundle:bundle roundID:job.roundID removed:removed bytes:bytes endReason:(NSInteger)job.endReason phase:phase message:message failed:failures effectivePaths:paths discoveredPaths:axs_cachekeeper_auto_discover(states[bundle]) ? discovered : nil directories:directoryReports round:round coverageComplete:(discoveryError.length == 0 && [knownPurge[@"error"] length] == 0)];
             if (reported) {
-                job.reportedRemoved = removed; job.reportedBytes = bytes;
-                if (cancelled || complete || capHit) {
-                    // 结束记录供静默期判定：结束原因＋近期文件数＋发现覆盖完整性（方案任务 3）。
+                if (cancelled || complete || capHit || unresolvedEnd) {
+                    // 结束记录供静默期判定：结束原因＋近期文件数＋未确认残留＋发现覆盖完整性（方案任务 3）。
                     // 取消的轮次不记录（下周期立即重开，不受静默期约束）。
-                    if (complete || capHit) finished[bundle] = @{@"signature":signature, @"time":NSDate.date, @"removed":@(removed), @"failed":@(failures), @"changed":@(changedCount), @"recent":@(recentCount), @"endReason":@(job.endReason), @"coverageComplete":@(discoveryError.length == 0 && [knownPurge[@"error"] length] == 0)};
+                    if (complete || capHit || unresolvedEnd) finished[bundle] = @{@"signature":signature, @"time":NSDate.date, @"removed":@(removed), @"failed":@(failures), @"changed":@(changedCount), @"recent":@(recentCount), @"unresolved":@(unresolvedCount), @"endReason":@(job.endReason), @"coverageComplete":@(discoveryError.length == 0 && [knownPurge[@"error"] length] == 0)};
+                    // 未确认范围登记：已完成的根有未确认残留即记入登记（规则/版本/排除/目录身份＋残留计数），
+                    // 供下轮跳过深度复查；无残留的根清除旧登记。未完成的根（触顶/取消）不登记，下轮重查——
+                    // 触顶根仍有未删候选，登记跳过会把剩余可删内容挡在轮外。
+                    for (AxsCacheKeeperSweep *sweep in job.sweeps) {
+                        if (!sweep.complete) continue;
+                        NSString *relative = [sweep.root substringFromIndex:[target[@"home"] length]+1];
+                        if (sweep.unresolvedCount > 0) {
+                            struct stat st;
+                            if (lstat(sweep.root.fileSystemRepresentation, &st)) continue;
+                            if (!unresolvedRanges[bundle]) unresolvedRanges[bundle] = [NSMutableDictionary new];
+                            unresolvedRanges[bundle][relative] = @{@"rulesVersion":[AxsCacheKeeperCleanupRules rulesVersion], @"appVersion":@"", @"exclusions":exclusionsString, @"mtime":@(st.st_mtimespec.tv_sec), @"ctime":@(st.st_ctimespec.tv_sec), @"unresolved":@(sweep.unresolvedCount), @"unresolvedBytes":@(sweep.unresolvedBytes), @"evidence":sweep.unresolvedEvidence ?: @""};
+                        } else [unresolvedRanges[bundle] removeObjectForKey:relative];
+                    }
                     [jobs removeObjectForKey:bundle];
-                    if (manual && (complete || cancelled)) dispatch_async(dispatch_get_main_queue(), ^{ [axs_cachekeeper_manual removeObject:bundle]; });
+                    if (manual && (complete || cancelled || unresolvedEnd)) dispatch_async(dispatch_get_main_queue(), ^{ [axs_cachekeeper_manual removeObject:bundle]; });
                 }
             }
         }

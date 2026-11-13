@@ -1,9 +1,9 @@
 # CacheKeeper 缓存管家
 
-iOS 16–17 RootHide 插件。列出已安装 APP，由用户逐个开启缓存控制；支持自动、只禁止、只清理模式。
+iOS 16–17 RootHide 插件。列出已安装 APP，由用户逐个开启缓存控制；支持自动、限制缓存并清理、只清理模式，三种模式共用同一清理引擎。
 
-- [下载编译后的测试包](https://github.com/shine85/CacheKeeper/releases)
-- [查看自动构建与日志](https://github.com/shine85/CacheKeeper/actions/workflows/build.yml)
+- [下载编译后的测试包](https://github.com/shine85/CacheKeeper2/releases)
+- [查看自动构建与日志](https://github.com/shine85/CacheKeeper2/actions/workflows/build.yml)
 - [目录、保护规则与模式说明](docs/缓存控制优化.md)
 - [本地编译与交接](交接说明.md)
 

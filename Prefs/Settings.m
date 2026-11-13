@@ -2,6 +2,7 @@
 #import <Preferences/PSViewController.h>
 #import <objc/message.h>
 #include <roothide.h>
+#include <sys/stat.h>
 #import "../AxsCacheKeeperPolicy.h"
 
 static id axs_cachekeeper_app_property(id object, NSString *name) {
@@ -44,7 +45,11 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @property(nonatomic,copy) NSString *appsError;
 @property(nonatomic,strong) NSDictionary *directoriesSnapshot;
 @property(nonatomic,strong) NSDictionary *statesSnapshot;
-@property(nonatomic,copy) NSString *lastBatchKey;
+@property(nonatomic,strong) NSDictionary *batchSnapshot;
+@property(nonatomic,strong) NSMutableDictionary *appsByID;
+@property(nonatomic,copy) NSString *lastStatusMtime;
+@property(nonatomic,assign) NSInteger lastSelectedTab;
+@property(nonatomic,copy) NSString *lastQuery;
 @end
 @implementation CKSettings
 - (void)viewDidLoad {
@@ -54,6 +59,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     self.sections = @[];
     self.favorites = [NSSet set];
     self.iconCache = [NSMutableDictionary new];
+    self.appsByID = [NSMutableDictionary new];
     self.selectedTab = 0;
     // 搜索栏用普通 UISearchBar 直接放进视图，不用 UISearchController：控制器激活后的
     // 呈现层会挡住 Tab 条的点按（#59 真机：搜索后点不了顶栏）；普通搜索栏没有呈现行为，
@@ -240,7 +246,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     return placeholder;
 }
 - (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];[self axs_cachekeeper_reload_apps];[self updateBatch];
+    [super viewWillAppear:animated];[self updateBatch];
     if (!self.batchTimer) {
         __weak typeof(self) weak=self;
         self.batchTimer=[NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer){[weak updateBatch];}];
@@ -251,12 +257,16 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 - (NSString *)axs_cachekeeper_source_for_type:(NSString *)type {
     return [type isEqual:@"System"] ? @"troll" : @"user";
 }
-- (void)axs_cachekeeper_reload_apps {
+// 重查已安装应用，返回列表是否变化（任务 5）：安装/卸载/版本/名称变化都刷新列表。
+// 拼音按 bundle ID 缓存，每秒重查只重算新增或版本/名称变化的条目；已卸载的图标缓存同步清理。
+// 列表按 bundle ID 排序后比较内容（allValues 顺序不稳定，不能直接比较）。
+- (BOOL)axs_cachekeeper_reload_apps {
     id manager=axs_cachekeeper_app_property(NSClassFromString(@"LSApplicationWorkspace"),@"defaultWorkspace");
     NSArray *installed=axs_cachekeeper_app_property(manager,@"allInstalledApplications");
     if (![installed isKindOfClass:NSArray.class]) {
         self.appsError=@"无法读取系统应用列表，请检查插件加载情况；没有修改任何 APP 的开关。";
-        self.apps=@[];return;
+        if (!self.apps.count) return NO;
+        self.apps=@[];return YES;
     }
     self.appsError=nil;
     NSMutableDictionary *apps=[NSMutableDictionary new];
@@ -267,20 +277,34 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
         BOOL isContainer=axs_cachekeeper_container_bundle_path(url.path);
         if ([type isEqual:@"System"] && !isContainer) continue;
         if ([type isEqual:@"System"] && [bundleID hasPrefix:@"com.apple."]) continue;
-        NSDictionary *app=axs_cachekeeper_application_entry(bundleID,
-            axs_cachekeeper_app_property(proxy,@"localizedName"),type,url);
+        NSString *name=axs_cachekeeper_app_property(proxy,@"localizedName");
+        NSString *effectiveName=([name isKindOfClass:NSString.class] && name.length) ? name : bundleID;
+        NSString *version=axs_cachekeeper_app_property(proxy,@"shortVersionString");
+        version=([version isKindOfClass:NSString.class] && version.length) ? version : @"";
+        NSDictionary *cached=self.appsByID[bundleID];
+        if (cached && [cached[@"name"] isEqual:effectiveName] && [(cached[@"version"] ?: @"") isEqual:version] && [cached[@"source"] isEqual:[self axs_cachekeeper_source_for_type:type]]) { apps[bundleID]=cached;continue; }
+        NSDictionary *app=axs_cachekeeper_application_entry(bundleID,name,type,url);
         if (!app) continue;
-        NSString *name=app[@"name"];
-        NSString *pinyin=[name stringByApplyingTransform:NSStringTransformMandarinToLatin reverse:NO] ?: name;
+        NSString *pinyin=[effectiveName stringByApplyingTransform:NSStringTransformMandarinToLatin reverse:NO] ?: effectiveName;
         pinyin=[pinyin stringByApplyingTransform:NSStringTransformStripCombiningMarks reverse:NO] ?: pinyin;
         NSMutableDictionary *entry=[app mutableCopy];
         entry[@"source"]=[self axs_cachekeeper_source_for_type:type];
-        NSString *version=axs_cachekeeper_app_property(proxy,@"shortVersionString");
-        if ([version isKindOfClass:NSString.class] && version.length) entry[@"version"]=version;
+        if (version.length) entry[@"version"]=version;
         entry[@"pinyin"]=pinyin;
-        apps[app[@"id"]]=entry;
+        apps[bundleID]=entry;
     }
-    self.apps=apps.allValues;
+    NSArray *sorted=[apps.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b) { return [a[@"id"] compare:b[@"id"]]; }];
+    if ([sorted isEqualToArray:self.apps]) return NO;
+    self.apps=sorted;self.appsByID=apps;
+    for (NSString *bundle in self.iconCache.allKeys) if (!apps[bundle]) [self.iconCache removeObjectForKey:bundle];
+    return YES;
+}
+// 回执变化信号（任务 5）：回执由 Receipts 模块原子写入（临时文件＋重命名），
+// 每次落盘都更新 Status 目录 mtime；只比目录 mtime，不必每秒读全部回执文件。
+- (NSString *)axs_cachekeeper_status_mtime {
+    struct stat info;
+    if (stat([jbroot(@"/var/mobile/Library/CacheKeeper/Status") fileSystemRepresentation], &info)) return @"missing";
+    return [NSString stringWithFormat:@"%lld.%09ld", (long long)info.st_mtimespec.tv_sec, (long)info.st_mtimespec.tv_nsec];
 }
 - (void)scanAll {
     NSString *path=jbroot(@"/var/mobile/Library/CacheKeeper/batch.plist");
@@ -303,19 +327,26 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 - (void)searchBarTextDidEndEditing:(UISearchBar *)searchBar { [searchBar setShowsCancelButton:NO animated:YES]; }
 - (void)searchBarCancelButtonClicked:(UISearchBar *)searchBar { searchBar.text = @""; [searchBar resignFirstResponder]; [self updateBatch]; }
 - (void)updateBatch {
-    NSDictionary *states = [NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")];
-    self.statesSnapshot=states;
-    self.directoriesSnapshot=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist")];
+    NSDictionary *states = [NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")] ?: @{};
+    NSDictionary *directories=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist")] ?: @{};
     NSArray *savedFavorites=[NSArray arrayWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/favorites.plist")];
-    self.favorites=[NSSet setWithArray:[savedFavorites isKindOfClass:NSArray.class] ? savedFavorites : @[]];
-    self.scanHistory=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/snapshots.plist")];
-    NSDictionary *batch=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/batch.plist")];
-    NSString *query = self.searchBar.text;
-    // 每秒定时刷新：输入（Tab/查询/各快照）无变化时跳过重建与 reloadData——无谓的全量重建
-    // 每秒销毁重建全部 cell，既抖动又打断长按手势（#62）；清理进行中快照在变，仍会正常刷新。
-    NSString *key=[NSString stringWithFormat:@"%ld|%@|%lu|%lu|%lu|%lu|%lu",(long)self.selectedTab,query?:@"",(unsigned long)states.hash,(unsigned long)self.directoriesSnapshot.hash,(unsigned long)self.favorites.hash,(unsigned long)self.scanHistory.hash,(unsigned long)batch.hash];
-    if ([key isEqualToString:self.lastBatchKey]) return;
-    self.lastBatchKey=key;
+    NSSet *favorites=[NSSet setWithArray:[savedFavorites isKindOfClass:NSArray.class] ? savedFavorites : @[]];
+    NSDictionary *history=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/snapshots.plist")] ?: @{};
+    NSDictionary *batch=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/batch.plist")] ?: @{};
+    NSString *query = self.searchBar.text ?: @"";
+    BOOL appsChanged=[self axs_cachekeeper_reload_apps];
+    NSString *statusMtime=[self axs_cachekeeper_status_mtime];
+    // 每秒定时刷新：输入（Tab/查询/各快照/应用列表/回执目录 mtime）无变化时跳过重建与
+    // reloadData——无谓的全量重建每秒销毁重建全部 cell，既抖动又打断长按手势（#62）。
+    // 快照用 isEqual: 真实内容比较，不用 .hash（哈希碰撞会漏刷；旧键还漏了回执与应用列表，
+    // 只变回执或安装/卸载时列表不刷新，P2-2）。清理进行中快照在变，仍会正常刷新。
+    if (!appsChanged && self.selectedTab==self.lastSelectedTab && [query isEqual:self.lastQuery] &&
+        [states isEqual:self.statesSnapshot] && [directories isEqual:self.directoriesSnapshot] &&
+        [favorites isEqual:self.favorites] && [history isEqual:self.scanHistory] &&
+        [batch isEqual:self.batchSnapshot] && [statusMtime isEqual:self.lastStatusMtime]) return;
+    self.statesSnapshot=states;self.directoriesSnapshot=directories;self.favorites=favorites;
+    self.scanHistory=history;self.batchSnapshot=batch;self.lastStatusMtime=statusMtime;
+    self.lastSelectedTab=self.selectedTab;self.lastQuery=query;
     NSMutableArray *matches = [NSMutableArray new];
     for (NSDictionary *app in self.apps) {
         NSString *name = app[@"name"], *bundle = app[@"id"];
