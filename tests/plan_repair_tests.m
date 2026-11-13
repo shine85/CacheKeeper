@@ -44,6 +44,7 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
 
     // 生产入口须能回收已确认的 ALog，而非只有测试注册规则能删除。
     // 任何按目录全删、版本泛化、挂起放行或取消内容否决都会破坏本组断言。
+    {
     NSString *alogBundle=@"com.ss.iphone.ugc.Aweme";
     NSString *alogVersion=@"41.1.0";
     NSDictionary *exited=@{@"processExited":@YES};
@@ -84,6 +85,7 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     put(readyLog);
     AxsCacheKeeperSweep *alogAgain=[[AxsCacheKeeperSweep alloc] initWithRoot:alogRoot bundle:alogBundle version:alogVersion containerPath:home state:exited clock:^NSTimeInterval{return future;}];finish(alogAgain);
     check(alogAgain.removed==1 && ![fm fileExistsAtPath:readyLog],@"第二轮新产生日志成熟后仍实际回收");
+    }
 
     // 根在范围检查后消失时，失败对象仍须有稳定报告键，不能让调度器以 nil 作字典键。
     AxsCacheKeeperSweep *missingRoot=sweepFor([home stringByAppendingPathComponent:@"Library/Caches/disappeared"],@{});
