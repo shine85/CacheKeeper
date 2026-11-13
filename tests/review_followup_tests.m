@@ -172,5 +172,36 @@ void axs_cachekeeper_run_review_followup_tests(NSString *fixture) {
     NSDictionary *failedReport=[failed report];
     ckcheck(failed.complete && [failedReport[@"twinFailures"] unsignedIntegerValue]==1 && [failedReport[@"linkTwins"] count]==0 &&
         ![failedReport[@"twinCoverageComplete"] boolValue] && ![failedReport[@"twinScanTruncated"] boolValue],@"零匹配的搜索读取失败与截断分开报告");
+    // 真机诊断回归：被整树保留的内容不能被零文件统计掩盖；孪生路径不能丢失中间目录。
+    NSString *diagnosticRoot=ckdir(home,@"Library/Caches/diagnostic");
+    NSString *retainedFile=[ckdir(diagnosticRoot,@"WebKit/NetworkCache") stringByAppendingPathComponent:@"payload"];
+    ckput(retainedFile,@"retained contents");
+    NSString *cleanableFile=[diagnosticRoot stringByAppendingPathComponent:@"ordinary"];ckput(cleanableFile,@"cache");
+    AxsCacheKeeperSweep *diagnosticSweep=sweep(diagnosticRoot,@{},@"1.0");ckfinish(diagnosticSweep);
+    NSDictionary *diagnosticReport=[diagnosticSweep directoryReport];
+    ckcheck(diagnosticSweep.removed==1 && ![fm fileExistsAtPath:cleanableFile] &&
+        [[NSString stringWithContentsOfFile:retainedFile encoding:NSUTF8StringEncoding error:nil] isEqual:@"retained contents"],@"诊断统计不得改变原来的删除与保留结果");
+    BOOL retainedReported=[diagnosticReport[@"retainedSubtreeCount"] unsignedIntegerValue]==1 &&
+        [diagnosticReport[@"retainedSubtrees"][0][@"path"] isEqual:@"Library/Caches/diagnostic/WebKit"];
+    NSString *nested=ckdir(search,@"nested");
+    NSString *largeFile=[source stringByAppendingPathComponent:@"large-resource"];
+    ckput(largeFile,[@"x" stringByPaddingToLength:8192 withString:@"x" startingAtIndex:0]);
+    ckcheck(!link(largeFile.fileSystemRepresentation,[[nested stringByAppendingPathComponent:@"resource-blob"] fileSystemRepresentation]),@"创建深层资源硬链接");
+    // Foundation 会标准化末尾分隔符；旧代码字符串前缀失配后退化为文件名。
+    AxsCacheKeeperInspection *diagnostic=[[AxsCacheKeeperInspection alloc] initWithRoot:source
+        searchRoots:@[@{@"path":[search stringByAppendingString:@"/"],@"label":@"容器"}]];
+    for (NSUInteger n=0;n<1000 && !diagnostic.complete;n++) [diagnostic advance:2];
+    NSDictionary *inspectionReport=[diagnostic report];
+    BOOL fullTwinPath=NO;
+    for (NSDictionary *twin in inspectionReport[@"linkTwins"]) if ([twin[@"source"] isEqual:@"large-resource"])
+        fullTwinPath=[twin[@"twin"] isEqual:@"容器/nested/resource-blob"];
+    NSArray *largestLinks=inspectionReport[@"largestHardLinks"];
+    BOOL hardLinksReported=largestLinks.count==2 && [largestLinks[0][@"path"] isEqual:@"large-resource"] &&
+        [largestLinks[0][@"bytes"] unsignedLongLongValue]==8192 && [largestLinks[0][@"nlink"] unsignedIntegerValue]==2;
+    fprintf(stderr,"DIAGNOSTIC REGRESSION: retained=%d twinPath=%d hardLinks=%d\n",retainedReported,fullTwinPath,hardLinksReported);
+    ckcheck(diagnostic.complete && retainedReported && fullTwinPath && hardLinksReported,@"保留子树明示、孪生完整路径及硬链接大文件应全部可见");
+    ckcheck([[fm attributesOfItemAtPath:largeFile error:nil][NSFileSize] unsignedLongLongValue]==8192 &&
+        [inspectionReport[@"files"] unsignedIntegerValue]==0,@"硬链接仅采集属性，未读取文件头或修改文件");
+    puts("PASS: device diagnostics: retained subtrees, complete twin paths and largest hard links");
     puts("PASS: review followup: exclusions, mode preservation, activity/recheck, dependency collections, upgrade retention and twin boundaries");
 }
