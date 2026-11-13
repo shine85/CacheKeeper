@@ -34,6 +34,18 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     dxcheck([redacted hasSuffix:@".pdf"] && [inspection[@"linkTwins"][0][@"source"] isEqual:redacted],@"保留扩展名及同报告路径关联");
     dxcheck([app[@"cleanup"][@"state"] isEqual:@"missing"],@"缺回执不能伪造零删除");
     dxcheck([[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"appEnabled.plist"]] isEqual:states],@"导出不写配置");
+    // 大批量采集只汇总已保存记录，完成数按 APP 固定，不以目录扩张任务。
+    NSString *largeFolder=[fixture stringByAppendingPathComponent:@"diagnostics-126-apps"];
+    dxcheck([NSFileManager.defaultManager createDirectoryAtPath:largeFolder withIntermediateDirectories:YES attributes:nil error:nil],@"创建批量报告夹具");
+    NSMutableDictionary *largeStates=[NSMutableDictionary new];
+    for (NSUInteger i=0;i<126;i++) largeStates[[NSString stringWithFormat:@"test.app%03lu",(unsigned long)i]]=@{@"enabled":@(i<19)};
+    dxwrite(largeFolder,@"appEnabled.plist",largeStates);
+    AxsCacheKeeperDiagnostics *large=[[cls alloc] initWithFolder:largeFolder];
+    NSDictionary *largeReport=[large reportWithApps:@[] environment:@{}];
+    NSDictionary *collection=largeReport[@"collection"];
+    dxcheck([largeReport[@"apps"] count]==126 && [collection[@"total"] unsignedIntegerValue]==126 &&
+        [collection[@"completed"] unsignedIntegerValue]==126 && [collection[@"phase"] isEqual:@"complete"] &&
+        [collection[@"mode"] isEqual:@"savedRecords"],@"126 个 APP 应一次汇总完成，固定 126/126，不能启动深度任务队列");
     dxcheck([session startAt:0]==nil && session.running,@"启动补采");
     [session advanceAt:0];
     NSDictionary *request=[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"request.plist"]];
