@@ -277,8 +277,9 @@ static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSErr
 }
 - (void)axs_cachekeeper_set_favorite:(NSString *)bundle favorite:(BOOL)favorite {
     NSString *path = jbroot(@"/var/mobile/Library/CacheKeeper/favorites.plist");
-    NSArray *existing = [NSArray arrayWithContentsOfFile:path];
-    if (!existing && [NSFileManager.defaultManager fileExistsAtPath:path]) {
+    NSError *readError=nil;
+    NSArray *existing=[AxsCacheKeeperAppList axs_cachekeeper_read_source_at_path:path name:@"favorites.plist" error:&readError];
+    if (readError) {
         [self axs_cachekeeper_configuration_error];[self axs_cachekeeper_refresh_after_write];return;
     }
     NSMutableArray *saved = existing ? [existing mutableCopy] : [NSMutableArray new];
@@ -358,8 +359,9 @@ static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSErr
 }
 - (void)scanAll {
     NSString *path=jbroot(@"/var/mobile/Library/CacheKeeper/batch.plist");
-    NSDictionary *existing=[NSDictionary dictionaryWithContentsOfFile:path];
-    if (!existing && [NSFileManager.defaultManager fileExistsAtPath:path]) {
+    NSError *readError=nil;
+    NSDictionary *existing=[AxsCacheKeeperAppList axs_cachekeeper_read_source_at_path:path name:@"batch.plist" error:&readError];
+    if (readError) {
         [self axs_cachekeeper_configuration_error];[self axs_cachekeeper_refresh_after_write];return;
     }
     if ([existing[@"remaining"] count]) return;
@@ -443,9 +445,12 @@ static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSErr
 - (void)changed:(UISwitch *)toggle {
     NSString *bundle=toggle.accessibilityIdentifier;
     NSString *directoryPath=jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist");
-    NSMutableDictionary *directories=axs_cachekeeper_edit_configuration(directoryPath);
-    NSMutableDictionary *states=axs_cachekeeper_edit_configuration(jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist"));
-    if (!directories || !states) { [self axs_cachekeeper_configuration_error]; [self axs_cachekeeper_refresh_after_write]; return; }
+    NSError *readError=nil;
+    [AxsCacheKeeperAppList axs_cachekeeper_read_source_at_path:directoryPath name:@"directories.plist" error:&readError];
+    if (readError) { [self axs_cachekeeper_configuration_error];[self axs_cachekeeper_refresh_after_write];return; }
+    NSDictionary *savedStates=[AxsCacheKeeperAppList axs_cachekeeper_read_source_at_path:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist") name:@"appEnabled.plist" error:&readError];
+    if (readError) { [self axs_cachekeeper_configuration_error];[self axs_cachekeeper_refresh_after_write];return; }
+    NSMutableDictionary *states=savedStates ? [savedStates mutableCopy] : [NSMutableDictionary new];
     states[bundle]=axs_cachekeeper_app_state(states[bundle],toggle.on);
     if (![states writeToFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist") atomically:YES]) {
         UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"保存失败" message:@"缓存控制设置未完整保存，请检查安装与目录权限。" preferredStyle:UIAlertControllerStyleAlert];

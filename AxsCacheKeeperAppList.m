@@ -1,7 +1,59 @@
 #import "AxsCacheKeeperAppList.h"
 #import "AxsCacheKeeperPolicy.h"
 #include <errno.h>
+#include <math.h>
 #include <sys/stat.h>
+
+static BOOL axs_cachekeeper_source_strings(id value, BOOL (*predicate)(NSString *)) {
+    if (![value isKindOfClass:NSArray.class]) return NO;
+    for (id item in value) if (![item isKindOfClass:NSString.class] || (predicate && !predicate(item))) return NO;
+    return YES;
+}
+static BOOL axs_cachekeeper_source_counter(id value) {
+    return [value isKindOfClass:NSNumber.class] && isfinite([value doubleValue]) && [value doubleValue]>=0;
+}
+static BOOL axs_cachekeeper_source_schema(id value, NSString *name) {
+    if ([name isEqual:@"favorites.plist"]) return axs_cachekeeper_source_strings(value,NULL);
+    if (![value isKindOfClass:NSDictionary.class]) return NO;
+    NSDictionary *dictionary=value;
+    if ([name isEqual:@"batch.plist"]) {
+        if (dictionary[@"remaining"] && !axs_cachekeeper_source_strings(dictionary[@"remaining"],axs_cachekeeper_bundle_id)) return NO;
+        for (NSString *field in @[@"total",@"completed"])
+            if (dictionary[field] && !axs_cachekeeper_source_counter(dictionary[field])) return NO;
+        return YES;
+    }
+    if ([name hasPrefix:@"Status/"] && [name hasSuffix:@".auto.plist"]) {
+        for (NSString *field in @[@"removed",@"bytes",@"failed",@"lastBytes",@"confirmedRemoved",@"confirmedBytes",@"lastRemoved"])
+            if (dictionary[field] && !axs_cachekeeper_source_counter(dictionary[field])) return NO;
+        if (dictionary[@"updated"] && ![dictionary[@"updated"] isKindOfClass:NSDate.class]) return NO;
+        if (dictionary[@"message"] && ![dictionary[@"message"] isKindOfClass:NSString.class]) return NO;
+        return YES;
+    }
+    if ([name isEqual:@"appEnabled.plist"]) {
+        for (id state in dictionary.allValues) {
+            if ([state isKindOfClass:NSNumber.class]) continue;
+            if (![state isKindOfClass:NSDictionary.class]) return NO;
+            for (NSString *field in @[@"enabled",@"urlCache",@"autoDiscover",@"restrict"])
+                if (state[field] && ![state[field] isKindOfClass:NSNumber.class]) return NO;
+            if (state[@"mode"] && ![@[@"auto",@"prevent",@"clean"] containsObject:state[@"mode"]]) return NO;
+            for (NSString *field in @[@"logPaths",@"excludedPaths"])
+                if (state[field] && !axs_cachekeeper_source_strings(state[field],axs_cachekeeper_relative_path)) return NO;
+        }
+        return YES;
+    }
+    if ([name isEqual:@"directories.plist"]) {
+        for (id paths in dictionary.allValues) if (!axs_cachekeeper_source_strings(paths,axs_cachekeeper_relative_path)) return NO;
+        return YES;
+    }
+    if ([name isEqual:@"snapshots.plist"]) {
+        for (id record in dictionary.allValues) {
+            if (![record isKindOfClass:NSDictionary.class]) return NO;
+            if (record[@"rows"] && ![record[@"rows"] isKindOfClass:NSArray.class]) return NO;
+        }
+        return YES;
+    }
+    return NO;
+}
 
 @interface AxsCacheKeeperAppListSource : NSObject
 @property(nonatomic,copy) NSString *folder;
@@ -43,17 +95,14 @@
         @(info.st_mtimespec.tv_sec),@(info.st_mtimespec.tv_nsec),@(info.st_ctimespec.tv_sec),@(info.st_ctimespec.tv_nsec)];
     if ([stamp isEqual:self.stamps[name]]) return self.values[name] ?: empty;
     NSError *error=nil;
-    NSData *data=[NSData dataWithContentsOfFile:path options:0 error:&error];
-    id value=data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:&error] : nil;
-    if (![value isKindOfClass:array ? NSArray.class : NSDictionary.class]) {
-        errors[name]=error ? [NSString stringWithFormat:@"读取失败（%ld）",(long)error.code] : @"来源格式无效";
+    id value=[AxsCacheKeeperAppList axs_cachekeeper_read_source_at_path:path name:name error:&error];
+    if (error) {
+        errors[name]=[NSString stringWithFormat:@"来源读取或字段校验失败（%ld）",(long)error.code];
         return self.values[name] ?: empty;
     }
-    if (array) for (id item in value) {
-        if (![item isKindOfClass:NSString.class]) {
-            errors[name]=@"收藏列表格式无效";
-            return self.values[name] ?: empty;
-        }
+    if (!value) {
+        self.stamps[name]=@[@"missing"];self.values[name]=empty;
+        return empty;
     }
     self.stamps[name]=stamp;self.values[name]=value;
     return value;
@@ -112,6 +161,27 @@
 @end
 
 @implementation AxsCacheKeeperAppList
++ (id)axs_cachekeeper_read_source_at_path:(NSString *)path name:(NSString *)name error:(NSError **)error {
+    if (error) *error=nil;
+    struct stat info;
+    if (stat(path.fileSystemRepresentation,&info)) {
+        int failure=errno;
+        if (failure!=ENOENT && error) *error=[NSError errorWithDomain:NSPOSIXErrorDomain code:failure userInfo:nil];
+        return nil;
+    }
+    if (!S_ISREG(info.st_mode)) {
+        if (error) *error=[NSError errorWithDomain:@"dev.local.cachekeeper.app-list" code:2 userInfo:@{NSLocalizedDescriptionKey:@"来源不是普通文件"}];
+        return nil;
+    }
+    NSError *readError=nil;
+    NSData *data=[NSData dataWithContentsOfFile:path options:0 error:&readError];
+    id value=data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:&readError] : nil;
+    if (!value || !axs_cachekeeper_source_schema(value,name)) {
+        if (error) *error=readError ?: [NSError errorWithDomain:@"dev.local.cachekeeper.app-list" code:3 userInfo:@{NSLocalizedDescriptionKey:@"来源字段格式无效"}];
+        return nil;
+    }
+    return value;
+}
 - (instancetype)initWithProvider:(AxsCacheKeeperAppListProvider)provider completion:(AxsCacheKeeperAppListCompletion)completion {
     if (!(self=[super init])) return nil;
     NSParameterAssert(provider);NSParameterAssert(completion);

@@ -17,7 +17,8 @@ void axs_cachekeeper_run_app_retention_tests(NSString *fixture) {
     NSArray *cases=@[
         @{@"bundle":@"com.zhiliaoapp.musically",@"paths":@[@"offline-mode",@"com.studio.album.importToEdit"]},
         @{@"bundle":@"com.strava.stravaride",@"paths":@[@"offline",@"mapdownloads"]},
-        @{@"bundle":@"com.google.Maps",@"paths":@[@"OfflineData"]}];
+        @{@"bundle":@"com.google.Maps",@"paths":@[@"OfflineData"]},
+        @{@"bundle":@"com.tencent.xin",@"paths":@[@"MMResourceMgr"]}];
     NSDictionary *evidence=@{@"readComplete":@YES,@"hasEvidence":@NO,@"hasMediaSignature":@NO};
     [AxsCacheKeeperCleanupRules removeAllRulesForTesting];
     NSTimeInterval future=NSDate.date.timeIntervalSince1970+600;
