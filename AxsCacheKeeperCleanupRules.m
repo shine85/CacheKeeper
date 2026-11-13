@@ -84,7 +84,18 @@ static NSString * const AxsCacheKeeperUserLogRuleRevision = @"1";
 static NSMutableDictionary *AxsCacheKeeperBuiltinRules(void) {
     AxsCacheKeeperAppRule *rule=[[AxsCacheKeeperALogRule alloc] initWithRuleID:@"douyin-alog" revision:@"1" appVersion:@"41.1.0"
         cleanablePaths:@[@"Library/alog"] retentionPaths:@[] dependencyPaths:@[]];
-    return [@{@"com.ss.iphone.ugc.Aweme":[NSMutableArray arrayWithObject:rule]} mutableCopy];
+    NSMutableDictionary *rules=[@{@"com.ss.iphone.ugc.Aweme":[NSMutableArray arrayWithObject:rule]} mutableCopy];
+    NSArray *retentions=@[
+        @{@"bundle":@"com.zhiliaoapp.musically",@"paths":@[@"Library/Caches/offline-mode",@"Library/Caches/com.studio.album.importToEdit"]},
+        @{@"bundle":@"com.strava.stravaride",@"paths":@[@"Library/Caches/offline",@"Library/Caches/mapdownloads"]},
+        @{@"bundle":@"com.google.Maps",@"paths":@[@"Library/Caches/OfflineData"]},
+        @{@"bundle":@"com.tencent.xin",@"paths":@[@"Library/Caches/MMResourceMgr"]},
+        @{@"bundle":@"com.spotify.client",@"paths":@[@"Library/Caches"]}];
+    for (NSDictionary *item in retentions) {
+        AxsCacheKeeperAppRule *retention=[[AxsCacheKeeperAppRule alloc] initWithRuleID:[NSString stringWithFormat:@"%@-retention",item[@"bundle"]] revision:@"1" appVersion:nil cleanablePaths:@[] retentionPaths:item[@"paths"] dependencyPaths:@[]];
+        rules[item[@"bundle"]]=[NSMutableArray arrayWithObject:retention];
+    }
+    return rules;
 }
 
 // relative 是否等于 scope 或位于 scope 子树内（按路径成分边界比较，不做子串匹配）。
