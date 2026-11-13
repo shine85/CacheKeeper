@@ -19,7 +19,7 @@ Description: 应用退出后自动清理缓存（按应用开启，全自动）
  * 三种模式共用同一清理引擎：自动、限制缓存并清理、只清理，仅网络限制不同。
  .
  适用：iOS 16–17.3.1，RootHide 越狱环境。
-Maintainer: Local Developer
-Author: Local Developer
+Maintainer: 目目
+Author: 目目
 Section: Tweaks
 Depends: firmware (>= 16.0), firmware (<< 18.0), mobilesubstrate, preferenceloader, com.opa334.libsandy

@@ -31,3 +31,4 @@
 - 交付流程：本地必要检查 → 复核 diff 与忽略项 → 提交并推送 → 跟进对应提交的 Actions → 处理构建失败 → 提供成功构建的 Release/deb 下载链接。未经实际运行不得声称云端编译通过。
 - `.github/workflows/build.yml` 是自动构建入口；沿用当前包标识、iOS 16–17、RootHide 和 SDK 16.5，不套用新项目模板改变身份。
 - 自动发布为测试包，原生测试、Theos 编译、deb 核验和真机验证分别报告；`memory/`、`BK/`、`tmp/` 不暂存或上传。
+- 插件作者与维护者为“目目”，以 `control` 为包元数据维护入口。每次发布由 `scripts/generate_release_notes.py` 按上一个可达发布标签以来的真实提交生成带完整版本号的更新日志，同一份内容用于 Release 描述与 `CHANGELOG.md` 附件；提交说明必须用具体中文描述本次变化。

@@ -2,6 +2,7 @@
 import hashlib
 import pathlib
 import plistlib
+import re
 import subprocess
 import sys
 import tarfile
@@ -20,6 +21,11 @@ def field(name):
 
 if field('Package') != 'dev.local.cachekeeper' or field('Architecture') != 'iphoneos-arm64e':
     raise SystemExit('Unexpected package identity or architecture')
+source_control = (pathlib.Path(__file__).resolve().parents[1] / 'control').read_text(encoding='utf-8')
+for name in ('Author', 'Maintainer'):
+    expected = re.search(rf'^{name}: (.+)$', source_control, re.M)
+    if not expected or field(name) != expected.group(1).strip():
+        raise SystemExit(f'Package {name} does not match control')
 tmp = pathlib.Path('tmp')
 tmp.mkdir(exist_ok=True)
 with tempfile.TemporaryFile(dir=tmp) as archive:
@@ -58,4 +64,4 @@ checksum = hashlib.sha256(package.read_bytes()).hexdigest()
 control = subprocess.check_output(['dpkg-deb', '-I', str(package)], text=True)
 listing = subprocess.check_output(['dpkg-deb', '-c', str(package)], text=True)
 (folder / 'package-contents.txt').write_text(control + '\n' + listing, encoding='utf-8')
-print(f'PASS: {package.name}; identity, architecture, {len(required)} required files, local artifact exclusion')
+print(f'PASS: {package.name}; identity, author, maintainer, architecture, {len(required)} required files, local artifact exclusion')

@@ -107,6 +107,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: 获取源码与发布历史
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: 取得验证后的产物
         uses: actions/download-artifact@v4
         with:
@@ -123,11 +128,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p tmp
-          cat > tmp/release-notes.md <<EOF
+          python3 scripts/generate_release_notes.py --version "$PACKAGE_VERSION" \
+            --source "$SOURCE_SHA" --repository "$GH_REPO" --output packages/CHANGELOG.md
+          cat >> packages/CHANGELOG.md <<EOF
+
+          ## 构建与使用说明
+
           自动构建的 CacheKeeper RootHide 测试包，目标 iOS 16–17。
 
-          - 源码提交：$SOURCE_SHA
           - 构建记录：$RUN_URL
           - 已完成：macOS 原生回归、Theos 编译、deb 文件检查。
           - 尚未完成：iOS 真机注入与功能验收。
@@ -140,6 +148,6 @@ jobs:
 
           下载下方 .deb 文件；SHA256SUMS 可用于完整性校验。
           EOF
-          gh release create "v$PACKAGE_VERSION" packages/*.deb packages/SHA256SUMS packages/package-contents.txt \
+          gh release create "v$PACKAGE_VERSION" packages/*.deb packages/SHA256SUMS packages/package-contents.txt packages/CHANGELOG.md \
             --repo "$GH_REPO" --target "$SOURCE_SHA" --prerelease \
-            --title "缓存管家 $PACKAGE_VERSION · RootHide" --notes-file tmp/release-notes.md
+            --title "缓存管家 $PACKAGE_VERSION · RootHide" --notes-file packages/CHANGELOG.md
