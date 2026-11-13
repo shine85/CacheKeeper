@@ -42,7 +42,7 @@
 | 任务 2：beginCycleWithEnabledBundles:configurationReadable:、lastExecutingIdentityForBundle:、Scanner 接线及配置组合测试 | 本轮已静态核对存在，Scanner 已移除 seen_instances；由原“反馈已改、待提交核验”更新为“本地已有、原生及真机待验收” |
 | 任务 1/3：CleanupRules、候选列表、hasDeleteCandidates、期限/额度回调、根替换拆分测试、批次中跨期测试 | 本地已有，不重复创建；#79 缺口已有对应改动，尚不能宣布修复通过 |
 | 任务 3 扩展、4、9＋8、5/6/7 的后续改动 | 导入材料已包含部分完成/Unresolved、Receipts、模式及残留展示等实现；按下列清单逐项验收，不能整组打勾 |
-| 任务 10 | 导入核对记录无生产 APP 规则注册，Scanner 本轮实查仍传 version:nil；测试规则不等于真实 APP 适配 |
+| 任务 10 | 导入阶段曾记录 Scanner 传 version:nil；截至 2026-11-13 的 3c5f5d8 已传 APP 版本，生产专属规则仍无注册。测试规则不等于真实 APP 适配；最新实施路线见任务 10 的补充方案 |
 
 **当前三项明确阻塞：** 以下在导入报告中提出，本轮按本地文件再次核对；先修并验证，再判断已有任务完成度。
 
@@ -287,6 +287,8 @@ https://developer.apple.com/documentation/foundation/urlcache/diskcapacity
 **验收：** auto/prevent/clean 的相同清理范围均清存量并回收第二轮新增；clean 不干预缓存写入；网络限制关闭仍可正常清理；存在写锁恢复失败时其他 APP 继续；旧 fullClear=false 不再导致标准缓存数据库/无后缀缓存被类型过滤；草稿例外及排除子树保持。真机至少完成连续 3 次使用—清理—重开，核对功能、数据与实际占用。
 
 ## 任务 10：按占用扩大 APP 适配（新增，有明确交付物）
+
+2026-11-13 补充：[重点 APP 存储回收实现方案](2026-11-13-app-storage-remediation.md) 已把百度网盘、Swiftgram 和抖音系拆为具体定位、资源回收及验收任务。当前 Scanner 已传递 APP 版本，生产专属规则仍为空；不能继续沿用早期“version:nil”的状态描述，也不能把快速汇总修复视为本任务完成。
 
 **文件：** CleanupRules 的规则注册与必要的 APP 专属读取实现、Inspection 现有诊断、原生夹具；规则证据记录在 docs/app-rules/ 对应 bundle ID 文档中。
 
