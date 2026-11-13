@@ -75,6 +75,7 @@ static void writeMedia(NSString *path) {
 
 extern void axs_cachekeeper_run_plan_repair_tests(NSString *fixture);
 extern void axs_cachekeeper_run_review_followup_tests(NSString *fixture);
+extern void axs_cachekeeper_run_diagnostics_tests(NSString *fixture);
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
@@ -1692,6 +1693,7 @@ int main(int argc, const char *argv[]) {
         require([receipt[@"removed"] unsignedIntegerValue]==210 && ![receipt[@"coverageComplete"] boolValue], @"覆盖翻转落盘，累计不重复计入");
         axs_cachekeeper_run_plan_repair_tests(fixture);
         axs_cachekeeper_run_review_followup_tests(fixture);
+        axs_cachekeeper_run_diagnostics_tests(fixture);
         puts("PASS: configuration, modes, deduplication, age, protected files, cleanup, cancellation, permission restoration, receipts and URLCache");
     }
     return 0;
