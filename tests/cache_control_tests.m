@@ -515,6 +515,8 @@ int main(int argc, const char *argv[]) {
         require(dec.disposition == AxsCacheKeeperCleanupDelete && dec.basis == AxsCacheKeeperCleanupBasisAppRule && [dec.dependencyPaths isEqualToArray:@[@"Library/Downloads/index.json"]], @"APP 规则可清理资源可删且携带依赖");
         dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads/drafts/draft.txt" state:emptyState evidence:cleanEvidence];
         require(dec.disposition == AxsCacheKeeperCleanupKeep && dec.basis == AxsCacheKeeperCleanupBasisAppRule, @"APP 规则保留范围保留");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads/messages.db" state:emptyState evidence:dataEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupKeep && [dec.ruleID isEqual:@"necessary-state"], @"精确资源规则不放开同目录消息库");
         dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"2.0" relativePath:@"Library/Downloads/cache/res.bin" state:emptyState evidence:cleanEvidence];
         require(dec.disposition == AxsCacheKeeperCleanupKeep && [dec.ruleID isEqual:@"necessary-state"], @"版本不匹配后下载目录仍受必要状态保护");
         dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:nil relativePath:@"Library/Downloads/cache/res.bin" state:emptyState evidence:cleanEvidence];
@@ -971,7 +973,7 @@ int main(int argc, const char *argv[]) {
         require([@"SQLite format 3\0payload" writeToFile:[downloadsRoot stringByAppendingPathComponent:@"messages.db"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"APP 规则消息库夹具");
         AxsCacheKeeperSweep *appSweep = makeSweep(downloadsRoot, @{});
         for (NSUInteger pass=0;!appSweep.complete && pass<100;pass++) [appSweep advance:64 shouldContinue:^BOOL{return YES;}];
-        require(appSweep.complete && appSweep.failed==0 && appSweep.removed==2 && appSweep.unresolvedCount==1 && !appSweep.dependencyInvalidated &&
+        require(appSweep.complete && appSweep.failed==0 && appSweep.removed==2 && appSweep.unresolvedCount==0 && appSweep.protectedCount==2 && !appSweep.dependencyInvalidated &&
             ![fm fileExistsAtPath:[downloadsRoot stringByAppendingPathComponent:@"cache/res1.bin"]] &&
             ![fm fileExistsAtPath:[downloadsRoot stringByAppendingPathComponent:@"cache/res2.bin"]] &&
             [fm fileExistsAtPath:[downloadsRoot stringByAppendingPathComponent:@"drafts/draft1.txt"]] &&
