@@ -76,6 +76,7 @@ static void writeMedia(NSString *path) {
 extern void axs_cachekeeper_run_plan_repair_tests(NSString *fixture);
 extern void axs_cachekeeper_run_review_followup_tests(NSString *fixture);
 extern void axs_cachekeeper_run_diagnostics_tests(NSString *fixture);
+extern void axs_cachekeeper_run_app_list_tests(NSString *fixture);
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
@@ -1694,6 +1695,7 @@ int main(int argc, const char *argv[]) {
         axs_cachekeeper_run_plan_repair_tests(fixture);
         axs_cachekeeper_run_review_followup_tests(fixture);
         axs_cachekeeper_run_diagnostics_tests(fixture);
+        axs_cachekeeper_run_app_list_tests(fixture);
         puts("PASS: configuration, modes, deduplication, age, protected files, cleanup, cancellation, permission restoration, receipts and URLCache");
     }
     return 0;
