@@ -183,6 +183,43 @@ int main(int argc, const char *argv[]) {
         [AxsCacheKeeperProcessObservation observeBundle:disableBundle state:AxsCacheKeeperExecSuspended identity:@"1:300.000000" atMonotonicTime:761];
         require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:disableBundle identity:@"1:300.000000" atMonotonicTime:761], @"invalidateAll 后旧起点作废");
         require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:obsBundle identity:@"1:200.000000" atMonotonicTime:761], @"invalidateAll 清除全部 bundle");
+        // 任务 2 补齐（修订方案）：beginCycle 差集清理＋最近执行实例。启用集合用真实配置解析
+        //（axs_cachekeeper_app_enabled）从伪造的状态字典导出，测配置入口与模块的组合，不只测孤立模块。
+        NSString *cycleA=@"com.example.cycle-a";
+        NSString *cycleB=@"com.example.cycle-b";
+        [AxsCacheKeeperProcessObservation observeBundle:cycleA state:AxsCacheKeeperExecExecuting identity:@"1:400.000000" atMonotonicTime:790];
+        [AxsCacheKeeperProcessObservation observeBundle:cycleA state:AxsCacheKeeperExecSuspended identity:@"1:400.000000" atMonotonicTime:800];
+        [AxsCacheKeeperProcessObservation observeBundle:cycleB state:AxsCacheKeeperExecExecuting identity:@"1:401.000000" atMonotonicTime:790];
+        [AxsCacheKeeperProcessObservation observeBundle:cycleB state:AxsCacheKeeperExecSuspended identity:@"1:401.000000" atMonotonicTime:800];
+        // B 的配置键直接移除（字典中不存在），C 显式停用；只有 A 在启用集合内。
+        NSDictionary *cycleStates = @{cycleA: @{@"enabled": @YES}, @"com.example.cycle-c": @{@"enabled": @NO}};
+        NSMutableSet *cycleEnabled = [NSMutableSet new];
+        for (NSString *bundle in cycleStates) if (axs_cachekeeper_bundle_id(bundle) && axs_cachekeeper_app_enabled(cycleStates[bundle])) [cycleEnabled addObject:bundle];
+        [AxsCacheKeeperProcessObservation beginCycleWithEnabledBundles:cycleEnabled configurationReadable:YES];
+        require([AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:cycleA identity:@"1:400.000000" atMonotonicTime:861], @"差集清理保留启用 bundle 的窗口");
+        require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:cycleB identity:@"1:401.000000" atMonotonicTime:861], @"配置键移除的 bundle 窗口作废");
+        require([[AxsCacheKeeperProcessObservation lastExecutingIdentityForBundle:cycleA] isEqual:@"1:400.000000"], @"启用 bundle 的执行实例保留");
+        require([AxsCacheKeeperProcessObservation lastExecutingIdentityForBundle:cycleB] == nil, @"配置键移除的 bundle 执行实例记录清除");
+        // B 重新加入启用集合：须重新挂起满 60 秒，不能继承旧窗口。
+        [AxsCacheKeeperProcessObservation observeBundle:cycleB state:AxsCacheKeeperExecSuspended identity:@"1:401.000000" atMonotonicTime:900];
+        require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:cycleB identity:@"1:401.000000" atMonotonicTime:900], @"重新加入后须重计挂起窗口");
+        require([AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:cycleB identity:@"1:401.000000" atMonotonicTime:960], @"重新加入后新窗口满 60 秒放行");
+        // 配置不可读：beginCycle 全部作废。
+        [AxsCacheKeeperProcessObservation beginCycleWithEnabledBundles:[NSSet set] configurationReadable:NO];
+        require(![AxsCacheKeeperProcessObservation allowsSuspendedCleanupForBundle:cycleA identity:@"1:400.000000" atMonotonicTime:1061], @"配置不可读时全部窗口作废");
+        require([AxsCacheKeeperProcessObservation lastExecutingIdentityForBundle:cycleA] == nil, @"配置不可读时执行实例记录清除");
+        // 最近执行实例生命周期：挂起/消失不抹除历史，新实例更新，nil 身份不覆盖。
+        NSString *execBundle=@"com.example.exec";
+        [AxsCacheKeeperProcessObservation observeBundle:execBundle state:AxsCacheKeeperExecExecuting identity:@"1:500.000000" atMonotonicTime:1100];
+        require([[AxsCacheKeeperProcessObservation lastExecutingIdentityForBundle:execBundle] isEqual:@"1:500.000000"], @"Executing 记录执行实例");
+        [AxsCacheKeeperProcessObservation observeBundle:execBundle state:AxsCacheKeeperExecSuspended identity:@"1:500.000000" atMonotonicTime:1110];
+        require([[AxsCacheKeeperProcessObservation lastExecutingIdentityForBundle:execBundle] isEqual:@"1:500.000000"], @"挂起不抹除执行实例历史");
+        [AxsCacheKeeperProcessObservation observeBundle:execBundle state:AxsCacheKeeperExecExecuting identity:@"1:600.000000" atMonotonicTime:1120];
+        require([[AxsCacheKeeperProcessObservation lastExecutingIdentityForBundle:execBundle] isEqual:@"1:600.000000"], @"新实例运行更新执行实例记录");
+        [AxsCacheKeeperProcessObservation observeBundle:execBundle state:AxsCacheKeeperExecAbsent identity:nil atMonotonicTime:1130];
+        require([[AxsCacheKeeperProcessObservation lastExecutingIdentityForBundle:execBundle] isEqual:@"1:600.000000"], @"消失不抹除执行实例历史");
+        [AxsCacheKeeperProcessObservation observeBundle:execBundle state:AxsCacheKeeperExecExecuting identity:nil atMonotonicTime:1140];
+        require([[AxsCacheKeeperProcessObservation lastExecutingIdentityForBundle:execBundle] isEqual:@"1:600.000000"], @"nil 身份不覆盖执行实例记录");
         NSDictionary *selection = @{bundle:@[@"Library/Caches/a", @"Library/Caches", @"Library/Caches/a",
             @"Library/Application Support", @"Library/Caches/../Preferences", @"Library/CachesOther"]};
         require([axs_cachekeeper_selected_paths(selection, @{bundle:@YES}, bundle) isEqual:@[@"Library/Caches"]], @"过滤保护目录并去掉父子重复选择");

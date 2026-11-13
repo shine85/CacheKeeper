@@ -154,8 +154,6 @@ void CKInspectRequests(void) {
     });
 }
 static NSMutableSet<NSString *> *axs_cachekeeper_manual;
-// 最近一次观测到的运行实例标识（仅主线程读写：CKApply 入口观测、目标构建与门控采样均在主线程——门控经 dispatch_sync 回主队列执行；作业在清理队列执行，但门控采样块内部回主队列，不碰本字典）。
-static NSMutableDictionary<NSString *, NSString *> *axs_cachekeeper_seen_instances;
 static AxsCacheKeeperExecState axs_cachekeeper_exec(NSString *bundle, NSString **identity, NSInteger *taskState, NSString **reason) {
     id manager = SRead(NSClassFromString(@"FBProcessManager"), @"sharedInstance");
     return axs_cachekeeper_process_exec_state(manager,bundle,identity,taskState,reason);
@@ -240,21 +238,22 @@ void CKApplyDirectorySwitches(void) {
     // 实例观测独立于清理忙碌状态：每轮入口先记录各已启用 APP 当前运行实例，
     // 使长任务存续期间发生的新实例启停也能被门控采样的绑定比对发现；
     // 同时维护挂起稳定跟踪（同一实例被系统挂起的起始时刻），供放行判定使用。
-    if (!axs_cachekeeper_seen_instances) axs_cachekeeper_seen_instances = [NSMutableDictionary new];
     NSDictionary *observedStates = [NSDictionary dictionaryWithContentsOfFile:
         [axs_cachekeeper_folder() stringByAppendingPathComponent:@"appEnabled.plist"]];
-    // 配置读不到时无法枚举应观测的 bundle，全部挂起起点作废（方案任务 2 第 3 步）。
-    if (!observedStates) [AxsCacheKeeperProcessObservation invalidateAllBundles];
+    // 周期起点差集清理：以当前启用集合为准，配置键直接移除的 bundle 其挂起起点与
+    // 执行实例记录一并作废；配置读不到时全部作废（方案任务 2 补齐）。
+    NSMutableSet *enabledBundles = [NSMutableSet new];
+    for (NSString *bundle in observedStates) if (axs_cachekeeper_bundle_id(bundle) && axs_cachekeeper_app_enabled(observedStates[bundle])) [enabledBundles addObject:bundle];
+    [AxsCacheKeeperProcessObservation beginCycleWithEnabledBundles:enabledBundles configurationReadable:(observedStates != nil)];
     for (NSString *bundle in observedStates) {
         if (!axs_cachekeeper_bundle_id(bundle) || !axs_cachekeeper_app_enabled(observedStates[bundle])) {
             // 未启用/无效 bundle 不观测，但须清除旧挂起记录：停用期间进程恢复运行再挂起，
-            // 重开时不能继承停用前的旧起点（方案任务 2 第 3 步）。
+            // 重开时不能继承停用前的旧起点（方案任务 2 第 3 步；与周期差集清理互为纵深）。
             [AxsCacheKeeperProcessObservation observeBundle:bundle state:AxsCacheKeeperExecUnknown identity:nil atMonotonicTime:axs_cachekeeper_monotonic_seconds()];
             continue;
         }
         NSString *identity=nil;
         AxsCacheKeeperExecState exec=axs_cachekeeper_exec(bundle,&identity,NULL,NULL);
-        if (exec==AxsCacheKeeperExecExecuting && identity) axs_cachekeeper_seen_instances[bundle]=identity;
         [AxsCacheKeeperProcessObservation observeBundle:bundle state:exec identity:identity atMonotonicTime:axs_cachekeeper_monotonic_seconds()];
     }
     if (busy) return;
@@ -297,7 +296,7 @@ void CKApplyDirectorySwitches(void) {
         [AxsCacheKeeperProcessObservation observeBundle:bundle state:exec identity:execIdentity atMonotonicTime:axs_cachekeeper_monotonic_seconds()];
         AxsCacheKeeperProcessState process=AxsCacheKeeperProcessUnknown;
         AxsCacheKeeperSignalConfidence confidence=AxsCacheKeeperSignalNone;
-        NSString *instance=axs_cachekeeper_seen_instances[bundle] ?: @"";
+        NSString *instance=[AxsCacheKeeperProcessObservation lastExecutingIdentityForBundle:bundle] ?: @"";
         if (exec==AxsCacheKeeperExecAbsent) {
             process=AxsCacheKeeperProcessStopped; confidence=AxsCacheKeeperSignalStrong;
         } else if (exec==AxsCacheKeeperExecTerminated) {
@@ -480,7 +479,7 @@ void CKApplyDirectorySwitches(void) {
                     NSArray *currentPurgePaths = axs_cachekeeper_purge_paths(purgeCandidates, currentStates[bundle]);
                     BOOL purgeOK = [currentPurgePaths isEqual:purgePaths];
                     // 实例绑定：任务存续期间观测到不同实例运行过，说明目标缓存可能已被新实例接管，旧任务过期。
-                    NSString *seen = axs_cachekeeper_seen_instances[bundle];
+                    NSString *seen = [AxsCacheKeeperProcessObservation lastExecutingIdentityForBundle:bundle];
                     BOOL instanceOK = ![jobInstance length] || ![seen length] || [seen isEqual:jobInstance];
                     // 仅清理未知目录的任务没有缓存根，currentPaths 为空是正常态：任一根存在即放行。
                     allowed = readable && selected && (currentPaths.count || currentPurgePaths.count) && axs_cachekeeper_wants_cleanup(currentStates[bundle]) && [Container(bundle).path isEqual:target[@"home"]] &&

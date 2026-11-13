@@ -10,6 +10,14 @@ static NSMutableDictionary<NSString *, NSDictionary *> *AxsCacheKeeperSuspendedR
     return records;
 }
 
+// 最近一次执行实例（bundle → identity 字符串）；记历史，不随挂起/消失观测清除。
+static NSMutableDictionary<NSString *, NSString *> *AxsCacheKeeperExecutingIdentities(void) {
+    static NSMutableDictionary<NSString *, NSString *> *identities;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ identities = [NSMutableDictionary new]; });
+    return identities;
+}
+
 @implementation AxsCacheKeeperProcessObservation
 
 + (void)observeBundle:(NSString *)bundle state:(AxsCacheKeeperExecState)state identity:(NSString *)identity atMonotonicTime:(NSTimeInterval)now {
@@ -19,6 +27,8 @@ static NSMutableDictionary<NSString *, NSDictionary *> *AxsCacheKeeperSuspendedR
     // 了 sampleGate 内的 dispatch_sync，用户 2026-11-12 22:20 源码核对纠正）。
     NSAssert([NSThread isMainThread], @"AxsCacheKeeperProcessObservation 仅限主线程调用");
     if (!bundle.length) return;
+    // 所有采样入口的 Executing 都同步记录最新执行实例，供门控实例绑定比对。
+    if (state==AxsCacheKeeperExecExecuting && identity.length) AxsCacheKeeperExecutingIdentities()[bundle]=identity;
     if (state==AxsCacheKeeperExecSuspended && identity.length) {
         NSDictionary *record=AxsCacheKeeperSuspendedRecords()[bundle];
         if (![record[@"identity"] isEqual:identity])
@@ -34,9 +44,27 @@ static NSMutableDictionary<NSString *, NSDictionary *> *AxsCacheKeeperSuspendedR
 }
 
 + (void)invalidateAllBundles {
-    // 配置不可读/缺失时无法枚举应观测的 bundle，全部挂起起点作废，不继承未持续维护的窗口。
+    // 配置不可读/缺失时无法枚举应观测的 bundle，全部挂起起点与执行实例记录作废，不继承未持续维护的窗口。
     NSAssert([NSThread isMainThread], @"AxsCacheKeeperProcessObservation 仅限主线程调用");
     [AxsCacheKeeperSuspendedRecords() removeAllObjects];
+    [AxsCacheKeeperExecutingIdentities() removeAllObjects];
+}
+
++ (void)beginCycleWithEnabledBundles:(NSSet<NSString *> *)enabledBundles configurationReadable:(BOOL)readable {
+    NSAssert([NSThread isMainThread], @"AxsCacheKeeperProcessObservation 仅限主线程调用");
+    if (!readable) { [self invalidateAllBundles]; return; }
+    // 差集清理：不在当前启用集合的 bundle，其挂起起点与执行实例记录一并作废。
+    // 覆盖配置键直接移除（遍历不到 enabled=false），不只覆盖显式停用。
+    for (NSString *bundle in [AxsCacheKeeperSuspendedRecords().allKeys copy])
+        if (![enabledBundles containsObject:bundle]) [AxsCacheKeeperSuspendedRecords() removeObjectForKey:bundle];
+    for (NSString *bundle in [AxsCacheKeeperExecutingIdentities().allKeys copy])
+        if (![enabledBundles containsObject:bundle]) [AxsCacheKeeperExecutingIdentities() removeObjectForKey:bundle];
+}
+
++ (NSString *)lastExecutingIdentityForBundle:(NSString *)bundle {
+    NSAssert([NSThread isMainThread], @"AxsCacheKeeperProcessObservation 仅限主线程调用");
+    if (!bundle.length) return nil;
+    return AxsCacheKeeperExecutingIdentities()[bundle];
 }
 
 @end
