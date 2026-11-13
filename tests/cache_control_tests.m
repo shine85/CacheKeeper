@@ -491,7 +491,7 @@ int main(int argc, const char *argv[]) {
         // 保留范围优先于平台规则。
         dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Preferences/a.txt" state:emptyState evidence:retentionEvidence];
         require(dec.disposition == AxsCacheKeeperCleanupKeep && [dec.ruleID isEqualToString:@"retention-range"], @"保留范围优先于平台规则");
-        // 读取不完整 → Keep，本轮不删除。
+        // 读取不完整 → Defer，本轮不删除，访问恢复后重试。
         dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Caches/secret.log" state:emptyState evidence:incompleteEvidence];
         require(dec.disposition == AxsCacheKeeperCleanupDefer && [dec.ruleID isEqualToString:@"read-incomplete"], @"读取不完整本轮不删除");
         // 日志定级：日志名 + 无证据 + 无媒体头 + 不受保护 → Delete/UserLog。
@@ -508,7 +508,7 @@ int main(int argc, const char *argv[]) {
         require(dec.disposition == AxsCacheKeeperCleanupUnresolved, @"非日志名不删除");
         // APP 规则：注册 / 匹配 / 版本 / 规则版本 / 可清范围交集。
         NSString *versionBefore = [AxsCacheKeeperCleanupRules rulesVersion];
-        AxsCacheKeeperAppRule *testRule = [[AxsCacheKeeperAppRule alloc] initWithRuleID:@"test-downloads" revision:@"1" appVersion:@"1.0" cleanablePaths:@[@"Library/Downloads/cache"] retentionPaths:@[@"Library/Downloads/drafts"] dependencyPaths:@[@"Library/Downloads/index.json"]];
+        AxsCacheKeeperAppRule *testRule = [[AxsCacheKeeperAppRule alloc] initWithRuleID:@"test-downloads" revision:@"1" appVersion:@"1.0" cleanablePaths:@[@"Library/Downloads/cache",@"Library/Resources/cache"] retentionPaths:@[@"Library/Downloads/drafts"] dependencyPaths:@[@"Library/Downloads/index.json"]];
         [AxsCacheKeeperCleanupRules registerRule:testRule forBundle:bundle];
         require(![[AxsCacheKeeperCleanupRules rulesVersion] isEqualToString:versionBefore], @"注册规则改变规则版本");
         dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads/cache/res.bin" state:emptyState evidence:cleanEvidence];
@@ -516,9 +516,15 @@ int main(int argc, const char *argv[]) {
         dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads/drafts/draft.txt" state:emptyState evidence:cleanEvidence];
         require(dec.disposition == AxsCacheKeeperCleanupKeep && dec.basis == AxsCacheKeeperCleanupBasisAppRule, @"APP 规则保留范围保留");
         dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"2.0" relativePath:@"Library/Downloads/cache/res.bin" state:emptyState evidence:cleanEvidence];
-        require(dec.disposition == AxsCacheKeeperCleanupUnresolved, @"APP 版本不匹配规则失效");
+        require(dec.disposition == AxsCacheKeeperCleanupKeep && [dec.ruleID isEqual:@"necessary-state"], @"版本不匹配后下载目录仍受必要状态保护");
         dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:nil relativePath:@"Library/Downloads/cache/res.bin" state:emptyState evidence:cleanEvidence];
-        require(dec.disposition == AxsCacheKeeperCleanupUnresolved, @"版本缺失时带版本规则不匹配");
+        require(dec.disposition == AxsCacheKeeperCleanupKeep && [dec.ruleID isEqual:@"necessary-state"], @"版本缺失不能越过下载目录保护");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Resources/cache/res.bin" state:emptyState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupDelete && dec.basis == AxsCacheKeeperCleanupBasisAppRule, @"非保留资源范围在匹配版本可清理");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"2.0" relativePath:@"Library/Resources/cache/res.bin" state:emptyState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupUnresolved, @"APP 版本不匹配后非保留资源变为待识别");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:nil relativePath:@"Library/Resources/cache/res.bin" state:emptyState evidence:cleanEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupUnresolved, @"版本缺失时资源规则不匹配");
         require([AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads"] &&
             [AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads/cache"] &&
             [AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads/cache/sub"] &&
@@ -590,8 +596,8 @@ int main(int argc, const char *argv[]) {
         require([@"SQLite format 3\0payload" writeToFile:[migrateRoot stringByAppendingPathComponent:@"state.sqlite"] atomically:YES encoding:NSUTF8StringEncoding error:nil], @"迁移数据库夹具");
         writeFile([migrateRoot stringByAppendingPathComponent:@"opaque"]);
         AxsCacheKeeperSweep *migrateSweep = makeSweep(migrateRoot, @{@"fullClear":@NO});
-        [migrateSweep advance:64 shouldContinue:^BOOL { return YES; }];
-        require(migrateSweep.removed==3 && migrateSweep.failed==0 && migrateSweep.unresolvedCount==0 &&
+        for (NSUInteger pass=0;!migrateSweep.complete && pass<100;pass++) [migrateSweep advance:64 shouldContinue:^BOOL { return YES; }];
+        require(migrateSweep.complete && migrateSweep.removed==3 && migrateSweep.failed==0 && migrateSweep.unresolvedCount==0 &&
             ![fm fileExistsAtPath:[migrateRoot stringByAppendingPathComponent:@"clip.mp4"]] &&
             ![fm fileExistsAtPath:[migrateRoot stringByAppendingPathComponent:@"state.sqlite"]] &&
             ![fm fileExistsAtPath:[migrateRoot stringByAppendingPathComponent:@"opaque"]] &&
@@ -603,8 +609,8 @@ int main(int argc, const char *argv[]) {
         writeMedia([exclRoot stringByAppendingPathComponent:@"sibling.mp4"]);
         writeMedia([exclKeep stringByAppendingPathComponent:@"kept.mp4"]);
         AxsCacheKeeperSweep *exclSweep = makeSweep(exclRoot, @{@"excludedPaths":@[@"Library/Caches/job-excl/keep"]});
-        [exclSweep advance:64 shouldContinue:^BOOL { return YES; }];
-        require(exclSweep.removed==1 && exclSweep.protectedCount==1 && exclSweep.failed==0 &&
+        for (NSUInteger pass=0;!exclSweep.complete && pass<100;pass++) [exclSweep advance:64 shouldContinue:^BOOL { return YES; }];
+        require(exclSweep.complete && exclSweep.removed==1 && exclSweep.protectedCount==1 && exclSweep.failed==0 &&
             ![fm fileExistsAtPath:[exclRoot stringByAppendingPathComponent:@"sibling.mp4"]] &&
             [fm fileExistsAtPath:[exclKeep stringByAppendingPathComponent:@"kept.mp4"]], @"排除子树的文件保留，同级文件照常清理");
         // 保留子树裁剪：平台根内的 Preferences 子树整片保留，其余独立文件照常删除。
