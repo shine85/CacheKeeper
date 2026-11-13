@@ -1,14 +1,11 @@
 #pragma once
 #import <Foundation/Foundation.h>
 
-// 仅聚合插件记录；补采复用现有只读检测接口，不直接访问 APP 容器。
+// 仅在内存汇总插件已有记录，不发起检测、不访问 APP 容器、不写报告文件。
 @interface AxsCacheKeeperDiagnostics : NSObject
 @property(nonatomic,readonly) NSArray<NSString *> *bundles;
-@property(nonatomic,readonly) BOOL running;
-@property(nonatomic,readonly) NSString *status;
 - (instancetype)initWithFolder:(NSString *)folder;
-- (NSString *)startAt:(NSTimeInterval)now;
-- (void)advanceAt:(NSTimeInterval)now;
-- (void)stop;
 - (NSDictionary *)reportWithApps:(NSArray<NSDictionary *> *)apps environment:(NSDictionary *)environment;
+// 回调在调用线程运行，依次报告 0/总数到总数/总数；调用方负责主线程显示。
+- (NSDictionary *)reportWithApps:(NSArray<NSDictionary *> *)apps environment:(NSDictionary *)environment progress:(void (^)(NSUInteger completed,NSUInteger total))progress;
 @end

@@ -46,64 +46,76 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     dxcheck([largeReport[@"apps"] count]==126 && [collection[@"total"] unsignedIntegerValue]==126 &&
         [collection[@"completed"] unsignedIntegerValue]==126 && [collection[@"phase"] isEqual:@"complete"] &&
         [collection[@"mode"] isEqual:@"savedRecords"],@"126 个 APP 应一次汇总完成，固定 126/126，不能启动深度任务队列");
-    dxcheck([session startAt:0]==nil && session.running,@"启动补采");
-    [session advanceAt:0];
-    NSDictionary *request=[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"request.plist"]];
-    dxcheck([request[@"bundle"] isEqual:@"test.active"],@"首先检测第一项配置");
-    dxwrite(folder,@"scan.plist",@{@"token":@"old",@"bundle":@"test.active",@"rows":@[]});
-    [session advanceAt:1];
-    dxcheck(![NSFileManager.defaultManager fileExistsAtPath:[folder stringByAppendingPathComponent:@"inspectionRequest.plist"]],@"旧 token 不推进队列");
-    dxwrite(folder,@"scan.plist",@{@"token":request[@"token"],@"bundle":@"test.active",@"rows":@[@{@"path":@"Library/Caches"},@{@"path":@"../escape"},@{@"path":@"Library/Caches"}]});
-    // Scanner 已消费请求；夹具只移除自己创建的请求文件。
-    [NSFileManager.defaultManager removeItemAtPath:[folder stringByAppendingPathComponent:@"request.plist"] error:nil];
-    [session advanceAt:2];[session advanceAt:3];
-    NSDictionary *deep=[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"inspectionRequest.plist"]];
-    dxcheck([deep[@"path"] isEqual:@"Library/Caches"],@"同 token 后串行补采有效根");
-    [session stop];
-    dxcheck(!session.running && [[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"inspectionRequest.plist"]][@"cancel"] boolValue],@"停止仅取消本会话深度请求");
-    AxsCacheKeeperDiagnostics *timeout=[[cls alloc] initWithFolder:folder];
-    dxcheck([timeout startAt:10]==nil,@"已取消请求允许新采集");
-    [timeout advanceAt:10];[timeout advanceAt:131];
-    dxcheck(!timeout.running && [timeout.status containsString:@"超时"],@"无回执超时停止，不能假报完成");
-    dxwrite(folder,@"inspectionRequest.plist",@{@"bundle":@"test.other",@"path":@"tmp",@"token":@"someone-else"});
-    [timeout stop];
-    dxcheck(![[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"inspectionRequest.plist"]][@"cancel"] boolValue],@"不取消其他会话请求");
+    // 已有扫描请求不属于报告生成器；忙碌、损坏、取消等状态都不能被汇总动作改写。
+    NSDictionary *request=@{@"bundle":@"test.other",@"token":@"existing",@"path":@"tmp",@"cancel":@NO};
+    NSMutableDictionary *beforeRequests=[NSMutableDictionary new];
+    for (NSString *name in @[@"request.plist",@"inspectionRequest.plist",@"batch.plist"]) {
+        dxwrite(largeFolder,name,request);
+        beforeRequests[name]=[NSData dataWithContentsOfFile:[largeFolder stringByAppendingPathComponent:name]];
+    }
+    NSMutableDictionary *snapshots=[NSMutableDictionary new];
+    NSMutableDictionary *reports=[NSMutableDictionary new];
+    NSMutableArray *rows=[NSMutableArray new];
+    NSDate *oldDate=[NSDate dateWithTimeIntervalSince1970:100];
+    for (NSUInteger i=0;i<12;i++) {
+        NSString *path=[NSString stringWithFormat:@"Library/fixture%lu",(unsigned long)i];
+        NSMutableArray *largest=[NSMutableArray new];
+        for (NSUInteger j=0;j<10;j++) [largest addObject:@{@"path":[NSString stringWithFormat:@"account-123456789/resource-%lu.pdf",(unsigned long)j],@"bytes":@(j+100)}];
+        reports[path]=@{@"updated":oldDate,@"complete":@YES,@"coverageComplete":@NO,@"largest":largest,@"files":@10,@"bytes":@1045};
+        [rows addObject:@{@"path":path,@"bytes":@1045,@"complete":@YES}];
+    }
+    dxcheck([NSFileManager.defaultManager createDirectoryAtPath:[largeFolder stringByAppendingPathComponent:@"Status"] withIntermediateDirectories:YES attributes:nil error:nil],@"创建已有状态目录");
+    for (NSString *bundle in large.bundles) {
+        snapshots[bundle]=@{@"updated":oldDate,@"rows":rows};
+        dxwrite(largeFolder,[NSString stringWithFormat:@"Status/%@.inspection.plist",bundle],@{@"reports":reports});
+    }
+    dxwrite(largeFolder,@"snapshots.plist",snapshots);
+    NSArray *beforeFiles=[NSFileManager.defaultManager subpathsAtPath:largeFolder];
+    __block NSUInteger callbacks=0;
+    NSTimeInterval began=NSProcessInfo.processInfo.systemUptime;
+    NSDictionary *fixed=[large reportWithApps:@[] environment:@{} progress:^(NSUInteger completed,NSUInteger total) {
+        dxcheck(total==126 && completed==callbacks,@"固定 APP 总数，进度从 0 到 126 逐项增加");callbacks++;
+    }];
+    NSData *fixedJSON=[NSJSONSerialization dataWithJSONObject:fixed options:0 error:nil];
+    NSTimeInterval elapsed=NSProcessInfo.processInfo.systemUptime-began;
+    dxcheck(callbacks==127 && fixedJSON && [fixed[@"schemaVersion"] isEqual:@2],@"批量汇总返回完整内存报告与版本 2 元数据");
+    dxcheck([fixed[@"collection"][@"rescanned"] isEqual:@NO] && !fixed[@"collection"][@"tasks"],@"不把已有记录汇总伪装成新扫描或创建任务队列");
+    dxcheck([fixed[@"apps"][0][@"inspection"][@"data"][@"reports"] count]==12 && [fixed[@"apps"][0][@"scan"][@"data"][@"updated"] isEqual:@100],@"保留旧深度记录和原始时间，不伪造新鲜度");
+    for (NSString *name in @[@"request.plist",@"inspectionRequest.plist",@"batch.plist"])
+        dxcheck([[NSData dataWithContentsOfFile:[largeFolder stringByAppendingPathComponent:name]] isEqual:beforeRequests[name]],@"已有请求字节不变，不取消、不改写、不补扫");
+    dxcheck([[NSSet setWithArray:beforeFiles] isEqual:[NSSet setWithArray:[NSFileManager.defaultManager subpathsAtPath:largeFolder]]],@"采集只返回内存报告，不自动生成本地文件");
+    NSDictionary *again=[large reportWithApps:@[] environment:@{}];
+    dxcheck([again[@"collection"][@"completed"] isEqual:@126] && [again[@"apps"] count]==126,@"重复采集不累积任务或 APP");
+    printf("PASS: saved-record report: 126 apps, 1512 saved inspections, %lu JSON bytes, %.3f seconds, zero writes\n",(unsigned long)fixedJSON.length,elapsed);
+
     dxwrite(folder,@"Status/test.disabled.auto.plist",@{@"directories":@{@"Library/Caches":@42}});
     dxwrite(folder,@"Status/test.active.inspection.plist",@{@"reports":@[@"bad-shape"]});
     dxwrite(folder,@"Status/test.active.network.plist",@{@"prevent":@YES,@"applied":@NO});
     dxwrite(folder,@"batch.plist",@{@"remaining":@12});
-    AxsCacheKeeperDiagnostics *damaged=[[cls alloc] initWithFolder:folder];
-    dxcheck([damaged startAt:200]!=nil && !damaged.running,@"损坏批次拒绝启动，不崩溃或覆盖其他请求");
-    NSDictionary *badReport=[damaged reportWithApps:@[] environment:@{}];
+    NSDictionary *badReport=[session reportWithApps:@[] environment:@{}];
     dxcheck([NSJSONSerialization dataWithJSONObject:badReport options:0 error:nil]!=nil,@"损坏嵌套记录仍可导出诊断");
     dxcheck([badReport[@"apps"][0][@"inspection"][@"data"][@"invalidRecord"] boolValue],@"损坏 reports 不能伪装为空档案");
     dxcheck([badReport[@"apps"][1][@"cleanup"][@"data"][@"directories"][0][@"invalidRecord"] boolValue],@"损坏目录记录明确标记");
     dxcheck([badReport[@"apps"][0][@"network"][@"data"][@"prevent"] isEqual:@YES] && [badReport[@"apps"][0][@"network"][@"data"][@"applied"] isEqual:@NO],@"网络限制请求和实际生效结果保留");
-    dxwrite(folder,@"batch.plist",@{});
-    [NSFileManager.defaultManager removeItemAtPath:[folder stringByAppendingPathComponent:@"request.plist"] error:nil];
-    dxwrite(folder,@"inspectionRequest.plist",@{@"token":@"broken",@"cancel":@[]});
-    dxcheck([damaged startAt:201]!=nil,@"错误类型的 cancel 不能崩溃或被覆盖");
-    dxwrite(folder,@"inspectionRequest.plist",@{});
-    dxcheck([damaged startAt:202]==nil,@"空闲接口重新开始");
-    [damaged advanceAt:202];
-    NSDictionary *current=[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"request.plist"]];
-    dxwrite(folder,@"scan.plist",@{@"bundle":current[@"bundle"],@"token":current[@"token"],@"complete":@[],@"rows":@[]});
-    [damaged advanceAt:203];
-    dxcheck(!damaged.running && [damaged.status containsString:@"损坏"],@"回执布尔类型损坏明确停止");
-    dxcheck([[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"appEnabled.plist"]] isEqual:states],@"整个补采流程不修改开关");
-    NSString *doneFolder=[fixture stringByAppendingPathComponent:@"diagnostics-finished"];
-    dxcheck([NSFileManager.defaultManager createDirectoryAtPath:[doneFolder stringByAppendingPathComponent:@"Status"] withIntermediateDirectories:YES attributes:nil error:nil],@"创建完成流程夹具");
-    dxwrite(doneFolder,@"appEnabled.plist",@{@"test.done":@YES});
-    AxsCacheKeeperDiagnostics *done=[[cls alloc] initWithFolder:doneFolder];
-    dxcheck([done startAt:0]==nil,@"开始成功流程");[done advanceAt:0];
-    NSDictionary *scanRequest=[NSDictionary dictionaryWithContentsOfFile:[doneFolder stringByAppendingPathComponent:@"request.plist"]];
-    dxcheck([scanRequest[@"diagnostic"] boolValue],@"采集目录请求不触发清理重检");
-    dxwrite(doneFolder,@"scan.plist",@{@"bundle":@"test.done",@"token":scanRequest[@"token"],@"rows":@[@{@"path":@"tmp"} ]});
-    [done advanceAt:1];[done advanceAt:2];
-    NSDictionary *inspectRequest=[NSDictionary dictionaryWithContentsOfFile:[doneFolder stringByAppendingPathComponent:@"inspectionRequest.plist"]];
-    dxwrite(doneFolder,@"Status/test.done.inspection.plist",@{@"reports":@{@"tmp":@{@"bundle":@"test.done",@"token":inspectRequest[@"token"],@"complete":@YES,@"coverageComplete":@YES}}});
-    [done advanceAt:3];[done advanceAt:4];
-    NSDictionary *doneReport=[done reportWithApps:@[] environment:@{}];
-    dxcheck(!done.running && [doneReport[@"collection"][@"phase"] isEqual:@"complete"] && [doneReport[@"collection"][@"tasks"] count]==2,@"扫描与深度串行结束后准确报告完成");
-    printf("PASS: diagnostic scope, privacy, receipts, token sequencing, stop and timeout\n");
+    dxcheck([badReport[@"batch"][@"state"] isEqual:@"invalid"],@"损坏扫描批次仍可汇总并明确标识");
+    dxcheck([[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"appEnabled.plist"]] isEqual:states],@"整个汇总流程不修改开关");
+    dxwrite(folder,@"appEnabled.plist",@{@"test.active":@{@"enabled":@YES,@"mode":@42},@"test.disabled":@"invalid"});
+    dxwrite(folder,@"directories.plist",@{@"test.active":@42,@"test.paths":@[@"Library/Caches",@42]});
+    NSDictionary *invalidSelection=[session reportWithApps:@[] environment:@{}];
+    dxcheck([invalidSelection[@"apps"][0][@"configurationState"] isEqual:@"invalid"] &&
+        [invalidSelection[@"apps"][0][@"configuration"][@"invalidFields"] containsObject:@"mode"],@"配置字符串字段坏类型明确标记");
+    dxcheck([invalidSelection[@"apps"][1][@"configurationState"] isEqual:@"invalid"],@"单 APP 配置坏类型不能伪装有效");
+    dxcheck([invalidSelection[@"apps"][0][@"selectionState"] isEqual:@"invalid"] &&
+        [invalidSelection[@"apps"][2][@"selectionState"] isEqual:@"invalid"],@"目录选择坏容器和坏元素明确标记");
+    dxcheck([invalidSelection[@"apps"][1][@"selectionState"] isEqual:@"missing"] &&
+        [invalidSelection[@"apps"][2][@"configurationState"] isEqual:@"missing"],@"逐 APP 缺失与损坏分别标记");
+    dxwrite(folder,@"directories.plist",@{@"test.paths":@[@"Library/Caches"]});
+    dxcheck([[@"invalid plist" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:[folder stringByAppendingPathComponent:@"appEnabled.plist"] atomically:YES],@"写入损坏配置夹具");
+    AxsCacheKeeperDiagnostics *damaged=[[cls alloc] initWithFolder:folder];
+    NSDictionary *damagedReport=[damaged reportWithApps:@[] environment:@{}];
+    dxcheck([damagedReport[@"sourceStates"][@"configuration"] isEqual:@"invalid"] && [damagedReport[@"apps"] count]==1,@"配置损坏明确标识，仍汇总独立目录配置已有 APP");
+    AxsCacheKeeperDiagnostics *empty=[[cls alloc] initWithFolder:[fixture stringByAppendingPathComponent:@"no-config"]];
+    NSDictionary *emptyReport=[empty reportWithApps:@[] environment:@{}];
+    dxcheck([emptyReport[@"collection"][@"total"] isEqual:@0] && [emptyReport[@"sourceStates"][@"configuration"] isEqual:@"missing"],@"无配置报告保留缺失状态");
+    printf("PASS: diagnostic saved-record aggregation, privacy, fixed progress, missing records and zero filesystem writes\n");
 }
