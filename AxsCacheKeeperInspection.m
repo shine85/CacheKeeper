@@ -17,6 +17,7 @@
 @property(nonatomic,strong) NSMutableDictionary *types;
 @property(nonatomic,strong) NSMutableDictionary *ages;
 @property(nonatomic,strong) NSMutableArray *largest;
+@property(nonatomic,strong) NSMutableArray *largestHardLinks;
 @property(nonatomic,copy) NSString *error;
 @property(nonatomic,strong) NSDate *started;
 // 硬链接孪生定位：主枚举只记身份（设备+inode），枚举完成后分批扫搜索根找孪生。
@@ -29,6 +30,7 @@
 @property(nonatomic) BOOL twinPhase;
 @property(nonatomic) NSUInteger searchIndex;
 @property(nonatomic,strong) NSDictionary *searchCurrent;
+@property(nonatomic,copy) NSArray<NSString *> *searchAliases;
 @property(nonatomic,strong) NSDirectoryEnumerator *searchEntries;
 @property(nonatomic,strong) NSMutableArray *twinEntries;
 @property(nonatomic,strong) NSMutableSet *twinnedKeys;
@@ -70,7 +72,7 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
 - (instancetype)initWithRoot:(NSString *)root searchRoots:(NSArray<NSDictionary *> *)searchRoots searchLimit:(NSUInteger)searchLimit stat:(int (^)(const char *,struct stat *))statBlock {
     self=[super init];if (!self) return nil;
     _searchLimit=searchLimit;_searchStat=[statBlock copy];
-    _root=[root copy];_types=[NSMutableDictionary new];_ages=[NSMutableDictionary new];_largest=[NSMutableArray new];_started=NSDate.date;
+    _root=[root copy];_types=[NSMutableDictionary new];_ages=[NSMutableDictionary new];_largest=[NSMutableArray new];_largestHardLinks=[NSMutableArray new];_started=NSDate.date;
     _searchRoots=[searchRoots count] ? [searchRoots copy] : @[@{@"path":root ?: @"",@"label":@"本目录"}];
     _linkFiles=[NSMutableArray new];_twinEntries=[NSMutableArray new];_twinnedKeys=[NSMutableSet new];
     int fd=axs_cachekeeper_open_directory(root);
@@ -83,6 +85,12 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
     }];
     if (!_entries) { _complete=YES;_failures=1;_error=@"无法创建目录枚举器"; }
     return self;
+}
+- (void)axs_cachekeeper_record_file:(NSDictionary *)file largest:(NSMutableArray *)largest {
+    static const NSUInteger AxsCacheKeeperLargestFileLimit=10;
+    [largest addObject:file];
+    [largest sortUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b) { return [b[@"bytes"] compare:a[@"bytes"]]; }];
+    if (largest.count>AxsCacheKeeperLargestFileLimit) [largest removeLastObject];
 }
 - (void)advance:(NSUInteger)limit {
     for (NSUInteger index=0;index<limit && !self.complete;index++) {
@@ -101,6 +109,8 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
             if (S_ISLNK(info.st_mode)) { self.links++;self.symlinks++;continue; }
             if (S_ISREG(info.st_mode) && info.st_nlink!=1) {
                 self.links++;self.hardLinks++;
+                // 大文件诊断覆盖所有已枚举硬链接，独立于孪生源的 100 条上限；不读取内容。
+                [self axs_cachekeeper_record_file:@{@"path":relative,@"bytes":@(info.st_size),@"nlink":@(info.st_nlink)} largest:self.largestHardLinks];
                 if (self.linkFiles.count<100) [self.linkFiles addObject:@{@"path":relative,@"device":@(info.st_dev),@"inode":@(info.st_ino),@"nlink":@(info.st_nlink),@"bytes":@(info.st_size)}];
                 else self.linkFilesTruncated=YES;
                 continue;
@@ -132,9 +142,7 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
             NSTimeInterval age=[self.started timeIntervalSince1970]-MAX(opened.st_mtimespec.tv_sec,MAX(opened.st_ctimespec.tv_sec,opened.st_birthtimespec.tv_sec));
             NSString *bucket=age<60 ? @"不足 60 秒" : age<86400 ? @"60 秒至 1 天" : age<30*86400 ? @"1 至 30 天" : @"30 天以上";
             self.ages[bucket]=@([self.ages[bucket] unsignedIntegerValue]+1);
-            [self.largest addObject:@{@"path":relative,@"bytes":@(opened.st_size),@"type":kind}];
-            [self.largest sortUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b) { return [b[@"bytes"] compare:a[@"bytes"]]; }];
-            if (self.largest.count>10) [self.largest removeLastObject];
+            [self axs_cachekeeper_record_file:@{@"path":relative,@"bytes":@(opened.st_size),@"type":kind} largest:self.largest];
         }
     }
 }
@@ -152,12 +160,13 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
     if (!self.searchEntries) self.complete=YES;
 }
 - (void)axs_cachekeeper_open_search_root {
-    self.searchEntries=nil;self.searchCurrent=nil;
+    self.searchEntries=nil;self.searchCurrent=nil;self.searchAliases=nil;
     while (self.searchIndex<self.searchRoots.count) {
         NSDictionary *candidate=self.searchRoots[self.searchIndex];
         self.searchIndex++;
         NSString *path=candidate[@"path"];
         if (![path isKindOfClass:NSString.class] || !path.length) { self.twinSkipped++;continue; }
+        path=path.stringByStandardizingPath;
         // 先预校验目录可读（任务 7）：enumeratorAtURL 对缺失路径是否返回 nil 未定，
         // 不预校验会让不可读搜索根静默漏计失败；open_directory 失败即计入孪生失败。
         int fd=axs_cachekeeper_open_directory(path);
@@ -165,7 +174,12 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
         close(fd);
         __weak typeof(self) weak=self;
         NSDirectoryEnumerator *entries=[NSFileManager.defaultManager enumeratorAtURL:[NSURL fileURLWithPath:path] includingPropertiesForKeys:nil options:0 errorHandler:^BOOL(NSURL *url,NSError *error) { (void)error;weak.twinSkipped++;return YES; }];
-        if (entries) { self.searchEntries=entries;self.searchCurrent=candidate;return; }
+        if (entries) {
+            self.searchEntries=entries;
+            self.searchCurrent=@{@"path":path,@"label":candidate[@"label"] ?: @""};
+            self.searchAliases=axs_cachekeeper_directory_aliases(path);
+            return;
+        }
         self.twinSkipped++;
     }
 }
@@ -174,27 +188,27 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
     NSURL *enumerated=[self.searchEntries nextObject];
     if (!enumerated) { [self axs_cachekeeper_open_search_root];if (!self.searchEntries) self.complete=YES;return; }
     self.twinScanned++;
+    NSString *base=self.searchCurrent[@"path"];
+    NSString *entry=axs_cachekeeper_enumerated_path(enumerated.path,base,self.searchAliases);
+    if (!entry) { self.twinSkipped++;return; }
     struct stat info;
     // 孪生搜索的 lstat 失败计入孪生失败（任务 7）：静默跳过会让 0 匹配看起来像"已确认无孪生"。
-    if (self.searchStat(enumerated.path.fileSystemRepresentation,&info)) { self.twinSkipped++;return; }
+    if (self.searchStat(entry.fileSystemRepresentation,&info)) { self.twinSkipped++;return; }
     if (!S_ISREG(info.st_mode) || info.st_nlink==1) return;
     NSString *key=axs_cachekeeper_inode_key(info.st_dev,info.st_ino);
     NSArray *sources=self.linkIndex[key];
     if (!sources.count) return;
     for (NSDictionary *source in sources) {
         NSString *sourceFull=[self.root stringByAppendingPathComponent:source[@"path"]];
-        NSString *twinResolved=[NSURL fileURLWithPath:enumerated.path].URLByResolvingSymlinksInPath.path;
+        NSString *twinResolved=[NSURL fileURLWithPath:entry].URLByResolvingSymlinksInPath.path;
         NSString *sourceResolved=[NSURL fileURLWithPath:sourceFull].URLByResolvingSymlinksInPath.path;
         if ([twinResolved isEqual:sourceResolved]) continue;
         NSUInteger existing=0;
         for (NSDictionary *twin in self.twinEntries) if ([twin[@"source"] isEqual:source[@"path"]]) existing++;
         // 展示截断（任务 7）：每源 3 条或总 50 条上限丢掉的孪生须标记，不能静默少报。
         if (existing>=3 || self.twinEntries.count>=50) { self.twinDisplayTruncated=YES;continue; }
-        NSString *base=self.searchCurrent[@"path"];
         NSString *label=self.searchCurrent[@"label"] ?: @"";
-        NSString *shown=[enumerated.path hasPrefix:[base stringByAppendingString:@"/"]] ?
-            [NSString stringWithFormat:@"%@/%@",label,[enumerated.path substringFromIndex:base.length+1]] :
-            [NSString stringWithFormat:@"%@/%@",label,enumerated.path.lastPathComponent];
+        NSString *shown=[NSString stringWithFormat:@"%@/%@",label,[entry substringFromIndex:base.length+1]];
         [self.twinEntries addObject:@{@"source":source[@"path"],@"twin":shown,@"bytes":source[@"bytes"]}];
         // 关联大小按 (设备, inode) 去重（任务 7）：同一 inode 的多个源路径只计一次，
         // 否则同目录双链接会把同一份数据算两遍。twinBytes 是逻辑关联大小，非实测释放空间。
@@ -214,6 +228,7 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
     return @{@"complete":@(self.complete),@"coverageComplete":@(covered),@"files":@(self.files),@"bytes":@(self.bytes),
         @"failures":@(self.failures),@"changed":@(self.changed),@"links":@(self.links),@"hidden":@(self.hidden),
         @"hardLinks":@(self.hardLinks),@"symlinks":@(self.symlinks),@"linkTwins":[self.twinEntries copy],@"twinBytes":@(self.twinBytes),
+        @"largestHardLinks":[self.largestHardLinks copy],
         @"twinCoverageComplete":@(twinCovered),@"twinFailures":@(self.twinSkipped),
         @"twinScanTruncated":@(self.twinTruncated),@"twinDisplayTruncated":@(self.twinDisplayTruncated),@"linkFilesTruncated":@(self.linkFilesTruncated),@"twinScanned":@(self.twinScanned),
         @"types":[self.types copy],@"ages":[self.ages copy],@"largest":[self.largest copy],@"evidence":evidence,

@@ -105,12 +105,21 @@
         else if ([cleanup[@"unresolved"] unsignedIntegerValue]) roundState=@"待识别";
         else if (deferred) roundState=@"等待延期文件";
         else if ([cleanup[@"remaining"] unsignedIntegerValue]) roundState=[NSString stringWithFormat:@"部分完成（待处理 %@ 项）",cleanup[@"remaining"]];
+        else if ([cleanup[@"retainedSubtreeCount"] unsignedIntegerValue]) roundState=@"已检查（有整目录保留范围）";
         else roundState=@"完成";
         if (skipped) [text appendFormat:@"最近一轮清理记录（%@）：%@\n删除 %@ 个文件 · %.2f MB；待识别 %@ 项 · %.2f MB。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),roundState,cleanup[@"removed"] ?: @0,[cleanup[@"bytes"] doubleValue]/1048576,cleanup[@"unresolved"] ?: @0,[cleanup[@"unresolvedBytes"] doubleValue]/1048576,cleanup[@"error"] ?: @""];
         else if (![cleanup[@"measurementComplete"] boolValue]) [text appendFormat:@"最近清理记录（%@）：测量未完成，残留数量与大小未知；已删除 %@ 项，失败 %@ 项。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),cleanup[@"removed"] ?: @0,cleanup[@"failed"] ?: @0,cleanup[@"error"] ?: @""];
         else [text appendFormat:@"最近一轮清理记录（%@）：%@\n删除 %@ 个文件 · %.2f MB；保留受保护 %@ 项，延期 %lu 项 · %.2f MB，失败 %@ 项，待识别 %@ 项 · %.2f MB，待处理 %@ 项 · %.2f MB。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),roundState,cleanup[@"removed"] ?: @0,[cleanup[@"bytes"] doubleValue]/1048576,cleanup[@"protected"] ?: @0,(unsigned long)deferred,[cleanup[@"deferredBytes"] doubleValue]/1048576,cleanup[@"failed"] ?: @0,cleanup[@"unresolved"] ?: @0,[cleanup[@"unresolvedBytes"] doubleValue]/1048576,cleanup[@"remaining"] ?: @0,[cleanup[@"remainingBytes"] doubleValue]/1048576,cleanup[@"error"] ?: @""];
     }
     else [text appendString:@"本目录尚无清理回执；占用减少不能据此归因于插件。\n\n"];
+    NSUInteger retainedCount=[cleanup[@"retainedSubtreeCount"] unsignedIntegerValue];
+    NSArray *retainedSubtrees=cleanup[@"retainedSubtrees"];
+    if (retainedCount) {
+        [text appendFormat:@"整目录保留 %lu 处，未遍历内部文件；其文件数量和大小未计入上面的文件统计，不能把 0 项当作目录为空：\n",(unsigned long)retainedCount];
+        for (NSDictionary *subtree in retainedSubtrees) [text appendFormat:@"%@ · %@\n",subtree[@"path"],subtree[@"reason"]];
+        if (retainedCount>retainedSubtrees.count) [text appendFormat:@"另有 %lu 处保留目录，样本已截断。\n",(unsigned long)(retainedCount-retainedSubtrees.count)];
+        [text appendString:@"\n"];
+    }
     if ([cleanup[@"purgeClassification"] isEqual:@"invalid"]) [text appendFormat:@"内容审查：规则依赖已变化（%@），相关范围本轮延期，下轮重新预检。\n\n",cleanup[@"purgeEvidence"] ?: @""];
     else if ([cleanup[@"purgeClassification"] isEqual:@"paused"]) [text appendString:@"内容审查：未知内容待识别，暂不自动清理；专属识别规则后续按占用补充。\n\n"];
     if ([self axs_cachekeeper_judged]) [text appendString:@"本目录已定级为日志目录：该 APP 完全退出后，仅清理本目录内的日志特征文件（.log/.alog/.xlog），数据与未知内容保留；可在本页取消定级。\n\n"];
@@ -150,8 +159,13 @@
     for (NSString *kind in [report[@"types"] allKeys]) [text appendFormat:@"%@：%@ 个 · %.2f MB\n",kind,report[@"types"][kind][@"count"],[report[@"types"][kind][@"bytes"] doubleValue]/1048576];
     [text appendString:@"\n文件时间（取创建、修改和状态变更中最近时间）：\n"];
     for (NSString *age in @[@"不足 60 秒",@"60 秒至 1 天",@"1 至 30 天",@"30 天以上"]) [text appendFormat:@"%@：%@ 个\n",age,report[@"ages"][age] ?: @0];
-    [text appendString:@"\n最大的 10 个文件：\n"];
+    [text appendString:@"\n已读取文件头的最大 10 个文件（不含跳过的硬链接）：\n"];
     for (NSDictionary *file in report[@"largest"]) [text appendFormat:@"%@ · %.2f MB · %@\n",file[@"path"],[file[@"bytes"] doubleValue]/1048576,file[@"type"]];
+    if ([report[@"largestHardLinks"] count]) {
+        [text appendString:@"\n最大的 10 个硬链接文件（仅属性，未读取文件头）：\n"];
+        for (NSDictionary *file in report[@"largestHardLinks"]) [text appendFormat:@"%@ · %.2f MB · 链接数 %@\n",file[@"path"],[file[@"bytes"] doubleValue]/1048576,file[@"nlink"]];
+        [text appendString:@"大小为各路径的逻辑长度，同一份数据可能对应多个路径，不代表可释放空间。\n"];
+    }
     [text appendString:@"\n下一步判断：先确认检测完整。标准 Library/Caches、tmp 按平台缓存用途处理，数据库格式不单独构成保留依据；已确认的登录与业务状态、草稿、唯一副本及用户排除优先保留。非标准下载资源须有匹配的 APP 规则及恢复证据，未知内容暂不清理。可用 APP 自带的‘清理缓存’后重新检测作对照，但不能据此认定整个混合目录可删。\n\n这是读取期间的观察结果，不是原子快照。文件格式、旧文件和持续增长都不能单独证明可删；本页不会自动扩大清理范围。"];
     self.textView.text=text;
 }

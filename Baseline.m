@@ -58,6 +58,8 @@
 @property(nonatomic) BOOL verifyingDependencies;
 @property(nonatomic,strong) NSMutableSet<NSString *> *invalidDependencies;
 @property(nonatomic,strong) NSMutableArray<NSDictionary *> *recordedFailures;
+@property(nonatomic,strong) NSMutableArray<NSDictionary *> *retainedSubtrees;
+@property(nonatomic) NSUInteger retainedSubtreeCount;
 @property(nonatomic,copy) int (^unlinkFile)(int, const char *);
 // 延期类字节累计（任务 5）：近期与变化文件的逻辑占用估计；已消失/非普通文件计 0。
 @property(nonatomic) unsigned long long recentBytes;
@@ -80,7 +82,7 @@
     _containerPath = [containerPath copy] ?: @"";
     _state = [state copy] ?: @{};
     _clock = [clock copy];
-    _unlinkFile=[unlinkFile copy];_recordedFailures=[NSMutableArray new];
+    _unlinkFile=[unlinkFile copy];_recordedFailures=[NSMutableArray new];_retainedSubtrees=[NSMutableArray new];
     // 根可能在调度器检查后消失；失败对象同样需要稳定的回执目录键。
     NSString *containerPrefix = [_containerPath stringByAppendingString:@"/"];
     _relativePath = (_containerPath.length && [root hasPrefix:containerPrefix]) ?
@@ -143,6 +145,7 @@
         @"checking":@(self.checking), @"cancelled":@(self.cancelled), @"measurementComplete":@(self.measurementComplete),
         @"coverageComplete":@(self.coverageComplete), @"removed":@(self.removed), @"bytes":@(self.bytes),
         @"failed":@(self.failed), @"error":self.error ?: @"", @"failureDetails":self.failureDetails ?: @[],
+        @"retainedSubtreeCount":@(self.retainedSubtreeCount), @"retainedSubtrees":[self.retainedSubtrees copy],
         @"purgeClassification":self.dependencyInvalidated ? @"invalid" : self.unresolvedCount ? @"paused" : @"",
         @"purgeEvidence":self.dependencyInvalidated ? (self.invalidEvidence ?: @"") : (self.unresolvedEvidence ?: @"")} mutableCopy];
     if (self.measurementComplete) [report addEntriesFromDictionary:@{@"protected":@(self.protectedCount),
@@ -229,17 +232,26 @@
 }
 // 预检采集：只记录快照与证据事实，不决定删除。保留子树整片裁剪（不枚举其下内容），
 // 其余独立范围继续；一个保留标记不让整片父目录永久不处理。
+- (void)axs_cachekeeper_record_retained_subtree:(NSString *)relative reason:(NSString *)reason {
+    self.retainedSubtreeCount++;
+    // 不遍历保留子树，也不把目录当成一个已统计文件；只记录有限的原因样本。
+    static const NSUInteger AxsCacheKeeperRetainedSubtreeSampleLimit=8;
+    if (self.retainedSubtrees.count<AxsCacheKeeperRetainedSubtreeSampleLimit)
+        [self.retainedSubtrees addObject:@{@"path":relative,@"reason":reason}];
+}
 - (void)axs_cachekeeper_collect:(NSString *)entry info:(struct stat)info {
     if (S_ISDIR(info.st_mode)) {
         self.directorySnapshots[[self axs_cachekeeper_directory_key:entry]]=[self axs_cachekeeper_snapshot:info];
         NSString *relative = [self axs_cachekeeper_relative_path:entry];
         for (NSString *unavailable in self.state[@"unavailablePaths"]) if (axs_cachekeeper_path_inside(relative,unavailable)) {
+            [self axs_cachekeeper_record_retained_subtree:relative reason:@"旧权限恢复失败，未遍历"];
             [self.entries skipDescendants]; return;
         }
         // 已验证 APP 可清范围有交集时不裁剪——名称启发式不挡已验证规则。
         if (axs_cachekeeper_retention_path(relative) &&
             ![AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:self.bundle version:self.version relativePath:relative]) {
             [self.retentionRanges addObject:relative];
+            [self axs_cachekeeper_record_retained_subtree:relative reason:@"命中保留规则，未遍历内部文件"];
             [self.entries skipDescendants];
         }
         return;
