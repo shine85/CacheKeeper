@@ -47,7 +47,8 @@ void CKScanRequests(void) {
     NSString *bundle=request[@"bundle"],*token=request[@"token"];
     if (!axs_cachekeeper_bundle_id(bundle) || ![token isKindOfClass:NSString.class] || !token.length) return;
     // 检测仍只读；让下一次满足进程条件的清理轮重新预检，不沿用旧静默/未知登记。
-    [AxsCacheKeeperProcessObservation requestRecheckForBundle:bundle];
+    if (!([request[@"diagnostic"] isKindOfClass:NSNumber.class] && [request[@"diagnostic"] boolValue]))
+        [AxsCacheKeeperProcessObservation requestRecheckForBundle:bundle];
     NSURL *home=Container(bundle);
     Class proxy=NSClassFromString(@"LSApplicationProxy");
     SEL lookup=NSSelectorFromString(@"applicationProxyForIdentifier:");

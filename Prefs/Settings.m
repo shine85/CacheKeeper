@@ -4,6 +4,7 @@
 #include <roothide.h>
 #include <sys/stat.h>
 #import "../AxsCacheKeeperPolicy.h"
+#import "DiagnosticsPage.h"
 
 static id axs_cachekeeper_app_property(id object, NSString *name) {
     SEL selector=NSSelectorFromString(name);
@@ -54,6 +55,11 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @property(nonatomic) BOOL axs_cachekeeper_refreshPending;
 @end
 @implementation CKSettings
+- (void)loadView {
+    // 自有内容根，避免 Preferences 的默认容器布局参与搜索栏命中区域。
+    self.view=[[UIView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    self.view.backgroundColor=UIColor.systemGroupedBackgroundColor;
+}
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"缓存管家";
@@ -70,46 +76,54 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     self.searchBar.placeholder = @"搜索应用";
     self.searchBar.delegate = self;
     self.searchBar.searchBarStyle = UISearchBarStyleMinimal;
+    self.searchBar.accessibilityIdentifier=@"CacheKeeperAppSearch";
     [self.view addSubview:self.searchBar];
     self.tabWrap = [[UIView alloc] initWithFrame:CGRectZero];
     self.tabWrap.backgroundColor = [UIColor systemGroupedBackgroundColor];
-    self.tabWrap.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     self.tabs = [[UISegmentedControl alloc] initWithItems:@[@"已开启", @"用户应用", @"巨魔应用", @"收藏应用"]];
-    self.tabs.frame = CGRectMake(16, 7, self.view.bounds.size.width - 32, 32);
-    // 注意：tabs 不挂 FlexibleWidth。tabWrap 初始为 CGRectZero，首次布局时宽度从 0 变到
-    // 全屏，自动伸缩会把宽度增量再加到 tabs 上，导致控件变成约两倍宽、只露出前两段
-    // （#57 真机 bug）；tabs 的 frame 改由 viewDidLayoutSubviews 每次显式重算。
     self.tabs.selectedSegmentIndex = 0;
     [self.tabs addTarget:self action:@selector(tabChanged:) forControlEvents:UIControlEventValueChanged];
     [self.tabWrap addSubview:self.tabs];
     [self.view addSubview:self.tabWrap];
     self.table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
-    self.table.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.table.keyboardDismissMode=UIScrollViewKeyboardDismissModeOnDrag;
     self.table.dataSource = self; self.table.delegate = self;
     [self.view addSubview:self.table];
-    // 左右滑动切换分组（与点 Tab 等价）：左滑下一组，右滑上一组，两端循环
-    // （已开启右滑到收藏应用，收藏应用左滑回已开启）。挂在 self.view 上，列表、
-    // Tab 条、搜索栏区域的滑动都生效；竖滑滚动由表格的 pan 手势处理，与横向
-    // 滑动手势不冲突。
+    // 横滑只在列表内切组，不参与搜索输入、光标选择或分段按钮的触摸仲裁。
     UISwipeGestureRecognizer *swipeLeft=[[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(swipeTab:)];
     swipeLeft.direction=UISwipeGestureRecognizerDirectionLeft;
-    [self.view addGestureRecognizer:swipeLeft];
+    swipeLeft.cancelsTouchesInView=NO;swipeLeft.delaysTouchesBegan=NO;
+    [self.table addGestureRecognizer:swipeLeft];
     UISwipeGestureRecognizer *swipeRight=[[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(swipeTab:)];
     swipeRight.direction=UISwipeGestureRecognizerDirectionRight;
-    [self.view addGestureRecognizer:swipeRight];
-    self.navigationItem.rightBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"检测全部" style:UIBarButtonItemStylePlain target:self action:@selector(scanAll)];
+    swipeRight.cancelsTouchesInView=NO;swipeRight.delaysTouchesBegan=NO;
+    [self.table addGestureRecognizer:swipeRight];
+    self.navigationItem.rightBarButtonItems=@[
+        [[UIBarButtonItem alloc] initWithTitle:@"检测全部" style:UIBarButtonItemStylePlain target:self action:@selector(scanAll)],
+        [[UIBarButtonItem alloc] initWithTitle:@"诊断" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_diagnostics)]];
+    for (UIView *view in @[self.searchBar,self.tabWrap,self.tabs,self.table]) view.translatesAutoresizingMaskIntoConstraints=NO;
+    UILayoutGuide *safe=self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.searchBar.topAnchor constraintEqualToAnchor:safe.topAnchor],
+        [self.searchBar.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [self.searchBar.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [self.searchBar.heightAnchor constraintEqualToConstant:56],
+        [self.tabWrap.topAnchor constraintEqualToAnchor:self.searchBar.bottomAnchor],
+        [self.tabWrap.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [self.tabWrap.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [self.tabWrap.heightAnchor constraintEqualToConstant:46],
+        [self.tabs.topAnchor constraintEqualToAnchor:self.tabWrap.topAnchor constant:7],
+        [self.tabs.leadingAnchor constraintEqualToAnchor:self.tabWrap.leadingAnchor constant:16],
+        [self.tabs.trailingAnchor constraintEqualToAnchor:self.tabWrap.trailingAnchor constant:-16],
+        [self.tabs.heightAnchor constraintEqualToConstant:32],
+        [self.table.topAnchor constraintEqualToAnchor:self.tabWrap.bottomAnchor],
+        [self.table.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [self.table.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [self.table.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor]]];
 }
-- (void)viewDidLayoutSubviews {
-    [super viewDidLayoutSubviews];
-    // 视图延伸到导航栏下方，Tab 条必须从安全区顶部（导航栏下沿）起算，不能从 y=0 起；
-    // 否则会被状态栏/灵动岛盖住（#55 真机 bug）。每次布局都重算，旋转与导航栏变化时也正确。
-    CGFloat top = self.view.safeAreaInsets.top;
-    CGFloat searchHeight = 56;
-    CGFloat tabHeight = 46;
-    self.searchBar.frame = CGRectMake(0, top, self.view.bounds.size.width, searchHeight);
-    self.tabWrap.frame = CGRectMake(0, top + searchHeight, self.view.bounds.size.width, tabHeight);
-    self.tabs.frame = CGRectMake(16, 7, self.tabWrap.bounds.size.width - 32, 32);
-    self.table.frame = CGRectMake(0, top + searchHeight + tabHeight, self.view.bounds.size.width, self.view.bounds.size.height - top - searchHeight - tabHeight);
+- (void)axs_cachekeeper_diagnostics {
+    [self.searchBar resignFirstResponder];
+    [self.navigationController pushViewController:[[AxsCacheKeeperDiagnosticsPage alloc] initWithApps:self.apps] animated:YES];
 }
 - (void)tabChanged:(UISegmentedControl *)sender {
     self.selectedTab = sender.selectedSegmentIndex;
