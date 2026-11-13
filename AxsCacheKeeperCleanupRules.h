@@ -73,12 +73,14 @@ typedef NS_ENUM(NSInteger, AxsCacheKeeperCleanupBasis) {
                                            evidence:(NSDictionary *)evidence;
 // 规则版本（参与 job 签名）：平台规则修订＋已注册 APP 规则的 ID/修订；规则变化使旧 job 失效。
 + (NSString *)rulesVersion;
+// 仅返回已匹配生产规则的固定说明，供回执展示；不用于授权删除。
++ (NSString *)productionRuleSummaryForBundle:(NSString *)bundle version:(NSString *)version relativePath:(NSString *)relativePath;
 // 枚举裁剪用：相对路径是否与任一适用 APP 规则的可清范围有交集
 //（在可清范围内，或可清范围在其内）。已验证规则优先于名称启发式保留——
 // 否则 Downloads 等保留名目录下的已验证资源范围会被整片裁掉、规则永不生效。
 + (BOOL)hasCleanableRangeForBundle:(NSString *)bundle version:(NSString *)version relativePath:(NSString *)relativePath;
 // 注册 APP 专属规则（生产规则由内置表注册；测试用本接口注入测试规则）。
 + (void)registerRule:(AxsCacheKeeperAppRule *)rule forBundle:(NSString *)bundle;
-// 测试专用：清除全部已注册 APP 规则。内置表在任务 1 为空；任务 10 填充后须改为重建内置表。
+// 测试专用：清除测试注册并恢复内置生产规则，保持与生产相同的初始条件。
 + (void)removeAllRulesForTesting;
 @end

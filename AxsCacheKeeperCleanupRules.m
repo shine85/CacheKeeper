@@ -30,7 +30,16 @@ static NSString * const AxsCacheKeeperUserLogRuleRevision = @"1";
 
 @end
 
+@interface AxsCacheKeeperAppRule ()
+- (BOOL)axs_cachekeeper_allows_file:(NSString *)relative state:(NSDictionary *)state evidence:(NSDictionary *)evidence;
+@end
+
 @implementation AxsCacheKeeperAppRule
+
+- (BOOL)axs_cachekeeper_allows_file:(NSString *)relative state:(NSDictionary *)state evidence:(NSDictionary *)evidence {
+    (void)relative; (void)state; (void)evidence;
+    return YES;
+}
 
 - (instancetype)initWithRuleID:(NSString *)ruleID
                       revision:(NSString *)revision
@@ -51,6 +60,33 @@ static NSString * const AxsCacheKeeperUserLogRuleRevision = @"1";
 
 @end
 
+// ALog 是有明确用途的 SDK 日志；限定已观测版本与文件命名，不授权整目录。
+// 进程挂起仍可能持有 mmap/描述符，因此该规则额外要求真实退出。
+@interface AxsCacheKeeperALogRule : AxsCacheKeeperAppRule
+@end
+@implementation AxsCacheKeeperALogRule
+- (BOOL)axs_cachekeeper_allows_file:(NSString *)relative state:(NSDictionary *)state evidence:(NSDictionary *)evidence {
+    if (![state[@"processExited"] isKindOfClass:NSNumber.class] || ![state[@"processExited"] boolValue] ||
+        ![evidence[@"readComplete"] isKindOfClass:NSNumber.class] || ![evidence[@"readComplete"] boolValue] ||
+        ![evidence[@"hasEvidence"] isKindOfClass:NSNumber.class] || [evidence[@"hasEvidence"] boolValue] ||
+        ![evidence[@"hasMediaSignature"] isKindOfClass:NSNumber.class] || [evidence[@"hasMediaSignature"] boolValue] ||
+        axs_cachekeeper_protected_path(relative)) return NO;
+    static NSRegularExpression *pattern;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        pattern=[NSRegularExpression regularExpressionWithPattern:@"\\ABDALog_[0-9]{8}_[0-9]{6}\\.alog\\.iOS\\.[0-9]+\\z" options:0 error:nil];
+    });
+    NSString *name=relative.lastPathComponent;
+    return [pattern numberOfMatchesInString:name options:0 range:NSMakeRange(0,name.length)]==1;
+}
+@end
+
+static NSMutableDictionary *AxsCacheKeeperBuiltinRules(void) {
+    AxsCacheKeeperAppRule *rule=[[AxsCacheKeeperALogRule alloc] initWithRuleID:@"douyin-alog" revision:@"1" appVersion:@"41.1.0"
+        cleanablePaths:@[@"Library/alog"] retentionPaths:@[] dependencyPaths:@[]];
+    return [@{@"com.ss.iphone.ugc.Aweme":[NSMutableArray arrayWithObject:rule]} mutableCopy];
+}
+
 // relative 是否等于 scope 或位于 scope 子树内（按路径成分边界比较，不做子串匹配）。
 static BOOL AxsCacheKeeperPathUnder(NSString *relative, NSString *scope) {
     if (!relative.length || !scope.length) return NO;
@@ -69,7 +105,7 @@ static NSString *AxsCacheKeeperMatchedScope(NSString *relative, NSArray<NSString
 static NSMutableDictionary<NSString *, NSMutableArray<AxsCacheKeeperAppRule *> *> *AxsCacheKeeperRuleRegistry(void) {
     static NSMutableDictionary<NSString *, NSMutableArray<AxsCacheKeeperAppRule *> *> *registry;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ registry = [NSMutableDictionary new]; });
+    dispatch_once(&once, ^{ registry = AxsCacheKeeperBuiltinRules(); });
     return registry;
 }
 
@@ -90,7 +126,18 @@ static BOOL AxsCacheKeeperRuleApplies(AxsCacheKeeperAppRule *rule, NSString *ver
 }
 
 + (void)removeAllRulesForTesting {
-    [AxsCacheKeeperRuleRegistry() removeAllObjects];
+    [AxsCacheKeeperRuleRegistry() setDictionary:AxsCacheKeeperBuiltinRules()];
+}
+
++ (NSString *)productionRuleSummaryForBundle:(NSString *)bundle version:(NSString *)version relativePath:(NSString *)relativePath {
+    if (!bundle.length || !axs_cachekeeper_relative_path(relativePath)) return nil;
+    for (AxsCacheKeeperAppRule *rule in AxsCacheKeeperRuleRegistry()[bundle]) {
+        if (![rule isKindOfClass:AxsCacheKeeperALogRule.class] || !AxsCacheKeeperRuleApplies(rule,version)) continue;
+        for (NSString *scope in rule.cleanablePaths)
+            if (AxsCacheKeeperPathUnder(relativePath,scope) || AxsCacheKeeperPathUnder(scope,relativePath))
+                return @"ALog 专属规则：APP 完全退出后回收匹配命名的诊断日志；数据、媒体、未知文件和手动排除保留";
+    }
+    return nil;
 }
 
 + (NSString *)rulesVersion {
@@ -106,6 +153,8 @@ static BOOL AxsCacheKeeperRuleApplies(AxsCacheKeeperAppRule *rule, NSString *ver
     if (!bundle.length || !relativePath.length) return NO;
     for (AxsCacheKeeperAppRule *rule in AxsCacheKeeperRuleRegistry()[bundle]) {
         if (!AxsCacheKeeperRuleApplies(rule, version)) continue;
+        // 日志规则不解除目录级保护；只有专属资源规则才可穿过已验证的保护父级。
+        if ([rule isKindOfClass:AxsCacheKeeperALogRule.class] && axs_cachekeeper_retention_path(relativePath)) continue;
         for (NSString *cleanable in rule.cleanablePaths) {
             if (AxsCacheKeeperPathUnder(relativePath, cleanable) || AxsCacheKeeperPathUnder(cleanable, relativePath)) return YES;
         }
@@ -146,7 +195,12 @@ static BOOL AxsCacheKeeperRuleApplies(AxsCacheKeeperAppRule *rule, NSString *ver
     for (AxsCacheKeeperAppRule *rule in rules) {
         if (!AxsCacheKeeperRuleApplies(rule, version)) continue;
         NSString *cleanable = AxsCacheKeeperMatchedScope(relativePath, rule.cleanablePaths);
-        if (cleanable) return [[AxsCacheKeeperCleanupDecision alloc] initWithDisposition:AxsCacheKeeperCleanupDelete
+        BOOL fileAllowed=cleanable && [rule axs_cachekeeper_allows_file:relativePath state:state evidence:evidence];
+        if (cleanable && [rule isKindOfClass:AxsCacheKeeperALogRule.class] && !fileAllowed)
+            return [[AxsCacheKeeperCleanupDecision alloc] initWithDisposition:AxsCacheKeeperCleanupUnresolved
+                basis:AxsCacheKeeperCleanupBasisNone ruleID:rule.ruleID ruleRevision:rule.ruleRevision
+                scopeRelativePath:cleanable reason:@"日志未满足完整的专属条件，保留且不回退到较宽日志规则" dependencyPaths:@[]];
+        if (fileAllowed) return [[AxsCacheKeeperCleanupDecision alloc] initWithDisposition:AxsCacheKeeperCleanupDelete
             basis:AxsCacheKeeperCleanupBasisAppRule ruleID:rule.ruleID ruleRevision:rule.ruleRevision
             scopeRelativePath:cleanable reason:@"APP 专属规则：可清资源" dependencyPaths:rule.dependencyPaths];
     }

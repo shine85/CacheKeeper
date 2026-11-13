@@ -386,6 +386,12 @@
     // 结转报告（skipped）只结转未确认残留，其余字段未测量，缺键即未知，不显示为 0。
     NSDictionary *directoryReport=[self axs_cachekeeper_display:[@"Status/" stringByAppendingFormat:@"%@.auto.plist",self.bundle]][@"directories"][relative];
     if ([directoryReport isKindOfClass:NSDictionary.class]) {
+        NSString *ruleSummary=directoryReport[@"appRuleSummary"];
+        if (masterOn && !axs_cachekeeper_row_selected(relative,axs_cachekeeper_exclusions(viewState)) &&
+            [ruleSummary isKindOfClass:NSString.class] && ruleSummary.length) {
+            state=[@"最近回执：" stringByAppendingString:ruleSummary];
+            if ([directoryReport[@"appRuleWaitingForExit"] boolValue]) state=[state stringByAppendingString:@"\n该轮未确认进程完全退出，专属日志暂未处理"];
+        }
         NSMutableArray *residual=[NSMutableArray new];
         if (![directoryReport[@"measurementComplete"] boolValue] && ![directoryReport[@"skipped"] boolValue]) [residual addObject:@"测量未完成，残留数量与大小未知"];
         NSUInteger remaining=[directoryReport[@"remaining"] unsignedIntegerValue];

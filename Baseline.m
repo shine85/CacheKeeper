@@ -148,6 +148,12 @@
         @"retainedSubtreeCount":@(self.retainedSubtreeCount), @"retainedSubtrees":[self.retainedSubtrees copy],
         @"purgeClassification":self.dependencyInvalidated ? @"invalid" : self.unresolvedCount ? @"paused" : @"",
         @"purgeEvidence":self.dependencyInvalidated ? (self.invalidEvidence ?: @"") : (self.unresolvedEvidence ?: @"")} mutableCopy];
+    NSString *ruleSummary=[AxsCacheKeeperCleanupRules productionRuleSummaryForBundle:self.bundle version:self.version relativePath:self.relativePath];
+    if (ruleSummary) {
+        report[@"appRuleID"]=@"douyin-alog";
+        report[@"appRuleSummary"]=ruleSummary;
+        report[@"appRuleWaitingForExit"]=@(![self.state[@"processExited"] boolValue]);
+    }
     if (self.measurementComplete) [report addEntriesFromDictionary:@{@"protected":@(self.protectedCount),
         @"recent":@(self.recentCount), @"changed":@(self.changedCount), @"remaining":@(self.remainingCandidates),
         @"remainingBytes":@(self.remainingBytes), @"deferred":@(self.deferredCount), @"deferredBytes":@(self.deferredBytes),

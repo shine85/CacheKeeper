@@ -51,9 +51,9 @@ static NSDictionary *AxsCacheKeeperDiagnosticRead(NSString *folder,NSString *nam
 - (NSDictionary *)axs_cachekeeper_record:(NSDictionary *)record {
     if (![record isKindOfClass:NSDictionary.class]) return @{@"invalidRecord":@YES};
     NSMutableDictionary *out=[NSMutableDictionary new];
-    NSArray *numbers=@[@"bytes",@"files",@"count",@"nlink",@"removed",@"failed",@"failures",@"changed",@"recent",@"remaining",@"remainingBytes",@"deferred",@"deferredBytes",@"unresolved",@"unresolvedBytes",@"protected",@"protectedBytes",@"retainedSubtreeCount",@"lastRemoved",@"lastBytes",@"endReason",@"links",@"hardLinks",@"symlinks",@"hidden",@"twinBytes",@"twinFailures",@"twinScanned",@"result",@"errorCode",@"complete",@"coverageComplete",@"measurementComplete",@"cancelled",@"checking",@"skipped",@"manageable",@"twinCoverageComplete",@"twinScanTruncated",@"twinDisplayTruncated",@"linkFilesTruncated",@"enabled",@"autoDiscover",@"urlCache",@"prevent",@"applied",@"total",@"completed",@"remainingCount"];
+    NSArray *numbers=@[@"appRuleWaitingForExit",@"bytes",@"files",@"count",@"nlink",@"removed",@"failed",@"failures",@"changed",@"recent",@"remaining",@"remainingBytes",@"deferred",@"deferredBytes",@"unresolved",@"unresolvedBytes",@"protected",@"protectedBytes",@"retainedSubtreeCount",@"lastRemoved",@"lastBytes",@"endReason",@"links",@"hardLinks",@"symlinks",@"hidden",@"twinBytes",@"twinFailures",@"twinScanned",@"result",@"errorCode",@"complete",@"coverageComplete",@"measurementComplete",@"cancelled",@"checking",@"skipped",@"manageable",@"twinCoverageComplete",@"twinScanTruncated",@"twinDisplayTruncated",@"linkFilesTruncated",@"enabled",@"autoDiscover",@"urlCache",@"prevent",@"applied",@"total",@"completed",@"remainingCount"];
     NSMutableArray *invalid=[NSMutableArray new];
-    for (NSString *key in @[@"state",@"phase",@"mode",@"kind",@"purgeClassification",@"type",@"outcome",@"path",@"source",@"twin"])
+    for (NSString *key in @[@"appRuleID",@"state",@"phase",@"mode",@"kind",@"purgeClassification",@"type",@"outcome",@"path",@"source",@"twin"])
         if (record[key] && ![record[key] isKindOfClass:NSString.class]) [invalid addObject:key];
     for (NSString *key in numbers) if (record[key] && ![record[key] isKindOfClass:NSNumber.class]) [invalid addObject:key];
     for (NSString *key in @[@"updated",@"started"]) if (record[key] && ![record[key] isKindOfClass:NSDate.class]) [invalid addObject:key];
@@ -66,8 +66,8 @@ static NSDictionary *AxsCacheKeeperDiagnosticRead(NSString *folder,NSString *nam
     for (NSString *key in @[@"updated",@"started"]) if ([record[key] isKindOfClass:NSDate.class]) out[key]=@([record[key] timeIntervalSince1970]);
     for (NSString *key in @[@"path",@"source",@"twin"]) if (record[key]) out[key]=[self axs_cachekeeper_path:record[key]];
     if (axs_cachekeeper_bundle_id(record[@"bundle"])) out[@"bundle"]=record[@"bundle"];
-    NSSet *values=[NSSet setWithArray:@[@"auto",@"clean",@"prevent",@"waiting",@"running",@"complete",@"error",@"paused",@"cache",@"log",@"data",@"mixed",@"unknown",@"scan",@"inspection",@"pending",@"submitted",@"finished",@"partial",@"stopped",@"notStarted",@"timeout",@"conflict",@"available",@"missing",@"unreadable",@"invalid",@"空文件",@"SQLite 数据库",@"二进制 plist",@"媒体文件头",@"归档或压缩文件",@"JSON 数据",@"文本头特征（用途未定）",@"未知二进制",@"数据或登录态名称特征"]];
-    for (NSString *key in @[@"state",@"phase",@"mode",@"kind",@"purgeClassification",@"type",@"outcome"])
+    NSSet *values=[NSSet setWithArray:@[@"douyin-alog",@"auto",@"clean",@"prevent",@"waiting",@"running",@"complete",@"error",@"paused",@"cache",@"log",@"data",@"mixed",@"unknown",@"scan",@"inspection",@"pending",@"submitted",@"finished",@"partial",@"stopped",@"notStarted",@"timeout",@"conflict",@"available",@"missing",@"unreadable",@"invalid",@"空文件",@"SQLite 数据库",@"二进制 plist",@"媒体文件头",@"归档或压缩文件",@"JSON 数据",@"文本头特征（用途未定）",@"未知二进制",@"数据或登录态名称特征"]];
+    for (NSString *key in @[@"appRuleID",@"state",@"phase",@"mode",@"kind",@"purgeClassification",@"type",@"outcome"])
         if ([record[key] isKindOfClass:NSString.class]) out[key]=[values containsObject:record[key]] ? record[key] : @"unknown";
     for (NSString *key in @[@"error",@"message",@"reason",@"evidence",@"purgeEvidence",@"unresolvedEvidence"]) {
         NSString *text=record[key];if (![text isKindOfClass:NSString.class] || !text.length) continue;

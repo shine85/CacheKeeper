@@ -17,9 +17,12 @@ static NSArray *AxsCacheKeeperRangeStamp(struct stat info) {
         sweep.remainingCandidates || sweep.deferredCount) return nil;
     struct stat info;
     if (lstat(sweep.root.fileSystemRepresentation,&info) || !S_ISDIR(info.st_mode)) return nil;
-    return @{@"signature":signature, @"stamp":AxsCacheKeeperRangeStamp(info), @"checkedAt":@(now),
+    NSMutableDictionary *record=[@{@"signature":signature, @"stamp":AxsCacheKeeperRangeStamp(info), @"checkedAt":@(now),
         @"updated":NSDate.date, @"unresolved":@(sweep.unresolvedCount), @"unresolvedBytes":@(sweep.unresolvedBytes),
-        @"evidence":sweep.unresolvedEvidence ?: @""};
+        @"evidence":sweep.unresolvedEvidence ?: @""} mutableCopy];
+    NSDictionary *report=[sweep directoryReport];
+    for (NSString *key in @[@"appRuleID",@"appRuleSummary",@"appRuleWaitingForExit"]) if (report[key]) record[key]=report[key];
+    return record;
 }
 + (AxsCacheKeeperRangeState)checkRoot:(NSString *)root registration:(NSDictionary *)registration signature:(NSString *)signature
                                 now:(NSTimeInterval)now stat:(int (^)(const char *, struct stat *))statBlock error:(NSString **)error {
@@ -42,10 +45,12 @@ static NSArray *AxsCacheKeeperRangeStamp(struct stat info) {
     return AxsCacheKeeperRangeScan;
 }
 + (NSDictionary *)carriedReport:(NSDictionary *)registration {
-    return @{@"updated":registration[@"updated"], @"complete":@YES, @"checking":@NO, @"cancelled":@NO,
+    NSMutableDictionary *report=[@{@"updated":registration[@"updated"], @"complete":@YES, @"checking":@NO, @"cancelled":@NO,
         @"measurementComplete":@NO, @"coverageComplete":@NO, @"skipped":@YES, @"removed":@0, @"bytes":@0,
         @"unresolved":registration[@"unresolved"], @"unresolvedBytes":registration[@"unresolvedBytes"],
-        @"purgeClassification":@"paused", @"purgeEvidence":registration[@"evidence"] ?: @"", @"error":@""};
+        @"purgeClassification":@"paused", @"purgeEvidence":registration[@"evidence"] ?: @"", @"error":@""} mutableCopy];
+    for (NSString *key in @[@"appRuleID",@"appRuleSummary",@"appRuleWaitingForExit"]) if (registration[key]) report[key]=registration[key];
+    return report;
 }
 + (NSDictionary *)summaryForJob:(AxsCacheKeeperCleanupJob *)job directories:(NSDictionary *)directories
               externalFailures:(NSUInteger)externalFailures discoveryComplete:(BOOL)discoveryComplete {

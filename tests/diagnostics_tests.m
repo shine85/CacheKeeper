@@ -33,6 +33,9 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     NSString *redacted=inspection[@"largest"][0][@"path"];
     dxcheck([redacted hasSuffix:@".pdf"] && [inspection[@"linkTwins"][0][@"source"] isEqual:redacted],@"保留扩展名及同报告路径关联");
     dxcheck([app[@"cleanup"][@"state"] isEqual:@"missing"],@"缺回执不能伪造零删除");
+    dxwrite(folder,@"Status/test.active.auto.plist",@{@"directories":@{@"Library/alog":@{@"appRuleID":@"douyin-alog",@"appRuleWaitingForExit":@YES,@"appRuleSummary":@"private-summary",@"removed":@0}}});
+    NSDictionary *ruleExport=[session reportWithApps:@[] environment:@{}][@"apps"][0][@"cleanup"][@"data"][@"directories"][0];
+    dxcheck([ruleExport[@"appRuleID"] isEqual:@"douyin-alog"] && [ruleExport[@"appRuleWaitingForExit"] boolValue] && !ruleExport[@"appRuleSummary"],@"导出保留固定规则ID和等待状态，不导出任意规则说明原文");
     dxcheck([[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"appEnabled.plist"]] isEqual:states],@"导出不写配置");
     // 大批量采集只汇总已保存记录，完成数按 APP 固定，不以目录扩张任务。
     NSString *largeFolder=[fixture stringByAppendingPathComponent:@"diagnostics-126-apps"];

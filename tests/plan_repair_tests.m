@@ -62,7 +62,7 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
         check([AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:alogVersion relativePath:wrongPath state:exited evidence:clearLog].disposition!=AxsCacheKeeperCleanupDelete,@"未知文件、额外后缀与邻近/保留路径不放行");
     for (NSDictionary *veto in @[@{@"readComplete":@NO},@{@"readComplete":@YES,@"hasEvidence":@YES},@{@"readComplete":@YES,@"hasMediaSignature":@YES},@{}])
         check([AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:alogVersion relativePath:alogPath state:exited evidence:veto].disposition!=AxsCacheKeeperCleanupDelete,@"读取或用途证据不齐不能当日志删除");
-    for (NSDictionary *state in @[@{},@{@"processExited":@NO},@{@"processExited":@YES,@"excludedPaths":@[@"Library/alog/ready"]}])
+    for (NSDictionary *state in @[@{},@{@"processExited":@NO},@{@"processExited":@NO,@"logPaths":@[@"Library/alog"]},@{@"processExited":@YES,@"excludedPaths":@[@"Library/alog/ready"]}])
         check([AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:alogVersion relativePath:alogPath state:state evidence:clearLog].disposition!=AxsCacheKeeperCleanupDelete,@"挂起/未知进程与用户排除保持保留");
 
     NSString *alogRoot=makeDir(home,@"Library/alog");
@@ -79,6 +79,10 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     NSString *outside=[home stringByAppendingPathComponent:@"shared-original"];check(link(shared.fileSystemRepresentation,outside.fileSystemRepresentation)==0,@"创建日志硬链接对照");
     AxsCacheKeeperSweep *alogRecent=[[AxsCacheKeeperSweep alloc] initWithRoot:alogRoot bundle:alogBundle version:alogVersion containerPath:home state:exited];finish(alogRecent);
     check(alogRecent.removed==0 && alogRecent.recentCount>=1 && [fm fileExistsAtPath:readyLog],@"新日志仍遵守年龄门");
+    AxsCacheKeeperSweep *alogSuspended=[[AxsCacheKeeperSweep alloc] initWithRoot:alogRoot bundle:alogBundle version:alogVersion containerPath:home state:@{@"processExited":@NO,@"logPaths":@[@"Library/alog"]} clock:^NSTimeInterval{return future;}];finish(alogSuspended);
+    check(alogSuspended.removed==0 && [fm fileExistsAtPath:readyLog],@"用户日志定级不能绕过专属日志的进程退出约束");
+    NSDictionary *alogWait=[AxsCacheKeeperCleanupSchedule registrationForSweep:alogSuspended signature:@"alog-wait" now:10];
+    check([alogWait[@"appRuleWaitingForExit"] boolValue] && [[AxsCacheKeeperCleanupSchedule carriedReport:alogWait][@"appRuleID"] isEqual:@"douyin-alog"],@"等待退出的规则说明在结转回执中保持可诊断");
     AxsCacheKeeperSweep *alogReal=[[AxsCacheKeeperSweep alloc] initWithRoot:alogRoot bundle:alogBundle version:alogVersion containerPath:home state:exited clock:^NSTimeInterval{return future;}];finish(alogReal);
     check(alogReal.removed==1 && alogReal.bytes==13 && ![fm fileExistsAtPath:readyLog],@"成熟日志真实删除且回执等于实际删量");
     for (NSString *kept in @[unknown,database,media,shared,outside]) check([fm fileExistsAtPath:kept],@"同目录未知、数据库、媒体与根外硬链接保持完整");

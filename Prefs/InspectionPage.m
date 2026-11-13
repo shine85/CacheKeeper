@@ -91,6 +91,11 @@
     NSDictionary *autoReport=[NSDictionary dictionaryWithContentsOfFile:[self axs_cachekeeper_file:[NSString stringWithFormat:@"Status/%@.auto.plist",self.bundle]]];
     NSDictionary *cleanup=autoReport[@"directories"][self.relative];
     if (cleanup) {
+        if ([cleanup[@"appRuleSummary"] isKindOfClass:NSString.class]) {
+            [text appendFormat:@"最近回执规则：%@\n",cleanup[@"appRuleSummary"]];
+            if ([cleanup[@"appRuleWaitingForExit"] boolValue]) [text appendString:@"该轮尚未确认 APP 完全退出，专属日志保持保留。\n"];
+            [text appendString:@"\n"];
+        }
         // 轮次状态按残留推导（任务 5）：覆盖不完整或有未确认残留时不显示"完成"，
         // 零删除也不冒充"已经干净"；残留三类互斥（待处理/延期/待识别），失败是独立诊断。
         // 结转报告（skipped）本轮未重扫：只显示已登记的未确认残留，未测量字段不写 0。
