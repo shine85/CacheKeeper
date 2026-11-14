@@ -164,6 +164,37 @@
         [self waitForExpectations:@[dismissed] timeout:10];
     }
 }
+- (void)testUpdateBatchShrinksStaleExpandedHostBar {
+    // 124.1 device: the host bar re-expanded after appearance (mode still Never, frame stale
+    // at ~91pt), so the geometry clearance held ~47pt. A viewDidAppear-only force cannot catch
+    // it; the per-second batch must shrink the bar back.
+    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+    host.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAutomatic;
+    UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:host];
+    nav.navigationBar.prefersLargeTitles=YES;nav.modalPresentationStyle=UIModalPresentationFullScreen;
+    XCTestExpectation *shown=[self expectationWithDescription:@"Nested navigation appeared"];
+    [self.owner presentViewController:nav animated:NO completion:^{ [shown fulfill]; }];
+    [self waitForExpectations:@[shown] timeout:10];
+    [nav.view layoutIfNeeded];
+    AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+    [settings updateBatch];
+    XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
+    XCTAssertLessThanOrEqual(nav.navigationBar.bounds.size.height,44.5);
+    CGFloat originalTop=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y;
+    // Force the stale expanded frame while the mode stays Never, exactly as on device.
+    CGRect frame=nav.navigationBar.frame;frame.size.height=91;nav.navigationBar.frame=frame;
+    XCTAssertEqualWithAccuracy(nav.navigationBar.bounds.size.height,91,0.5);
+    XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
+    [settings updateBatch];
+    XCTAssertLessThanOrEqual(nav.navigationBar.bounds.size.height,44.5);
+    CGRect rect=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window];
+    XCTAssertGreaterThanOrEqual(rect.origin.y,CGRectGetMaxY([nav.navigationBar convertRect:nav.navigationBar.bounds toView:self.window]));
+    XCTAssertEqualWithAccuracy(rect.origin.y,originalTop,0.5);
+    XCTestExpectation *dismissed=[self expectationWithDescription:@"Nested navigation dismissed"];
+    [self.owner dismissViewControllerAnimated:NO completion:^{ [dismissed fulfill]; }];
+    [self waitForExpectations:@[dismissed] timeout:10];
+}
 - (void)testSearchClearsExternalNavigationBarAndReturnsAfterCollapse {
     CKSettings *settings=[CKSettings new];
     settings.additionalSafeAreaInsets=UIEdgeInsetsMake(44,0,0,0);

@@ -495,6 +495,10 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 - (void)updateBatch {
     if (!self.axs_cachekeeper_visible || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
     // The outer Settings navigation bar can expand without laying out this inner controller.
+    // 124.1 device: the bar re-expanded after appearance (inset 0 -> 47pt between didAppear
+    // and the first 1s sample), so a viewDidAppear-only force cannot catch it. Enforce the
+    // compact claim on every tick; the helper returns early while the bar is compact.
+    [self axs_cachekeeper_layout_compact_navigation];
     [self axs_cachekeeper_update_search_top];[self.view layoutIfNeeded];
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_sample];
     // Poll only cached source metadata each second. Installed-app metadata has a separate cadence.
