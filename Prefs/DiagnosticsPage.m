@@ -1,6 +1,7 @@
 #import "DiagnosticsPage.h"
 #import "../AxsCacheKeeperDiagnostics.h"
 #import "../AxsCacheKeeperInstallation.h"
+#import "../AxsCacheKeeperDiagnosticChannel.h"
 #include <roothide.h>
 
 @interface AxsCacheKeeperDiagnosticsPage ()
@@ -86,12 +87,14 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     NSDictionary *environment=@{@"os":UIDevice.currentDevice.systemVersion,@"architecture":architecture,@"pluginVersion":[bundle objectForInfoDictionaryKey:@"CacheKeeperPackageVersion"] ?: @"unknown"};
     NSMutableDictionary *installationCache=self.installationCache;__weak typeof(self) weak=self;
     dispatch_async(self.collectionQueue,^{
+        NSMutableDictionary *collectionEnvironment=[environment mutableCopy];
+        collectionEnvironment[@"diagnosticChannel"]=axs_cachekeeper_diagnostic_channel_hello();
         // Reuse unchanged package metadata, but obtain current membership on every collection.
         NSError *installationError=nil;
         NSArray *apps=axs_cachekeeper_installed_applications(installationCache,&installationError);
         if (installationError) apps=nil;
         AxsCacheKeeperDiagnostics *session=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:jbroot(@"/var/mobile/Library/CacheKeeper")];
-        NSDictionary *report=[session reportWithApps:apps environment:environment progress:^(NSUInteger completed,NSUInteger total) {
+        NSDictionary *report=[session reportWithApps:apps environment:collectionEnvironment progress:^(NSUInteger completed,NSUInteger total) {
             dispatch_async(dispatch_get_main_queue(),^{
                 AxsCacheKeeperDiagnosticsPage *page=weak;if (!page || page.generation!=generation) return;
                 page.completed=completed;page.total=total;

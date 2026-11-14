@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import "AxsCacheKeeperPolicy.h"
+#import "AxsCacheKeeperDiagnosticChannel.h"
 #include <roothide.h>
 
 static NSString *const DouyinID = @"com.ss.iphone.ugc.Aweme";
@@ -56,6 +57,7 @@ static id Read(id object, NSString *name) {
 %ctor {
     if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.springboard"]) return;
     %init;
+    axs_cachekeeper_diagnostic_channel_start(nil);
     dispatch_async(dispatch_get_main_queue(), ^{
         NSTimer *timer = [NSTimer timerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer) {
             CKScanRequests();

@@ -13,6 +13,8 @@ if sys.platform != "darwin" or not compiler:
 output = root / "tmp" / ("cache-tests-" + str(time.time_ns()))
 output.mkdir(parents=True)
 try:
+    subprocess.run([sys.executable, str(root / "tests" / "run_diagnostic_channel_export_red.py")],
+                   check=True, timeout=60)
     subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
                     "-I" + str(root / "tests" / "include"), "-framework", "Foundation",
                     str(root / "tests" / "cache_control_tests.m"), str(root / "Baseline.m"),
@@ -32,10 +34,13 @@ try:
                     str(root / "tests" / "app_retention_tests.m"),
                     str(root / "tests" / "installation_tests.m"),
                     str(root / "tests" / "network_cache_tests.m"),
+                    str(root / "tests" / "diagnostic_channel_tests.m"),
+                    str(root / "tests" / "diagnostic_channel_export_tests.m"),
                     str(root / "tests" / "presentation_tests.m"),
                     str(root / "AxsCacheKeeperDiagnostics.m"),
                     str(root / "AxsCacheKeeperAppList.m"),
                     str(root / "AxsCacheKeeperInstallation.m"),
+                    str(root / "AxsCacheKeeperDiagnosticChannel.m"),
                     "-o", str(output / "cache-tests")], check=True, timeout=60)
     subprocess.run([str(output / "cache-tests"), str(output / "fixtures")], check=True, timeout=60)
 finally:

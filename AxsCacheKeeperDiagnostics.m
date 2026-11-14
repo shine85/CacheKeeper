@@ -15,6 +15,34 @@ static NSMutableSet<NSString *> *AxsCacheKeeperDiagnosticConfiguredBundles(NSDic
         for (id bundle in [read[@"data"] allKeys]) if (axs_cachekeeper_bundle_id(bundle)) [bundles addObject:bundle];
     return bundles;
 }
+static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
+    if (!value) return @{@"state":@"notObserved"};
+    if (![value isKindOfClass:NSDictionary.class]) return @{@"state":@"invalid"};
+    NSDictionary *allowed=@{
+        @"state":@[@"listening",@"verified",@"unavailable",@"rejected",@"busy"],
+        @"stage":@[@"none",@"host",@"selfToken",@"api",@"systemURL",@"status",@"signingIdentity",@"executable",@"finalStatus",@"register",@"lookup",@"send",@"receive",@"protocol",@"replay",@"timeout",@"busy"],
+        @"errorDomain":@[@"none",@"mach",@"posix",@"protocol"],
+        @"errorOrigin":@[@"none",@"local",@"peer"],
+        @"selfIdentity":@[@"notObserved",@"verified",@"unexpected",@"unavailable"],
+        @"peerIdentity":@[@"notObserved",@"verified",@"unexpected",@"unavailable"],
+        @"serverRegister":@[@"notObserved",@"verified",@"failed"]};
+    NSMutableDictionary *out=[NSMutableDictionary new];
+    for (NSString *key in allowed) {
+        if (![value[key] isKindOfClass:NSString.class] || ![allowed[key] containsObject:value[key]])
+            return @{@"state":@"invalid"};
+        out[key]=[value[key] copy];
+    }
+    for (NSString *key in @[@"protocolVersion",@"errorCode"]) {
+        id number=value[key];
+        if (![number isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)number)==CFBooleanGetTypeID())
+            return @{@"state":@"invalid"};
+        double numeric=[number doubleValue];
+        if (!isfinite(numeric) || numeric!=trunc(numeric) || numeric<INT32_MIN || numeric>INT32_MAX ||
+            ([key isEqual:@"protocolVersion"] && numeric!=1)) return @{@"state":@"invalid"};
+        out[key]=@((int32_t)numeric);
+    }
+    return [out copy];
+}
 // 白名单投影：自由文本与未知字段永不原样进入分享文件。
 @interface AxsCacheKeeperDiagnosticRedactor : NSObject
 @property(nonatomic,strong) NSMutableDictionary *aliases;
@@ -191,9 +219,10 @@ static NSMutableSet<NSString *> *AxsCacheKeeperDiagnosticConfiguredBundles(NSDic
     NSDictionary *collection=@{@"mode":@"savedRecords",@"phase":@"complete",@"total":@(bundles.count),
         @"completed":@(exported.count),@"started":@(started.timeIntervalSince1970),@"finished":@(finished),@"rescanned":@NO};
     return @{@"schemaVersion":@2,@"generatedAt":@(finished),@"environment":env,@"apps":exported,
+        @"diagnosticChannel":AxsCacheKeeperDiagnosticChannelProjection(environment[@"diagnosticChannel"]),
         @"sourceStates":@{@"configuration":states[@"state"],@"selection":directories[@"state"],@"snapshots":snapshots[@"state"],@"installedApplications":installedSnapshotAvailable ? @"available" : @"unavailable"},
         @"batch":[redactor axs_cachekeeper_record:batch],
         @"collection":collection,
-        @"notes":@[@"按传入安装快照与当前配置的并集汇总已有记录；缺配置 APP 保持禁用。notInSnapshot 只表示传入快照缺条目，不确认卸载；安装来源缺失或含坏身份条目时标记 unavailable。",@"只汇总插件已保存记录，不重新扫描 APP；历史、缺失与损坏状态保留。各记录时间不同，不是原子快照。",@"汇总完成不等于清理完成或深度检测完成；覆盖、失败、取消、截断与原始时间分别判断。",@"字节是逻辑记录值；硬链接孪生大小不等于实际释放空间。",@"未知路径组件和账号已匿名化；自由文本只导出原因类别，不含文件内容或原始日志。"]};
+        @"notes":@[@"按传入安装快照与当前配置的并集汇总已有记录；缺配置 APP 保持禁用。notInSnapshot 只表示传入快照缺条目，不确认卸载；安装来源缺失或含坏身份条目时标记 unavailable。",@"只汇总插件已保存记录，不重新扫描 APP；历史、缺失与损坏状态保留。各记录时间不同，不是原子快照。",@"汇总完成不等于清理完成或深度检测完成；覆盖、失败、取消、截断与原始时间分别判断。",@"诊断通道只核验本轮握手；verified 不表示取得 APP 容器访问或清理能力，notObserved 表示未观察到，invalid 表示状态记录损坏。",@"字节是逻辑记录值；硬链接孪生大小不等于实际释放空间。",@"未知路径组件和账号已匿名化；自由文本只导出原因类别，不含文件内容或原始日志。"]};
 }
 @end
