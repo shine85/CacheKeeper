@@ -363,6 +363,9 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
         UINavigationItem *item=claim[@"item"];
         if (item.largeTitleDisplayMode==UINavigationItemLargeTitleDisplayModeNever)
             item.largeTitleDisplayMode=[claim[@"previousMode"] integerValue];
+        UINavigationBar *bar=claim[@"bar"];
+        if (bar && !bar.prefersLargeTitles)
+            bar.prefersLargeTitles=[claim[@"previousPrefersLargeTitles"] boolValue];
     }
     // Let the hosts grow their bars back with the transition; never force them synchronously here.
     for (NSDictionary *candidate in [self axs_cachekeeper_compact_candidates])
@@ -380,9 +383,16 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     NSMutableArray<NSDictionary *> *claims=[NSMutableArray new];
     for (NSDictionary *candidate in candidates) {
         UINavigationItem *item=candidate[@"item"];
-        // Save before the setter: UIKit may synchronously lay out the container.
-        [claims addObject:@{@"item":item,@"previousMode":@(item.largeTitleDisplayMode)}];
+        UINavigationBar *bar=[candidate[@"navigation"] navigationBar];
+        // Save before the setters: UIKit may synchronously lay out the container.
+        [claims addObject:@{@"item":item,@"previousMode":@(item.largeTitleDisplayMode),
+            @"bar":bar,@"previousPrefersLargeTitles":@(bar.prefersLargeTitles)}];
         item.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeNever;
+        // 126.1 device: the mode alone does not shrink the bar — its frame stayed 91pt for
+        // seconds with the mode at Never, and forcing layout never re-applied the height.
+        // Switching the bar off large titles is the setter that makes the host recompute the
+        // frame; it is restored on release, like the mode.
+        bar.prefersLargeTitles=NO;
         // Hint the hosts to shrink their bars; the synchronous force runs in viewDidAppear,
         // after the push transition, so the animation is not disturbed.
         [[candidate[@"navigation"] view] setNeedsLayout];
@@ -399,8 +409,14 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     BOOL forced=NO;
     for (NSDictionary *candidate in [self axs_cachekeeper_compact_candidates]) {
         UINavigationController *navigation=candidate[@"navigation"];
-        if (navigation.navigationBar.bounds.size.height<=44.5) continue;
-        [navigation.view setNeedsLayout];[navigation.view layoutIfNeeded];forced=YES;
+        UINavigationBar *bar=navigation.navigationBar;
+        if (bar.bounds.size.height<=44.5) continue;
+        [navigation.view setNeedsLayout];[navigation.view layoutIfNeeded];
+        // The layout pass does not always re-apply the bar height (126.1 device: the frame
+        // stayed 91pt for seconds with the mode at Never). Ask the bar for its own fitting
+        // size, which is compact while the mode is Never, and take it.
+        if (bar.bounds.size.height>44.5) [bar sizeToFit];
+        forced=YES;
     }
     if (forced) [self axs_cachekeeper_update_search_top];
 }

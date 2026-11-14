@@ -129,7 +129,9 @@
         for (NSUInteger i=0;i<3;i++) {
             [settings updateBatch];
             XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
-            XCTAssertTrue(nav.navigationBar.prefersLargeTitles);
+            // 126.1 device: the mode alone does not shrink the bar (its frame stayed 91pt with
+            // the mode at Never), so the claim also switches the host bar off large titles.
+            XCTAssertFalse(nav.navigationBar.prefersLargeTitles);
             XCTAssertTrue(host.axs_cachekeeper_inner.navigationBarHidden);
             CGRect rect=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window];
             CGRect bar=[nav.navigationBar convertRect:nav.navigationBar.bounds toView:self.window];
@@ -144,6 +146,7 @@
         [host.axs_cachekeeper_inner pushViewController:detail animated:NO];
         [self waitForExpectations:@[pushed] timeout:10];
         XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,mode.integerValue);
+        XCTAssertTrue(nav.navigationBar.prefersLargeTitles);
         self.expectedNavigation=host.axs_cachekeeper_inner;self.expectedController=settings;
         XCTestExpectation *popped=[self expectationWithDescription:@"Inner navigation delivered settings didShow"];
         self.navigationFinished=popped;
@@ -151,6 +154,7 @@
         [self waitForExpectations:@[popped] timeout:10];
         [nav.view layoutIfNeeded];[settings updateBatch];
         XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
+        XCTAssertFalse(nav.navigationBar.prefersLargeTitles);
         // A subsequent host change belongs to the host and must not be overwritten on release.
         host.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAlways;
         self.expectedNavigation=host.axs_cachekeeper_inner;self.expectedController=detail;
@@ -159,6 +163,7 @@
         [host.axs_cachekeeper_inner pushViewController:detail animated:NO];
         [self waitForExpectations:@[repushed] timeout:10];
         XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways);
+        XCTAssertTrue(nav.navigationBar.prefersLargeTitles);
         XCTestExpectation *dismissed=[self expectationWithDescription:@"Nested navigation dismissed"];
         [self.owner dismissViewControllerAnimated:NO completion:^{ [dismissed fulfill]; }];
         [self waitForExpectations:@[dismissed] timeout:10];
