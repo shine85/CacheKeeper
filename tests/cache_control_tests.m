@@ -84,6 +84,7 @@ extern void axs_cachekeeper_prepare_network_cache_tests(void);
 extern void axs_cachekeeper_run_network_cache_tests(NSString *fixture);
 extern void axs_cachekeeper_run_diagnostic_channel_tests(void);
 extern void axs_cachekeeper_run_diagnostic_channel_export_tests(void);
+extern void axs_cachekeeper_run_search_diagnostics_tests(void);
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
@@ -1706,6 +1707,7 @@ int main(int argc, const char *argv[]) {
         axs_cachekeeper_run_review_followup_tests(fixture);
         axs_cachekeeper_run_diagnostics_tests(fixture);
         axs_cachekeeper_run_diagnostic_channel_export_tests();
+        axs_cachekeeper_run_search_diagnostics_tests();
         axs_cachekeeper_run_diagnostic_channel_tests();
         axs_cachekeeper_run_app_list_tests(fixture);
         axs_cachekeeper_run_presentation_tests();

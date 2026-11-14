@@ -1,5 +1,6 @@
 #import "AxsCacheKeeperDiagnostics.h"
 #import "AxsCacheKeeperPolicy.h"
+#import "AxsCacheKeeperSearchDiagnostics.h"
 
 static NSDictionary *AxsCacheKeeperDiagnosticRead(NSString *folder,NSString *name) {
     NSError *error=nil;
@@ -220,6 +221,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
         @"completed":@(exported.count),@"started":@(started.timeIntervalSince1970),@"finished":@(finished),@"rescanned":@NO};
     return @{@"schemaVersion":@2,@"generatedAt":@(finished),@"environment":env,@"apps":exported,
         @"diagnosticChannel":AxsCacheKeeperDiagnosticChannelProjection(environment[@"diagnosticChannel"]),
+        @"searchUI":axs_cachekeeper_search_diagnostics_projection(environment[@"searchUI"]),
         @"sourceStates":@{@"configuration":states[@"state"],@"selection":directories[@"state"],@"snapshots":snapshots[@"state"],@"installedApplications":installedSnapshotAvailable ? @"available" : @"unavailable"},
         @"batch":[redactor axs_cachekeeper_record:batch],
         @"collection":collection,

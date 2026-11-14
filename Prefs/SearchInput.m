@@ -1,4 +1,5 @@
 #import "SearchInput.h"
+#import "SearchDiagnostics.h"
 
 @interface AxsCacheKeeperSearchInput () <UITextFieldDelegate,UIGestureRecognizerDelegate>
 @property(nonatomic,strong) UITextField *axs_cachekeeper_field;
@@ -43,20 +44,36 @@
 }
 - (NSString *)axs_cachekeeper_text { return self.axs_cachekeeper_field.text ?: @""; }
 - (BOOL)axs_cachekeeper_focus {
-    if (!self.window || !self.userInteractionEnabled || self.hidden) return NO;
+    [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventFocus];
+    if (!self.window) { [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventFocusNoWindow];return NO; }
+    if (!self.userInteractionEnabled) { [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventFocusDisabled];return NO; }
+    if (self.hidden) { [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventFocusHidden];return NO; }
     BOOL accepted=[self.axs_cachekeeper_field becomeFirstResponder];
+    [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:accepted ? AxsCacheKeeperSearchEventFocusAccepted : AxsCacheKeeperSearchEventFocusRejected];
     if (!accepted && self.axs_cachekeeper_focus_failed) self.axs_cachekeeper_focus_failed();
     return accepted;
 }
-- (void)axs_cachekeeper_dismiss_keyboard { [self.axs_cachekeeper_field resignFirstResponder]; }
+- (void)axs_cachekeeper_dismiss_keyboard {
+    [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventDismiss];
+    [self.axs_cachekeeper_field resignFirstResponder];
+}
 - (void)axs_cachekeeper_tapped { [self axs_cachekeeper_focus]; }
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)recognizer shouldReceiveTouch:(UITouch *)touch {
     (void)recognizer;
     return touch.view!=self.axs_cachekeeper_cancel_button && ![touch.view isDescendantOfView:self.axs_cachekeeper_cancel_button];
 }
-- (BOOL)textFieldShouldBeginEditing:(UITextField *)textField { return textField==self.axs_cachekeeper_field; }
-- (void)textFieldDidBeginEditing:(UITextField *)textField { (void)textField;self.axs_cachekeeper_cancel_button.hidden=NO; }
-- (void)textFieldDidEndEditing:(UITextField *)textField { (void)textField;self.axs_cachekeeper_cancel_button.hidden=YES; }
+- (BOOL)textFieldShouldBeginEditing:(UITextField *)textField {
+    if (textField==self.axs_cachekeeper_field) [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventShouldBegin];
+    return textField==self.axs_cachekeeper_field;
+}
+- (void)textFieldDidBeginEditing:(UITextField *)textField {
+    (void)textField;self.axs_cachekeeper_cancel_button.hidden=NO;
+    [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventDidBegin];
+}
+- (void)textFieldDidEndEditing:(UITextField *)textField {
+    (void)textField;self.axs_cachekeeper_cancel_button.hidden=YES;
+    [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventDidEnd];
+}
 - (BOOL)textFieldShouldReturn:(UITextField *)textField { [textField resignFirstResponder];return YES; }
 - (void)axs_cachekeeper_changed { if (self.axs_cachekeeper_changed_handler) self.axs_cachekeeper_changed_handler(); }
 - (void)axs_cachekeeper_cancel {

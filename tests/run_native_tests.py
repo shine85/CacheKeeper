@@ -30,6 +30,7 @@ try:
                     str(root / "tests" / "plan_repair_tests.m"),
                     str(root / "tests" / "review_followup_tests.m"),
                     str(root / "tests" / "diagnostics_tests.m"),
+                    str(root / "tests" / "search_diagnostics_tests.m"),
                     str(root / "tests" / "app_list_tests.m"),
                     str(root / "tests" / "app_retention_tests.m"),
                     str(root / "tests" / "installation_tests.m"),

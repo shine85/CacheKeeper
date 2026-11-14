@@ -7,6 +7,7 @@
 #import "../AxsCacheKeeperInstallation.h"
 #import "DiagnosticsPage.h"
 #import "SearchInput.h"
+#import "SearchDiagnostics.h"
 
 static id axs_cachekeeper_app_property(id object, NSString *name) {
     SEL selector=NSSelectorFromString(name);
@@ -58,11 +59,12 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @property(nonatomic) BOOL axs_cachekeeper_visible;
 @property(nonatomic) BOOL axs_cachekeeper_menuVisible;
 @property(nonatomic) BOOL axs_cachekeeper_renderPending;
+@property(nonatomic,strong) AxsCacheKeeperSearchDiagnostics *axs_cachekeeper_searchDiagnostics;
 @end
 @implementation CKSettings
 - (void)loadView {
     // 自有内容根，避免 Preferences 的默认容器布局参与搜索栏命中区域。
-    self.view=[[UIView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    self.view=[[AxsCacheKeeperSearchRootView alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.view.backgroundColor=UIColor.systemGroupedBackgroundColor;
 }
 - (void)viewDidLoad {
@@ -94,6 +96,10 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     self.table.keyboardDismissMode=UIScrollViewKeyboardDismissModeOnDrag;
     self.table.dataSource = self; self.table.delegate = self;
     [self.view addSubview:self.table];
+    self.axs_cachekeeper_searchDiagnostics=[[AxsCacheKeeperSearchDiagnostics alloc] initWithField:self.axs_cachekeeper_searchInput.axs_cachekeeper_field input:self.axs_cachekeeper_searchInput root:self.view table:self.table owner:self];
+    self.axs_cachekeeper_searchInput.axs_cachekeeper_diagnostics=self.axs_cachekeeper_searchDiagnostics;
+    ((AxsCacheKeeperSearchRootView *)self.view).axs_cachekeeper_diagnostics=self.axs_cachekeeper_searchDiagnostics;
+    [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventLoaded];
     // 横滑只在列表内切组，不参与搜索输入、光标选择或分段按钮的触摸仲裁。
     UISwipeGestureRecognizer *swipeLeft=[[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(swipeTab:)];
     swipeLeft.direction=UISwipeGestureRecognizerDirectionLeft;
@@ -140,8 +146,10 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(axs_cachekeeper_application_inactive:) name:UIApplicationWillResignActiveNotification object:nil];
 }
 - (void)axs_cachekeeper_diagnostics {
+    // Freeze before our own resign/push so navigation does not masquerade as spontaneous focus loss.
+    NSDictionary *snapshot=[self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_freeze:AxsCacheKeeperSearchEventDiagnostics];
     [self.axs_cachekeeper_searchInput axs_cachekeeper_dismiss_keyboard];
-    [self.navigationController pushViewController:[[AxsCacheKeeperDiagnosticsPage alloc] init] animated:YES];
+    [self.navigationController pushViewController:[[AxsCacheKeeperDiagnosticsPage alloc] initWithSearchSnapshot:snapshot] animated:YES];
 }
 - (void)tabChanged:(UISegmentedControl *)sender {
     self.selectedTab = sender.selectedSegmentIndex;
@@ -296,17 +304,28 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     return placeholder;
 }
 - (void)viewWillAppear:(BOOL)animated {
+    [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_begin];
+    [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventWillAppear];
     [super viewWillAppear:animated];
     self.axs_cachekeeper_visible=YES;self.axs_cachekeeper_menuVisible=NO;
     [self axs_cachekeeper_application_active:nil];
 }
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventDidAppear];
+}
 - (void)viewWillDisappear:(BOOL)animated {
+    [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_freeze:AxsCacheKeeperSearchEventWillDisappear];
     [super viewWillDisappear:animated];
     self.axs_cachekeeper_visible=NO;self.axs_cachekeeper_menuVisible=NO;
     [self.axs_cachekeeper_searchInput axs_cachekeeper_dismiss_keyboard];
     [self axs_cachekeeper_application_inactive:nil];
 }
 - (void)dealloc { [self.batchTimer invalidate];[NSNotificationCenter.defaultCenter removeObserver:self]; }
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_clear];
+}
 - (void)axs_cachekeeper_application_active:(NSNotification *)notification {
     (void)notification;
     if (!self.axs_cachekeeper_visible || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;

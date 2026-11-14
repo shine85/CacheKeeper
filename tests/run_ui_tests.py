@@ -19,7 +19,9 @@ if not candidates:
 device = candidates[0]["udid"]
 print("UIKit destination:", candidates[0]["name"], device, flush=True)
 subprocess.run(["xcrun", "simctl", "boot", device], check=False, timeout=60)
-subprocess.run(["xcrun", "simctl", "bootstatus", device, "-b"], check=True, timeout=180)
+# Hosted simulator migration exceeded the old 180-second startup budget in run 115.
+# Keep startup bounded separately; the actual test deadline and assertions stay unchanged.
+subprocess.run(["xcrun", "simctl", "bootstatus", device, "-b"], check=True, timeout=420)
 subprocess.run(["xcodebuild", "test", "-project", str(output / "CacheKeeperInputTests.xcodeproj"),
                 "-scheme", "InputHarness", "-destination", f"platform=iOS Simulator,id={device}",
                 "-derivedDataPath", str(output / "DerivedData"), "-resultBundlePath", str(output / "Results.xcresult"),
