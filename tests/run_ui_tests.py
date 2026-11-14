@@ -28,10 +28,13 @@ build_options = ["-project", str(output / "CacheKeeperInputTests.xcodeproj"),
 # Run 116 spent most of the combined deadline compiling; execution gets its own
 # unchanged 600-second budget, against exactly the products built above.
 subprocess.run(["xcodebuild", "build-for-testing", *build_options], check=True, timeout=600)
+# Run 127 exceeded the 600-second test budget with zero assertion failures: the keyboard
+# input test alone took 268 seconds and the suite was cut off mid-test. Raise only the
+# execution budget; no assertion or timeout inside the tests changes.
 try:
     subprocess.run(["xcodebuild", "test-without-building", *build_options,
                     "-resultBundlePath", str(output / "Results.xcresult"),
-                    "-parallel-testing-enabled", "NO"], check=True, timeout=600)
+                    "-parallel-testing-enabled", "NO"], check=True, timeout=900)
 finally:
     if (output / "Results.xcresult").exists():
         subprocess.run(["xcrun", "xcresulttool", "export", "attachments",
