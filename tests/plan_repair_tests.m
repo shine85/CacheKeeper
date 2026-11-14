@@ -42,15 +42,20 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     };
     [AxsCacheKeeperCleanupRules removeAllRulesForTesting];
 
+    // Keep surviving link-change payloads out of later whole-container cache sweeps.
+    NSString *hardHome=makeDir(fixture,@"plan-repairs-hardlinks");
+    AxsCacheKeeperSweep *(^hardSweepFor)(NSString *,NSDictionary *)=^AxsCacheKeeperSweep *(NSString *root,NSDictionary *state) {
+        return [[AxsCacheKeeperSweep alloc] initWithRoot:root bundle:bundle version:@"1.0" containerPath:hardHome state:state clock:^NSTimeInterval { return future; }];
+    };
     // Real inode aliases are intentional retention, while a post-preflight link change is deferred.
-    NSString *hardRoot=makeDir(home,@"Library/Caches/stable-hardlinks");
+    NSString *hardRoot=makeDir(hardHome,@"Library/Caches/stable-hardlinks");
     NSString *hardSource=[hardRoot stringByAppendingPathComponent:@"source"],*hardAlias=[hardRoot stringByAppendingPathComponent:@"alias"],
-        *hardOutside=[home stringByAppendingPathComponent:@"stable-hardlink-outside"];
+        *hardOutside=[hardHome stringByAppendingPathComponent:@"stable-hardlink-outside"];
     put(hardSource);put([hardRoot stringByAppendingPathComponent:@"ordinary"]);
     check(!link(hardSource.fileSystemRepresentation,hardAlias.fileSystemRepresentation) &&
         !link(hardSource.fileSystemRepresentation,hardOutside.fileSystemRepresentation),@"创建同根与根外真实硬链接");
     struct stat hardBefore;check(!lstat(hardSource.fileSystemRepresentation,&hardBefore),@"核查真实硬链接大小");
-    AxsCacheKeeperSweep *hardSweep=sweepFor(hardRoot,@{});
+    AxsCacheKeeperSweep *hardSweep=hardSweepFor(hardRoot,@{});
     AxsCacheKeeperCleanupJob *hardJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[hardSweep] signature:@"hardlink" instance:@"" clock:^NSTimeInterval{return 10;}];
     for (NSUInteger i=0;hardJob.phase!=AxsCacheKeeperCleanupPhaseFinished && i<1000;i++) [hardJob advanceCycleWithPerRootLimit:8 gate:^BOOL{return YES;}];
     NSDictionary *hardReport=[hardSweep directoryReport];
@@ -62,10 +67,10 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
         [hardReport[@"coverageComplete"] boolValue] && [fm fileExistsAtPath:hardSource] && [fm fileExistsAtPath:hardAlias] && [fm fileExistsAtPath:hardOutside],
         @"稳定硬链接明确保留，逻辑字节按路径计，不误报预检后变化或影响根外别名");
     for (NSString *operation in @[@"add",@"remove"]) {
-        NSString *raceRoot=makeDir(home,[@"Library/Caches/link-change-" stringByAppendingString:operation]);
-        NSString *raceFile=[raceRoot stringByAppendingPathComponent:@"payload"],*outside=[home stringByAppendingPathComponent:[@"changed-link-" stringByAppendingString:operation]];put(raceFile);
+        NSString *raceRoot=makeDir(hardHome,[@"Library/Caches/link-change-" stringByAppendingString:operation]);
+        NSString *raceFile=[raceRoot stringByAppendingPathComponent:@"payload"],*outside=[hardHome stringByAppendingPathComponent:[@"changed-link-" stringByAppendingString:operation]];put(raceFile);
         if ([operation isEqual:@"remove"]) check(!link(raceFile.fileSystemRepresentation,outside.fileSystemRepresentation),@"预检前增加外部别名");
-        AxsCacheKeeperSweep *race=sweepFor(raceRoot,@{});
+        AxsCacheKeeperSweep *race=hardSweepFor(raceRoot,@{});
         while (race.checking) [race advancePreflight:16];
         if ([operation isEqual:@"add"]) check(!link(raceFile.fileSystemRepresentation,outside.fileSystemRepresentation),@"预检后链接数增加");
         else check(!unlink(outside.fileSystemRepresentation),@"预检后链接数减少");
@@ -148,7 +153,11 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     [AxsCacheKeeperCleanupRules registerRule:[[AxsCacheKeeperAppRule alloc] initWithRuleID:@"fixture-offline" revision:@"1" appVersion:@"1.0"
         cleanablePaths:@[@"Library/Caches/offline/cache"] retentionPaths:@[] dependencyPaths:@[@"Library/Caches/offline/index.json"]] forBundle:bundle];
     AxsCacheKeeperSweep *scoped=sweepFor(root,@{}); finish(scoped);
-    check(scoped.removed==2 && [fm fileExistsAtPath:unique] && [fm fileExistsAtPath:index] && [fm fileExistsAtPath:[draft stringByAppendingPathComponent:@"unsent"]],@"资源和普通缓存删除，父树唯一副本、索引与草稿完整");
+    BOOL uniqueRetained=[fm fileExistsAtPath:unique],indexRetained=[fm fileExistsAtPath:index],draftRetained=[fm fileExistsAtPath:[draft stringByAppendingPathComponent:@"unsent"]];
+    check(scoped.removed==2 && uniqueRetained && indexRetained && draftRetained,
+        [NSString stringWithFormat:@"资源和普通缓存删除，父树唯一副本、索引与草稿完整 (removed=%lu retained=%lu changed=%lu protected=%lu unique=%d index=%d draft=%d)",
+        (unsigned long)scoped.removed,(unsigned long)scoped.hardLinkRetainedCount,(unsigned long)scoped.changedCount,
+        (unsigned long)scoped.protectedCount,uniqueRetained,indexRetained,draftRetained]);
     put([resource stringByAppendingPathComponent:@"stale"]);
     AxsCacheKeeperSweep *dependency=sweepFor(resource,@{});
     while (dependency.checking && !dependency.complete) [dependency advancePreflight:8];
