@@ -224,8 +224,10 @@ int main(int argc, const char *argv[]) {
         [AxsCacheKeeperProcessObservation observeBundle:execBundle state:AxsCacheKeeperExecExecuting identity:nil atMonotonicTime:1140];
         require([[AxsCacheKeeperProcessObservation lastExecutingIdentityForBundle:execBundle] isEqual:@"1:600.000000"], @"nil 身份不覆盖执行实例记录");
         NSDictionary *selection = @{bundle:@[@"Library/Caches/a", @"Library/Caches", @"Library/Caches/a",
-            @"Library/Application Support", @"Library/Caches/../Preferences", @"Library/CachesOther"]};
+            @"Library/Application Support", @"Library/CachesOther"]};
         require([axs_cachekeeper_selected_paths(selection, @{bundle:@YES}, bundle) isEqual:@[@"Library/Caches"]], @"过滤保护目录并去掉父子重复选择");
+        require(!axs_cachekeeper_selected_paths(@{bundle:@[@"Library/Caches",@"Library/Caches/../Preferences"]},@{bundle:@YES},bundle).count,
+            @"混入越界路径的损坏选择必须整体停止，不能静默丢弃坏字段后继续删除");
         require(!axs_cachekeeper_selected_paths(selection, @{bundle:@NO}, bundle).count, @"关闭总开关禁止处理");
         require(!axs_cachekeeper_selected_paths(selection, @{}, bundle).count, @"只有目录选择、没有明确总开关时必须关闭");
         require(!axs_cachekeeper_selected_paths(selection, nil, bundle).count, @"总开关配置文件缺失时必须关闭");

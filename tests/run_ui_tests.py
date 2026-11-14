@@ -10,7 +10,7 @@ if sys.platform != "darwin":
 output = ROOT / "tmp" / "input-ui-tests"
 output.mkdir(parents=True, exist_ok=True)
 subprocess.run(["xcodegen", "generate", "--spec", str(ROOT / "tests/ui/project.yml"),
-                "--project", str(output), "--project-root", str(ROOT / "tests/ui")], check=True, timeout=60)
+                "--project", str(output), "--project-root", str(output)], check=True, timeout=60)
 devices = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"], text=True))
 candidates = [d for runtime, items in devices["devices"].items() if ".iOS-" in runtime
               for d in items if d.get("isAvailable") and d["name"].startswith("iPhone")]
