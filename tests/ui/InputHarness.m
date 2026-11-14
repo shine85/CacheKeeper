@@ -4,6 +4,13 @@
 #import "../../Prefs/DiagnosticsPage.h"
 @implementation PSViewController
 @end
+@interface AxsCacheKeeperTestHostBarContainer : UIView
+@end
+@implementation AxsCacheKeeperTestHostBarContainer
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit=[super hitTest:point withEvent:event];return hit==self ? nil : hit;
+}
+@end
 @interface CKSettings : PSViewController
 @end
 @interface CKScanPage : UITableViewController
@@ -39,8 +46,12 @@
         // Device 119.1: the reported inner bar is hidden, while another host bar occupies 91 points.
         UINavigationBar *bar=[[UINavigationBar alloc] initWithFrame:CGRectMake(0,compactBottom-44,self.window.bounds.size.width,91)];
         bar.accessibilityIdentifier=@"CacheKeeperTestHostNavigationBar";
-        [bar setItems:@[[[UINavigationItem alloc] initWithTitle:@"Host navigation"]] animated:NO];
-        [self.window addSubview:bar];self.axs_cachekeeper_testHostBar=bar;
+        UINavigationItem *item=[[UINavigationItem alloc] initWithTitle:@"Host navigation"];
+        item.leftBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"收起测试栏" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_collapseHostBar)];
+        item.rightBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"诊断" style:UIBarButtonItemStylePlain target:controller action:NSSelectorFromString(@"axs_cachekeeper_diagnostics")];
+        [bar setItems:@[item] animated:NO];
+        UIView *wrapper=[[AxsCacheKeeperTestHostBarContainer alloc] initWithFrame:self.window.bounds];
+        [wrapper addSubview:bar];[self.window addSubview:wrapper];self.axs_cachekeeper_testHostBar=bar;
         [controller.view setNeedsLayout];
     }
     if ([controller isKindOfClass:CKSettings.class] &&
@@ -55,6 +66,10 @@
         [navigation.view addSubview:overlay];self.axs_cachekeeper_testOverlay=overlay;
     }
     if (![controller isKindOfClass:AxsCacheKeeperDiagnosticsPage.class]) return;
+    if (self.axs_cachekeeper_testHostBar) {
+        [self.axs_cachekeeper_testHostBar.superview removeFromSuperview];self.axs_cachekeeper_testHostBar=nil;
+        [navigation setNavigationBarHidden:NO animated:NO];
+    }
     NSDictionary *snapshot=[controller valueForKey:@"axs_cachekeeper_searchSnapshot"];
     NSDictionary *route=[snapshot[@"events"] lastObject][@"hitRoute"];
     BOOL observed=NO;
@@ -77,6 +92,9 @@
     label.accessibilityLabel=[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
     [controller.view addSubview:label];
     [self.axs_cachekeeper_testOverlay removeFromSuperview];self.axs_cachekeeper_testOverlay=nil;
+}
+- (void)axs_cachekeeper_collapseHostBar {
+    CGRect frame=self.axs_cachekeeper_testHostBar.frame;frame.size.height=44;self.axs_cachekeeper_testHostBar.frame=frame;
 }
 @end
 int main(int argc,char *argv[]) {

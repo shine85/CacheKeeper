@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <Preferences/PSViewController.h>
 #import <objc/message.h>
+#include <math.h>
 #include <roothide.h>
 #import "../AxsCacheKeeperPolicy.h"
 #import "../AxsCacheKeeperAppList.h"
@@ -39,6 +40,8 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @property(nonatomic,strong) UISegmentedControl *tabs;
 @property(nonatomic,strong) UIView *tabWrap;
 @property(nonatomic,strong) AxsCacheKeeperSearchInput *axs_cachekeeper_searchInput;
+@property(nonatomic,strong) NSLayoutConstraint *axs_cachekeeper_searchTop;
+@property(nonatomic,weak) UINavigationBar *axs_cachekeeper_hostBar;
 @property(nonatomic,assign) NSInteger selectedTab;
 @property(nonatomic,strong) NSArray *apps;
 @property(nonatomic,strong) NSArray *sections;
@@ -114,8 +117,9 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
         [[UIBarButtonItem alloc] initWithTitle:@"诊断" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_diagnostics)]];
     for (UIView *view in @[self.axs_cachekeeper_searchInput,self.tabWrap,self.tabs,self.table]) view.translatesAutoresizingMaskIntoConstraints=NO;
     UILayoutGuide *safe=self.view.safeAreaLayoutGuide;
+    self.axs_cachekeeper_searchTop=[self.axs_cachekeeper_searchInput.topAnchor constraintEqualToAnchor:safe.topAnchor];
     [NSLayoutConstraint activateConstraints:@[
-        [self.axs_cachekeeper_searchInput.topAnchor constraintEqualToAnchor:safe.topAnchor],
+        self.axs_cachekeeper_searchTop,
         [self.axs_cachekeeper_searchInput.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [self.axs_cachekeeper_searchInput.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
         [self.axs_cachekeeper_searchInput.heightAnchor constraintEqualToConstant:56],
@@ -303,7 +307,62 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     UIGraphicsEndImageContext();
     return placeholder;
 }
+- (CGFloat)axs_cachekeeper_search_inset_for_bar:(UINavigationBar *)bar window:(UIWindow *)window safe:(CGRect)safe {
+    UIView *root=self.view;
+    if (!bar || bar.window!=window || [bar isDescendantOfView:root]) return 0;
+    CGRect rect=[bar convertRect:bar.bounds toView:root];
+    if (!isfinite(rect.origin.x) || !isfinite(rect.origin.y) ||
+        !isfinite(rect.size.width) || !isfinite(rect.size.height)) return 0;
+    for (UIView *ancestor=bar;ancestor;ancestor=ancestor.superview) {
+        if (ancestor.hidden || ancestor.alpha<=0.01 || !ancestor.userInteractionEnabled) return 0;
+        if (ancestor!=bar && ancestor.clipsToBounds)
+            rect=CGRectIntersection(rect,[ancestor convertRect:ancestor.bounds toView:root]);
+        if (ancestor==window) break;
+    }
+    if (CGRectIsEmpty(rect) || CGRectIsNull(rect) ||
+        CGRectGetMaxX(rect)<=CGRectGetMinX(safe) || CGRectGetMinX(rect)>=CGRectGetMaxX(safe) ||
+        CGRectGetMinY(rect)>CGRectGetMinY(safe)+1.0/window.screen.scale) return 0;
+    return MAX(0,CGRectGetMaxY(rect)-CGRectGetMinY(safe));
+}
+- (BOOL)axs_cachekeeper_update_search_top {
+    if (!self.isViewLoaded || !self.axs_cachekeeper_visible || !self.axs_cachekeeper_searchTop) return NO;
+    UIView *root=self.view;UIWindow *window=root.window;
+    if (!window) { self.axs_cachekeeper_hostBar=nil;return NO; }
+    CGRect safe=root.safeAreaLayoutGuide.layoutFrame;
+    if (CGRectIsEmpty(safe) || !isfinite(safe.origin.x) || !isfinite(safe.origin.y) ||
+        !isfinite(safe.size.width) || !isfinite(safe.size.height)) return NO;
+    CGFloat pixel=1.0/window.screen.scale;
+    // Probe the original safe edge, never the shifted field: the latter oscillates after clearing the bar.
+    CGFloat xs[]={CGRectGetMinX(safe)+pixel,CGRectGetMidX(safe),CGRectGetMaxX(safe)-pixel};
+    UINavigationBar *observed=nil;CGFloat inset=0;
+    for (NSUInteger i=0;i<3;i++) {
+        CGPoint point=[root convertPoint:CGPointMake(xs[i],CGRectGetMinY(safe)+pixel) toView:window];
+        for (UIView *hit=[window hitTest:point withEvent:nil];hit;hit=hit.superview) {
+            if (![hit isKindOfClass:UINavigationBar.class]) continue;
+            CGFloat candidate=[self axs_cachekeeper_search_inset_for_bar:(UINavigationBar *)hit window:window safe:safe];
+            if (candidate>inset) { observed=(UINavigationBar *)hit;inset=candidate; }
+        }
+    }
+    // A temporary menu may cover all probes; revalidate the actual bar instead of retaining an old height.
+    if (!observed) {
+        inset=[self axs_cachekeeper_search_inset_for_bar:self.axs_cachekeeper_hostBar window:window safe:safe];
+        if (inset>0) observed=self.axs_cachekeeper_hostBar;
+    }
+    self.axs_cachekeeper_hostBar=observed;
+    if (fabs(self.axs_cachekeeper_searchTop.constant-inset)<pixel/2) return NO;
+    self.axs_cachekeeper_searchTop.constant=inset;
+    [root setNeedsLayout];return YES;
+}
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [self axs_cachekeeper_update_search_top];
+}
+- (void)viewSafeAreaInsetsDidChange {
+    [super viewSafeAreaInsetsDidChange];
+    [self axs_cachekeeper_update_search_top];
+}
 - (void)viewWillAppear:(BOOL)animated {
+    self.axs_cachekeeper_hostBar=nil;
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_begin];
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventWillAppear];
     [super viewWillAppear:animated];
@@ -312,12 +371,14 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 }
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    [self axs_cachekeeper_update_search_top];[self.view layoutIfNeeded];
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventDidAppear];
 }
 - (void)viewWillDisappear:(BOOL)animated {
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_freeze:AxsCacheKeeperSearchEventWillDisappear];
     [super viewWillDisappear:animated];
     self.axs_cachekeeper_visible=NO;self.axs_cachekeeper_menuVisible=NO;
+    self.axs_cachekeeper_hostBar=nil;
     [self.axs_cachekeeper_searchInput axs_cachekeeper_dismiss_keyboard];
     [self axs_cachekeeper_application_inactive:nil];
 }
@@ -325,6 +386,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_clear];
+    self.axs_cachekeeper_searchTop.constant=0;
 }
 - (void)axs_cachekeeper_application_active:(NSNotification *)notification {
     (void)notification;
@@ -363,6 +425,8 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 }
 - (void)updateBatch {
     if (!self.axs_cachekeeper_visible || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
+    // The outer Settings navigation bar can expand without laying out this inner controller.
+    [self axs_cachekeeper_update_search_top];[self.view layoutIfNeeded];
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_sample];
     // Poll only cached source metadata each second. Installed-app metadata has a separate cadence.
     NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;

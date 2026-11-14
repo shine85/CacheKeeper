@@ -25,6 +25,22 @@ final class SearchRoutingUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed)
         app.segmentedControls.buttons["用户应用"].tap()
         XCTAssertTrue(app.segmentedControls.buttons["用户应用"].isSelected)
+        let expandedTop = field.frame.minY
+        app.buttons["收起测试栏"].tap()
+        let collapsed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            field.frame.minY < expandedTop - 40 && field.frame.minY >= bar.frame.maxY
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [collapsed], timeout: 5), .completed)
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        let result = try snapshot(app)
+        XCTAssertEqual(result["observedFieldTouch"] as? Bool, true)
+        let events = try XCTUnwrap(result["events"] as? [String])
+        XCTAssertTrue(events.contains("shouldBegin"))
+        XCTAssertTrue(events.contains("didBegin"))
+        XCTAssertEqual(result["rootCenterHit"] as? String, "field")
+        XCTAssertEqual(result["windowHitRole"] as? String, "field")
+        XCTAssertEqual(result["sameHit"] as? Bool, true)
     }
 
     private func snapshot(_ app: XCUIApplication) throws -> [String: Any] {

@@ -9,6 +9,8 @@
 - (void)axs_cachekeeper_diagnostics;
 - (void)updateBatch;
 @end
+@interface AxsCacheKeeperTestHostBarContainer : UIView
+@end
 // Only the event marker is synthetic; all hierarchy, bounds and hit testing below use UIKit.
 @interface AxsCacheKeeperProbeTouchEvent : UIEvent
 @end
@@ -118,25 +120,48 @@
     CGFloat safeTop=[settings.view convertPoint:CGPointMake(0,settings.view.safeAreaInsets.top) toView:self.window].y;
     XCTAssertTrue(settings.navigationController.navigationBar.hidden);
     UINavigationBar *bar=[[UINavigationBar alloc] initWithFrame:CGRectMake(0,safeTop-44,self.window.bounds.size.width,91)];
-    [self.window addSubview:bar];
-    for (NSNumber *height in @[@91,@120,@44,@91]) {
+    UIView *wrapper=[[AxsCacheKeeperTestHostBarContainer alloc] initWithFrame:self.window.bounds];
+    [wrapper addSubview:bar];[self.window addSubview:wrapper];
+    for (NSNumber *height in @[@91,@120,@44,@110]) {
         CGRect frame=bar.frame;frame.size.height=height.doubleValue;bar.frame=frame;
-        [settings.view setNeedsLayout];[settings.view layoutIfNeeded];
-        [settings updateBatch];[settings.view layoutIfNeeded];
+        // The last change happens entirely outside the content hierarchy. Only the existing refresh runs.
+        if (height.doubleValue!=110) { [settings.view setNeedsLayout];[settings.view layoutIfNeeded]; }
+        [settings updateBatch];
         XCTAssertEqualWithAccuracy(bar.frame.origin.y,safeTop-44,0.5);
         XCTAssertEqualWithAccuracy(bar.frame.size.height,height.doubleValue,0.5);
         XCTAssertFalse(bar.hidden);XCTAssertTrue(bar.userInteractionEnabled);
+        XCTAssertEqual(bar.superview,wrapper);
         CGRect fieldRect=[field convertRect:field.bounds toView:self.window];
         XCTAssertGreaterThanOrEqual(CGRectGetMinY(fieldRect),CGRectGetMaxY(bar.frame));
         if (height.doubleValue==44) XCTAssertEqualWithAccuracy(fieldRect.origin.y,originalTop,0.5);
         CGPoint center=CGPointMake(CGRectGetMidX(fieldRect),CGRectGetMidY(fieldRect));
         UIView *hit=[self.window hitTest:center withEvent:nil];
         XCTAssertTrue(hit==field || [hit isDescendantOfView:field]);
+        for (NSUInteger repeat=0;repeat<3;repeat++) {
+            [settings updateBatch];
+            XCTAssertEqualWithAccuracy([field convertRect:field.bounds toView:self.window].origin.y,fieldRect.origin.y,0.5);
+        }
     }
+    CGFloat expandedTop=[field convertRect:field.bounds toView:self.window].origin.y;
+    UIView *temporaryCover=[[UIView alloc] initWithFrame:self.window.bounds];
+    [self.window addSubview:temporaryCover];
+    [settings updateBatch];
+    XCTAssertEqualWithAccuracy([field convertRect:field.bounds toView:self.window].origin.y,expandedTop,0.5);
+    [temporaryCover removeFromSuperview];[settings updateBatch];
+    XCTAssertEqualWithAccuracy([field convertRect:field.bounds toView:self.window].origin.y,expandedTop,0.5);
     bar.hidden=YES;
-    [settings.view setNeedsLayout];[settings.view layoutIfNeeded];[settings updateBatch];[settings.view layoutIfNeeded];
+    [settings updateBatch];
     XCTAssertEqualWithAccuracy([field convertRect:field.bounds toView:self.window].origin.y,originalTop,0.5);
-    [bar removeFromSuperview];
+    bar.hidden=NO;
+    wrapper.hidden=YES;[settings updateBatch];
+    XCTAssertEqualWithAccuracy([field convertRect:field.bounds toView:self.window].origin.y,originalTop,0.5);
+    wrapper.hidden=NO;[settings updateBatch];
+    XCTAssertEqualWithAccuracy([field convertRect:field.bounds toView:self.window].origin.y,expandedTop,0.5);
+    CGRect offscreen=bar.frame;offscreen.origin.x=self.window.bounds.size.width+10;bar.frame=offscreen;
+    [settings updateBatch];
+    XCTAssertEqualWithAccuracy([field convertRect:field.bounds toView:self.window].origin.y,originalTop,0.5);
+    XCTAssertEqualWithAccuracy(bar.frame.origin.x,offscreen.origin.x,0.5);
+    [wrapper removeFromSuperview];
 }
 - (void)testProducerBooleansSurviveStrictProjectionAndReport {
     [self.probe axs_cachekeeper_record:AxsCacheKeeperSearchEventDidAppear];
