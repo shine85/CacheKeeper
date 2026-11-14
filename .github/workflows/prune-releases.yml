@@ -65,3 +65,16 @@ jobs:
               gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id"
             fi
           done
+      - name: 只保留最新 5 次工作流运行记录
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          keep=5
+          run_ids=$(gh api --paginate "repos/${{ github.repository }}/actions/runs?per_page=100" --jq '.workflow_runs[].id')
+          total=$(printf '%s\n' "$run_ids" | grep -c .)
+          echo "工作流运行共 ${total} 次，保留最新 ${keep} 次"
+          printf '%s\n' "$run_ids" | tail -n +$((keep + 1)) | while read -r id; do
+            [ -n "$id" ] || continue
+            echo "删除运行记录 $id"
+            gh api -X DELETE "repos/${{ github.repository }}/actions/runs/${id}" || echo "删除运行 $id 失败，继续"
+          done
