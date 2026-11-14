@@ -6,6 +6,7 @@
 #import "../AxsCacheKeeperInstallation.h"
 #import "../AxsCacheKeeperSweep.h"
 #import "../AxsCacheKeeperCleanupJob.h"
+#import "../AxsCacheKeeperDiagnostics.h"
 
 static void aicheck(BOOL ok, NSString *message) {
     if (!ok) { fprintf(stderr,"FAIL: installation: %s\n",message.UTF8String);exit(1); }
@@ -32,6 +33,29 @@ static NSString *aibundle(NSString *fixture, NSString *name) {
 @end
 @implementation AxsCacheKeeperInstallationTestProxy
 @end
+
+@interface AxsCacheKeeperInstallationCoverageTestProxy : AxsCacheKeeperInstallationTestProxy
+@property(nonatomic,strong) id dataContainerURL,groupContainerURLs,plugInKitPlugins,containerURL;
+@end
+@implementation AxsCacheKeeperInstallationCoverageTestProxy
+@end
+@interface AxsCacheKeeperInstallationCoverageTestOwner : NSObject
+@property(nonatomic,copy) NSString *bundleIdentifier;
+@end
+@implementation AxsCacheKeeperInstallationCoverageTestOwner
+@end
+@interface AxsCacheKeeperInstallationCoverageTestPlugin : NSObject
+@property(nonatomic,strong) id pluginIdentifier,containingBundle,dataContainerURL;
+@end
+@implementation AxsCacheKeeperInstallationCoverageTestPlugin
+@end
+@interface AxsCacheKeeperInstallationCoverageScalarTestProxy : AxsCacheKeeperInstallationTestProxy
+- (NSUInteger)dataContainerURL;
+@end
+static NSUInteger aiScalarGetterCalls;
+@implementation AxsCacheKeeperInstallationCoverageScalarTestProxy
+- (NSUInteger)dataContainerURL {aiScalarGetterCalls++;return 1;}
+@end
 @interface AxsCacheKeeperInstallationTestWorkspace : NSObject
 + (instancetype)defaultWorkspace;
 - (NSArray *)allInstalledApplications;
@@ -52,6 +76,113 @@ static BOOL axs_cachekeeper_installation_test_getter_abi(Method method) {
     return signature.numberOfArguments==2 && signature.methodReturnType[0]=='@' && signature.methodReturnLength==sizeof(id) &&
         ([signature getArgumentTypeAtIndex:0][0]=='@' || [signature getArgumentTypeAtIndex:0][0]=='#') &&
         [signature getArgumentTypeAtIndex:1][0]==':';
+}
+
+static AxsCacheKeeperInstallationCoverageTestPlugin *aiplugin(NSString *identifier,NSString *owner,id url) {
+    AxsCacheKeeperInstallationCoverageTestPlugin *plugin=[AxsCacheKeeperInstallationCoverageTestPlugin new];
+    AxsCacheKeeperInstallationCoverageTestOwner *parent=[AxsCacheKeeperInstallationCoverageTestOwner new];parent.bundleIdentifier=owner;
+    plugin.pluginIdentifier=identifier;plugin.containingBundle=parent;plugin.dataContainerURL=url;return plugin;
+}
+static void aicoverage(NSString *root) {
+    // Mutations that skip System metadata, substitute containerURL, or retain an old membership fail these assertions.
+    AxsCacheKeeperInstallationCoverageTestProxy *user=[AxsCacheKeeperInstallationCoverageTestProxy new];
+    user.applicationIdentifier=@"test.installation";user.applicationType=@"User";user.localizedName=@"测试";
+    user.shortVersionString=@"1.0";user.bundleURL=[NSURL fileURLWithPath:root];
+    NSURL *home=[NSURL URLWithString:@"file:///var/mobile/Containers/Data/Application/test-home"],*group=[NSURL URLWithString:@"file:///private/var/mobile/Containers/Shared/AppGroup/test-group"],
+        *extension=[NSURL URLWithString:@"file:///private/var/mobile/Containers/Data/PluginKitPlugin/test-extension"];
+    user.dataContainerURL=home;user.groupContainerURLs=@{@"group.test.shared":group};
+    user.plugInKitPlugins=@[aiplugin(@"test.plugin.first",user.applicationIdentifier,extension),aiplugin(@"test.plugin.second",user.applicationIdentifier,extension)];
+    AxsCacheKeeperInstallationCoverageTestProxy *system=[AxsCacheKeeperInstallationCoverageTestProxy new];
+    system.applicationIdentifier=@"com.apple.coverage-test";system.applicationType=@"System";system.bundleURL=[NSURL fileURLWithPath:@"/Applications/Coverage.app"];
+    system.containerURL=[NSURL fileURLWithPath:@"/var/mobile"];system.groupContainerURLs=@{@"group.test.shared":group};
+    system.plugInKitPlugins=@[aiplugin(@"test.plugin.system",system.applicationIdentifier,home)];
+    aiinstalled=@[user,system];NSMutableDictionary *cache=[NSMutableDictionary new];NSDictionary *coverage=nil;
+    NSArray *apps=axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+    aicheck(apps.count==1 && [apps.firstObject[@"id"] isEqual:@"test.installation"],@"System登记进入摘要且仍被原展示列表过滤");
+    aicheck([coverage[@"state"] isEqual:@"available"] && [coverage[@"observedRegistrations"] isEqual:@2] &&
+        [coverage[@"home"][@"registeredURLCount"] isEqual:@1] && [coverage[@"home"][@"notProvidedCount"] isEqual:@1],@"无独立home不采用/var/mobile回退");
+    aicheck([coverage[@"group"][@"registeredURLCount"] isEqual:@1] && [coverage[@"group"][@"associationCount"] isEqual:@2] &&
+        [coverage[@"extension"][@"registeredURLCount"] isEqual:@2] && [coverage[@"extension"][@"associationCount"] isEqual:@3] &&
+        [coverage[@"allRolesUniqueRegisteredURLCount"] isEqual:@3],@"共享组、同URL两扩展、跨角色同URL登记正确去重，保留归属关联");
+    AxsCacheKeeperDiagnostics *diagnostics=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:root];
+    NSMutableDictionary *injected=[coverage mutableCopy];injected[@"rawURL"]=home;injected[@"privateOwner"]=user.applicationIdentifier;
+    NSDictionary *exported=[diagnostics reportWithApps:apps environment:@{@"containerCoverage":injected}];
+    aicheck([exported[@"containerCoverage"][@"allRolesUniqueRegisteredURLCount"] isEqual:@3] &&
+        [exported[@"containerCoverage"][@"scope"] isEqual:@"allSystemRegistrations"] &&
+        [exported[@"containerCoverage"][@"mode"] isEqual:@"systemMetadata"] &&
+        [exported[@"containerCoverage"][@"filesystemAccess"] isEqual:@"notChecked"] &&
+        [exported[@"containerCoverage"][@"cleanupEligibility"] isEqual:@"notGranted"] &&
+        !exported[@"containerCoverage"][@"rawURL"] && !exported[@"containerCoverage"][@"privateOwner"] &&
+        [exported[@"collection"][@"rescanned"] isEqual:@NO],@"同一诊断消费者严格投影计数，元数据覆盖不冒充访问或重新扫描");
+    NSDictionary *snapshot=cache[user.applicationIdentifier][@"installation"],*entry=apps.firstObject;
+    system.plugInKitPlugins=@[];aiinstalled=@[user];
+    NSArray *refreshed=axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+    aicheck(refreshed.firstObject==entry && cache[user.applicationIdentifier][@"installation"]==snapshot &&
+        [coverage[@"observedRegistrations"] isEqual:@1] && [coverage[@"extension"][@"associationCount"] isEqual:@2],@"同cache新枚举移除APP/插件且未变安装不重读Info");
+    user.plugInKitPlugins=@[];
+    axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+    aicheck([coverage[@"extension"][@"state"] isEqual:@"available"] && [coverage[@"extension"][@"registeredURLCount"] isEqual:@0],@"正确空扩展集合表示已观察零登记");
+    user.plugInKitPlugins=@[aiplugin(@"test.plugin.new",user.applicationIdentifier,[NSURL URLWithString:@"file:///private/var/new-extension"])];aiinstalled=@[user,system];
+    axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+    aicheck([coverage[@"observedRegistrations"] isEqual:@2] && [coverage[@"extension"][@"registeredURLCount"] isEqual:@1],@"新增登记与插件由相同入口自动刷新");
+    user.plugInKitPlugins=@[aiplugin(@"test.plugin.mismatch",@"test.other.owner",extension)];aiinstalled=@[user];
+    axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+    aicheck([coverage[@"state"] isEqual:@"partial"] && [coverage[@"extension"][@"ownerMismatchCount"] isEqual:@1] &&
+        [coverage[@"extension"][@"associationCount"] isEqual:@0] && [coverage[@"countsAreLowerBounds"] isEqual:@YES],@"真实containingBundle.bundleIdentifier失配拒绝关联且整体保留partial");
+    user.plugInKitPlugins=@[aiplugin(@"test.plugin.conflict",user.applicationIdentifier,extension),aiplugin(@"test.plugin.conflict",user.applicationIdentifier,home)];
+    axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+    aicheck([coverage[@"extension"][@"associationCount"] isEqual:@0] && [coverage[@"extension"][@"invalidAssociationCount"] unsignedIntegerValue]>0,@"重复插件ID的矛盾URL不能保留先到关联");
+    // A plugin ID has one owner within this observation, even when its URLs coincide.
+    user.groupContainerURLs=@{};system.groupContainerURLs=@{};user.dataContainerURL=nil;system.dataContainerURL=nil;
+    for (NSNumber *sameURL in @[@YES,@NO]) {
+        user.plugInKitPlugins=@[aiplugin(@"test.plugin.shared",user.applicationIdentifier,extension)];
+        system.plugInKitPlugins=@[aiplugin(@"test.plugin.shared",system.applicationIdentifier,[sameURL boolValue] ? extension : home)];
+        for (NSArray *registrations in @[@[user,system],@[system,user],@[user,system,user],@[system,user,system]]) {
+            aiinstalled=registrations;
+            NSArray *conflicted=axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+            aicheck(conflicted.count==1 && [conflicted.firstObject[@"id"] isEqual:user.applicationIdentifier],@"跨owner插件冲突不改变原APP展示列表");
+            aicheck([coverage[@"extension"][@"associationCount"] isEqual:@0] && [coverage[@"extension"][@"registeredURLCount"] isEqual:@0] &&
+                [coverage[@"extension"][@"invalidAssociationCount"] unsignedIntegerValue]>0 && [coverage[@"state"] isEqual:@"partial"] &&
+                [coverage[@"countsAreLowerBounds"] isEqual:@YES] && [axs_cachekeeper_container_coverage_projection(coverage)[@"state"] isEqual:@"partial"],
+                @"同ID跨owner不论URL、顺序或第三次重复均撤销且不能复活关联");
+        }
+    }
+    user.dataContainerURL=home;aiinstalled=@[user];
+    user.groupContainerURLs=nil;user.plugInKitPlugins=nil;
+    axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+    aicheck([coverage[@"group"][@"state"] isEqual:@"unavailable"] && [coverage[@"group"][@"notProvidedCount"] isEqual:@1] &&
+        !coverage[@"group"][@"registeredURLCount"] && [coverage[@"extension"][@"notProvidedCount"] isEqual:@1],@"nil来源不冒充空集合且不导出零登记计数");
+    user.groupContainerURLs=@{};user.plugInKitPlugins=@[];
+    axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+    aicheck([coverage[@"group"][@"state"] isEqual:@"available"] && [coverage[@"group"][@"registeredURLCount"] isEqual:@0],@"正确空组字典与nil区别保留");
+    AxsCacheKeeperInstallationTestProxy *legacy=[AxsCacheKeeperInstallationTestProxy new];legacy.applicationIdentifier=@"test.legacy";legacy.applicationType=@"User";
+    aiinstalled=@[legacy];axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+    aicheck([coverage[@"home"][@"missingSelectorCount"] isEqual:@1] && !coverage[@"home"][@"registeredURLCount"],@"selector缺失明确不可用且不补零");
+    aiinstalled=@[user];user.groupContainerURLs=@42;user.dataContainerURL=[NSURL URLWithString:@"file://remote.example/private/data"];
+    user.plugInKitPlugins=@[aiplugin(@"test.plugin.no-owner",nil,extension),@42];
+    axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+    aicheck([coverage[@"home"][@"state"] isEqual:@"invalid"] && [coverage[@"group"][@"state"] isEqual:@"invalid"] &&
+        [coverage[@"extension"][@"unavailableOwnerCount"] isEqual:@1] && [coverage[@"extension"][@"invalidAssociationCount"] isEqual:@1],@"坏类型、非本地URL、缺父归属分别拒绝");
+    NSString *json=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:coverage options:0 error:nil] encoding:NSUTF8StringEncoding];
+    for (NSString *secret in @[@"test.installation",@"test.plugin",@"remote.example",@"test-extension",@"/private/",@"/var/mobile"]) aicheck(![json containsString:secret],@"提供器摘要不输出私有URL、owner或扩展ID");
+    aiinstalled=(id)@42;NSError *error=nil;coverage=nil;
+    aicheck(!axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,&error) && error &&
+        [coverage[@"state"] isEqual:@"unavailable"] && [coverage[@"sourceState"] isEqual:@"invalid"] && !coverage[@"observedRegistrations"],@"坏系统枚举不复用旧摘要或填零");
+    aiinstalled=nil;axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+    aicheck([coverage[@"sourceState"] isEqual:@"unavailable"],@"系统枚举nil与坏类型分别记录");
+    exported=[diagnostics reportWithApps:nil environment:@{@"containerCoverage":coverage}];
+    aicheck([exported[@"containerCoverage"][@"state"] isEqual:@"unavailable"] && !exported[@"containerCoverage"][@"observedRegistrations"],@"枚举失败仍进入相同报告且不复用旧计数");
+    aiinstalled=@[];axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+    aicheck([axs_cachekeeper_container_coverage_projection(coverage)[@"state"] isEqual:@"available"] &&
+        [coverage[@"home"][@"registeredURLCount"] isEqual:@0],@"成功空系统枚举是明确零登记，仍可投影");
+    AxsCacheKeeperInstallationCoverageScalarTestProxy *scalar=[AxsCacheKeeperInstallationCoverageScalarTestProxy new];scalar.applicationIdentifier=@"test.scalar";
+    aiinstalled=@[scalar];axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+    aicheck(aiScalarGetterCalls==0 && [coverage[@"home"][@"state"] isEqual:@"invalid"] &&
+        [coverage[@"home"][@"invalidSourceCount"] isEqual:@1],@"运行时非对象返回类型在调用前拒绝");
+    NSMutableArray *bounded=[NSMutableArray new];for (NSUInteger i=0;i<4097;i++) [bounded addObject:system];aiinstalled=bounded;
+    axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
+    aicheck([coverage[@"observedRegistrations"] isEqual:@4096] && [coverage[@"truncatedRegistrationCount"] isEqual:@1] &&
+        [coverage[@"countsAreLowerBounds"] isEqual:@YES] && [axs_cachekeeper_container_coverage_projection(coverage)[@"state"] isEqual:@"partial"],@"系统登记超界明确截断并仅报告计数下界");
 }
 
 static void aicleanup(NSString *fixture, NSString *name, NSDictionary *snapshot, NSURL *url, BOOL allow) {
@@ -191,6 +322,7 @@ void axs_cachekeeper_run_installation_tests(NSString *fixture) {
         aicheck(axs_cachekeeper_installed_applications(trollCache,nil).count==0,@"当前有效路径明确在管理范围外时不复用旧分类");
         proxy.bundleURL=nil;
         aicheck(axs_cachekeeper_installed_applications(trollCache,nil).count==0,@"未知System来源不能凭缺路径扩展管理边界");
+        aicoverage(root);
         } @finally {
             method_setImplementation(systemGetter,originalGetter);
             aiinstalled=nil;

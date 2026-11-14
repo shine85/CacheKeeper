@@ -43,6 +43,8 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
 - (NSUInteger)removed { NSUInteger total = 0; for (AxsCacheKeeperSweep *s in self.sweeps) total += s.removed; return total; }
 - (NSUInteger)failed { NSUInteger total = 0; for (AxsCacheKeeperSweep *s in self.sweeps) total += s.failed; return total; }
 - (NSUInteger)changedCount { NSUInteger total = 0; for (AxsCacheKeeperSweep *s in self.sweeps) total += s.changedCount; return total; }
+- (NSUInteger)hardLinkRetainedCount { NSUInteger total=0;for (AxsCacheKeeperSweep *s in self.sweeps) total+=s.hardLinkRetainedCount;return total; }
+- (unsigned long long)hardLinkRetainedBytes { unsigned long long total=0;for (AxsCacheKeeperSweep *s in self.sweeps) total+=s.hardLinkRetainedBytes;return total; }
 - (NSUInteger)protectedCount { NSUInteger total = 0; for (AxsCacheKeeperSweep *s in self.sweeps) total += s.protectedCount; return total; }
 - (NSUInteger)recentCount { NSUInteger total = 0; for (AxsCacheKeeperSweep *s in self.sweeps) total += s.recentCount; return total; }
 - (NSUInteger)inspected { NSUInteger total = 0; for (AxsCacheKeeperSweep *s in self.sweeps) total += s.inspected; return total; }

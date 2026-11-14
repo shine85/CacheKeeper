@@ -24,6 +24,9 @@
 @property(nonatomic, readonly) BOOL checking;
 @property(nonatomic, readonly) NSUInteger inspected;
 @property(nonatomic, readonly) NSUInteger changedCount;
+// Stable multiple-link files retained by the deletion gate. Counts/bytes are per observed path.
+@property(nonatomic, readonly) NSUInteger hardLinkRetainedCount;
+@property(nonatomic, readonly) unsigned long long hardLinkRetainedBytes;
 @property(nonatomic, readonly) unsigned long long bytes;
 @property(nonatomic, readonly) BOOL hasDeleteCandidates; // 已预检且尚有未推进的可删候选
 @property(nonatomic, readonly) BOOL measurementComplete;

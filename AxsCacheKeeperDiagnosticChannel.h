@@ -8,6 +8,10 @@
 //        finalStatus | register | lookup | send | receive | protocol | replay | timeout | busy
 // errorDomain: none | mach | posix | protocol; errorCode: signed integer
 // errorOrigin: none | local | peer (peer only after authenticating the reply's audit token)
+// localPathStage: none | lsRecord | bundlePath | systemAnchor | bundleMetadata | executableFile |
+//                 kernelExecutable | executableRecheck
+// This detail describes only this process's path checks, even while checking a peer token.
+// A v1 reply has no path detail; errorOrigin=peer always has localPathStage=none.
 // selfIdentity, peerIdentity: notObserved | verified | unexpected | unavailable
 // serverRegister: notObserved | verified | failed
 // "listening" only describes local registration, not peer or container access verification.

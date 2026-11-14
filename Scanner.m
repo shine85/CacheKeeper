@@ -17,6 +17,8 @@
 #import "AxsCacheKeeperCleanupSchedule.h"
 #import "AxsCacheKeeperInspection.h"
 #import "AxsCacheKeeperInstallation.h"
+#import "AxsCacheKeeperPDFSession.h"
+#import "AxsCacheKeeperFileAccess.h"
 static id SRead(id target,NSString *name) { SEL s=NSSelectorFromString(name);return [target respondsToSelector:s]?((id(*)(id,SEL))objc_msgSend)(target,s):nil; }
 static id AxsCacheKeeperAppProxy(NSString *bundle) {
     Class proxy=NSClassFromString(@"LSApplicationProxy"); SEL selector=NSSelectorFromString(@"applicationProxyForIdentifier:");
@@ -28,6 +30,40 @@ static NSURL *Container(NSString *bundle) {
     if (![home isKindOfClass:NSURL.class]) return nil;
     home=home.URLByResolvingSymlinksInPath;
     return [home.path containsString:@"/Containers/Data/Application/"]?home:nil;
+}
+AxsCacheKeeperPDFRoot *axs_cachekeeper_pdf_resolve_root(NSString *bundle,NSString **stage,int *code) {
+    if (stage) *stage=@"containerResolve";if (code) *code=EINVAL;
+    if (!axs_cachekeeper_bundle_id(bundle)) return nil;
+    id app=AxsCacheKeeperAppProxy(bundle);
+    NSURL *home=SRead(app,@"dataContainerURL"),*package=SRead(app,@"bundleURL");
+    if (![SRead(app,@"applicationIdentifier") isEqual:bundle] || ![home isKindOfClass:NSURL.class] || !home.isFileURL) return nil;
+    struct stat original;
+    if (lstat(home.path.fileSystemRepresentation,&original)) {if (code) *code=errno;return nil;}
+    if (!S_ISDIR(original.st_mode)) {if (code) *code=ENOTDIR;return nil;}
+    NSURL *resolved=home.URLByResolvingSymlinksInPath;
+    if (![[NSUUID alloc] initWithUUIDString:resolved.lastPathComponent] || ![resolved.URLByDeletingLastPathComponent.path hasSuffix:@"/Containers/Data/Application"]) return nil;
+    NSError *installationError=nil;
+    NSDictionary *installation=axs_cachekeeper_installation_snapshot(package,bundle,SRead(app,@"shortVersionString"),&installationError);
+    if (!installation) {if (stage) *stage=@"installation";if (code) *code=(int)installationError.code ?: EACCES;return nil;}
+    if (stage) *stage=@"containerOpen";
+    int fd=axs_cachekeeper_open_directory(resolved.path);if (fd<0) {if (code) *code=errno;return nil;}
+    struct stat opened,current;
+    if (fstat(fd,&opened) || lstat(home.path.fileSystemRepresentation,&current) || fcntl(fd,F_SETFD,FD_CLOEXEC)) {
+        if (code) *code=errno;close(fd);return nil;
+    }
+    if (!S_ISDIR(opened.st_mode) || original.st_dev!=opened.st_dev || original.st_ino!=opened.st_ino || current.st_dev!=opened.st_dev || current.st_ino!=opened.st_ino) {
+        if (code) *code=ESTALE;close(fd);return nil;
+    }
+    BOOL (^validator)(void)=^BOOL {
+        id currentApp=AxsCacheKeeperAppProxy(bundle);NSURL *currentHome=SRead(currentApp,@"dataContainerURL");struct stat held,entry;
+        if (![SRead(currentApp,@"applicationIdentifier") isEqual:bundle] || ![currentHome isKindOfClass:NSURL.class] || !currentHome.isFileURL ||
+            ![currentHome.URLByResolvingSymlinksInPath.path isEqual:resolved.path] || fstat(fd,&held) || lstat(currentHome.path.fileSystemRepresentation,&entry) ||
+            !S_ISDIR(entry.st_mode) || entry.st_dev!=opened.st_dev || entry.st_ino!=opened.st_ino || held.st_dev!=opened.st_dev || held.st_ino!=opened.st_ino) return NO;
+        return axs_cachekeeper_validate_installation_snapshot(installation,SRead(currentApp,@"bundleURL"),SRead(currentApp,@"shortVersionString"),nil);
+    };
+    AxsCacheKeeperPDFRoot *root=[[AxsCacheKeeperPDFRoot alloc] initWithDescriptor:fd path:resolved.path validator:validator];
+    if (![root validate]) {if (stage) *stage=@"identityRecheck";if (code) *code=ESTALE;return nil;}
+    if (code) *code=0;return root;
 }
 void CKScanRequests(void) {
     static BOOL busy;
@@ -599,7 +635,8 @@ void CKApplyDirectorySwitches(void) {
             NSUInteger externalFailures=unlocatedRestoreFailures+(discoveryError.length ? 1 : 0)+(purgeErrorMessage.length ? 1 : 0);
             NSDictionary *summary=[AxsCacheKeeperCleanupSchedule summaryForJob:job directories:directoryReports externalFailures:externalFailures discoveryComplete:!discoveryErrors.length];
             NSUInteger failures=[summary[@"failed"] unsignedIntegerValue], recentCount=[summary[@"recent"] unsignedIntegerValue],
-                changedCount=[summary[@"changed"] unsignedIntegerValue], unresolvedCount=[summary[@"unresolved"] unsignedIntegerValue];
+                changedCount=[summary[@"changed"] unsignedIntegerValue], unresolvedCount=[summary[@"unresolved"] unsignedIntegerValue],
+                hardLinkRetained=[summary[@"hardLinkRetained"] unsignedIntegerValue];
             unsigned long long unresolvedBytes=[summary[@"unresolvedBytes"] unsignedLongLongValue];
             AxsCacheKeeperCleanupEndReason endReason=[summary[@"endReason"] integerValue];
             BOOL complete=endReason==AxsCacheKeeperCleanupEndReasonCompleted;
@@ -622,6 +659,7 @@ void CKApplyDirectorySwitches(void) {
                     (capHit ? [NSString stringWithFormat:@"本轮已达单轮上限（2000 项或 120 秒），已清理 %lu 项 · %.2f MB；剩余内容顺延下轮继续", (unsigned long)removed, bytes / 1048576.0] :
                     [NSString stringWithFormat:@"%@；已清理 %lu 项 · %.2f MB；保留 %lu 项受保护内容、%lu 项未知内容待识别、%lu 项近期文件", lead, (unsigned long)removed, bytes / 1048576.0, (unsigned long)protectedCount, (unsigned long)unresolvedCount, (unsigned long)recentCount]);
                 if (changedCount) message=[message stringByAppendingFormat:@"；%lu 项在预检后变化，已跳过等待下轮",(unsigned long)changedCount];
+                if (hardLinkRetained) message=[message stringByAppendingFormat:@"；保留 %lu 个硬链接路径 · %.2f MB 逻辑大小（其他链接归属未核验）",(unsigned long)hardLinkRetained,[summary[@"hardLinkRetainedBytes"] unsignedLongLongValue]/1048576.0];
                 if (hasPlatformRoot) message=[message stringByAppendingString:@"\n标准缓存目录（Library/Caches、tmp）内的文件按平台缓存用途约定处理，不按类型保留（60 秒内新文件除外）"];
                 if (hasLogRoot) message=[message stringByAppendingString:@"\n含用户定级的日志目录：仅清理日志特征文件（.log/.alog/.xlog)，数据与未知内容保留"];
                 if (hasPurgeRoot) message=[message stringByAppendingString:@"\n非标准目录仅处理命中专属规则的文件；其余用途未确认内容保留，具体规则见目录回执"];

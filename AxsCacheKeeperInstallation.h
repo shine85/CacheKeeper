@@ -13,3 +13,8 @@ BOOL axs_cachekeeper_validate_installation_snapshot(NSDictionary *snapshot, NSUR
 // and display entries; never pass this cache to UI/export. Unchanged packages need metadata only.
 // The returned array contains display entries only, without paths, fingerprints or private snapshots.
 NSArray *axs_cachekeeper_installed_applications(NSMutableDictionary *cache, NSError **error);
+// Same registry read, before display filtering. Counts describe registered URLs, not access or deletion.
+NSArray *axs_cachekeeper_installed_applications_with_container_coverage(NSMutableDictionary *cache,
+                                                                       NSDictionary **coverage, NSError **error);
+// Fixed, count-only schema; invalid values return an explicit invalid state. Never exports raw identities.
+NSDictionary *axs_cachekeeper_container_coverage_projection(id coverage);

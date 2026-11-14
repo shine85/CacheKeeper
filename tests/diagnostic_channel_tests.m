@@ -8,6 +8,9 @@
 #include <unistd.h>
 #include <dispatch/dispatch.h>
 #include <mach/notify.h>
+#include <sys/stat.h>
+#include <limits.h>
+#include <stdlib.h>
 
 static void axs_cachekeeper_channel_test_check(BOOL ok,const char *message) {
     if (!ok) { fprintf(stderr,"FAIL: diagnostic channel: %s\n",message);exit(1); }
@@ -29,8 +32,139 @@ static void axs_cachekeeper_channel_test_release_receive(mach_port_t port,BOOL o
     axs_cachekeeper_channel_test_check(axs_cachekeeper_channel_release_receive(port,ownsSend)==KERN_SUCCESS,"release only the owned receive/send rights with SDK-supported API");
 }
 
+static void axs_cachekeeper_channel_test_production_path_selection(NSString *folder) {
+    NSFileManager *fm=NSFileManager.defaultManager;NSError *error=nil;
+    for (NSNumber *host in @[@NO,@YES]) {
+        BOOL springBoard=host.boolValue;
+        NSString *name=springBoard ? @"SpringBoard" : @"Preferences";
+        NSString *anchor=springBoard ? @"/System/Library/CoreServices" : @"/Applications";
+        NSURL *lsURL=[NSURL fileURLWithPath:[anchor stringByAppendingPathComponent:[name stringByAppendingString:@".app"]]];
+        NSString *base=[folder stringByAppendingPathComponent:name];
+        NSString *root=[base stringByAppendingPathComponent:[name stringByAppendingString:@".app"]];
+        NSString *contents=[root stringByAppendingPathComponent:@"Contents"];
+        NSString *executables=[contents stringByAppendingPathComponent:@"MacOS"];
+        axs_cachekeeper_channel_test_check([fm createDirectoryAtPath:executables withIntermediateDirectories:YES attributes:nil error:&error],"create a real native bundle fixture for production path entrypoints");
+        NSDictionary *info=@{@"CFBundleIdentifier":springBoard ? @"com.apple.springboard" : @"com.apple.Preferences",
+            @"CFBundleExecutable":name,@"CFBundlePackageType":@"APPL"};
+        NSString *file=[executables stringByAppendingPathComponent:name];
+        axs_cachekeeper_channel_test_check([info writeToFile:[contents stringByAppendingPathComponent:@"Info.plist"] atomically:YES] &&
+            [fm copyItemAtPath:@"/usr/bin/true" toPath:file error:&error],"use real NSBundle metadata and an actual executable file without loading it");
+        AxsCacheKeeperChannelFailure failure={0};audit_token_t nativeToken;char kernelBytes[4096];
+        axs_cachekeeper_channel_test_check(axs_cachekeeper_channel_self_token(&nativeToken,&failure) &&
+            axs_cachekeeper_channel_token_path(&nativeToken,kernelBytes,&failure),"obtain the fixture runner's real token-bound kernel path without an identity mock");
+        NSString *kernelPath=[NSString stringWithUTF8String:kernelBytes];
+        NSMutableDictionary<NSString *,NSNumber *> *calls=[NSMutableDictionary new];
+        NSDictionary *mapping=@{lsURL.path:root,anchor:base,kernelPath:file};
+        NSString *(^map)(NSString *)=^NSString *(NSString *logical) {
+            calls[logical]=@([calls[logical] unsignedIntegerValue]+1);
+            NSString *mapped=mapping[logical];if (!mapped) errno=ENOENT;return mapped;
+        };
+        NSString *resolvedRoot=nil,*resolvedBase=nil;
+        // These are the exact three semantic entrypoints used by system_executable/authenticate.
+        // The test never supplies a RootFilesystem/ResolvedBundle source selection.
+        axs_cachekeeper_channel_test_check(axs_cachekeeper_channel_system_roots(springBoard,lsURL,map,&resolvedRoot,&resolvedBase,&failure),"production LS and fixed system-anchor combination resolves through the mapper");
+        NSBundle *bundle=[NSBundle bundleWithPath:resolvedRoot];
+        axs_cachekeeper_channel_test_check([bundle.bundleIdentifier isEqual:info[@"CFBundleIdentifier"]],"read metadata from the real fixture NSBundle");
+        NSString *executable=axs_cachekeeper_channel_bundle_executable(bundle,map,&failure);
+        axs_cachekeeper_channel_test_check(executable && calls.count==2 && [calls[lsURL.path] unsignedIntegerValue]==1 &&
+            [calls[anchor] unsignedIntegerValue]==1,"production NSBundle entrypoint preserves the mapped namespace with zero extra conversions");
+        axs_cachekeeper_channel_test_check(axs_cachekeeper_channel_kernel_matches(executable,kernelPath,map,&failure) && calls.count==3 &&
+            [calls[lsURL.path] unsignedIntegerValue]==1 && [calls[anchor] unsignedIntegerValue]==1 && [calls[kernelPath] unsignedIntegerValue]==1,
+            "production kernel comparison converts exactly once and agrees with the NSBundle executable");
+        char canonicalFile[PATH_MAX],canonicalRoot[PATH_MAX],canonicalBase[PATH_MAX];
+        axs_cachekeeper_channel_test_check(realpath(file.fileSystemRepresentation,canonicalFile) && realpath(root.fileSystemRepresentation,canonicalRoot) &&
+            realpath(base.fileSystemRepresentation,canonicalBase) && [executable isEqual:[NSString stringWithUTF8String:canonicalFile]] &&
+            [resolvedRoot isEqual:[NSString stringWithUTF8String:canonicalRoot]] && [resolvedBase isEqual:[NSString stringWithUTF8String:canonicalBase]],
+            "all production path outputs identify the real files rather than merely matching mapper call counts");
+        NSString *(^wrongKernel)(NSString *)=^NSString *(NSString *logical) {return [logical isEqual:kernelPath] ? @"/usr/bin/true" : nil;};
+        axs_cachekeeper_channel_test_check(!axs_cachekeeper_channel_kernel_matches(executable,kernelPath,wrongKernel,&failure) &&
+            failure.pathStage==AxsCacheKeeperChannelPathKernel && failure.domain==AxsCacheKeeperChannelProtocolError && failure.code==2,
+            "a real different kernel executable remains rejected after namespace conversion");
+    }
+}
+
+static void axs_cachekeeper_channel_test_system_paths(void) {
+    AxsCacheKeeperChannelFailure failure={0};
+    NSURL *url=[NSURL fileURLWithPath:@"/Applications/Preferences.app"];
+    axs_cachekeeper_channel_test_check(axs_cachekeeper_channel_validate_system_record(NO,@"com.apple.Preferences",@"System",url,&failure),"known Preferences LS identity and category satisfy metadata boundary only");
+    axs_cachekeeper_channel_test_check(axs_cachekeeper_channel_validate_system_record(YES,@"com.apple.springboard",@"Hidden",url,&failure) &&
+        axs_cachekeeper_channel_validate_system_record(YES,@"com.apple.springboard",@"System",url,&failure),"only exact SpringBoard also accepts the observed Hidden category");
+    for (id type in @[@"User",@"Unknown",@"hidden",NSNull.null]) {
+        axs_cachekeeper_channel_test_check(!axs_cachekeeper_channel_validate_system_record(YES,@"com.apple.springboard",type,url,&failure) &&
+            failure.pathStage==AxsCacheKeeperChannelPathLSRecord,"unknown or user category stays rejected");
+    }
+    axs_cachekeeper_channel_test_check(!axs_cachekeeper_channel_validate_system_record(NO,@"com.apple.Preferences",@"Hidden",url,&failure) &&
+        !axs_cachekeeper_channel_validate_system_record(YES,@"com.example.springboard",@"Hidden",url,&failure) &&
+        !axs_cachekeeper_channel_validate_system_record(YES,@"com.apple.springboard",@"Hidden",[NSURL URLWithString:@"https://example.invalid"],&failure),"Hidden cannot elevate another bundle or non-file URL");
+
+    NSString *folder=[NSTemporaryDirectory() stringByAppendingPathComponent:[@"cachekeeper-channel-path-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+    NSFileManager *fm=NSFileManager.defaultManager;NSError *error=nil;
+    axs_cachekeeper_channel_test_check([fm createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:&error],"create bounded path fixture");
+    @try {
+        axs_cachekeeper_channel_test_production_path_selection(folder);
+        NSString *file=[folder stringByAppendingPathComponent:@"program"],*loop=[folder stringByAppendingPathComponent:@"loop"];
+        axs_cachekeeper_channel_test_check([@"fixture" writeToFile:file atomically:YES encoding:NSUTF8StringEncoding error:&error] &&
+            symlink("loop",loop.fileSystemRepresentation)==0,"create real file and self-loop path fixtures");
+        __block NSUInteger conversions=0;
+        NSString *(^map)(NSString *)=^NSString *(NSString *logical) {
+            conversions++;return [logical isEqual:@"/Applications/Preferences.app/Preferences"] ? file : nil;
+        };
+        NSString *resolved=axs_cachekeeper_channel_resolve_path(@"/Applications/Preferences.app/Preferences",AxsCacheKeeperChannelRootFilesystemPath,
+            AxsCacheKeeperChannelPathBundle,map,&failure);
+        axs_cachekeeper_channel_test_check(resolved && conversions==1,"system namespace input is converted once before realpath");
+        NSString *again=axs_cachekeeper_channel_resolve_path(resolved,AxsCacheKeeperChannelResolvedBundlePath,
+            AxsCacheKeeperChannelPathFile,map,&failure);
+        axs_cachekeeper_channel_test_check([again isEqual:resolved] && conversions==1,"NSBundle path already in host namespace never receives a second conversion");
+        NSString *(^identity)(NSString *)=^NSString *(NSString *path) {return path;};
+        NSString *missing=[folder stringByAppendingPathComponent:@"missing"];
+        for (NSArray *sample in @[@[missing,@(ENOENT)],@[[file stringByAppendingPathComponent:@"child"],@(ENOTDIR)],@[loop,@(ELOOP)]]) {
+            axs_cachekeeper_channel_test_check(!axs_cachekeeper_channel_resolve_path(sample[0],AxsCacheKeeperChannelRootFilesystemPath,
+                AxsCacheKeeperChannelPathKernel,identity,&failure) && failure.code==[sample[1] intValue] &&
+                failure.domain==AxsCacheKeeperChannelPOSIXError && failure.pathStage==AxsCacheKeeperChannelPathKernel &&
+                failure.stage==AxsCacheKeeperChannelExecutable,"real realpath failure preserves exact errno and local path step");
+        }
+        // RootHide may return an input copy after a mapping error; returning a path is not success.
+        NSString *(^failedMap)(NSString *)=^NSString *(NSString *path) {errno=EACCES;return path;};
+        axs_cachekeeper_channel_test_check(!axs_cachekeeper_channel_resolve_path(file,AxsCacheKeeperChannelRootFilesystemPath,
+            AxsCacheKeeperChannelPathBundle,failedMap,&failure) && failure.code==EACCES,"mapping error is preserved even when the SDK returns an input path");
+        unichar embedded[]={ '/', 'x', 0, 'y' };
+        for (id invalid in @[@"relative",[NSString stringWithCharacters:embedded length:4],NSNull.null]) {
+            axs_cachekeeper_channel_test_check(!axs_cachekeeper_channel_resolve_path(invalid,AxsCacheKeeperChannelRootFilesystemPath,
+                AxsCacheKeeperChannelPathBundle,map,&failure) && conversions==1,"invalid input is rejected before invoking RootHide");
+        }
+        axs_cachekeeper_channel_test_check(!axs_cachekeeper_channel_resolve_path(file,(AxsCacheKeeperChannelPathSource)99,
+            AxsCacheKeeperChannelPathBundle,map,&failure),"unknown namespace source cannot skip conversion");
+        // The native suite runs on macOS. A real root-owned system app isolates the parent-anchor
+        // check from owner rejection; satisfying this file boundary is not host authentication.
+        NSString *systemRoot=axs_cachekeeper_channel_resolve_path(@"/System/Library/CoreServices/Finder.app",AxsCacheKeeperChannelResolvedBundlePath,
+            AxsCacheKeeperChannelPathBundle,nil,&failure);
+        axs_cachekeeper_channel_test_check(systemRoot && axs_cachekeeper_channel_validate_bundle_root(systemRoot,systemRoot.stringByDeletingLastPathComponent,&failure) &&
+            !axs_cachekeeper_channel_validate_bundle_root(systemRoot,folder,&failure),"even a real root-owned system bundle is rejected outside the expected anchor");
+        NSString *outside=[folder stringByAppendingPathComponent:@"outside.app"];
+        axs_cachekeeper_channel_test_check([fm createDirectoryAtPath:outside withIntermediateDirectories:NO attributes:nil error:&error],"create real bundle-shaped directory outside trusted anchor");
+        axs_cachekeeper_channel_test_check(!axs_cachekeeper_channel_validate_bundle_root(outside,[folder stringByAppendingPathComponent:@"Applications"],&failure) &&
+            failure.stage==AxsCacheKeeperChannelSystemURL && failure.pathStage==AxsCacheKeeperChannelPathAnchor && failure.code==2,"real directory outside system anchor stays rejected");
+        NSDictionary *local=axs_cachekeeper_channel_result(@"unavailable",failure,@"unavailable",@"notObserved",@"notObserved");
+        axs_cachekeeper_channel_test_check([local[@"localPathStage"] isEqual:@"systemAnchor"] && [local[@"errorOrigin"] isEqual:@"local"] &&
+            [local[@"peerIdentity"] isEqual:@"notObserved"],"path failure exposes only the local fixed step");
+        failure.peer=YES;
+        NSDictionary *remote=axs_cachekeeper_channel_result(@"rejected",failure,@"verified",@"verified",@"verified");
+        axs_cachekeeper_channel_test_check([remote[@"localPathStage"] isEqual:@"none"],"HELLO v1 remote failure never inherits local detail");
+        uint8_t nonce[16]={1};AxsCacheKeeperChannelMessage message;
+        axs_cachekeeper_channel_encode(&message,YES,nonce,MACH_PORT_NULL,MACH_PORT_NULL,AxsCacheKeeperChannelDenied,failure);
+        axs_cachekeeper_channel_test_check(message.version==1 && message.reserved==0 && sizeof(message)==68 &&
+            message.stage==AxsCacheKeeperChannelSystemURL && message.code==2,"local path step does not change HELLO v1 wire size or reserved bytes");
+        failure.pathStage=(AxsCacheKeeperChannelPathStage)99;
+        axs_cachekeeper_channel_test_check([axs_cachekeeper_channel_result(@"rejected",failure,@"verified",@"verified",@"verified")[@"state"] isEqual:@"invalid"],
+            "unknown internal path step is rejected before fixed-name array lookup");
+    } @finally {
+        axs_cachekeeper_channel_test_check([fm removeItemAtPath:folder error:&error],"remove only the path fixtures created by this test");
+    }
+}
+
 void axs_cachekeeper_run_diagnostic_channel_tests(void) {
     @autoreleasepool {
+        axs_cachekeeper_channel_test_system_paths();
         mach_port_type_t releasedType=0;
         mach_port_t receiveOnly=axs_cachekeeper_channel_test_port(NO);
         axs_cachekeeper_channel_test_release_receive(receiveOnly,NO);

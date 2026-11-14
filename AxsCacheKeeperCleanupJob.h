@@ -47,6 +47,8 @@ typedef NS_ENUM(NSInteger, AxsCacheKeeperCleanupEndReason) {
 @property(nonatomic, readonly) NSUInteger removed;
 @property(nonatomic, readonly) NSUInteger failed;
 @property(nonatomic, readonly) NSUInteger changedCount;
+@property(nonatomic, readonly) NSUInteger hardLinkRetainedCount;
+@property(nonatomic, readonly) unsigned long long hardLinkRetainedBytes;
 @property(nonatomic, readonly) NSUInteger protectedCount;
 @property(nonatomic, readonly) NSUInteger recentCount;
 @property(nonatomic, readonly) NSUInteger inspected;

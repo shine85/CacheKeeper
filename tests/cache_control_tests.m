@@ -85,6 +85,8 @@ extern void axs_cachekeeper_run_network_cache_tests(NSString *fixture);
 extern void axs_cachekeeper_run_diagnostic_channel_tests(void);
 extern void axs_cachekeeper_run_diagnostic_channel_export_tests(void);
 extern void axs_cachekeeper_run_search_diagnostics_tests(void);
+extern void axs_cachekeeper_run_pdf_inspection_tests(NSString *fixture);
+extern void axs_cachekeeper_run_pdf_session_tests(NSString *fixture);
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
@@ -1714,6 +1716,8 @@ int main(int argc, const char *argv[]) {
         axs_cachekeeper_run_app_retention_tests(fixture);
         axs_cachekeeper_run_installation_tests(fixture);
         axs_cachekeeper_run_network_cache_tests(fixture);
+        axs_cachekeeper_run_pdf_inspection_tests(fixture);
+        axs_cachekeeper_run_pdf_session_tests(fixture);
         puts("PASS: configuration, modes, deduplication, age, protected files, cleanup, cancellation, permission restoration, receipts and URLCache");
     }
     return 0;

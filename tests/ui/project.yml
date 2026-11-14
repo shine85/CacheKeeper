@@ -23,9 +23,12 @@ targets:
       - path: ../../AxsCacheKeeperAppList.m
       - path: ../../AxsCacheKeeperInstallation.m
       - path: ../../AxsCacheKeeperDiagnosticChannel.m
+      - path: ../../AxsCacheKeeperPDFSession.m
+      - path: ../../AxsCacheKeeperPDFInspection.m
     settings:
       base:
         HEADER_SEARCH_PATHS: "$(SRCROOT)/../../tests/ui/include $(SRCROOT)/../../tests/include"
+        GCC_PREPROCESSOR_DEFINITIONS: "$(inherited) AXS_CACHEKEEPER_PDF_CLIENT=1"
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
   InputUITests:
     type: bundle.ui-testing

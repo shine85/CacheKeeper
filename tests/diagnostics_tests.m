@@ -1,3 +1,4 @@
+#include <math.h>
 #import <Foundation/Foundation.h>
 #import "../AxsCacheKeeperDiagnostics.h"
 
@@ -228,5 +229,56 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     AxsCacheKeeperDiagnostics *empty=[[cls alloc] initWithFolder:[fixture stringByAppendingPathComponent:@"no-config"]];
     NSDictionary *emptyReport=[empty reportWithApps:@[] environment:@{}];
     dxcheck([emptyReport[@"collection"][@"total"] isEqual:@0] && [emptyReport[@"sourceStates"][@"configuration"] isEqual:@"missing"],@"无配置报告保留缺失状态");
+    NSMutableDictionary *role=[@{@"state":@"available",@"registeredURLCount":@1,@"associationCount":@1} mutableCopy];
+    for (NSString *key in @[@"observedSourceCount",@"missingSelectorCount",@"notProvidedCount",@"invalidSourceCount",@"invalidAssociationCount",@"ownerMismatchCount",@"unavailableOwnerCount",@"truncatedCount"]) role[key]=@0;
+    role[@"observedSourceCount"]=@1;role[@"rawPluginIdentifier"]=@"private-plugin-id";
+    NSMutableDictionary *coverage=[@{@"schemaVersion":@1,@"state":@"available",@"sourceState":@"available",@"observedRegistrations":@1,
+        @"invalidRegistrationCount":@0,@"truncatedRegistrationCount":@0,@"allRolesUniqueRegisteredURLCount":@1,@"countsAreLowerBounds":@NO,
+        @"home":role,@"group":role,@"extension":role,@"path":@"/private/secret-container"} mutableCopy];
+    NSDictionary *(^project)(void)=^NSDictionary *{return [empty reportWithApps:nil environment:@{@"containerCoverage":coverage}][@"containerCoverage"];};
+    NSDictionary *projected=project();
+    dxcheck([projected[@"state"] isEqual:@"available"] && !projected[@"path"] && !projected[@"extension"][@"rawPluginIdentifier"],@"容器诊断固定白名单丢弃恶意路径和插件ID");
+    coverage[@"schemaVersion"]=@2;dxcheck([project()[@"state"] isEqual:@"invalid"],@"未知容器摘要版本明确invalid");coverage[@"schemaVersion"]=@1;
+    coverage[@"observedRegistrations"]=@YES;dxcheck([project()[@"state"] isEqual:@"invalid"],@"布尔不能冒充容器登记计数");coverage[@"observedRegistrations"]=@1;
+    coverage[@"countsAreLowerBounds"]=@1;dxcheck([project()[@"state"] isEqual:@"invalid"],@"整数不能冒充lowerBounds布尔");coverage[@"countsAreLowerBounds"]=@NO;
+    role[@"invalidSourceCount"]=@1;dxcheck([project()[@"state"] isEqual:@"invalid"],@"含无效来源的角色不能伪装完整available");role[@"invalidSourceCount"]=@0;
+    role[@"registeredURLCount"]=@3;dxcheck([project()[@"state"] isEqual:@"invalid"],@"登记URL数不得超过角色关联数");role[@"registeredURLCount"]=@1;
+    // Each role gets an independent fixture so an impossible count cannot hide in another role.
+    for (NSString *name in @[@"home",@"group",@"extension"]) coverage[name]=[role mutableCopy];
+    for (NSString *name in @[@"home",@"group",@"extension"]) {
+        NSMutableDictionary *candidate=coverage[name];candidate[@"registeredURLCount"]=@0;
+        NSDictionary *rejected=project();
+        dxcheck([rejected[@"state"] isEqual:@"invalid"] && !rejected[@"home"] && !rejected[@"observedRegistrations"],@"每个角色零URL正关联均拒绝且不输出可信计数");
+        candidate[@"registeredURLCount"]=@1;
+    }
+    NSMutableDictionary *homeRole=coverage[@"home"];
+    homeRole[@"notProvidedCount"]=@2;
+    dxcheck([project()[@"state"] isEqual:@"invalid"],@"home未提供数量不得超过已观察来源");
+    homeRole[@"notProvidedCount"]=@1;
+    dxcheck([project()[@"state"] isEqual:@"invalid"],@"home关联加未提供数量不得超过来源");
+    homeRole[@"notProvidedCount"]=@0;
+    coverage[@"observedRegistrations"]=@2;
+    homeRole[@"observedSourceCount"]=@2;
+    dxcheck([project()[@"state"] isEqual:@"available"],@"重复APP登记去重后home关联加未提供可小于来源");
+    homeRole[@"notProvidedCount"]=@1;
+    dxcheck([project()[@"state"] isEqual:@"available"],@"home关联加未提供等于来源为合法边界");
+    homeRole[@"notProvidedCount"]=@0;homeRole[@"observedSourceCount"]=@1;coverage[@"observedRegistrations"]=@1;
+    for (NSNumber *bad in @[@(NAN),@(-1),@0.5]) {
+        coverage[@"observedRegistrations"]=bad;
+        dxcheck([project()[@"state"] isEqual:@"invalid"],@"顶层计数拒绝NaN、负数和小数");
+        coverage[@"observedRegistrations"]=@1;
+        for (NSString *name in @[@"home",@"group",@"extension"]) {
+            NSMutableDictionary *candidate=coverage[name];candidate[@"associationCount"]=bad;
+            dxcheck([project()[@"state"] isEqual:@"invalid"],@"各角色计数拒绝NaN、负数和小数");
+            candidate[@"associationCount"]=@1;
+        }
+    }
+    for (NSString *name in @[@"home",@"group",@"extension"]) coverage[name]=role;
+    role[@"state"]=@"unavailable";role[@"observedSourceCount"]=@0;
+    dxcheck([project()[@"state"] isEqual:@"invalid"],@"来源不可用不接受伪造零计数");
+    dxwrite(folder,@"Status/test.active.auto.plist",@{@"directories":@{@"Library/Caches":@{@"hardLinkRetained":@2,@"hardLinkRetainedBytes":@26,@"changed":@0,@"hardLinkRetentionReason":@"multipleLinks"}}});
+    NSDictionary *retained=[session reportWithApps:@[@{@"id":@"test.active"}] environment:@{}][@"apps"][0][@"cleanup"][@"data"][@"directories"][0];
+    dxcheck([retained[@"hardLinkRetained"] isEqual:@2] && [retained[@"hardLinkRetainedBytes"] isEqual:@26] &&
+        [retained[@"changed"] isEqual:@0] && [retained[@"hardLinkRetentionReason"] isEqual:@"multipleLinks"],@"硬链接保留计数、逻辑字节和固定原因由已有诊断导出保留");
     printf("PASS: diagnostic saved-record aggregation, privacy, fixed progress, missing records and zero filesystem writes\n");
 }

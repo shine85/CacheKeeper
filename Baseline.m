@@ -38,6 +38,8 @@
 @property(nonatomic, readwrite) BOOL checking;
 @property(nonatomic, readwrite) NSUInteger inspected;
 @property(nonatomic, readwrite) NSUInteger changedCount;
+@property(nonatomic, readwrite) NSUInteger hardLinkRetainedCount;
+@property(nonatomic, readwrite) unsigned long long hardLinkRetainedBytes;
 @property(nonatomic,copy) NSString *verifyDetail;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSArray *> *directorySnapshots;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSMutableDictionary *> *fileSnapshots;
@@ -162,6 +164,10 @@
         @"recent":@(self.recentCount), @"changed":@(self.changedCount), @"remaining":@(self.remainingCandidates),
         @"remainingBytes":@(self.remainingBytes), @"deferred":@(self.deferredCount), @"deferredBytes":@(self.deferredBytes),
         @"unresolved":@(self.unresolvedCount), @"unresolvedBytes":@(self.unresolvedBytes)}];
+    if (self.measurementComplete) {
+        report[@"hardLinkRetained"]=@(self.hardLinkRetainedCount);report[@"hardLinkRetainedBytes"]=@(self.hardLinkRetainedBytes);
+        if (self.hardLinkRetainedCount) report[@"hardLinkRetentionReason"]=@"multipleLinks";
+    }
     return [report copy];
 }
 // 预检快照里的文件大小（索引 6）；无快照（预检后新增）返回 0，不伪造。
@@ -171,7 +177,7 @@
 }
 - (NSArray *)axs_cachekeeper_snapshot:(struct stat)info {
     return @[@(info.st_ino),@(info.st_dev),@(info.st_mtimespec.tv_sec),@(info.st_mtimespec.tv_nsec),
-        @(info.st_ctimespec.tv_sec),@(info.st_ctimespec.tv_nsec),@(info.st_size)];
+        @(info.st_ctimespec.tv_sec),@(info.st_ctimespec.tv_nsec),@(info.st_size),@(info.st_nlink)];
 }
 // 目录快照的记录键统一标准化：枚举器给出的目录路径形态（尾随斜杠等）与删除时构造/剥离的形态
 // 在真机上可能不一致，键不统一会让复核全灭（31.1 真机 alog 身份核对失败、删除 0）。
@@ -431,6 +437,16 @@
     int file = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
     if (file<0) { int code=errno;close(fd);[self axs_cachekeeper_failure:@"openat-file" code:code path:entry detail:@""];return NO; }
     if (fstat(file,&current)) { int code=errno;close(file);close(fd);[self axs_cachekeeper_failure:@"fstat-file" code:code path:entry detail:@""];return NO; }
+    if (![[self axs_cachekeeper_snapshot:current] isEqual:record]) {
+        self.changedCount++;self.changedBytes += [self axs_cachekeeper_snapshot_bytes:entry];
+        self.error=@"预检后文件或硬链接数发生变化，已跳过该文件";
+        close(file);close(fd);errno=EBUSY;return NO;
+    }
+    if (S_ISREG(current.st_mode) && current.st_nlink!=1) {
+        // The open path and ancestor chain still match preflight. Other inode aliases have no deletion grant.
+        self.hardLinkRetainedCount++;self.hardLinkRetainedBytes += current.st_size>0 ? (unsigned long long)current.st_size : 0;
+        close(file);close(fd);errno=EMLINK;return NO;
+    }
     if (S_ISREG(current.st_mode) && current.st_nlink == 1 &&
         current.st_ino == expected.st_ino && current.st_dev == expected.st_dev &&
         axs_cachekeeper_old_enough(current, self.clock())) {
@@ -439,6 +455,9 @@
         struct stat final;
         if (fstatat(fd,name,&final,AT_SYMLINK_NOFOLLOW)) {
             int code=errno;[self axs_cachekeeper_failure:@"fstatat-final" code:code path:entry detail:@""];
+        } else if (![[self axs_cachekeeper_snapshot:final] isEqual:record] || final.st_nlink!=1) {
+            self.changedCount++;self.changedBytes += [self axs_cachekeeper_snapshot_bytes:entry];
+            self.error=@"预检后文件或硬链接数发生变化，已跳过该文件";errno=EBUSY;
         } else if (final.st_ino == current.st_ino && final.st_dev == current.st_dev && axs_cachekeeper_old_enough(final, self.clock())) {
             if (!willDelete()) { self.cancelled=YES; close(file); close(fd); errno=ECANCELED; return NO; }
             int result=self.unlinkFile(fd,name);int code=result ? errno : 0;
@@ -574,11 +593,11 @@
             continue;
         }
         if (S_ISLNK(info.st_mode) || !S_ISREG(info.st_mode)) { self.changedCount++; continue; }
-        if (info.st_nlink != 1) { self.changedCount++; self.changedBytes += info.st_size; self.error=@"共享硬链接暂不清理，避免影响根外数据"; continue; }
         if (!axs_cachekeeper_old_enough(info, self.clock())) { self.recentCount++; self.recentBytes += info.st_size; continue; }
+        NSUInteger retainedBefore=self.hardLinkRetainedCount;
         if ([self axs_cachekeeper_remove:entry expected:info willDelete:willDelete]) { self.removed++; self.bytes += info.st_size; }
         else if (self.cancelled) { self.deleteCursor--; return; }
-        else if (errno != ENOENT && errno != EBUSY) { self.failed++; [self.failedCandidates addObject:entry]; }
+        else if (self.hardLinkRetainedCount==retainedBefore && errno != ENOENT && errno != EBUSY) { self.failed++; [self.failedCandidates addObject:entry]; }
     }
 }
 

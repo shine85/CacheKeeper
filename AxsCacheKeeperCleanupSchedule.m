@@ -54,19 +54,21 @@ static NSArray *AxsCacheKeeperRangeStamp(struct stat info) {
 }
 + (NSDictionary *)summaryForJob:(AxsCacheKeeperCleanupJob *)job directories:(NSDictionary *)directories
               externalFailures:(NSUInteger)externalFailures discoveryComplete:(BOOL)discoveryComplete {
-    NSUInteger failed=externalFailures, recent=0, changed=0, unresolved=0, remaining=0;
-    unsigned long long unresolvedBytes=0;
+    NSUInteger failed=externalFailures, recent=0, changed=0, unresolved=0, remaining=0, hardLinkRetained=0;
+    unsigned long long unresolvedBytes=0,hardLinkRetainedBytes=0;
     BOOL coverage=discoveryComplete && !externalFailures;
     for (NSDictionary *report in directories.allValues) {
         failed += [report[@"failed"] unsignedIntegerValue]; recent += [report[@"recent"] unsignedIntegerValue];
         changed += [report[@"changed"] unsignedIntegerValue]; remaining += [report[@"remaining"] unsignedIntegerValue];
         unresolved += [report[@"unresolved"] unsignedIntegerValue]; unresolvedBytes += [report[@"unresolvedBytes"] unsignedLongLongValue];
+        hardLinkRetained += [report[@"hardLinkRetained"] unsignedIntegerValue];hardLinkRetainedBytes += [report[@"hardLinkRetainedBytes"] unsignedLongLongValue];
         coverage = coverage && [report[@"coverageComplete"] boolValue];
     }
     AxsCacheKeeperCleanupEndReason reason=job.endReason;
     if (reason==AxsCacheKeeperCleanupEndReasonCompleted && unresolved) reason=AxsCacheKeeperCleanupEndReasonUnresolved;
     return @{@"removed":@(job.removed), @"failed":@(failed), @"recent":@(recent), @"changed":@(changed),
         @"remaining":@(remaining), @"unresolved":@(unresolved), @"unresolvedBytes":@(unresolvedBytes),
+        @"hardLinkRetained":@(hardLinkRetained),@"hardLinkRetainedBytes":@(hardLinkRetainedBytes),
         @"endReason":@(reason), @"coverageComplete":@(coverage)};
 }
 + (NSTimeInterval)quietIntervalForSummary:(NSDictionary *)summary {
@@ -74,6 +76,7 @@ static NSArray *AxsCacheKeeperRangeStamp(struct stat info) {
         ![summary[@"removed"] unsignedIntegerValue] && ![summary[@"failed"] unsignedIntegerValue] &&
         ![summary[@"recent"] unsignedIntegerValue] && ![summary[@"changed"] unsignedIntegerValue] &&
         ![summary[@"remaining"] unsignedIntegerValue] && ![summary[@"unresolved"] unsignedIntegerValue] &&
+        ![summary[@"hardLinkRetained"] unsignedIntegerValue] &&
         [summary[@"coverageComplete"] boolValue] ? 1800 : 30;
 }
 + (BOOL)retireJob:(AxsCacheKeeperCleanupJob *)job bundle:(NSString *)bundle message:(NSString *)message {

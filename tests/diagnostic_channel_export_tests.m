@@ -9,7 +9,7 @@ void axs_cachekeeper_run_diagnostic_channel_export_tests(void) {
     NSString *folder=[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
     AxsCacheKeeperDiagnostics *session=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:folder];
     NSDictionary *verified=@{@"protocolVersion":@1,@"state":@"verified",@"stage":@"none",@"errorDomain":@"none",
-        @"errorCode":@0,@"errorOrigin":@"none",@"selfIdentity":@"verified",@"peerIdentity":@"verified",@"serverRegister":@"verified"};
+        @"errorCode":@0,@"errorOrigin":@"none",@"localPathStage":@"none",@"selfIdentity":@"verified",@"peerIdentity":@"verified",@"serverRegister":@"verified"};
     NSDictionary *report=[session reportWithApps:@[] environment:@{@"diagnosticChannel":verified}];
     axs_cachekeeper_channel_export_check([report[@"diagnosticChannel"] isEqual:verified],@"握手状态必须进入内存诊断报告");
     NSMutableDictionary *private=[verified mutableCopy];
@@ -21,9 +21,27 @@ void axs_cachekeeper_run_diagnostic_channel_export_tests(void) {
     NSString *json=[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     axs_cachekeeper_channel_export_check(data && ![json containsString:@"private-sentinel"],@"只序列化经过投影的状态");
     NSDictionary *unconnected=@{@"protocolVersion":@1,@"state":@"unavailable",@"stage":@"lookup",@"errorDomain":@"mach",
-        @"errorCode":@1102,@"errorOrigin":@"local",@"selfIdentity":@"verified",@"peerIdentity":@"notObserved",@"serverRegister":@"notObserved"};
+        @"errorCode":@1102,@"errorOrigin":@"local",@"localPathStage":@"none",@"selfIdentity":@"verified",@"peerIdentity":@"notObserved",@"serverRegister":@"notObserved"};
     report=[session reportWithApps:@[] environment:@{@"diagnosticChannel":unconnected}];
     axs_cachekeeper_channel_export_check([report[@"diagnosticChannel"] isEqual:unconnected],@"lookup 失败不得编造远端注册或身份结果");
+    for (NSString *pathStage in @[@"lsRecord",@"bundlePath",@"systemAnchor",@"bundleMetadata",@"executableFile",@"kernelExecutable",@"executableRecheck"]) {
+        NSMutableDictionary *local=[unconnected mutableCopy];
+        local[@"stage"]=[pathStage hasPrefix:@"kernel"] || [pathStage isEqual:@"executableRecheck"] ? @"executable" : @"systemURL";
+        local[@"errorDomain"]=@"posix";local[@"errorCode"]=@2;local[@"localPathStage"]=pathStage;
+        local[@"selfIdentity"]=@"unavailable";
+        report=[session reportWithApps:@[] environment:@{@"diagnosticChannel":local}];
+        axs_cachekeeper_channel_export_check([report[@"diagnosticChannel"] isEqual:local],@"本地路径子阶段仅按固定枚举导出，不声称观察到对端");
+        NSString *expectedStage=local[@"stage"];local[@"stage"]=@"lookup";
+        report=[session reportWithApps:@[] environment:@{@"diagnosticChannel":local}];
+        axs_cachekeeper_channel_export_check([report[@"diagnosticChannel"][@"state"] isEqual:@"invalid"],@"路径子阶段不能与无关主阶段拼接");
+        local[@"stage"]=expectedStage;
+        local[@"errorOrigin"]=@"peer";local[@"peerIdentity"]=@"verified";
+        report=[session reportWithApps:@[] environment:@{@"diagnosticChannel":local}];
+        axs_cachekeeper_channel_export_check([report[@"diagnosticChannel"][@"state"] isEqual:@"invalid"],@"HELLO v1 对端未传递路径子阶段，不能报告成对端事实");
+    }
+    NSMutableDictionary *unverifiedPeer=[unconnected mutableCopy];unverifiedPeer[@"errorOrigin"]=@"peer";
+    report=[session reportWithApps:@[] environment:@{@"diagnosticChannel":unverifiedPeer}];
+    axs_cachekeeper_channel_export_check([report[@"diagnosticChannel"][@"state"] isEqual:@"invalid"],@"未认证的回复不能报告对端错误");
     report=[session reportWithApps:@[] environment:@{}];
     axs_cachekeeper_channel_export_check([report[@"diagnosticChannel"] isEqual:@{@"state":@"notObserved"}],@"未调用握手与失败必须分开");
     for (id invalid in @[NSNull.null,@42,@[],@"private-sentinel"]) {
@@ -32,6 +50,7 @@ void axs_cachekeeper_run_diagnostic_channel_export_tests(void) {
     }
     NSDictionary *invalidValues=@{@"protocolVersion":@[@YES,@2,@1.5],@"state":@[@"private-sentinel",@42],
         @"stage":@[@"private-sentinel",@[]],@"errorDomain":@[@"private-sentinel"],@"errorOrigin":@[@"private-sentinel"],
+        @"localPathStage":@[@"private-sentinel",@42,@[]],
         @"errorCode":@[@"private-sentinel",@YES,@(NAN),@(INFINITY),@0.5,@(INT64_MAX)],
         @"selfIdentity":@[@"private-sentinel"],@"peerIdentity":@[@"private-sentinel"],@"serverRegister":@[@"private-sentinel"]};
     for (NSString *key in invalidValues) {

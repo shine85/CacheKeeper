@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <limits.h>
+#include <math.h>
 
 static BOOL axs_cachekeeper_installation_error(NSError **error, NSInteger code, NSString *message) {
     if (error) *error=[NSError errorWithDomain:@"dev.local.cachekeeper.installation" code:code userInfo:@{NSLocalizedDescriptionKey:message}];
@@ -156,16 +157,232 @@ static id axs_cachekeeper_installation_property(id object, NSString *name) {
     SEL selector=NSSelectorFromString(name);
     return [object respondsToSelector:selector] ? ((id(*)(id,SEL))objc_msgSend)(object,selector) : nil;
 }
-NSArray *axs_cachekeeper_installed_applications(NSMutableDictionary *cache, NSError **error) {
+// These private system getters are object-returning, zero-argument selectors in the checked SDK.
+// A missing getter, nil response, and incompatible runtime signature remain separate facts.
+static id axs_cachekeeper_coverage_property(id object, NSString *name, NSString **state) {
+    SEL selector=NSSelectorFromString(name);
+    if (![object respondsToSelector:selector]) { *state=@"missingSelector";return nil; }
+    NSMethodSignature *signature=[object methodSignatureForSelector:selector];
+    if (!signature || signature.numberOfArguments!=2 || signature.methodReturnType[0]!='@' ||
+        signature.methodReturnLength!=sizeof(id)) { *state=@"invalid";return nil; }
+    @try {
+        id value=((id(*)(id,SEL))objc_msgSend)(object,selector);
+        *state=value ? @"available" : @"unavailable";return value;
+    } @catch (NSException *exception) {
+        (void)exception;*state=@"invalid";return nil;
+    }
+}
+static NSString *axs_cachekeeper_coverage_url(id value) {
+    if (![value isKindOfClass:NSURL.class]) return nil;
+    NSURL *url=value;
+    if (!url.isFileURL || url.host.length || url.user.length || url.password.length || url.port || url.query || url.fragment ||
+        !axs_cachekeeper_installation_string(url.absoluteString,YES) || url.absoluteString.length>PATH_MAX ||
+        !axs_cachekeeper_installation_string(url.path,YES) || !url.path.isAbsolutePath || [url.path isEqual:@"/"] ||
+        [url.path.pathComponents containsObject:@".."] || [url.path.pathComponents containsObject:@"."]) return nil;
+    // Exact URL string identity only: do not resolve aliases, stat directories, or imply physical uniqueness.
+    return url.absoluteString;
+}
+static NSArray *axs_cachekeeper_coverage_count_keys(void) {
+    return @[@"observedSourceCount",@"missingSelectorCount",@"notProvidedCount",@"invalidSourceCount",@"invalidAssociationCount",
+        @"ownerMismatchCount",@"unavailableOwnerCount",@"truncatedCount"];
+}
+static NSMutableDictionary *axs_cachekeeper_coverage_role(void) {
+    NSMutableDictionary *role=[NSMutableDictionary new];
+    for (NSString *key in axs_cachekeeper_coverage_count_keys()) role[key]=@0;
+    role[@"_associations"]=[NSMutableDictionary new];role[@"_invalidAssociations"]=[NSMutableSet new];return role;
+}
+static void axs_cachekeeper_coverage_increment(NSMutableDictionary *role, NSString *key) {
+    role[key]=@([role[key] unsignedIntegerValue]+1);
+}
+static BOOL axs_cachekeeper_coverage_source(NSMutableDictionary *role, NSString *state) {
+    if ([state isEqual:@"available"]) return YES;
+    axs_cachekeeper_coverage_increment(role,[state isEqual:@"missingSelector"] ? @"missingSelectorCount" :
+        [state isEqual:@"invalid"] ? @"invalidSourceCount" : @"notProvidedCount");return NO;
+}
+static void axs_cachekeeper_coverage_associate(NSMutableDictionary *role, NSArray *identity, NSString *url) {
+    NSMutableDictionary *associations=role[@"_associations"];NSMutableSet *invalid=role[@"_invalidAssociations"];
+    if ([invalid containsObject:identity]) return;
+    NSString *previous=associations[identity];
+    if (previous && ![previous isEqual:url]) {
+        [associations removeObjectForKey:identity];[invalid addObject:identity];
+        axs_cachekeeper_coverage_increment(role,@"invalidAssociationCount");return;
+    }
+    associations[identity]=url;
+}
+static BOOL axs_cachekeeper_coverage_budget(NSMutableDictionary *role, NSUInteger *used) {
+    // Shared per-role work budget bounds private URL/identifier sets across all owners.
+    if (*used>=16384) { axs_cachekeeper_coverage_increment(role,@"truncatedCount");return NO; }
+    (*used)++;return YES;
+}
+static void axs_cachekeeper_coverage_registration(id proxy, NSString *owner, NSMutableDictionary *home,
+    NSMutableDictionary *group, NSMutableDictionary *extension, NSUInteger *groupUsed, NSUInteger *extensionUsed) {
+    NSString *state=nil;
+    id value=axs_cachekeeper_coverage_property(proxy,@"dataContainerURL",&state);
+    if ([state isEqual:@"unavailable"]) {
+        // A present dataContainerURL getter returning nil explicitly reports no independent home.
+        axs_cachekeeper_coverage_increment(home,@"observedSourceCount");axs_cachekeeper_coverage_increment(home,@"notProvidedCount");
+    } else if (axs_cachekeeper_coverage_source(home,state)) {
+        NSString *url=axs_cachekeeper_coverage_url(value);
+        if (url) { axs_cachekeeper_coverage_increment(home,@"observedSourceCount");axs_cachekeeper_coverage_associate(home,@[owner,@"home"],url); }
+        else axs_cachekeeper_coverage_increment(home,@"invalidSourceCount");
+    }
+    value=axs_cachekeeper_coverage_property(proxy,@"groupContainerURLs",&state);
+    if (axs_cachekeeper_coverage_source(group,state)) {
+        if (![value isKindOfClass:NSDictionary.class]) axs_cachekeeper_coverage_increment(group,@"invalidSourceCount");
+        else {
+            axs_cachekeeper_coverage_increment(group,@"observedSourceCount");
+            for (id identifier in value) {
+                if (!axs_cachekeeper_coverage_budget(group,groupUsed)) break;
+                NSString *url=axs_cachekeeper_coverage_url(value[identifier]);
+                if (!axs_cachekeeper_bundle_id(identifier) || !url) axs_cachekeeper_coverage_increment(group,@"invalidAssociationCount");
+                else axs_cachekeeper_coverage_associate(group,@[owner,identifier],url);
+            }
+        }
+    }
+    // Extensions and groups are sampled even when no independent home exists.
+    value=axs_cachekeeper_coverage_property(proxy,@"plugInKitPlugins",&state);
+    if (!axs_cachekeeper_coverage_source(extension,state)) return;
+    if (![value isKindOfClass:NSArray.class]) { axs_cachekeeper_coverage_increment(extension,@"invalidSourceCount");return; }
+    axs_cachekeeper_coverage_increment(extension,@"observedSourceCount");
+    for (id plugin in value) {
+        if (!axs_cachekeeper_coverage_budget(extension,extensionUsed)) break;
+        NSString *identifierState=nil,*parentState=nil,*ownerState=nil,*urlState=nil;
+        id identifier=axs_cachekeeper_coverage_property(plugin,@"pluginIdentifier",&identifierState);
+        if (!axs_cachekeeper_bundle_id(identifier)) {
+            if (![identifierState isEqual:@"available"]) axs_cachekeeper_coverage_source(extension,identifierState);
+            axs_cachekeeper_coverage_increment(extension,@"invalidAssociationCount");continue;
+        }
+        id parent=axs_cachekeeper_coverage_property(plugin,@"containingBundle",&parentState);
+        id containingOwner=parent ? axs_cachekeeper_coverage_property(parent,@"bundleIdentifier",&ownerState) : nil;
+        if (!axs_cachekeeper_bundle_id(containingOwner)) {
+            if (![parentState isEqual:@"available"]) axs_cachekeeper_coverage_source(extension,parentState);
+            else if (![ownerState isEqual:@"available"]) axs_cachekeeper_coverage_source(extension,ownerState);
+            axs_cachekeeper_coverage_increment(extension,@"unavailableOwnerCount");continue;
+        }
+        if (![containingOwner isEqual:owner]) { axs_cachekeeper_coverage_increment(extension,@"ownerMismatchCount");continue; }
+        // Plugin identity spans owners; a contradictory observation revokes the ID for this sample.
+        NSArray *identity=@[identifier];
+        NSMutableSet *invalid=extension[@"_invalidAssociations"];
+        if ([invalid containsObject:identity]) continue;
+        NSMutableDictionary *owners=extension[@"_pluginOwners"];
+        if (!owners) extension[@"_pluginOwners"]=owners=[NSMutableDictionary new];
+        NSString *previousOwner=owners[identifier];
+        if (previousOwner && ![previousOwner isEqual:owner]) {
+            [extension[@"_associations"] removeObjectForKey:identity];[invalid addObject:identity];
+            axs_cachekeeper_coverage_increment(extension,@"invalidAssociationCount");continue;
+        }
+        owners[identifier]=owner;
+        id dataURL=axs_cachekeeper_coverage_property(plugin,@"dataContainerURL",&urlState);
+        if (!axs_cachekeeper_coverage_source(extension,urlState)) continue;
+        NSString *url=axs_cachekeeper_coverage_url(dataURL);
+        if (!url) { axs_cachekeeper_coverage_increment(extension,@"invalidAssociationCount");continue; }
+        axs_cachekeeper_coverage_associate(extension,identity,url);
+    }
+}
+static NSDictionary *axs_cachekeeper_coverage_finish_role(NSMutableDictionary *role, BOOL home, NSMutableSet *allURLs) {
+    NSMutableDictionary *out=[NSMutableDictionary new];
+    NSUInteger issues=0;
+    for (NSString *key in axs_cachekeeper_coverage_count_keys()) {
+        out[key]=role[key];
+        if (![key isEqual:@"observedSourceCount"] && !(home && [key isEqual:@"notProvidedCount"])) issues += [role[key] unsignedIntegerValue];
+    }
+    BOOL observed=[role[@"observedSourceCount"] unsignedIntegerValue]>0;
+    out[@"state"]=observed ? (issues ? @"partial" : @"available") :
+        ([role[@"invalidSourceCount"] unsignedIntegerValue] ? @"invalid" : @"unavailable");
+    if (observed) {
+        NSDictionary *associations=role[@"_associations"];
+        NSSet *urls=[NSSet setWithArray:associations.allValues];[allURLs unionSet:urls];
+        out[@"registeredURLCount"]=@(urls.count);out[@"associationCount"]=@(associations.count);
+    }
+    return out;
+}
+static NSMutableDictionary *axs_cachekeeper_coverage_base(NSString *state) {
+    return [@{@"schemaVersion":@1,@"state":state,@"scope":@"allSystemRegistrations",@"mode":@"systemMetadata",
+        @"registeredURLIdentity":@"exactURLString",@"filesystemAccess":@"notChecked",@"cleanupEligibility":@"notGranted"} mutableCopy];
+}
+static BOOL axs_cachekeeper_coverage_number(id value) {
+    if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID()) return NO;
+    double number=[value doubleValue];return isfinite(number) && number>=0 && number==trunc(number) && number<=9007199254740991.0;
+}
+NSDictionary *axs_cachekeeper_container_coverage_projection(id coverage) {
+    NSMutableDictionary *out=axs_cachekeeper_coverage_base(coverage ? @"invalid" : @"notObserved");
+    if (![coverage isKindOfClass:NSDictionary.class]) return out;
+    if (!axs_cachekeeper_coverage_number(coverage[@"schemaVersion"]) || [coverage[@"schemaVersion"] integerValue]!=1 ||
+        ![@[@"available",@"partial",@"unavailable"] containsObject:coverage[@"state"]] ||
+        ![@[@"available",@"unavailable",@"invalid",@"missingSelector"] containsObject:coverage[@"sourceState"]]) return out;
+    if (![coverage[@"sourceState"] isEqual:@"available"]) {
+        if (![coverage[@"state"] isEqual:@"unavailable"] || coverage[@"observedRegistrations"]) return out;
+        out[@"state"]=@"unavailable";out[@"sourceState"]=coverage[@"sourceState"];return out;
+    }
+    for (NSString *key in @[@"observedRegistrations",@"invalidRegistrationCount",@"truncatedRegistrationCount",@"allRolesUniqueRegisteredURLCount"])
+        if (!axs_cachekeeper_coverage_number(coverage[key])) return out;
+    if ([coverage[@"observedRegistrations"] unsignedIntegerValue]>4096 ||
+        [coverage[@"invalidRegistrationCount"] unsignedIntegerValue]>[coverage[@"observedRegistrations"] unsignedIntegerValue]) return out;
+    id lower=coverage[@"countsAreLowerBounds"];
+    if (![lower isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)lower)!=CFBooleanGetTypeID()) return out;
+    NSMutableDictionary *roles=[NSMutableDictionary new];BOOL partial=NO;NSUInteger totalURLs=0,maxURLs=0;
+    for (NSString *name in @[@"home",@"group",@"extension"]) {
+        id role=coverage[name];
+        if (![role isKindOfClass:NSDictionary.class] || ![@[@"available",@"partial",@"unavailable",@"invalid"] containsObject:role[@"state"]]) return out;
+        NSMutableDictionary *projected=[@{@"state":role[@"state"]} mutableCopy];
+        for (NSString *key in axs_cachekeeper_coverage_count_keys()) {
+            if (!axs_cachekeeper_coverage_number(role[key])) return out;projected[key]=role[key];
+        }
+        NSUInteger sourceCount=[role[@"observedSourceCount"] unsignedIntegerValue],issues=0;
+        if (sourceCount>[coverage[@"observedRegistrations"] unsignedIntegerValue]-[coverage[@"invalidRegistrationCount"] unsignedIntegerValue] ||
+            ([name isEqual:@"home"] && [role[@"notProvidedCount"] unsignedIntegerValue]>sourceCount)) return out;
+        for (NSString *key in axs_cachekeeper_coverage_count_keys())
+            if (![key isEqual:@"observedSourceCount"] && !([name isEqual:@"home"] && [key isEqual:@"notProvidedCount"])) issues+=[role[key] unsignedIntegerValue];
+        BOOL observed=sourceCount>0;
+        BOOL emptyRegistry=[coverage[@"observedRegistrations"] unsignedIntegerValue]==0 &&
+            ![coverage[@"invalidRegistrationCount"] unsignedIntegerValue] && ![coverage[@"truncatedRegistrationCount"] unsignedIntegerValue];
+        BOOL exactEmpty=emptyRegistry && [role[@"state"] isEqual:@"available"];
+        NSString *expected=observed ? (issues ? @"partial" : @"available") :
+            ([role[@"invalidSourceCount"] unsignedIntegerValue] ? @"invalid" : @"unavailable");
+        if (exactEmpty ? (issues || [role[@"notProvidedCount"] unsignedIntegerValue]) : ![role[@"state"] isEqual:expected]) return out;
+        if (observed || exactEmpty) {
+            if (!axs_cachekeeper_coverage_number(role[@"registeredURLCount"]) || !axs_cachekeeper_coverage_number(role[@"associationCount"]) ||
+                [role[@"registeredURLCount"] unsignedLongLongValue]>[role[@"associationCount"] unsignedLongLongValue]) return out;
+            NSUInteger associations=[role[@"associationCount"] unsignedIntegerValue],urls=[role[@"registeredURLCount"] unsignedIntegerValue];
+            if ((associations>0 && urls==0) || (exactEmpty && associations) ||
+                ([name isEqual:@"home"] && associations>sourceCount-[role[@"notProvidedCount"] unsignedIntegerValue])) return out;
+            projected[@"registeredURLCount"]=role[@"registeredURLCount"];projected[@"associationCount"]=role[@"associationCount"];
+            NSUInteger count=[role[@"registeredURLCount"] unsignedIntegerValue];totalURLs+=count;maxURLs=MAX(maxURLs,count);
+        } else if (role[@"registeredURLCount"] || role[@"associationCount"]) return out;
+        if (![role[@"state"] isEqual:@"available"]) partial=YES;
+        roles[name]=projected;
+    }
+    partial=partial || [coverage[@"invalidRegistrationCount"] unsignedIntegerValue] || [coverage[@"truncatedRegistrationCount"] unsignedIntegerValue];
+    NSUInteger unique=[coverage[@"allRolesUniqueRegisteredURLCount"] unsignedIntegerValue];
+    if (unique>totalURLs || unique<maxURLs || [lower boolValue]!=partial ||
+        ![coverage[@"state"] isEqual:partial ? @"partial" : @"available"]) return out;
+    out[@"state"]=coverage[@"state"];out[@"sourceState"]=@"available";out[@"countsAreLowerBounds"]=lower;
+    for (NSString *key in @[@"observedRegistrations",@"invalidRegistrationCount",@"truncatedRegistrationCount",@"allRolesUniqueRegisteredURLCount"]) out[key]=coverage[key];
+    [out addEntriesFromDictionary:roles];return out;
+}
+NSArray *axs_cachekeeper_installed_applications_with_container_coverage(NSMutableDictionary *cache, NSDictionary **coverage, NSError **error) {
     if (error) *error=nil;
-    id manager=axs_cachekeeper_installation_property(NSClassFromString(@"LSApplicationWorkspace"),@"defaultWorkspace");
-    NSArray *installed=axs_cachekeeper_installation_property(manager,@"allInstalledApplications");
-    if (![installed isKindOfClass:NSArray.class]) { axs_cachekeeper_installation_error(error,7,@"系统应用列表不可用");return nil; }
+    NSString *sourceState=nil;
+    id manager=axs_cachekeeper_coverage_property(NSClassFromString(@"LSApplicationWorkspace"),@"defaultWorkspace",&sourceState);
+    id installed=manager ? axs_cachekeeper_coverage_property(manager,@"allInstalledApplications",&sourceState) : nil;
+    if (![installed isKindOfClass:NSArray.class]) {
+        if (installed) sourceState=@"invalid";
+        if (coverage) {NSMutableDictionary *failure=axs_cachekeeper_coverage_base(@"unavailable");failure[@"sourceState"]=sourceState;*coverage=[failure copy];}
+        axs_cachekeeper_installation_error(error,7,@"系统应用列表不可用");return nil;
+    }
+    NSMutableDictionary *home=coverage ? axs_cachekeeper_coverage_role() : nil,*group=coverage ? axs_cachekeeper_coverage_role() : nil,
+        *extension=coverage ? axs_cachekeeper_coverage_role() : nil;
+    NSUInteger registrations=0,invalidRegistrations=0,groupUsed=0,extensionUsed=0;
     NSMutableDictionary *apps=[NSMutableDictionary new],*nextCache=[NSMutableDictionary new];
     for (id proxy in installed) { @autoreleasepool {
         NSString *type=axs_cachekeeper_installation_property(proxy,@"applicationType");
         NSURL *url=axs_cachekeeper_installation_property(proxy,@"bundleURL");
         NSString *bundle=axs_cachekeeper_installation_property(proxy,@"applicationIdentifier");
+        if (coverage && registrations<4096) {
+            registrations++;
+            if (axs_cachekeeper_bundle_id(bundle)) axs_cachekeeper_coverage_registration(proxy,bundle,home,group,extension,&groupUsed,&extensionUsed);
+            else invalidRegistrations++;
+        }
         if (!axs_cachekeeper_bundle_id(bundle)) continue;
         NSDictionary *previous=cache[bundle];
         BOOL container=[url isKindOfClass:NSURL.class] && axs_cachekeeper_container_bundle_path(url.path);
@@ -202,6 +419,25 @@ NSArray *axs_cachekeeper_installed_applications(NSMutableDictionary *cache, NSEr
         // Failed snapshots evict the former identity; the visible APP remains with an explicit state.
         nextCache[bundle]=snapshot ? @{@"installation":snapshot,@"entry":apps[bundle]} : @{@"entry":apps[bundle]};
     }}
+    if (coverage) {
+        NSMutableSet *allURLs=[NSMutableSet new];
+        NSDictionary *h=axs_cachekeeper_coverage_finish_role(home,YES,allURLs),*g=axs_cachekeeper_coverage_finish_role(group,NO,allURLs),
+            *e=axs_cachekeeper_coverage_finish_role(extension,NO,allURLs);
+        NSUInteger truncated=[installed count]-registrations;
+        // Empty registry is an observed empty source, unlike a missing getter or nil response.
+        if (![installed count]) {
+            NSMutableDictionary *empty=[h mutableCopy];empty[@"state"]=@"available";empty[@"registeredURLCount"]=@0;empty[@"associationCount"]=@0;
+            h=empty;g=empty;e=empty;
+        }
+        BOOL partial=invalidRegistrations || truncated || ![h[@"state"] isEqual:@"available"] || ![g[@"state"] isEqual:@"available"] || ![e[@"state"] isEqual:@"available"];
+        NSMutableDictionary *result=axs_cachekeeper_coverage_base(partial ? @"partial" : @"available");
+        [result addEntriesFromDictionary:@{@"sourceState":@"available",@"observedRegistrations":@(registrations),@"invalidRegistrationCount":@(invalidRegistrations),
+            @"truncatedRegistrationCount":@(truncated),@"allRolesUniqueRegisteredURLCount":@(allURLs.count),@"countsAreLowerBounds":@(partial),@"home":h,@"group":g,@"extension":e}];
+        *coverage=[result copy];
+    }
     [cache setDictionary:nextCache];
     return [apps.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b){return [a[@"id"] compare:b[@"id"]];}];
+}
+NSArray *axs_cachekeeper_installed_applications(NSMutableDictionary *cache, NSError **error) {
+    return axs_cachekeeper_installed_applications_with_container_coverage(cache,NULL,error);
 }

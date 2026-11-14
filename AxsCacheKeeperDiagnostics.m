@@ -1,4 +1,6 @@
+#import "AxsCacheKeeperPDFInspection.h"
 #import "AxsCacheKeeperDiagnostics.h"
+#import "AxsCacheKeeperInstallation.h"
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperSearchDiagnostics.h"
 
@@ -24,6 +26,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
         @"stage":@[@"none",@"host",@"selfToken",@"api",@"systemURL",@"status",@"signingIdentity",@"executable",@"finalStatus",@"register",@"lookup",@"send",@"receive",@"protocol",@"replay",@"timeout",@"busy"],
         @"errorDomain":@[@"none",@"mach",@"posix",@"protocol"],
         @"errorOrigin":@[@"none",@"local",@"peer"],
+        @"localPathStage":@[@"none",@"lsRecord",@"bundlePath",@"systemAnchor",@"bundleMetadata",@"executableFile",@"kernelExecutable",@"executableRecheck"],
         @"selfIdentity":@[@"notObserved",@"verified",@"unexpected",@"unavailable"],
         @"peerIdentity":@[@"notObserved",@"verified",@"unexpected",@"unavailable"],
         @"serverRegister":@[@"notObserved",@"verified",@"failed"]};
@@ -42,6 +45,14 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
             ([key isEqual:@"protocolVersion"] && numeric!=1)) return @{@"state":@"invalid"};
         out[key]=@((int32_t)numeric);
     }
+    if ([out[@"errorOrigin"] isEqual:@"peer"] &&
+        (![out[@"peerIdentity"] isEqual:@"verified"] || ![out[@"localPathStage"] isEqual:@"none"])) return @{@"state":@"invalid"};
+    if (![out[@"localPathStage"] isEqual:@"none"]) {
+        BOOL executable=[@[@"kernelExecutable",@"executableRecheck"] containsObject:out[@"localPathStage"]];
+        NSString *expectedStage=executable ? @"executable" : @"systemURL";
+        if (![out[@"errorOrigin"] isEqual:@"local"] || ![out[@"stage"] isEqual:expectedStage])
+            return @{@"state":@"invalid"};
+    }
     return [out copy];
 }
 // 白名单投影：自由文本与未知字段永不原样进入分享文件。
@@ -50,6 +61,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
 @property(nonatomic,strong) NSSet *technicalNames;
 - (NSString *)axs_cachekeeper_path:(NSString *)path;
 - (NSDictionary *)axs_cachekeeper_record:(NSDictionary *)record;
+- (NSDictionary *)axs_cachekeeper_pdf:(NSDictionary *)record;
 @end
 @implementation AxsCacheKeeperDiagnosticRedactor
 - (instancetype)init {
@@ -86,7 +98,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
 - (NSDictionary *)axs_cachekeeper_record:(NSDictionary *)record {
     if (![record isKindOfClass:NSDictionary.class]) return @{@"invalidRecord":@YES};
     NSMutableDictionary *out=[NSMutableDictionary new];
-    NSArray *numbers=@[@"appRuleWaitingForExit",@"bytes",@"files",@"count",@"nlink",@"removed",@"failed",@"failures",@"changed",@"recent",@"remaining",@"remainingBytes",@"deferred",@"deferredBytes",@"unresolved",@"unresolvedBytes",@"protected",@"protectedBytes",@"retainedSubtreeCount",@"lastRemoved",@"lastBytes",@"endReason",@"links",@"hardLinks",@"symlinks",@"hidden",@"twinBytes",@"twinFailures",@"twinScanned",@"result",@"errorCode",@"complete",@"coverageComplete",@"measurementComplete",@"cancelled",@"checking",@"skipped",@"manageable",@"twinCoverageComplete",@"twinScanTruncated",@"twinDisplayTruncated",@"linkFilesTruncated",@"enabled",@"autoDiscover",@"urlCache",@"prevent",@"applied",@"total",@"completed",@"remainingCount"];
+    NSArray *numbers=@[@"hardLinkRetained",@"hardLinkRetainedBytes",@"appRuleWaitingForExit",@"bytes",@"files",@"count",@"nlink",@"removed",@"failed",@"failures",@"changed",@"recent",@"remaining",@"remainingBytes",@"deferred",@"deferredBytes",@"unresolved",@"unresolvedBytes",@"protected",@"protectedBytes",@"retainedSubtreeCount",@"lastRemoved",@"lastBytes",@"endReason",@"links",@"hardLinks",@"symlinks",@"hidden",@"twinBytes",@"twinFailures",@"twinScanned",@"result",@"errorCode",@"complete",@"coverageComplete",@"measurementComplete",@"cancelled",@"checking",@"skipped",@"manageable",@"twinCoverageComplete",@"twinScanTruncated",@"twinDisplayTruncated",@"linkFilesTruncated",@"enabled",@"autoDiscover",@"urlCache",@"prevent",@"applied",@"total",@"completed",@"remainingCount"];
     NSMutableArray *invalid=[NSMutableArray new];
     for (NSString *key in @[@"appRuleID",@"state",@"phase",@"mode",@"kind",@"purgeClassification",@"type",@"outcome",@"path",@"source",@"twin"])
         if (record[key] && ![record[key] isKindOfClass:NSString.class]) [invalid addObject:key];
@@ -104,6 +116,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
     NSSet *values=[NSSet setWithArray:@[@"douyin-alog",@"auto",@"clean",@"prevent",@"waiting",@"running",@"complete",@"error",@"paused",@"cache",@"log",@"data",@"mixed",@"unknown",@"scan",@"inspection",@"pending",@"submitted",@"finished",@"partial",@"stopped",@"notStarted",@"timeout",@"conflict",@"available",@"missing",@"unreadable",@"invalid",@"空文件",@"SQLite 数据库",@"二进制 plist",@"媒体文件头",@"归档或压缩文件",@"JSON 数据",@"文本头特征（用途未定）",@"未知二进制",@"数据或登录态名称特征"]];
     for (NSString *key in @[@"appRuleID",@"state",@"phase",@"mode",@"kind",@"purgeClassification",@"type",@"outcome"])
         if ([record[key] isKindOfClass:NSString.class]) out[key]=[values containsObject:record[key]] ? record[key] : @"unknown";
+    if ([record[@"hardLinkRetentionReason"] isEqual:@"multipleLinks"]) out[@"hardLinkRetentionReason"]=@"multipleLinks";
     for (NSString *key in @[@"error",@"message",@"reason",@"evidence",@"purgeEvidence",@"unresolvedEvidence"]) {
         NSString *text=record[key];if (![text isKindOfClass:NSString.class] || !text.length) continue;
         // 仅导出原因类别；NSError 原文可能带完整路径、URL 和账号，不拼接原文。
@@ -134,6 +147,20 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
         }out[key]=groups;
     }
     if ([record[@"data"] isKindOfClass:NSDictionary.class]) out[@"data"]=[self axs_cachekeeper_record:record[@"data"]];
+    return out;
+}
+- (NSDictionary *)axs_cachekeeper_pdf:(NSDictionary *)record {
+    if (!record) return @{@"state":@"notRequested"};
+    NSMutableDictionary *out=[axs_cachekeeper_pdf_report_fields(record) mutableCopy];
+    if (!out) return @{@"state":@"invalid"};
+    if (axs_cachekeeper_bundle_id(record[@"bundle"])) out[@"bundle"]=record[@"bundle"];
+    if (record[@"path"]) out[@"path"]=[self axs_cachekeeper_path:record[@"path"]];
+    if (out[@"pdfCandidates"]) {
+        NSMutableArray *candidates=[NSMutableArray new];
+        for (NSDictionary *candidate in out[@"pdfCandidates"]) {
+            NSMutableDictionary *row=[candidate mutableCopy];row[@"path"]=[self axs_cachekeeper_path:candidate[@"path"]];[candidates addObject:row];
+        }out[@"pdfCandidates"]=candidates;
+    }
     return out;
 }
 @end
@@ -221,7 +248,9 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
         @"completed":@(exported.count),@"started":@(started.timeIntervalSince1970),@"finished":@(finished),@"rescanned":@NO};
     return @{@"schemaVersion":@2,@"generatedAt":@(finished),@"environment":env,@"apps":exported,
         @"diagnosticChannel":AxsCacheKeeperDiagnosticChannelProjection(environment[@"diagnosticChannel"]),
+        @"containerCoverage":axs_cachekeeper_container_coverage_projection(environment[@"containerCoverage"]),
         @"searchUI":axs_cachekeeper_search_diagnostics_projection(environment[@"searchUI"]),
+        @"pdfLocate":[redactor axs_cachekeeper_pdf:environment[@"pdfLocate"]],
         @"sourceStates":@{@"configuration":states[@"state"],@"selection":directories[@"state"],@"snapshots":snapshots[@"state"],@"installedApplications":installedSnapshotAvailable ? @"available" : @"unavailable"},
         @"batch":[redactor axs_cachekeeper_record:batch],
         @"collection":collection,

@@ -42,6 +42,37 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     };
     [AxsCacheKeeperCleanupRules removeAllRulesForTesting];
 
+    // Real inode aliases are intentional retention, while a post-preflight link change is deferred.
+    NSString *hardRoot=makeDir(home,@"Library/Caches/stable-hardlinks");
+    NSString *hardSource=[hardRoot stringByAppendingPathComponent:@"source"],*hardAlias=[hardRoot stringByAppendingPathComponent:@"alias"],
+        *hardOutside=[home stringByAppendingPathComponent:@"stable-hardlink-outside"];
+    put(hardSource);put([hardRoot stringByAppendingPathComponent:@"ordinary"]);
+    check(!link(hardSource.fileSystemRepresentation,hardAlias.fileSystemRepresentation) &&
+        !link(hardSource.fileSystemRepresentation,hardOutside.fileSystemRepresentation),@"创建同根与根外真实硬链接");
+    struct stat hardBefore;check(!lstat(hardSource.fileSystemRepresentation,&hardBefore),@"核查真实硬链接大小");
+    AxsCacheKeeperSweep *hardSweep=sweepFor(hardRoot,@{});
+    AxsCacheKeeperCleanupJob *hardJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[hardSweep] signature:@"hardlink" instance:@"" clock:^NSTimeInterval{return 10;}];
+    for (NSUInteger i=0;hardJob.phase!=AxsCacheKeeperCleanupPhaseFinished && i<1000;i++) [hardJob advanceCycleWithPerRootLimit:8 gate:^BOOL{return YES;}];
+    NSDictionary *hardReport=[hardSweep directoryReport];
+    NSDictionary *hardSummary=[AxsCacheKeeperCleanupSchedule summaryForJob:hardJob directories:@{hardSweep.relativePath:hardReport} externalFailures:0 discoveryComplete:YES];
+    check(hardJob.removed==1 && hardJob.changedCount==0 && hardJob.failed==0 && !hardJob.partial &&
+        hardJob.hardLinkRetainedCount==2 && hardJob.hardLinkRetainedBytes==2*(unsigned long long)hardBefore.st_size &&
+        [hardReport[@"hardLinkRetained"] isEqual:@2] && [hardReport[@"hardLinkRetentionReason"] isEqual:@"multipleLinks"] &&
+        [hardSummary[@"hardLinkRetained"] isEqual:@2] && [hardSummary[@"hardLinkRetainedBytes"] unsignedLongLongValue]==2*(unsigned long long)hardBefore.st_size &&
+        [hardReport[@"coverageComplete"] boolValue] && [fm fileExistsAtPath:hardSource] && [fm fileExistsAtPath:hardAlias] && [fm fileExistsAtPath:hardOutside],
+        @"稳定硬链接明确保留，逻辑字节按路径计，不误报预检后变化或影响根外别名");
+    for (NSString *operation in @[@"add",@"remove"]) {
+        NSString *raceRoot=makeDir(home,[@"Library/Caches/link-change-" stringByAppendingString:operation]);
+        NSString *raceFile=[raceRoot stringByAppendingPathComponent:@"payload"],*outside=[home stringByAppendingPathComponent:[@"changed-link-" stringByAppendingString:operation]];put(raceFile);
+        if ([operation isEqual:@"remove"]) check(!link(raceFile.fileSystemRepresentation,outside.fileSystemRepresentation),@"预检前增加外部别名");
+        AxsCacheKeeperSweep *race=sweepFor(raceRoot,@{});
+        while (race.checking) [race advancePreflight:16];
+        if ([operation isEqual:@"add"]) check(!link(raceFile.fileSystemRepresentation,outside.fileSystemRepresentation),@"预检后链接数增加");
+        else check(!unlink(outside.fileSystemRepresentation),@"预检后链接数减少");
+        finish(race);
+        check(race.changedCount==1 && race.hardLinkRetainedCount==0 && race.removed==0 && [fm fileExistsAtPath:raceFile],@"预检后nlink增减仍计变化并保留，不能归为稳定硬链接");
+    }
+
     // 生产入口须能回收已确认的 ALog，而非只有测试注册规则能删除。
     // 任何按目录全删、版本泛化、挂起放行或取消内容否决都会破坏本组断言。
     {
