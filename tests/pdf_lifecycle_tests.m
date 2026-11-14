@@ -483,18 +483,53 @@ static void axs_cachekeeper_pdf_lifecycle_client_binding(void) {
     }
 }
 static void axs_cachekeeper_pdf_lifecycle_failed_send(void) {
-    mach_port_t receive=MACH_PORT_NULL,reply=MACH_PORT_NULL;mach_msg_type_name_t acquired=0;
-    axs_cachekeeper_pdf_lifecycle_require(mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&receive)==KERN_SUCCESS &&
-        mach_port_extract_right(mach_task_self(),receive,MACH_MSG_TYPE_MAKE_SEND_ONCE,&reply,&acquired)==KERN_SUCCESS,
-        "allocate real failed-send reply right");
-    axs_cachekeeper_channel_release_receive(receive,NO);
-    AxsCacheKeeperPDFMessage message;int code=0;
-    axs_cachekeeper_pdf_lifecycle_require(axs_cachekeeper_pdf_encode(&message,@{@"reply":@YES},YES,reply,MACH_PORT_NULL) &&
-        !axs_cachekeeper_pdf_send(&message,&code) && (code & ~MACH_MSG_MASK)==MACH_SEND_INVALID_DEST,
-        "actual send fails when reply endpoint has exited");
-    mach_port_type_t type=0;
-    axs_cachekeeper_pdf_lifecycle_require(mach_port_type(mach_task_self(),reply,&type)!=KERN_SUCCESS,
-        "failed real send releases owned send-once/dead-name right");
+    for (NSUInteger production=0;production<2;production++) {
+        mach_port_t receive=MACH_PORT_NULL,reply=MACH_PORT_NULL;mach_msg_type_name_t acquired=0;
+        kern_return_t allocated=mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&receive);
+        kern_return_t extracted=allocated==KERN_SUCCESS ? mach_port_extract_right(mach_task_self(),receive,
+            MACH_MSG_TYPE_MAKE_SEND_ONCE,&reply,&acquired) : allocated;
+        fprintf(stderr,"PDF failed-send fixture: production=%lu allocate=0x%x extract=0x%x disposition=%u\n",
+            (unsigned long)production,(unsigned)allocated,(unsigned)extracted,(unsigned)acquired);
+        axs_cachekeeper_pdf_lifecycle_require(allocated==KERN_SUCCESS && extracted==KERN_SUCCESS &&
+            acquired==MACH_MSG_TYPE_PORT_SEND_ONCE,"allocate real failed-send reply right");
+        kern_return_t destroyed=axs_cachekeeper_channel_release_receive(receive,NO);
+        // XNU permits a lazy inactive SEND_ONCE to be consumed with MACH_MSG_SUCCESS.
+        // Querying its type materializes DEAD_NAME before send, deterministically exercising
+        // INVALID_DEST, whose copy-in failure leaves the caller owning the dead-name uref.
+        mach_port_type_t beforeType=0;mach_port_urefs_t beforeRefs=0;
+        kern_return_t beforeInfo=mach_port_type(mach_task_self(),reply,&beforeType);
+        kern_return_t beforeRefInfo=mach_port_get_refs(mach_task_self(),reply,MACH_PORT_RIGHT_DEAD_NAME,&beforeRefs);
+        fprintf(stderr,"PDF failed-send fixture: destroy=0x%x beforeInfo=0x%x type=0x%x refsInfo=0x%x refs=%u\n",
+            (unsigned)destroyed,(unsigned)beforeInfo,(unsigned)beforeType,(unsigned)beforeRefInfo,(unsigned)beforeRefs);
+        axs_cachekeeper_pdf_lifecycle_require(destroyed==KERN_SUCCESS && beforeInfo==KERN_SUCCESS &&
+            beforeType==MACH_PORT_TYPE_DEAD_NAME && beforeRefInfo==KERN_SUCCESS && beforeRefs==1,
+            "destroyed endpoint materializes exactly one owned dead-name reference");
+        AxsCacheKeeperPDFMessage message;int code=0;
+        axs_cachekeeper_pdf_lifecycle_require(axs_cachekeeper_pdf_encode(&message,@{@"reply":@YES},YES,reply,MACH_PORT_NULL),
+            "encode real failed-send reply");
+        BOOL sent;
+        if (production) sent=axs_cachekeeper_pdf_send(&message,&code);
+        else {
+            code=mach_msg(&message.header,MACH_SEND_MSG|MACH_SEND_TIMEOUT,message.header.msgh_size,0,
+                MACH_PORT_NULL,1000,MACH_PORT_NULL);sent=code==MACH_MSG_SUCCESS;
+        }
+        mach_port_type_t afterType=0;mach_port_urefs_t afterRefs=0;
+        kern_return_t afterInfo=mach_port_type(mach_task_self(),reply,&afterType);
+        kern_return_t afterRefInfo=mach_port_get_refs(mach_task_self(),reply,MACH_PORT_RIGHT_DEAD_NAME,&afterRefs);
+        fprintf(stderr,"PDF failed-send fixture: sent=%d code=0x%x afterInfo=0x%x type=0x%x refsInfo=0x%x refs=%u\n",
+            sent,(unsigned)code,(unsigned)afterInfo,(unsigned)afterType,(unsigned)afterRefInfo,(unsigned)afterRefs);
+        axs_cachekeeper_pdf_lifecycle_require(!sent && (code & ~MACH_MSG_MASK)==MACH_SEND_INVALID_DEST,
+            "materialized dead-name destination produces actual INVALID_DEST");
+        if (production) {
+            axs_cachekeeper_pdf_lifecycle_require(afterInfo==KERN_INVALID_NAME && afterRefInfo==KERN_INVALID_NAME,
+                "failed real send releases owned send-once/dead-name right");
+        } else {
+            axs_cachekeeper_pdf_lifecycle_require(afterInfo==KERN_SUCCESS && afterType==MACH_PORT_TYPE_DEAD_NAME &&
+                afterRefInfo==KERN_SUCCESS && afterRefs==1,"raw failed send retains the reference the production wrapper must release");
+            axs_cachekeeper_pdf_lifecycle_require(mach_port_deallocate(mach_task_self(),reply)==KERN_SUCCESS,
+                "release raw-send control fixture reference");
+        }
+    }
 }
 
 // The enclosing runner owns and cleans this fixture path.
