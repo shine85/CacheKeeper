@@ -22,7 +22,12 @@ subprocess.run(["xcrun", "simctl", "boot", device], check=False, timeout=60)
 # Hosted simulator migration exceeded the old 180-second startup budget in run 115.
 # Keep startup bounded separately; the actual test deadline and assertions stay unchanged.
 subprocess.run(["xcrun", "simctl", "bootstatus", device, "-b"], check=True, timeout=420)
-subprocess.run(["xcodebuild", "test", "-project", str(output / "CacheKeeperInputTests.xcodeproj"),
-                "-scheme", "InputHarness", "-destination", f"platform=iOS Simulator,id={device}",
-                "-derivedDataPath", str(output / "DerivedData"), "-resultBundlePath", str(output / "Results.xcresult"),
-                "-parallel-testing-enabled", "NO", "CODE_SIGNING_ALLOWED=NO"], check=True, timeout=600)
+build_options = ["-project", str(output / "CacheKeeperInputTests.xcodeproj"),
+                 "-scheme", "InputHarness", "-destination", f"platform=iOS Simulator,id={device}",
+                 "-derivedDataPath", str(output / "DerivedData"), "CODE_SIGNING_ALLOWED=NO"]
+# Run 116 spent most of the combined deadline compiling; execution gets its own
+# unchanged 600-second budget, against exactly the products built above.
+subprocess.run(["xcodebuild", "build-for-testing", *build_options], check=True, timeout=600)
+subprocess.run(["xcodebuild", "test-without-building", *build_options,
+                "-resultBundlePath", str(output / "Results.xcresult"),
+                "-parallel-testing-enabled", "NO"], check=True, timeout=600)

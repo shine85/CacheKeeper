@@ -25,10 +25,11 @@ static NSDictionary *axs_cachekeeper_search_rect(CGRect rect,BOOL available) {
 }
 static NSDictionary *axs_cachekeeper_search_view(UIView *view,UIWindow *window,CGPoint center) {
     BOOL attached=view && window && view.window==window;
+    // C comparisons/logical expressions have type int; this contract requires actual CFBoolean values.
     return @{@"bounds":axs_cachekeeper_search_rect(view.bounds,view!=nil),
         @"windowRect":axs_cachekeeper_search_rect(attached ? [view convertRect:view.bounds toView:window] : CGRectZero,attached),
         @"hidden":@(view.hidden),@"alpha":@(view.alpha),@"interaction":@(view.userInteractionEnabled),@"clips":@(view.clipsToBounds),
-        @"centerInsideBounds":@(attached && CGRectContainsPoint(view.bounds,[view convertPoint:center fromView:window]))};
+        @"centerInsideBounds":(attached && CGRectContainsPoint(view.bounds,[view convertPoint:center fromView:window])) ? @YES : @NO};
 }
 @implementation AxsCacheKeeperSearchDiagnostics
 - (instancetype)initWithField:(UITextField *)field input:(UIView *)input root:(UIView *)root table:(UIView *)table owner:(UIViewController *)owner {
@@ -76,11 +77,11 @@ static NSDictionary *axs_cachekeeper_search_view(UIView *view,UIWindow *window,C
     NSDictionary *entry=@{@"event":axs_cachekeeper_search_event_names()[event],@"elapsedMs":@((NSUInteger)MIN(3600000,MAX(0,elapsed*1000))),
         @"observedHit":observedHit,@"centerHit":[self axs_cachekeeper_hit_role:hit],@"firstResponder":@(self.field.isFirstResponder),
         @"fieldEnabled":@(self.field.enabled),@"fieldCanBecomeFirstResponder":@(self.field.canBecomeFirstResponder),
-        @"presented":@(self.owner.presentedViewController!=nil),@"windowAttached":@(window!=nil),@"windowKey":@(window.isKeyWindow),
+        @"presented":self.owner.presentedViewController ? @YES : @NO,@"windowAttached":window ? @YES : @NO,@"windowKey":@(window.isKeyWindow),
         @"windowHidden":@(window.hidden),@"windowInteraction":@(window.userInteractionEnabled),@"windowAlpha":@(window.alpha),@"scene":scene,
         @"field":axs_cachekeeper_search_view(self.field,window,center),@"input":axs_cachekeeper_search_view(self.input,window,center),
         @"root":axs_cachekeeper_search_view(self.root,window,center),@"table":axs_cachekeeper_search_view(self.table,window,center),
-        @"ancestors":[ancestors copy],@"ancestorsTruncated":@(ancestor!=nil)};
+        @"ancestors":[ancestors copy],@"ancestorsTruncated":ancestor ? @YES : @NO};
     if (self.events.count==AxsCacheKeeperSearchEventLimit) { [self.events removeObjectAtIndex:0];self.truncated=YES; }
     [self.events addObject:entry];self.capturing=NO;
 }
