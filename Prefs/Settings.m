@@ -44,6 +44,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @property(nonatomic,strong) NSLayoutConstraint *axs_cachekeeper_searchTop;
 @property(nonatomic,weak) UINavigationBar *axs_cachekeeper_hostBar;
 @property(nonatomic,weak) UINavigationItem *axs_cachekeeper_compactItem;
+@property(nonatomic,weak) UINavigationController *axs_cachekeeper_compactNavigation;
 @property(nonatomic) UINavigationItemLargeTitleDisplayMode axs_cachekeeper_previousTitleMode;
 @property(nonatomic) BOOL axs_cachekeeper_updatingTitle;
 @property(nonatomic,assign) NSInteger selectedTab;
@@ -131,7 +132,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
         self.axs_cachekeeper_searchTop,
         [self.axs_cachekeeper_searchInput.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [self.axs_cachekeeper_searchInput.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
-        [self.axs_cachekeeper_searchInput.heightAnchor constraintGreaterThanOrEqualToConstant:56],
+        [self.axs_cachekeeper_searchInput.heightAnchor constraintGreaterThanOrEqualToConstant:44],
         [self.tabWrap.topAnchor constraintEqualToAnchor:self.axs_cachekeeper_searchInput.bottomAnchor],
         [self.tabWrap.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [self.tabWrap.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
@@ -342,13 +343,16 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 - (void)axs_cachekeeper_restore_compact_title {
     UINavigationItem *item=self.axs_cachekeeper_compactItem;
     UINavigationItemLargeTitleDisplayMode previous=self.axs_cachekeeper_previousTitleMode;
-    self.axs_cachekeeper_compactItem=nil;
+    UINavigationController *navigation=self.axs_cachekeeper_compactNavigation;
+    self.axs_cachekeeper_compactItem=nil;self.axs_cachekeeper_compactNavigation=nil;
     if (item.largeTitleDisplayMode==UINavigationItemLargeTitleDisplayModeNever)
         item.largeTitleDisplayMode=previous;
+    // Let the host grow its bar back with the transition; never force it synchronously here.
+    [navigation.view setNeedsLayout];
 }
 - (void)axs_cachekeeper_update_compact_title {
     if (!self.axs_cachekeeper_visible || !self.view.window || self.axs_cachekeeper_updatingTitle) return;
-    UINavigationItem *candidate=nil;
+    UINavigationItem *candidate=nil;UINavigationController *candidateNavigation=nil;
     // Only a real ancestor navigation controller whose current top contains this page owns its title.
     // An unrelated overlay bar remains untouched and is handled by the geometry clearance below.
     UIViewController *child=self;
@@ -358,7 +362,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
         UINavigationBar *bar=navigation.navigationBar;
         if (navigation.topViewController!=child || bar.topItem!=child.navigationItem ||
             child==self || bar.hidden || bar.alpha<=0.01 || bar.window!=self.view.window) continue;
-        candidate=child.navigationItem;break;
+        candidate=child.navigationItem;candidateNavigation=navigation;break;
     }
     if (candidate==self.axs_cachekeeper_compactItem) return;
     self.axs_cachekeeper_updatingTitle=YES;
@@ -366,10 +370,24 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     if (candidate) {
         // Save before the setter: UIKit may synchronously lay out the container.
         self.axs_cachekeeper_compactItem=candidate;
+        self.axs_cachekeeper_compactNavigation=candidateNavigation;
         self.axs_cachekeeper_previousTitleMode=candidate.largeTitleDisplayMode;
         candidate.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeNever;
+        // Hint the host to shrink its bar; the synchronous force runs in viewDidAppear,
+        // after the push transition, so the animation is not disturbed.
+        [candidateNavigation.view setNeedsLayout];
     }
     self.axs_cachekeeper_updatingTitle=NO;
+}
+- (void)axs_cachekeeper_layout_compact_navigation {
+    // The mode change can land after the push transition captured the bar's height, leaving a
+    // stale expanded frame (123.1 device: the bar still measured ~91pt, so the geometry
+    // clearance held ~49pt and the search box sat ~58pt below the bar). Force the host to lay
+    // out now that the transition is over, then re-probe so the inset drops to the true bar.
+    UINavigationController *navigation=self.axs_cachekeeper_compactNavigation;
+    if (!navigation || navigation.navigationBar.bounds.size.height<=44.5) return;
+    [navigation.view setNeedsLayout];[navigation.view layoutIfNeeded];
+    [self axs_cachekeeper_update_search_top];
 }
 - (BOOL)axs_cachekeeper_update_search_top {
     if (!self.isViewLoaded || !self.axs_cachekeeper_visible || !self.axs_cachekeeper_searchTop) return NO;
@@ -421,6 +439,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     [self axs_cachekeeper_update_search_top];[self.view layoutIfNeeded];
+    [self axs_cachekeeper_layout_compact_navigation];
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventDidAppear];
 }
 - (void)viewWillDisappear:(BOOL)animated {

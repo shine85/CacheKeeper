@@ -65,7 +65,7 @@
     owner.axs_cachekeeper_appeared=visible;
     self.root=[[AxsCacheKeeperProbeRootView alloc] initWithFrame:self.window.bounds];owner.view=self.root;
     self.window.rootViewController=owner;
-    self.input=[[AxsCacheKeeperSearchInput alloc] initWithFrame:CGRectMake(0,80,390,56)];[self.root addSubview:self.input];
+    self.input=[[AxsCacheKeeperSearchInput alloc] initWithFrame:CGRectMake(0,80,390,44)];[self.root addSubview:self.input];
     UITableView *table=[[UITableView alloc] initWithFrame:CGRectMake(0,160,390,500)];self.table=table;[self.root addSubview:table];
     self.probe=[[AxsCacheKeeperSearchDiagnostics alloc] initWithField:self.input.axs_cachekeeper_field input:self.input root:self.root table:table owner:owner];
     self.input.axs_cachekeeper_diagnostics=self.probe;self.root.axs_cachekeeper_diagnostics=self.probe;
@@ -261,7 +261,7 @@
     [overlay removeFromSuperview];
     // An actual unclipped wrapper draws the input outside its bounds but cannot hit that portion.
     UIView *wrapper=[[UIView alloc] initWithFrame:CGRectMake(0,80,390,10)];[self.root addSubview:wrapper];
-    [wrapper addSubview:self.input];self.input.frame=CGRectMake(0,0,390,56);
+    [wrapper addSubview:self.input];self.input.frame=CGRectMake(0,0,390,44);
     [self.probe axs_cachekeeper_record:AxsCacheKeeperSearchEventDidAppear];
     NSDictionary *last=[self axs_cachekeeper_last];
     XCTAssertNotEqualObjects(last[@"centerHit"],@"field");
@@ -273,7 +273,7 @@
 - (void)testRouteSeparatesWindowOverlayFromRootLocalHit {
     UIViewController *owner=[UIViewController new];
     AxsCacheKeeperSearchRootView *root=[[AxsCacheKeeperSearchRootView alloc] initWithFrame:self.window.bounds];owner.view=root;
-    AxsCacheKeeperSearchInput *input=[[AxsCacheKeeperSearchInput alloc] initWithFrame:CGRectMake(0,120,390,56)];[root addSubview:input];
+    AxsCacheKeeperSearchInput *input=[[AxsCacheKeeperSearchInput alloc] initWithFrame:CGRectMake(0,120,390,44)];[root addSubview:input];
     UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:owner];nav.modalPresentationStyle=UIModalPresentationFullScreen;
     XCTestExpectation *visible=[self expectationWithDescription:@"Navigation host visible for route capture"];
     [self.owner presentViewController:nav animated:NO completion:^{ [visible fulfill]; }];

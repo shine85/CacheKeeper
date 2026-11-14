@@ -18,10 +18,10 @@
     self.axs_cachekeeper_field.borderStyle=UITextBorderStyleNone;
     self.axs_cachekeeper_field.backgroundColor=UIColor.tertiarySystemFillColor;
     self.axs_cachekeeper_field.layer.cornerRadius=10;
-    UIView *leading=[[UIView alloc] initWithFrame:CGRectMake(0,0,36,44)];
+    UIView *leading=[[UIView alloc] initWithFrame:CGRectMake(0,0,36,36)];
     leading.userInteractionEnabled=NO;
     UIImageView *glass=[[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]];
-    glass.frame=CGRectMake(12,14,16,16);glass.contentMode=UIViewContentModeScaleAspectFit;
+    glass.frame=CGRectMake(12,10,16,16);glass.contentMode=UIViewContentModeScaleAspectFit;
     glass.autoresizingMask=UIViewAutoresizingFlexibleTopMargin|UIViewAutoresizingFlexibleBottomMargin;
     glass.tintColor=UIColor.secondaryLabelColor;glass.isAccessibilityElement=NO;
     [leading addSubview:glass];
@@ -50,15 +50,16 @@
     [NSLayoutConstraint activateConstraints:@[
         [stack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
         [stack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
-        [stack.topAnchor constraintEqualToAnchor:self.topAnchor constant:6],
-        [stack.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-6]]];
+        [stack.topAnchor constraintEqualToAnchor:self.topAnchor constant:4],
+        [stack.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-4]]];
     // Padding/icon-area taps explicitly request the real text field; do not consume its touches.
     UITapGestureRecognizer *tap=[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(axs_cachekeeper_tapped)];
     tap.cancelsTouchesInView=NO;tap.delaysTouchesBegan=NO;tap.delegate=self;[self addGestureRecognizer:tap];
     return self;
 }
 - (CGSize)intrinsicContentSize {
-    return CGSizeMake(UIViewNoIntrinsicMetric,MAX(44,ceil(self.axs_cachekeeper_field.font.lineHeight)+12)+12);
+    // Standard search field height (36pt) plus the 4+4 stack insets; grows with Dynamic Type.
+    return CGSizeMake(UIViewNoIntrinsicMetric,MAX(36,ceil(self.axs_cachekeeper_field.font.lineHeight)+8)+8);
 }
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
     [super traitCollectionDidChange:previousTraitCollection];
