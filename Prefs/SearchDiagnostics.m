@@ -50,6 +50,11 @@ static NSString *axs_cachekeeper_search_kind(UIView *view) {
     if ([view isKindOfClass:UIWindow.class]) return @"window";
     return @"view";
 }
+static void axs_cachekeeper_search_collect_bars(UIView *view,NSMutableArray *bars,NSUInteger depth) {
+    if (!view || depth>32) return;
+    if ([view isKindOfClass:UINavigationBar.class]) [bars addObject:view];
+    for (UIView *subview in view.subviews) axs_cachekeeper_search_collect_bars(subview,bars,depth+1);
+}
 @implementation AxsCacheKeeperSearchDiagnostics
 - (instancetype)initWithField:(UITextField *)field input:(UIView *)input root:(UIView *)root table:(UIView *)table owner:(UIViewController *)owner {
     if (!(self=[super init])) return nil;
@@ -127,6 +132,28 @@ static NSString *axs_cachekeeper_search_kind(UIView *view) {
             NSString *role=ancestor==self.input ? @"search" : ancestor==self.root ? @"root" : ancestor==self.table ? @"table" : ancestor==window ? @"window" : @"other";
             [ancestors addObject:@{@"role":role,@"view":axs_cachekeeper_search_view(ancestor,window,center)}];
         }
+        // 125.1 device: the search stayed 47pt low for 10s while the compact claim held, so the
+        // bar the geometry probe measures is not necessarily the claimed one. Enumerate every
+        // navigation bar in the window with its frame, top-item mode and host ownership, so the
+        // next export shows which bar is expanded and whether the claim governs it.
+        NSMutableArray *foundBars=[NSMutableArray new];
+        if (window) axs_cachekeeper_search_collect_bars(window,foundBars,0);
+        NSMutableArray *ancestorBars=[NSMutableArray new];
+        for (UIViewController *ancestorController=self.owner;ancestorController;ancestorController=ancestorController.parentViewController) {
+            if ([ancestorController isKindOfClass:UINavigationController.class])
+                [ancestorBars addObject:((UINavigationController *)ancestorController).navigationBar];
+        }
+        NSMutableArray *bars=[NSMutableArray new];BOOL barsTruncated=foundBars.count>AxsCacheKeeperSearchBarLimit;
+        for (UINavigationBar *candidateBar in foundBars) {
+            if (bars.count>=AxsCacheKeeperSearchBarLimit) break;
+            UINavigationItem *topItem=candidateBar.topItem;
+            NSString *role=candidateBar==navigation.navigationBar ? @"inner" :
+                [ancestorBars containsObject:candidateBar] ? @"ancestor" : @"other";
+            [bars addObject:@{@"view":axs_cachekeeper_search_view(candidateBar,window,center),@"role":role,
+                @"hasTopItem":topItem ? @YES : @NO,
+                @"topItemMode":@(topItem ? topItem.largeTitleDisplayMode : UINavigationItemLargeTitleDisplayModeAutomatic),
+                @"prefersLargeTitles":candidateBar.prefersLargeTitles ? @YES : @NO}];
+        }
         NSTimeInterval elapsed=NSProcessInfo.processInfo.systemUptime-self.started;
         NSDictionary *entry=@{@"event":axs_cachekeeper_search_event_names()[event],@"elapsedMs":@((NSUInteger)MIN(3600000,MAX(0,elapsed*1000))),
             @"observedHit":observedHit,@"centerHit":[self axs_cachekeeper_hit_role:hit],@"firstResponder":@(self.field.isFirstResponder),
@@ -135,7 +162,8 @@ static NSString *axs_cachekeeper_search_kind(UIView *view) {
             @"windowHidden":@(window.hidden),@"windowInteraction":@(window.userInteractionEnabled),@"windowAlpha":@(window.alpha),@"scene":scene,
             @"field":axs_cachekeeper_search_view(self.field,window,center),@"input":axs_cachekeeper_search_view(self.input,window,center),
             @"root":axs_cachekeeper_search_view(self.root,window,center),@"table":axs_cachekeeper_search_view(self.table,window,center),
-            @"ancestors":[ancestors copy],@"ancestorsTruncated":ancestor ? @YES : @NO,@"hitRoute":route};
+            @"ancestors":[ancestors copy],@"ancestorsTruncated":ancestor ? @YES : @NO,@"hitRoute":route,
+            @"bars":[bars copy],@"barsTruncated":barsTruncated ? @YES : @NO};
         if (event==AxsCacheKeeperSearchEventSampled) {
             NSMutableDictionary *state=[entry mutableCopy];
             // Table contentOffset changes on ordinary scrolling and must not evict search touch evidence.

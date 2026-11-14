@@ -172,6 +172,19 @@ void axs_cachekeeper_run_search_diagnostics_tests(void) {
         item[@"ancestors"]=@[ancestor];bad[@"events"]=@[item];
         axs_cachekeeper_search_check([project(bad)[@"state"] isEqual:@"invalid"],@"祖先形状、枚举及深层视图同样拒绝坏输入");
     }
+    NSMutableDictionary *barsFixture=axs_cachekeeper_search_route_fixture();
+    NSDictionary *barNode=barsFixture[@"events"][0][@"field"];
+    barsFixture[@"events"][0][@"bars"]=@[@{@"view":barNode,@"role":@"ancestor",@"hasTopItem":@YES,@"topItemMode":@2,@"prefersLargeTitles":@YES},
+        @{@"view":barNode,@"role":@"inner",@"hasTopItem":@NO,@"topItemMode":@0,@"prefersLargeTitles":@NO}];
+    barsFixture[@"events"][0][@"barsTruncated"]=@NO;
+    axs_cachekeeper_search_check([project(barsFixture) isEqual:barsFixture],@"导航栏枚举必须完整进入同一份诊断 JSON");
+    NSMutableDictionary *badBars=axs_cachekeeper_search_route_fixture();
+    badBars[@"events"][0][@"bars"]=@[@{@"view":badBars[@"events"][0][@"field"],@"role":@"host",@"hasTopItem":@YES,@"topItemMode":@2,@"prefersLargeTitles":@YES}];
+    badBars[@"events"][0][@"barsTruncated"]=@NO;
+    axs_cachekeeper_search_check([project(badBars)[@"state"] isEqual:@"invalid"],@"导航栏角色枚举须严格拒收");
+    NSMutableDictionary *partialBars=axs_cachekeeper_search_route_fixture();
+    partialBars[@"events"][0][@"bars"]=@[@{@"view":partialBars[@"events"][0][@"field"],@"role":@"ancestor",@"hasTopItem":@YES,@"topItemMode":@2,@"prefersLargeTitles":@YES}];
+    axs_cachekeeper_search_check([project(partialBars)[@"state"] isEqual:@"invalid"],@"导航栏枚举缺截断标记应拒绝");
     NSData *json=[NSJSONSerialization dataWithJSONObject:@[result,routeResult] options:0 error:nil];
     axs_cachekeeper_search_check(json && ![[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] containsString:@"private-sentinel"],@"同一报告序列化不含私有输入");
     axs_cachekeeper_search_check(![NSFileManager.defaultManager fileExistsAtPath:folder],@"取证导出投影不自动落盘");

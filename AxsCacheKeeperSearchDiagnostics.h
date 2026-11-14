@@ -3,7 +3,7 @@
 #include <math.h>
 
 // Shared, content-free snapshot contract. No UIKit objects or arbitrary strings cross this boundary.
-enum { AxsCacheKeeperSearchEventLimit=16, AxsCacheKeeperSearchAncestorLimit=6 };
+enum { AxsCacheKeeperSearchEventLimit=16, AxsCacheKeeperSearchAncestorLimit=6, AxsCacheKeeperSearchBarLimit=8 };
 typedef NS_ENUM(NSUInteger,AxsCacheKeeperSearchEvent) {
     AxsCacheKeeperSearchEventLoaded, AxsCacheKeeperSearchEventWillAppear, AxsCacheKeeperSearchEventDidAppear,
     AxsCacheKeeperSearchEventWillDisappear, AxsCacheKeeperSearchEventDiagnostics, AxsCacheKeeperSearchEventRootHit,
@@ -76,6 +76,18 @@ static inline NSDictionary *axs_cachekeeper_search_route_projection(id value) {
     }
     out[@"hitAncestors"]=[ancestors copy];return [out copy];
 }
+static inline NSDictionary *axs_cachekeeper_search_bar_projection(id value) {
+    if (![value isKindOfClass:NSDictionary.class]) return nil;
+    NSDictionary *view=axs_cachekeeper_search_view_projection(value[@"view"]);if (!view) return nil;
+    if (![value[@"role"] isKindOfClass:NSString.class] ||
+        ![@[@"inner",@"ancestor",@"other"] containsObject:value[@"role"]] ||
+        !axs_cachekeeper_search_bool(value[@"hasTopItem"]) ||
+        !axs_cachekeeper_search_number(value[@"topItemMode"],0,2,YES) ||
+        !axs_cachekeeper_search_bool(value[@"prefersLargeTitles"])) return nil;
+    return @{@"view":view,@"role":[value[@"role"] copy],@"hasTopItem":@([value[@"hasTopItem"] boolValue]),
+        @"topItemMode":@([value[@"topItemMode"] unsignedIntegerValue]),
+        @"prefersLargeTitles":@([value[@"prefersLargeTitles"] boolValue])};
+}
 static inline NSDictionary *axs_cachekeeper_search_diagnostics_projection(id value) {
     if (!value) return @{@"state":@"notObserved"};
     NSDictionary *invalid=@{@"state":@"invalid"};
@@ -118,6 +130,16 @@ static inline NSDictionary *axs_cachekeeper_search_diagnostics_projection(id val
             [ancestors addObject:@{@"role":[ancestor[@"role"] copy],@"view":node}];
         }
         out[@"ancestors"]=[ancestors copy];
+        if (event[@"bars"] || event[@"barsTruncated"]) {
+            if (![event[@"bars"] isKindOfClass:NSArray.class] || [event[@"bars"] count]>AxsCacheKeeperSearchBarLimit ||
+                !axs_cachekeeper_search_bool(event[@"barsTruncated"])) return invalid;
+            NSMutableArray *bars=[NSMutableArray new];
+            for (id bar in event[@"bars"]) {
+                NSDictionary *descriptor=axs_cachekeeper_search_bar_projection(bar);if (!descriptor) return invalid;
+                [bars addObject:descriptor];
+            }
+            out[@"bars"]=[bars copy];out[@"barsTruncated"]=@([event[@"barsTruncated"] boolValue]);
+        }
         if (revision==2) {
             NSDictionary *route=axs_cachekeeper_search_route_projection(event[@"hitRoute"]);if (!route) return invalid;
             out[@"hitRoute"]=route;
