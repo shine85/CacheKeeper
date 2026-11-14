@@ -32,7 +32,7 @@ static uint32_t axs_cachekeeper_refresh_network(void) {
     NSString *folder = jbroot(@"/var/mobile/Library/CacheKeeper");
     NSString *statePath = [folder stringByAppendingPathComponent:@"appEnabled.plist"];
     NSError *readError=nil;
-    NSDictionary *states = [NSDictionary dictionaryWithContentsOfURL:[NSURL fileURLWithPath:statePath] error:&readError];
+    NSDictionary *states = axs_cachekeeper_read_input(statePath,&readError);
     BOOL readable = axs_cachekeeper_access && states!=nil;
     uint32_t diagnostic=!axs_cachekeeper_access ? axs_cachekeeper_probe_result(1,axs_cachekeeper_sandy_status) :
         (!readable ? axs_cachekeeper_probe_result(2,readError.code) : axs_cachekeeper_probe_result(3,0));
@@ -43,7 +43,7 @@ static uint32_t axs_cachekeeper_refresh_network(void) {
     }
     BOOL applied = axs_cachekeeper_configure_network_cache(prevent);
     axs_cachekeeper_restore_pending = !prevent && !applied;
-    NSString *message = !readable ? @"配置不可读，未限制网络缓存" :
+    NSString *message = !readable ? @"配置不可读或字段无效，未限制网络缓存" :
         (prevent ? (applied ? @"标准 NSURLCache 磁盘容量已置 0" : @"磁盘容量设置未生效，自动模式仍会退出后清理") :
         (applied ? (restoring ? @"未禁止网络缓存，已恢复 APP 请求的容量" : @"已读取配置；当前模式／选项未请求网络限制") : @"关闭后的容量恢复尚未成功；下次刷新时重试，可重新启动 APP 恢复"));
     if (readable && axs_cachekeeper_app_enabled(states[bundle])) diagnostic=axs_cachekeeper_probe_result(prevent ? (applied ? 5 : 6) : 4,0);

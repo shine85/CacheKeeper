@@ -80,13 +80,17 @@
     _bundle = [bundle copy] ?: @"";
     _version = [version copy];
     _containerPath = [containerPath copy] ?: @"";
-    _state = [state copy] ?: @{};
+    _state = [state isKindOfClass:NSDictionary.class] ? [state copy] : @{};
     _clock = [clock copy];
     _unlinkFile=[unlinkFile copy];_recordedFailures=[NSMutableArray new];_retainedSubtrees=[NSMutableArray new];
     // 根可能在调度器检查后消失；失败对象同样需要稳定的回执目录键。
     NSString *containerPrefix = [_containerPath stringByAppendingString:@"/"];
     _relativePath = (_containerPath.length && [root hasPrefix:containerPrefix]) ?
         [root substringFromIndex:containerPrefix.length] : @"";
+    if (state && (![state isKindOfClass:NSDictionary.class] || !axs_cachekeeper_state_valid(state))) {
+        _failed=1;_complete=YES;_error=@"配置字段无效，未开始清理";
+        return self;
+    }
     struct stat info;
     if (![root isEqual:[NSURL fileURLWithPath:root].URLByResolvingSymlinksInPath.path] ||
         lstat(root.fileSystemRepresentation, &info) || !S_ISDIR(info.st_mode)) {

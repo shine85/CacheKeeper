@@ -28,6 +28,16 @@ jobs:
     steps:
       - name: 获取源码
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 验证回执展示失败基线
+        run: |
+          mkdir -p tmp
+          python3 tests/run_presentation_red.py
+
+      - name: 验证配置执行边界红绿回归
+        run: python3 tests/run_configuration_red.py
 
       - name: 原生回归测试
         run: python3 tests/run_native_tests.py

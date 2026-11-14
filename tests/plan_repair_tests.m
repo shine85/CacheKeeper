@@ -55,7 +55,8 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
         @"内置抖音规则应识别已退出进程的 ALog 日志，不能仍全部待识别");
     NSString *modulePath=@"Library/alog/AWELive/ready/AWELive_BDALog_20261114_085325.alog.iOS.1128";
     check([AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:alogVersion relativePath:modulePath state:exited evidence:clearLog].disposition==AxsCacheKeeperCleanupDelete,@"真实截图中的模块前缀ready日志应能回收");
-    for (NSString *keptPath in @[@"Library/alog/Timor/prepare/Timor_BDALog.mmap2.iOS.1128",@"Library/alog/AWELive/ready/Other_BDALog_20261114_085325.alog.iOS.1128",@"Library/alog/Unverified/ready/Unverified_BDALog_20261114_085325.alog.iOS.1128"])
+    check([AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:alogVersion relativePath:@"Library/alog/default/ready/BDALog_20261114_085325.alog.iOS.1128" state:exited evidence:clearLog].disposition==AxsCacheKeeperCleanupDelete,@"默认模块完成日志仍可回收");
+    for (NSString *keptPath in @[@"Library/alog/Timor/prepare/Timor_BDALog.mmap2.iOS.1128",@"Library/alog/default/prepare/BDALog_20261114_085325.alog.iOS.1128",@"Library/alog/Unverified/ready/BDALog_20261114_085325.alog.iOS.1128",@"Library/alog/AWELive/ready/Other_BDALog_20261114_085325.alog.iOS.1128",@"Library/alog/Unverified/ready/Unverified_BDALog_20261114_085325.alog.iOS.1128"])
         check([AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:alogVersion relativePath:keptPath state:exited evidence:clearLog].disposition!=AxsCacheKeeperCleanupDelete,@"prepare映射、模块不一致与未确认模块仍保留");
     for (NSString *otherVersion in @[@"",@"41.1.1",@"41.1.0.1"])
         check([AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:otherVersion relativePath:alogPath state:exited evidence:clearLog].disposition!=AxsCacheKeeperCleanupDelete,@"未验版本不继承 ALog 删除授权");
@@ -73,6 +74,10 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     makeDir(home,@"Library/alog/ready");
     NSString *readyLog=[home stringByAppendingPathComponent:alogPath];
     put(readyLog);
+    NSString *moduleReady=makeDir(home,@"Library/alog/AWELive/ready");
+    NSString *moduleLog=[moduleReady stringByAppendingPathComponent:@"AWELive_BDALog_20261114_085325.alog.iOS.1128"];put(moduleLog);
+    NSString *prepared=makeDir(home,@"Library/alog/Timor/prepare");
+    NSString *mapped=[prepared stringByAppendingPathComponent:@"Timor_BDALog.mmap2.iOS.1128"];put(mapped);
     NSString *unknown=[alogRoot stringByAppendingPathComponent:@"ready/notes.txt"];put(unknown);
     NSString *database=[alogRoot stringByAppendingPathComponent:@"ready/BDALog_20261111_193315.alog.iOS.1128"];
     check([@"SQLite format 3\0payload" writeToFile:database atomically:YES encoding:NSUTF8StringEncoding error:nil],@"写伪装日志的数据库");
@@ -88,8 +93,8 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     NSDictionary *alogWait=[AxsCacheKeeperCleanupSchedule registrationForSweep:alogSuspended signature:@"alog-wait" now:10];
     check([alogWait[@"appRuleWaitingForExit"] boolValue] && [[AxsCacheKeeperCleanupSchedule carriedReport:alogWait][@"appRuleID"] isEqual:@"douyin-alog"],@"等待退出的规则说明在结转回执中保持可诊断");
     AxsCacheKeeperSweep *alogReal=[[AxsCacheKeeperSweep alloc] initWithRoot:alogRoot bundle:alogBundle version:alogVersion containerPath:home state:exited clock:^NSTimeInterval{return future;}];finish(alogReal);
-    check(alogReal.removed==1 && alogReal.bytes==13 && ![fm fileExistsAtPath:readyLog],@"成熟日志真实删除且回执等于实际删量");
-    for (NSString *kept in @[unknown,database,media,shared,outside]) check([fm fileExistsAtPath:kept],@"同目录未知、数据库、媒体与根外硬链接保持完整");
+    check(alogReal.removed==2 && alogReal.bytes==26 && ![fm fileExistsAtPath:readyLog] && ![fm fileExistsAtPath:moduleLog],@"成熟普通和模块日志各删1项，回执等于真实删量");
+    for (NSString *kept in @[unknown,database,media,shared,outside,mapped]) check([fm fileExistsAtPath:kept],@"同目录未知、数据库、媒体、prepare映射与根外硬链接保持完整");
     put(readyLog);
     AxsCacheKeeperSweep *alogAgain=[[AxsCacheKeeperSweep alloc] initWithRoot:alogRoot bundle:alogBundle version:alogVersion containerPath:home state:exited clock:^NSTimeInterval{return future;}];finish(alogAgain);
     check(alogAgain.removed==1 && ![fm fileExistsAtPath:readyLog],@"第二轮新产生日志成熟后仍实际回收");

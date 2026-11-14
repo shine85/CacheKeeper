@@ -2,7 +2,9 @@
 #include <roothide.h>
 #include <sys/stat.h>
 #import "../AxsCacheKeeperPolicy.h"
+#import "../AxsCacheKeeperRecords.h"
 #import "../AxsCacheKeeperSelection.h"
+#import "../AxsCacheKeeperPresentation.h"
 #import "../AxsCacheKeeperFilza.h"
 #import "InspectionPage.h"
 #import "../AxsCacheKeeperInspection.h"
@@ -41,7 +43,13 @@
 - (NSString *)file:(NSString *)name {return [jbroot(@"/var/mobile/Library/CacheKeeper") stringByAppendingPathComponent:name];}
 - (NSDictionary *)axs_cachekeeper_display:(NSString *)name {
     if (!self.displayCache) self.displayCache=[NSMutableDictionary new];
-    if (!self.displayCache[name]) self.displayCache[name]=[NSDictionary dictionaryWithContentsOfFile:[self file:name]] ?: @{};
+    if (!self.displayCache[name]) {
+        NSError *error=nil;
+        NSDictionary *value=([name isEqual:@"directories.plist"] || [name isEqual:@"appEnabled.plist"]) ?
+            axs_cachekeeper_read_input([self file:name],&error) : axs_cachekeeper_read_records([self file:name],&error);
+        if (error) self.scanError=error.localizedDescription;
+        self.displayCache[name]=value ?: @{};
+    }
     return self.displayCache[name];
 }
 - (void)axs_cachekeeper_reload {
@@ -59,10 +67,11 @@
 }
 - (void)viewDidLoad {
     [super viewDidLoad];self.title=self.appName;
-    NSDictionary *history=[NSDictionary dictionaryWithContentsOfFile:[self file:@"snapshots.plist"]];
+    NSError *historyError=nil;
+    NSDictionary *history=axs_cachekeeper_read_records([self file:@"snapshots.plist"],&historyError);
     self.rows=axs_cachekeeper_parent_rows(history[self.bundle][@"rows"]);
     self.previous=@{@"rows":history[self.bundle][@"previousRows"]?:@[]};
-    self.scanError=history[self.bundle][@"error"];
+    self.scanError=historyError.localizedDescription ?: history[self.bundle][@"error"];
     self.scanUpdated=history[self.bundle][@"updated"];
     self.scanButton=[[UIBarButtonItem alloc] initWithTitle:@"检测目录" style:UIBarButtonItemStylePlain target:self action:@selector(scan)];
     self.enableAllButton=[[UIBarButtonItem alloc] initWithTitle:@"一键开启" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_enable_all)];
@@ -87,7 +96,9 @@
     [self axs_cachekeeper_reload];
 }
 - (void)check {
-    NSDictionary *result=[NSDictionary dictionaryWithContentsOfFile:[self file:@"scan.plist"]];
+    NSError *readError=nil;
+    NSDictionary *result=axs_cachekeeper_read_records([self file:@"scan.plist"],&readError);
+    if (readError) self.scanError=readError.localizedDescription;
     if ([result[@"token"] isEqual:self.token]) {
         [self.timer invalidate];self.timer=nil;self.scanButton.enabled=YES;self.title=self.appName;
         self.rows=axs_cachekeeper_parent_rows(result[@"rows"]);
@@ -344,7 +355,7 @@
         for (NSDictionary *row in items) {bytes+=[row[@"bytes"] unsignedLongLongValue];complete&=[row[@"complete"] boolValue];}
         cell.textLabel.text=[NSString stringWithFormat:@"%@%lu 项%@",expanded ? @"收起 " : @"展开 ",(unsigned long)items.count,unknown ? @"用途未知目录" : @"混合／共享数据"];
         cell.textLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];cell.textLabel.textColor=UIColor.systemBlueColor;
-        cell.detailTextLabel.text=[NSString stringWithFormat:@"已统计 %.2f MB%@ · %@",bytes/1048576.0,complete ? @"" : @"（未统计完整）",unknown ? @"未知内容暂不自动清理，待专属识别规则按占用适配" : @"不自动处理"];cell.detailTextLabel.numberOfLines=0;
+        cell.detailTextLabel.text=[NSString stringWithFormat:@"%@\n%@",axs_cachekeeper_presentation_snapshot(@{@"bytes":@(bytes),@"complete":@(complete)},self.scanUpdated),unknown ? @"未知内容暂不自动清理，待专属识别规则按占用适配" : @"不自动处理"];cell.detailTextLabel.numberOfLines=0;
         cell.imageView.image=[UIImage systemImageNamed:unknown ? @"questionmark.folder" : @"folder"];
         cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;cell.accessibilityValue=expanded ? @"已展开" : @"已折叠";return cell;
     }
@@ -368,7 +379,7 @@
     for (NSDictionary *old in self.previous[@"rows"]) if ([old[@"path"] isEqual:relative]) {previous=[old[@"bytes"] longLongValue];compared=YES;break;}
     UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
     cell.textLabel.text=[relative isEqual:@"Library/Caches"]?@"Library/Caches · 标准缓存":relative;cell.textLabel.numberOfLines=0;cell.detailTextLabel.numberOfLines=0;
-    NSString *growth=compared?[NSString stringWithFormat:@" · 变化 %+.2f MB",([row[@"bytes"] longLongValue]-previous)/1048576.0]:@" · 首次检测";
+    NSString *growth=compared?[NSString stringWithFormat:@" · 较上次大小快照变化 %+.2f MB",([row[@"bytes"] longLongValue]-previous)/1048576.0]:@" · 首次检测";
     BOOL masterOn=axs_cachekeeper_app_enabled(master[self.bundle]);
     BOOL manageable=axs_cachekeeper_row_manageable(row);
     BOOL judged=[axs_cachekeeper_log_paths(viewState) containsObject:relative];
@@ -384,7 +395,8 @@
     // 残留分类（任务 5）：三类互斥——待处理（本轮可删未删完）、延期（近期＋变化合并）、
     // 待识别（用途未确认）；失败是独立诊断。字节为逻辑占用估计，非实测释放空间。
     // 结转报告（skipped）只结转未确认残留，其余字段未测量，缺键即未知，不显示为 0。
-    NSDictionary *directoryReport=[self axs_cachekeeper_display:[@"Status/" stringByAppendingFormat:@"%@.auto.plist",self.bundle]][@"directories"][relative];
+    NSDictionary *appReport=[self axs_cachekeeper_display:[@"Status/" stringByAppendingFormat:@"%@.auto.plist",self.bundle]];
+    NSDictionary *directoryReport=appReport[@"directories"][relative];
     if ([directoryReport isKindOfClass:NSDictionary.class]) {
         NSString *ruleSummary=directoryReport[@"appRuleSummary"];
         if (masterOn && !axs_cachekeeper_row_selected(relative,axs_cachekeeper_exclusions(viewState)) &&
@@ -392,20 +404,10 @@
             state=[@"最近回执：" stringByAppendingString:ruleSummary];
             if ([directoryReport[@"appRuleWaitingForExit"] boolValue]) state=[state stringByAppendingString:@"\n该轮未确认进程完全退出，专属日志暂未处理"];
         }
-        NSMutableArray *residual=[NSMutableArray new];
-        if (![directoryReport[@"measurementComplete"] boolValue] && ![directoryReport[@"skipped"] boolValue]) [residual addObject:@"测量未完成，残留数量与大小未知"];
-        NSUInteger remaining=[directoryReport[@"remaining"] unsignedIntegerValue];
-        unsigned long long remainingBytes=[directoryReport[@"remainingBytes"] unsignedLongLongValue];
-        if (remaining) [residual addObject:remainingBytes ? [NSString stringWithFormat:@"待处理 %lu 项 · %.2f MB", (unsigned long)remaining, remainingBytes / 1048576.0] : [NSString stringWithFormat:@"待处理 %lu 项", (unsigned long)remaining]];
-        // 旧回执无 deferred 键时回退为近期＋变化之和（无字节数）。
-        NSUInteger deferred=directoryReport[@"deferred"] ? [directoryReport[@"deferred"] unsignedIntegerValue] : [directoryReport[@"recent"] unsignedIntegerValue] + [directoryReport[@"changed"] unsignedIntegerValue];
-        unsigned long long deferredBytes=[directoryReport[@"deferredBytes"] unsignedLongLongValue];
-        if (deferred) [residual addObject:deferredBytes ? [NSString stringWithFormat:@"延期 %lu 项 · %.2f MB（到期或下轮重判）", (unsigned long)deferred, deferredBytes / 1048576.0] : [NSString stringWithFormat:@"延期 %lu 项（到期或下轮重判）", (unsigned long)deferred]];
-        if ([directoryReport[@"unresolved"] unsignedIntegerValue]) [residual addObject:[NSString stringWithFormat:@"待识别 %lu 项 · %.2f MB", (unsigned long)[directoryReport[@"unresolved"] unsignedIntegerValue], [directoryReport[@"unresolvedBytes"] unsignedLongLongValue] / 1048576.0]];
-        if ([directoryReport[@"failed"] unsignedIntegerValue]) [residual addObject:[NSString stringWithFormat:@"失败 %lu 项", (unsigned long)[directoryReport[@"failed"] unsignedIntegerValue]]];
-        if (residual.count) state=[state stringByAppendingFormat:@"\n残留：%@%@", [residual componentsJoinedByString:@"；"], [directoryReport[@"skipped"] boolValue] ? @"（本轮未重扫，残留为上轮登记）" : @""];
+        state=[state stringByAppendingFormat:@"\n%@",axs_cachekeeper_presentation_receipt(directoryReport,appReport)];
     }
-    NSString *size=row[@"bytes"] ? [NSString stringWithFormat:@"%.2f MB%@%@",[row[@"bytes"] doubleValue]/1048576,growth,[row[@"complete"] boolValue]?@"":@" · 大小未统计完"] : @"自动发现，大小待检测";
+    NSString *size=axs_cachekeeper_presentation_snapshot(row,self.scanUpdated);
+    if (row[@"bytes"]) size=[size stringByAppendingString:growth];
     NSDictionary *snapshot=[self axs_cachekeeper_display:@"snapshots.plist"][self.bundle];
     NSString *trend=axs_cachekeeper_growth_evidence(relative,snapshot[@"recentScans"] ?: @[],snapshot);
     cell.detailTextLabel.text=[NSString stringWithFormat:@"%@\n%@\n%@\n%@\n点击查看档案／补测大小",size,axs_cachekeeper_directory_description(relative),state,trend];

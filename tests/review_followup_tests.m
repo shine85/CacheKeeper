@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import "../AxsCacheKeeperPolicy.h"
+#import "../AxsCacheKeeperRecords.h"
 #import "../AxsCacheKeeperCleanupRules.h"
 #import "../AxsCacheKeeperSweep.h"
 #import "../AxsCacheKeeperCleanupSchedule.h"
@@ -7,6 +8,7 @@
 #import "../AxsCacheKeeperProcessObservation.h"
 #import "../AxsCacheKeeperDependencySnapshot.h"
 #import "../AxsCacheKeeperInspection.h"
+#import "../AxsCacheKeeperSelection.h"
 #include <unistd.h>
 #include <errno.h>
 
@@ -39,6 +41,110 @@ void axs_cachekeeper_run_review_followup_tests(NSString *fixture) {
         return [[AxsCacheKeeperSweep alloc] initWithRoot:root bundle:bundle version:version containerPath:home state:state clock:^NSTimeInterval {return future;}];
     };
     [AxsCacheKeeperCleanupRules removeAllRulesForTesting];
+
+    // A malformed exclusion must revoke cleanup, not silently become an empty exclusion list.
+    NSString *configHome=ckdir(home,@"configuration-boundary");
+    NSString *configRoot=ckdir(configHome,@"Library/Caches");
+    NSString *unique=[configRoot stringByAppendingPathComponent:@"keep-me"];
+    ckput(unique,@"unique contents");
+    NSString *configFile=[configHome stringByAppendingPathComponent:@"appEnabled.plist"];
+    NSString *selectionFile=[configHome stringByAppendingPathComponent:@"directories.plist"];
+    for (NSDictionary *bad in @[@{@"enabled":@YES,@"excludedPaths":@"Library/Caches/keep-me"},
+        @{@"enabled":@YES,@"excludedPaths":@[@1]},@{@"enabled":@YES,@"excludedPaths":@[@"../outside"]},
+        @{@"enabled":@YES,@"autoDiscover":@"yes"},@{@"enabled":@YES,@"mode":@"unknown"}]) {
+        ckcheck(!axs_cachekeeper_app_enabled(bad),@"坏配置不能授予后台清理或网络限制资格");
+        ckcheck([@{bundle:bad} writeToFile:configFile atomically:YES],@"写坏配置夹具");
+        NSData *before=[NSData dataWithContentsOfFile:configFile];
+        ckcheck(!axs_cachekeeper_edit_configuration(configFile),@"详情页写入入口拒绝坏嵌套配置");
+        ckcheck(axs_cachekeeper_set_log_path(configHome,bundle,@"Library/alog",YES)!=nil,@"日志定级不能覆盖损坏的排除意图");
+        ckcheck(axs_cachekeeper_set_excluded_path(configHome,bundle,@"Library/Caches/keep-me",YES)!=nil,@"保留开关不能归一化损坏配置");
+        ckcheck([[NSData dataWithContentsOfFile:configFile] isEqual:before],@"拒绝写入后配置原始字节不变");
+        AxsCacheKeeperSweep *blocked=[[AxsCacheKeeperSweep alloc] initWithRoot:configRoot bundle:bundle version:@"1" containerPath:configHome state:bad clock:^NSTimeInterval{return future;}];
+        ckfinish(blocked);
+        ckcheck(blocked.removed==0 && blocked.failed>0 && !blocked.measurementComplete &&
+            [[NSString stringWithContentsOfFile:unique encoding:NSUTF8StringEncoding error:nil] isEqual:@"unique contents"],@"直接清理入口拒绝坏状态，文件原样保留且报告失败");
+    }
+    NSDictionary *validState=@{@"enabled":@YES,@"autoDiscover":@NO};
+    ckcheck([@{bundle:validState} writeToFile:configFile atomically:YES],@"恢复合法配置");
+    NSError *configError=nil;
+    ckcheck(axs_cachekeeper_app_enabled(axs_cachekeeper_read_input(configFile,&configError)[bundle]) && !configError,@"配置修复后重新读取可恢复资格");
+    AxsCacheKeeperSweep *inFlight=[[AxsCacheKeeperSweep alloc] initWithRoot:configRoot bundle:bundle version:@"1" containerPath:configHome state:validState clock:^NSTimeInterval{return future;}];
+    ckpreflight(inFlight);
+    ckcheck([@{bundle:@{@"enabled":@YES,@"excludedPaths":@1}} writeToFile:configFile atomically:YES],@"预检后损坏排除字段");
+    [inFlight advance:8 shouldContinue:^BOOL {
+        return axs_cachekeeper_cleanup_inputs(selectionFile,configFile,bundle,NULL,NULL);
+    }];
+    ckcheck(inFlight.cancelled && inFlight.removed==0 && [fm fileExistsAtPath:unique],@"预检后的坏配置使执行门停止，不能沿用旧快照删除");
+    NSString *purgeRoot=ckdir(configHome,@"Library/Resources");
+    NSString *purgeFile=[purgeRoot stringByAppendingPathComponent:@"recoverable"];
+    [AxsCacheKeeperCleanupRules registerRule:[[AxsCacheKeeperAppRule alloc] initWithRuleID:@"consent-gate" revision:@"1" appVersion:@"1"
+        cleanablePaths:@[@"Library/Resources"] retentionPaths:@[] dependencyPaths:@[]] forBundle:bundle];
+    for (NSUInteger transition=0;transition<4;transition++) {
+        ckput(purgeFile,@"recoverable resource");
+        ckcheck([@{bundle:validState} writeToFile:configFile atomically:YES],@"纯非标准范围先取得启用资格");
+        ckcheck(axs_cachekeeper_cleanup_inputs(selectionFile,configFile,bundle,NULL,NULL) &&
+            !axs_cachekeeper_effective_paths(@[],validState,@[]).count,@"缺目录选择允许启用的纯非标准范围，无标准缓存根");
+        AxsCacheKeeperSweep *purge=[[AxsCacheKeeperSweep alloc] initWithRoot:purgeRoot bundle:bundle version:@"1" containerPath:configHome state:validState clock:^NSTimeInterval{return future;}];
+        ckpreflight(purge);
+        if (transition==0) ckcheck([@{bundle:@{@"enabled":@NO,@"autoDiscover":@NO}} writeToFile:configFile atomically:YES],@"预检后关闭开关");
+        if (transition==1) ckcheck([@{} writeToFile:configFile atomically:YES],@"预检后移除 APP 配置键");
+        if (transition==2) ckcheck([fm removeItemAtPath:configFile error:nil],@"预检后配置文件消失");
+        for (NSUInteger n=0;n<100 && !purge.complete && !purge.cancelled;n++)
+            [purge advance:8 shouldContinue:^BOOL {return axs_cachekeeper_cleanup_inputs(selectionFile,configFile,bundle,NULL,NULL);}];
+        if (transition<3) ckcheck(purge.cancelled && purge.removed==0 && [fm fileExistsAtPath:purgeFile],@"执行门撤回纯非标准范围资格，文件保留且零删除");
+        else ckcheck(purge.complete && purge.removed==1 && ![fm fileExistsAtPath:purgeFile],@"未撤回资格的对照范围实际删除，夹具具有可删性");
+    }
+    [AxsCacheKeeperCleanupRules removeAllRulesForTesting];
+    for (NSDictionary *badRequest in @[
+        @{@"name":@"batch.plist",@"value":@{@"token":@"test",@"remaining":@1}},
+        @{@"name":@"batch.plist",@"value":@{@"token":@"test",@"remaining":@[@1]}},
+        @{@"name":@"inspectionRequest.plist",@"value":@{@"token":@"test",@"bundle":bundle,@"path":@"Library/Caches",@"cancel":@{}}},
+        @{@"name":@"directories.plist",@"value":@{bundle:@"Library/Caches"}}
+    ]) {
+        NSString *path=[configHome stringByAppendingPathComponent:badRequest[@"name"]];
+        ckcheck([badRequest[@"value"] writeToFile:path atomically:YES],@"写入坏请求");
+        NSError *failure=nil;
+        ckcheck(!axs_cachekeeper_read_input(path,&failure) && failure,@"共享服务读取入口拒绝坏容器或布尔字段");
+    }
+    ckcheck(axs_cachekeeper_input_schema(@{@"token":@"valid",@"bundle":bundle,@"path":@"Library/Caches",@"cancel":@YES},@"inspectionRequest.plist"),@"合法取消请求继续接受");
+    ckcheck(axs_cachekeeper_edit_configuration([configHome stringByAppendingPathComponent:@"absent/appEnabled.plist"])!=nil,@"不存在的配置可初始化，区别于坏配置");
+    for (NSDictionary *badHistory in @[
+        @{@"name":@"snapshots.plist",@"value":@{bundle:@1}},
+        @{@"name":@"snapshots.plist",@"value":@{bundle:@{@"rows":@[@1]}}},
+        @{@"name":@"snapshots.plist",@"value":@{bundle:@{@"rows":@[@{@"path":@"Library/Caches",@"readOnly":@{}}]}}},
+        @{@"name":@"snapshots.plist",@"value":@{bundle:@{@"rows":@[@{@"bytes":@[]}],@"error":@1}}},
+        @{@"name":@"test.inspection.plist",@"value":@{@"reports":@[]}},
+        @{@"name":@"test.inspection.plist",@"value":@{@"reports":@{@"Library/Caches":@1}}},
+        @{@"name":@"test.inspection.plist",@"value":@{@"reports":@{@"Library/Caches":@{@"types":@{@"text":@1}}}}},
+        @{@"name":@"test.auto.plist",@"value":@{@"directories":@{@"Library/Caches":@{@"retainedSubtrees":@[@1]}}}}
+    ]) {
+        NSString *file=[configHome stringByAppendingPathComponent:badHistory[@"name"]];
+        ckcheck([badHistory[@"value"] writeToFile:file atomically:YES],@"写入损坏的历史或回执");
+        NSData *original=[NSData dataWithContentsOfFile:file];NSError *failure=nil;
+        ckcheck(!axs_cachekeeper_read_records(file,&failure) && failure,@"历史读写共同入口拒绝损坏的嵌套容器");
+        ckcheck([[NSData dataWithContentsOfFile:file] isEqual:original],@"损坏历史保留原始字节");
+    }
+    NSDictionary *goodHistory=@{bundle:@{@"rows":@[@{@"path":@"Library/Caches",@"bytes":@1,@"complete":@YES}],@"recentScans":@[],@"updated":NSDate.date,@"futureField":@1}};
+    NSString *historyFile=[configHome stringByAppendingPathComponent:@"snapshots.plist"];
+    ckcheck([goodHistory writeToFile:historyFile atomically:YES] && [axs_cachekeeper_read_records(historyFile,NULL) isEqual:goodHistory],@"合法旧历史与未知扩展字段继续可读");
+    NSDictionary *batch=@{@"token":@"save-test",@"remaining":@[bundle,@"test.next"],@"completed":@2,@"total":@4};
+    NSDictionary *stopped=axs_cachekeeper_batch_result(batch,@"save-test",bundle,@"历史文件损坏");
+    ckcheck([stopped[@"completed"] isEqual:@2] && [stopped[@"remaining"] isEqual:batch[@"remaining"]] && [stopped[@"error"] length],@"历史保存失败不虚增完成数、不丢失待处理项，批量停止并保留错误");
+    NSDictionary *advanced=axs_cachekeeper_batch_result(batch,@"save-test",bundle,nil);
+    ckcheck([advanced[@"completed"] isEqual:@3] && [advanced[@"remaining"] isEqual:@[@"test.next"]] && !advanced[@"error"],@"保存成功才推进批量回执");
+    ckcheck(!axs_cachekeeper_batch_result(batch,@"stale",bundle,nil),@"旧请求不能推进新批量任务");
+    __block NSUInteger writeAttempts=0;
+    NSDictionary *pending=axs_cachekeeper_retry_batch_receipt(advanced,batch,^BOOL(NSDictionary *receipt) {
+        writeAttempts++;return NO;
+    });
+    ckcheck([pending isEqual:advanced],@"回执保存失败保留待写内容");
+    pending=axs_cachekeeper_retry_batch_receipt(pending,batch,^BOOL(NSDictionary *receipt) {
+        writeAttempts++;return [receipt isEqual:advanced];
+    });
+    ckcheck(!pending && writeAttempts==2 && [advanced[@"completed"] isEqual:@3],@"写入恢复只补写一次既有回执，不重新推进完成数");
+    ckcheck(!axs_cachekeeper_retry_batch_receipt(advanced,@{@"token":@"new-request"},^BOOL(NSDictionary *receipt) {
+        writeAttempts++;return YES;
+    }) && writeAttempts==2,@"新请求使待补写的旧回执失效");
 
     // 名称保护不能过滤用户保留意图；真正执行父根清理，排除内容须逐个完整。
     NSArray *excluded=[@[@"Library/Caches/database",@"Library/Caches/sqlite",@"Library/Caches/realm",

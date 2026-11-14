@@ -76,13 +76,25 @@ static NSString * const AxsCacheKeeperUserLogRuleRevision = @"1";
     dispatch_once(&once, ^{
         pattern=[NSRegularExpression regularExpressionWithPattern:@"\\ABDALog_[0-9]{8}_[0-9]{6}\\.alog\\.iOS\\.[0-9]+\\z" options:0 error:nil];
     });
-    NSString *name=relative.lastPathComponent;
+    NSArray<NSString *> *parts=[relative componentsSeparatedByString:@"/"];
+    if (parts.count<4 || ![parts[0] isEqual:@"Library"] || ![parts[1] isEqual:@"alog"]) return NO;
+    NSString *name=parts.lastObject;
+    BOOL plainReady=(parts.count==4 && [parts[2] isEqual:@"ready"]) ||
+        (parts.count==5 && [parts[2] isEqual:@"default"] && [parts[3] isEqual:@"ready"]);
+    if (plainReady) return [pattern numberOfMatchesInString:name options:0 range:NSMakeRange(0,name.length)]==1;
+    // 已观测模块使用 module/ready/module_BDALog_...；prepare 不授权删除。
+    if (parts.count!=5 || ![parts[3] isEqual:@"ready"]) return NO;
+    NSString *module=parts[2];
+    if (![@[@"AWELive",@"Timor",@"IM",@"Knowledge",@"MainFrame",@"Commerce",@"CJPay",@"MetaSec"] containsObject:module]) return NO;
+    NSString *prefix=[module stringByAppendingString:@"_"];
+    if (![name hasPrefix:prefix]) return NO;
+    name=[name substringFromIndex:prefix.length];
     return [pattern numberOfMatchesInString:name options:0 range:NSMakeRange(0,name.length)]==1;
 }
 @end
 
 static NSMutableDictionary *AxsCacheKeeperBuiltinRules(void) {
-    AxsCacheKeeperAppRule *rule=[[AxsCacheKeeperALogRule alloc] initWithRuleID:@"douyin-alog" revision:@"1" appVersion:@"41.1.0"
+    AxsCacheKeeperAppRule *rule=[[AxsCacheKeeperALogRule alloc] initWithRuleID:@"douyin-alog" revision:@"2" appVersion:@"41.1.0"
         cleanablePaths:@[@"Library/alog"] retentionPaths:@[] dependencyPaths:@[]];
     NSMutableDictionary *rules=[@{@"com.ss.iphone.ugc.Aweme":[NSMutableArray arrayWithObject:rule]} mutableCopy];
     NSArray *retentions=@[
@@ -146,7 +158,7 @@ static BOOL AxsCacheKeeperRuleApplies(AxsCacheKeeperAppRule *rule, NSString *ver
         if (![rule isKindOfClass:AxsCacheKeeperALogRule.class] || !AxsCacheKeeperRuleApplies(rule,version)) continue;
         for (NSString *scope in rule.cleanablePaths)
             if (AxsCacheKeeperPathUnder(relativePath,scope) || AxsCacheKeeperPathUnder(scope,relativePath))
-                return @"ALog 专属规则：APP 完全退出后回收匹配命名的诊断日志；数据、媒体、未知文件和手动排除保留";
+                return @"ALog 专属规则：APP 完全退出后回收已确认命名的完成日志（含模块 ready 日志）；prepare 映射、数据、媒体、未知文件和手动排除保留";
     }
     return nil;
 }

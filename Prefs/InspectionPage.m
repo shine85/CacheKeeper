@@ -1,6 +1,8 @@
 #import "InspectionPage.h"
 #import "../AxsCacheKeeperPolicy.h"
+#import "../AxsCacheKeeperRecords.h"
 #import "../AxsCacheKeeperSelection.h"
+#import "../AxsCacheKeeperPresentation.h"
 #include <roothide.h>
 
 @interface AxsCacheKeeperInspectionPage ()
@@ -19,6 +21,12 @@
     self=[super init];if (self) { _bundle=[bundle copy];_relative=[path copy]; }return self;
 }
 - (NSString *)axs_cachekeeper_file:(NSString *)name { return [jbroot(@"/var/mobile/Library/CacheKeeper") stringByAppendingPathComponent:name]; }
+- (NSDictionary *)axs_cachekeeper_saved_report {
+    NSError *error=nil;
+    NSDictionary *saved=axs_cachekeeper_read_records([self axs_cachekeeper_file:[NSString stringWithFormat:@"Status/%@.inspection.plist",self.bundle]],&error);
+    if (error) self.requestError=error.localizedDescription;
+    return saved[@"reports"][self.relative];
+}
 - (void)viewDidLoad {
     [super viewDidLoad];self.title=@"目录档案 · 只读";
     self.textView=[[UITextView alloc] initWithFrame:self.view.bounds];self.textView.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
@@ -69,7 +77,7 @@
     BOOL judged=[self axs_cachekeeper_judged];
     if (!judged) {
         // 证据门：没有一份已完成且读到过普通文件的深度检测档案，不予定级（如 Pitaya 读到 0 个文件）。
-        NSDictionary *report=[NSDictionary dictionaryWithContentsOfFile:[self axs_cachekeeper_file:[NSString stringWithFormat:@"Status/%@.inspection.plist",self.bundle]]][@"reports"][self.relative];
+        NSDictionary *report=[self axs_cachekeeper_saved_report];
         if (![report[@"path"] isEqual:self.relative] || ![report[@"complete"] boolValue] || ![report[@"files"] unsignedIntegerValue]) {
             self.requestError=@"证据不足：请先完成一次深度检测且读到至少 1 个普通文件，再定级为日志目录。";
             [self axs_cachekeeper_refresh];return;
@@ -82,13 +90,15 @@
     [self axs_cachekeeper_refresh];
 }
 - (void)axs_cachekeeper_refresh {
-    NSDictionary *report=[NSDictionary dictionaryWithContentsOfFile:[self axs_cachekeeper_file:[NSString stringWithFormat:@"Status/%@.inspection.plist",self.bundle]]][@"reports"][self.relative];
+    NSDictionary *report=[self axs_cachekeeper_saved_report];
     BOOL matches=!self.token || [report[@"token"] isEqual:self.token];
     if (matches && ([report[@"complete"] boolValue] || [report[@"cancelled"] boolValue])) self.stopping=NO;
     NSMutableString *text=[NSMutableString stringWithFormat:@"%@\n\n完整枚举本目录，每个普通文件读取最多 4 KB 文件头；不设总文件数上限。链接与敏感目录跳过，不修改 APP 文件。点击右上角深度检测开始，也可再次检测。\n\n",self.relative];
     if (self.requestError.length) [text appendFormat:@"%@\n\n",self.requestError];
     if (self.stopping) [text appendString:@"已请求停止，等待当前请求的停止回执。\n\n"];
-    NSDictionary *autoReport=[NSDictionary dictionaryWithContentsOfFile:[self axs_cachekeeper_file:[NSString stringWithFormat:@"Status/%@.auto.plist",self.bundle]]];
+    NSError *cleanupError=nil;
+    NSDictionary *autoReport=axs_cachekeeper_read_records([self axs_cachekeeper_file:[NSString stringWithFormat:@"Status/%@.auto.plist",self.bundle]],&cleanupError);
+    if (cleanupError) [text appendFormat:@"清理回执不可用：%@\n\n",cleanupError.localizedDescription];
     NSDictionary *cleanup=autoReport[@"directories"][self.relative];
     if (cleanup) {
         if ([cleanup[@"appRuleSummary"] isKindOfClass:NSString.class]) {
@@ -96,31 +106,13 @@
             if ([cleanup[@"appRuleWaitingForExit"] boolValue]) [text appendString:@"该轮尚未确认 APP 完全退出，专属日志保持保留。\n"];
             [text appendString:@"\n"];
         }
-        // 轮次状态按残留推导（任务 5）：覆盖不完整或有未确认残留时不显示"完成"，
-        // 零删除也不冒充"已经干净"；残留三类互斥（待处理/延期/待识别），失败是独立诊断。
-        // 结转报告（skipped）本轮未重扫：只显示已登记的未确认残留，未测量字段不写 0。
-        BOOL skipped=[cleanup[@"skipped"] boolValue];
-        NSUInteger deferred=cleanup[@"deferred"] ? [cleanup[@"deferred"] unsignedIntegerValue] : [cleanup[@"recent"] unsignedIntegerValue] + [cleanup[@"changed"] unsignedIntegerValue];
-        NSString *roundState;
-        if (skipped) roundState=@"本轮未重扫（残留为上轮登记）";
-        else if ([cleanup[@"cancelled"] boolValue]) roundState=@"已中止";
-        else if (![cleanup[@"complete"] boolValue]) roundState=@"尚未完成";
-        else if ([cleanup[@"failed"] unsignedIntegerValue]) roundState=[NSString stringWithFormat:@"失败（%@ 项）",cleanup[@"failed"]];
-        else if (![autoReport[@"coverageComplete"] boolValue]) roundState=@"发现不完整（本轮未覆盖全部范围）";
-        else if ([cleanup[@"unresolved"] unsignedIntegerValue]) roundState=@"待识别";
-        else if (deferred) roundState=@"等待延期文件";
-        else if ([cleanup[@"remaining"] unsignedIntegerValue]) roundState=[NSString stringWithFormat:@"部分完成（待处理 %@ 项）",cleanup[@"remaining"]];
-        else if ([cleanup[@"retainedSubtreeCount"] unsignedIntegerValue]) roundState=@"已检查（有整目录保留范围）";
-        else roundState=@"完成";
-        if (skipped) [text appendFormat:@"最近一轮清理记录（%@）：%@\n删除 %@ 个文件 · %.2f MB；待识别 %@ 项 · %.2f MB。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),roundState,cleanup[@"removed"] ?: @0,[cleanup[@"bytes"] doubleValue]/1048576,cleanup[@"unresolved"] ?: @0,[cleanup[@"unresolvedBytes"] doubleValue]/1048576,cleanup[@"error"] ?: @""];
-        else if (![cleanup[@"measurementComplete"] boolValue]) [text appendFormat:@"最近清理记录（%@）：测量未完成，残留数量与大小未知；已删除 %@ 项，失败 %@ 项。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),cleanup[@"removed"] ?: @0,cleanup[@"failed"] ?: @0,cleanup[@"error"] ?: @""];
-        else [text appendFormat:@"最近一轮清理记录（%@）：%@\n删除 %@ 个文件 · %.2f MB；保留受保护 %@ 项，延期 %lu 项 · %.2f MB，失败 %@ 项，待识别 %@ 项 · %.2f MB，待处理 %@ 项 · %.2f MB。\n%@\n\n",axs_cachekeeper_time_string(cleanup[@"updated"]),roundState,cleanup[@"removed"] ?: @0,[cleanup[@"bytes"] doubleValue]/1048576,cleanup[@"protected"] ?: @0,(unsigned long)deferred,[cleanup[@"deferredBytes"] doubleValue]/1048576,cleanup[@"failed"] ?: @0,cleanup[@"unresolved"] ?: @0,[cleanup[@"unresolvedBytes"] doubleValue]/1048576,cleanup[@"remaining"] ?: @0,[cleanup[@"remainingBytes"] doubleValue]/1048576,cleanup[@"error"] ?: @""];
+        [text appendFormat:@"%@\n\n",axs_cachekeeper_presentation_receipt(cleanup,autoReport)];
     }
     else [text appendString:@"本目录尚无清理回执；占用减少不能据此归因于插件。\n\n"];
     NSUInteger retainedCount=[cleanup[@"retainedSubtreeCount"] unsignedIntegerValue];
     NSArray *retainedSubtrees=cleanup[@"retainedSubtrees"];
     if (retainedCount) {
-        [text appendFormat:@"整目录保留 %lu 处，未遍历内部文件；其文件数量和大小未计入上面的文件统计，不能把 0 项当作目录为空：\n",(unsigned long)retainedCount];
+        [text appendFormat:@"整目录保留范围（%lu 处）及原因：\n",(unsigned long)retainedCount];
         for (NSDictionary *subtree in retainedSubtrees) [text appendFormat:@"%@ · %@\n",subtree[@"path"],subtree[@"reason"]];
         if (retainedCount>retainedSubtrees.count) [text appendFormat:@"另有 %lu 处保留目录，样本已截断。\n",(unsigned long)(retainedCount-retainedSubtrees.count)];
         [text appendString:@"\n"];
@@ -135,7 +127,7 @@
         self.textView.text=text;return;
     }
     BOOL complete=[report[@"complete"] boolValue],cancelled=[report[@"cancelled"] boolValue];
-    [text appendFormat:@"%@ · %@\n读取 %lu 个普通文件，%.2f MB\n%@\n\n",cancelled ? @"已停止（部分结果）" : complete ? ([report[@"coverageComplete"] boolValue] ? @"枚举完成" : @"结束但未完整读取") : @"正在分批读取",axs_cachekeeper_time_string(report[@"updated"]),(unsigned long)[report[@"files"] unsignedIntegerValue],[report[@"bytes"] doubleValue]/1048576,report[@"evidence"] ?: @""];
+    [text appendFormat:@"%@\n%@\n\n",axs_cachekeeper_presentation_inspection(report),report[@"evidence"] ?: @""];
     if (!complete && !cancelled && -[report[@"updated"] timeIntervalSinceNow]>30) [text appendString:@"进度超过 30 秒未更新；可以停止后重检，当前不能判定已完成。\n"];
     NSString *linkDetail=report[@"hardLinks"] ? [NSString stringWithFormat:@"跳过链接 %@ 项（硬链接 %@ 项、符号链接 %@ 项）",report[@"links"] ?: @0,report[@"hardLinks"] ?: @0,report[@"symlinks"] ?: @0] : [NSString stringWithFormat:@"跳过链接 %@ 项",report[@"links"] ?: @0];
     [text appendFormat:@"读取失败 %@ 项；扫描中变化 %@ 项；%@、敏感目录 %@ 项。\n%@\n",report[@"failures"] ?: @0,report[@"changed"] ?: @0,linkDetail,report[@"hidden"] ?: @0,report[@"error"] ?: @""];

@@ -6,7 +6,7 @@ FINALPACKAGE = 1
 DEBUG = 0
 include $(THEOS)/makefiles/common.mk
 BUNDLE_NAME = CacheKeeperPrefs
-CacheKeeperPrefs_FILES = Prefs/Settings.m Prefs/ScanPage.m Prefs/InspectionPage.m Prefs/DiagnosticsPage.m AxsCacheKeeperDiagnostics.m AxsCacheKeeperAppList.m
+CacheKeeperPrefs_FILES = Prefs/Settings.m Prefs/SearchInput.m Prefs/ScanPage.m Prefs/InspectionPage.m Prefs/DiagnosticsPage.m AxsCacheKeeperDiagnostics.m AxsCacheKeeperAppList.m
 CacheKeeperPrefs_INSTALL_PATH = /Library/PreferenceBundles
 CacheKeeperPrefs_CFLAGS = -fobjc-arc
 CacheKeeperPrefs_FRAMEWORKS = UIKit Foundation

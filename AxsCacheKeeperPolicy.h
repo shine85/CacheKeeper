@@ -2,18 +2,14 @@
 #import <Foundation/Foundation.h>
 #include <sys/stat.h>
 #include <string.h>
+#include <errno.h>
+#include <math.h>
 
 static NSString *const AxsCacheKeeperPreferencesChanged = @"dev.local.cachekeeper.preferences-changed";
 static const NSTimeInterval AxsCacheKeeperMinimumFileAge = 60;
 static inline void axs_cachekeeper_notify_preferences(void) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)AxsCacheKeeperPreferencesChanged, NULL, NULL, YES);
 }
-static inline NSMutableDictionary *axs_cachekeeper_edit_configuration(NSString *path) {
-    NSDictionary *value=[NSDictionary dictionaryWithContentsOfFile:path];
-    if (!value && [NSFileManager.defaultManager fileExistsAtPath:path]) return nil;
-    return [value mutableCopy] ?: [NSMutableDictionary new];
-}
-
 static inline BOOL axs_cachekeeper_relative_path(NSString *path) {
     if (![path isKindOfClass:NSString.class] || !path.length || [path hasPrefix:@"/"]) return NO;
     for (NSString *part in [path componentsSeparatedByString:@"/"]) {
@@ -144,6 +140,105 @@ static inline BOOL axs_cachekeeper_bundle_id(NSString *bundle) {
     NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_"];
     return [bundle rangeOfCharacterFromSet:allowed.invertedSet].location == NSNotFound && ![bundle isEqual:@"."] && ![bundle isEqual:@".."];
 }
+// All consumers share the same input contract. Display may retain old values;
+// execution and editing must reject malformed data instead of dropping exclusions.
+static inline BOOL axs_cachekeeper_input_strings(id value, BOOL (*predicate)(NSString *)) {
+    if (![value isKindOfClass:NSArray.class]) return NO;
+    for (id item in value) if (![item isKindOfClass:NSString.class] || (predicate && !predicate(item))) return NO;
+    return YES;
+}
+static inline BOOL axs_cachekeeper_input_counter(id value) {
+    return [value isKindOfClass:NSNumber.class] && isfinite([value doubleValue]) && [value doubleValue]>=0;
+}
+static inline BOOL axs_cachekeeper_input_boolean(id value) {
+    return [value isKindOfClass:NSNumber.class] && ([value doubleValue]==0 || [value doubleValue]==1);
+}
+static inline BOOL axs_cachekeeper_state_valid(id state) {
+    if (!state) return YES;
+    if ([state isKindOfClass:NSNumber.class]) return axs_cachekeeper_input_boolean(state);
+    if (![state isKindOfClass:NSDictionary.class]) return NO;
+    for (NSString *field in @[@"enabled",@"urlCache",@"autoDiscover",@"restrict",@"processExited"])
+        if (state[field] && !axs_cachekeeper_input_boolean(state[field])) return NO;
+    if (state[@"mode"] && ![@[@"auto",@"prevent",@"clean"] containsObject:state[@"mode"]]) return NO;
+    for (NSString *field in @[@"logPaths",@"excludedPaths",@"unavailablePaths"])
+        if (state[field] && !axs_cachekeeper_input_strings(state[field],axs_cachekeeper_relative_path)) return NO;
+    return YES;
+}
+static inline BOOL axs_cachekeeper_input_schema(id value, NSString *name) {
+    if (![value isKindOfClass:NSDictionary.class]) return NO;
+    NSDictionary *dictionary=value;
+    if ([name isEqual:@"appEnabled.plist"] || [name isEqual:@"directories.plist"]) {
+        for (id bundle in dictionary) {
+            if (!axs_cachekeeper_bundle_id(bundle)) return NO;
+            if ([name isEqual:@"appEnabled.plist"] ? !axs_cachekeeper_state_valid(dictionary[bundle]) :
+                !axs_cachekeeper_input_strings(dictionary[bundle],axs_cachekeeper_relative_path)) return NO;
+        }
+        return YES;
+    }
+    if ([name isEqual:@"batch.plist"]) {
+        if (dictionary[@"error"] && ![dictionary[@"error"] isKindOfClass:NSString.class]) return NO;
+        if (dictionary[@"remaining"] && !axs_cachekeeper_input_strings(dictionary[@"remaining"],axs_cachekeeper_bundle_id)) return NO;
+        for (NSString *field in @[@"total",@"completed"])
+            if (dictionary[field] && !axs_cachekeeper_input_counter(dictionary[field])) return NO;
+        return !dictionary[@"token"] || ([dictionary[@"token"] isKindOfClass:NSString.class] && [dictionary[@"token"] length]>0);
+    }
+    if ([name isEqual:@"request.plist"] || [name isEqual:@"inspectionRequest.plist"]) {
+        if (!axs_cachekeeper_bundle_id(dictionary[@"bundle"]) || ![dictionary[@"token"] isKindOfClass:NSString.class] || ![dictionary[@"token"] length]) return NO;
+        if ([name isEqual:@"inspectionRequest.plist"] && !axs_cachekeeper_relative_path(dictionary[@"path"])) return NO;
+        for (NSString *field in @[@"cancel",@"diagnostic"])
+            if (dictionary[field] && !axs_cachekeeper_input_boolean(dictionary[field])) return NO;
+        return YES;
+    }
+    return NO;
+}
+static inline id axs_cachekeeper_read_plist(NSString *path, NSError **error) {
+    if (error) *error=nil;
+    struct stat info;
+    if (stat(path.fileSystemRepresentation,&info)) {
+        int code=errno;
+        if (code!=ENOENT && error) *error=[NSError errorWithDomain:NSPOSIXErrorDomain code:code userInfo:nil];
+        return nil;
+    }
+    NSError *failure=nil;
+    NSData *data=S_ISREG(info.st_mode) ? [NSData dataWithContentsOfFile:path options:0 error:&failure] : nil;
+    id value=data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:&failure] : nil;
+    if (!value) {
+        if (error) *error=failure ?: [NSError errorWithDomain:@"dev.local.cachekeeper.configuration" code:1 userInfo:@{NSLocalizedDescriptionKey:@"配置或请求字段无效，已停止处理"}];
+        return nil;
+    }
+    return value;
+}
+static inline NSDictionary *axs_cachekeeper_read_input(NSString *path, NSError **error) {
+    id value=axs_cachekeeper_read_plist(path,error);
+    if (value && !axs_cachekeeper_input_schema(value,path.lastPathComponent)) {
+        if (error) *error=[NSError errorWithDomain:@"dev.local.cachekeeper.configuration" code:1 userInfo:@{NSLocalizedDescriptionKey:@"配置或请求字段无效，已停止处理"}];
+        return nil;
+    }
+    return value;
+}
+static inline NSMutableDictionary *axs_cachekeeper_edit_configuration(NSString *path) {
+    NSError *error=nil;
+    NSDictionary *value=axs_cachekeeper_read_input(path,&error);
+    return error ? nil : ([value mutableCopy] ?: [NSMutableDictionary new]);
+}
+static inline NSDictionary *axs_cachekeeper_batch_result(NSDictionary *current, NSString *token, NSString *bundle, NSString *error) {
+    if (!axs_cachekeeper_input_schema(current,@"batch.plist") || ![current[@"token"] isEqual:token] ||
+        ![[current[@"remaining"] firstObject] isEqual:bundle]) return nil;
+    NSMutableDictionary *next=[current mutableCopy];
+    if (error.length) next[@"error"]=error;
+    else {
+        NSMutableArray *remaining=[current[@"remaining"] mutableCopy];[remaining removeObjectAtIndex:0];
+        next[@"remaining"]=remaining;next[@"completed"]=@([current[@"completed"] unsignedIntegerValue]+1);
+        [next removeObjectForKey:@"error"];
+    }
+    return next;
+}
+// A failed progress write is retried without repeating the already persisted scan.
+static inline NSDictionary *axs_cachekeeper_retry_batch_receipt(NSDictionary *pending, NSDictionary *current,
+                                                               BOOL (^write)(NSDictionary *)) {
+    if (!pending || ![current[@"token"] isEqual:pending[@"token"]]) return nil;
+    return write(pending) ? nil : pending;
+}
 static inline NSArray<NSString *> *axs_cachekeeper_parent_paths(NSArray *paths) {
     NSMutableSet *unique = [NSMutableSet new];
     if ([paths isKindOfClass:NSArray.class]) for (id path in paths) if (axs_cachekeeper_relative_path(path)) [unique addObject:path];
@@ -195,9 +290,20 @@ static inline BOOL axs_cachekeeper_container_bundle_path(NSString *path) {
     return [leaf isKindOfClass:NSString.class] && [[leaf lowercaseString] hasSuffix:@".app"];
 }
 static inline BOOL axs_cachekeeper_app_enabled(id state) {
-    if (!state) return NO;
+    if (!state || !axs_cachekeeper_state_valid(state)) return NO;
     if ([state isKindOfClass:NSNumber.class]) return [state boolValue];
     return [state isKindOfClass:NSDictionary.class] && [state[@"enabled"] isKindOfClass:NSNumber.class] && [state[@"enabled"] boolValue];
+}
+// Re-read both inputs at the execution gate, including jobs with only nonstandard roots.
+// Missing directory choices permit auto-discovery; missing APP consent never permits deletion.
+static inline BOOL axs_cachekeeper_cleanup_inputs(NSString *selectionPath, NSString *statePath, NSString *bundle,
+                                                  NSDictionary **selection, NSDictionary **states) {
+    NSError *selectionError=nil,*stateError=nil;
+    NSDictionary *currentSelection=axs_cachekeeper_read_input(selectionPath,&selectionError);
+    NSDictionary *currentStates=axs_cachekeeper_read_input(statePath,&stateError);
+    if (selection) *selection=currentSelection;
+    if (states) *states=currentStates;
+    return !selectionError && !stateError && axs_cachekeeper_app_enabled(currentStates[bundle]);
 }
 static inline NSString *axs_cachekeeper_mode(id state) {
     if ([state isKindOfClass:NSDictionary.class]) {
@@ -311,7 +417,7 @@ static inline NSArray<NSString *> *axs_cachekeeper_purge_paths(NSArray *candidat
     return axs_cachekeeper_parent_paths(paths);
 }
 static inline NSArray<NSString *> *axs_cachekeeper_effective_paths(NSArray *selected, id state, NSArray *discovered) {
-    if (!axs_cachekeeper_app_enabled(state)) return @[];
+    if (!axs_cachekeeper_app_enabled(state) || (selected && !axs_cachekeeper_input_strings(selected,axs_cachekeeper_relative_path))) return @[];
     NSMutableArray *paths=[axs_cachekeeper_cache_paths(selected) mutableCopy];
     if (axs_cachekeeper_auto_discover(state) && [discovered isKindOfClass:NSArray.class]) {
         for (id path in discovered) if ([axs_cachekeeper_cache_roots() containsObject:path]) [paths addObject:path];

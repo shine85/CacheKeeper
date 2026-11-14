@@ -1,56 +1,25 @@
 #import "AxsCacheKeeperAppList.h"
 #import "AxsCacheKeeperPolicy.h"
+#import "AxsCacheKeeperRecords.h"
 #include <errno.h>
 #include <math.h>
 #include <sys/stat.h>
 
-static BOOL axs_cachekeeper_source_strings(id value, BOOL (*predicate)(NSString *)) {
-    if (![value isKindOfClass:NSArray.class]) return NO;
-    for (id item in value) if (![item isKindOfClass:NSString.class] || (predicate && !predicate(item))) return NO;
-    return YES;
-}
-static BOOL axs_cachekeeper_source_counter(id value) {
-    return [value isKindOfClass:NSNumber.class] && isfinite([value doubleValue]) && [value doubleValue]>=0;
-}
 static BOOL axs_cachekeeper_source_schema(id value, NSString *name) {
-    if ([name isEqual:@"favorites.plist"]) return axs_cachekeeper_source_strings(value,NULL);
+    if ([name isEqual:@"favorites.plist"]) return axs_cachekeeper_input_strings(value,NULL);
     if (![value isKindOfClass:NSDictionary.class]) return NO;
     NSDictionary *dictionary=value;
-    if ([name isEqual:@"batch.plist"]) {
-        if (dictionary[@"remaining"] && !axs_cachekeeper_source_strings(dictionary[@"remaining"],axs_cachekeeper_bundle_id)) return NO;
-        for (NSString *field in @[@"total",@"completed"])
-            if (dictionary[field] && !axs_cachekeeper_source_counter(dictionary[field])) return NO;
-        return YES;
-    }
+    if ([@[@"batch.plist",@"appEnabled.plist",@"directories.plist"] containsObject:name])
+        return axs_cachekeeper_input_schema(value,name);
     if ([name hasPrefix:@"Status/"] && [name hasSuffix:@".auto.plist"]) {
         for (NSString *field in @[@"removed",@"bytes",@"failed",@"lastBytes",@"confirmedRemoved",@"confirmedBytes",@"lastRemoved"])
-            if (dictionary[field] && !axs_cachekeeper_source_counter(dictionary[field])) return NO;
+            if (dictionary[field] && !axs_cachekeeper_input_counter(dictionary[field])) return NO;
         if (dictionary[@"updated"] && ![dictionary[@"updated"] isKindOfClass:NSDate.class]) return NO;
         if (dictionary[@"message"] && ![dictionary[@"message"] isKindOfClass:NSString.class]) return NO;
         return YES;
     }
-    if ([name isEqual:@"appEnabled.plist"]) {
-        for (id state in dictionary.allValues) {
-            if ([state isKindOfClass:NSNumber.class]) continue;
-            if (![state isKindOfClass:NSDictionary.class]) return NO;
-            for (NSString *field in @[@"enabled",@"urlCache",@"autoDiscover",@"restrict"])
-                if (state[field] && ![state[field] isKindOfClass:NSNumber.class]) return NO;
-            if (state[@"mode"] && ![@[@"auto",@"prevent",@"clean"] containsObject:state[@"mode"]]) return NO;
-            for (NSString *field in @[@"logPaths",@"excludedPaths"])
-                if (state[field] && !axs_cachekeeper_source_strings(state[field],axs_cachekeeper_relative_path)) return NO;
-        }
-        return YES;
-    }
-    if ([name isEqual:@"directories.plist"]) {
-        for (id paths in dictionary.allValues) if (!axs_cachekeeper_source_strings(paths,axs_cachekeeper_relative_path)) return NO;
-        return YES;
-    }
     if ([name isEqual:@"snapshots.plist"]) {
-        for (id record in dictionary.allValues) {
-            if (![record isKindOfClass:NSDictionary.class]) return NO;
-            if (record[@"rows"] && ![record[@"rows"] isKindOfClass:NSArray.class]) return NO;
-        }
-        return YES;
+        return axs_cachekeeper_records_valid(value,name);
     }
     return NO;
 }

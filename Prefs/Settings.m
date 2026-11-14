@@ -5,6 +5,7 @@
 #import "../AxsCacheKeeperPolicy.h"
 #import "../AxsCacheKeeperAppList.h"
 #import "DiagnosticsPage.h"
+#import "SearchInput.h"
 
 static id axs_cachekeeper_app_property(id object, NSString *name) {
     SEL selector=NSSelectorFromString(name);
@@ -68,11 +69,11 @@ static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSErr
 // 来源判据是 applicationType，不是收据：巨魔应用报 @"System"（CoreTrust 系统级信任），商店
 // 应用报 @"User"；解密的商店 IPA 包内常带原始 StoreKit 收据，收据判据会把巨魔应用误判为
 // 商店应用（#60 真机：轻悦时光落在用户应用）。
-@interface CKSettings : PSViewController <UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate>
+@interface CKSettings : PSViewController <UITableViewDataSource, UITableViewDelegate>
 @property(nonatomic,strong) UITableView *table;
 @property(nonatomic,strong) UISegmentedControl *tabs;
 @property(nonatomic,strong) UIView *tabWrap;
-@property(nonatomic,strong) UISearchBar *searchBar;
+@property(nonatomic,strong) AxsCacheKeeperSearchInput *axs_cachekeeper_searchInput;
 @property(nonatomic,assign) NSInteger selectedTab;
 @property(nonatomic,strong) NSArray *apps;
 @property(nonatomic,strong) NSArray *sections;
@@ -108,15 +109,16 @@ static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSErr
     self.favorites = [NSSet set];
     self.iconCache = [NSMutableDictionary new];
     self.selectedTab = 0;
-    // 搜索栏用普通 UISearchBar 直接放进视图，不用 UISearchController：控制器激活后的
-    // 呈现层会挡住 Tab 条的点按（#59 真机：搜索后点不了顶栏）；普通搜索栏没有呈现行为，
-    // 搜索中切 Tab 照常过滤显示。外观位置不变，仍在 Tab 条上方。
-    self.searchBar = [[UISearchBar alloc] initWithFrame:CGRectZero];
-    self.searchBar.placeholder = @"搜索应用";
-    self.searchBar.delegate = self;
-    self.searchBar.searchBarStyle = UISearchBarStyleMinimal;
-    self.searchBar.accessibilityIdentifier=@"CacheKeeperAppSearch";
-    [self.view addSubview:self.searchBar];
+    self.axs_cachekeeper_searchInput=[AxsCacheKeeperSearchInput new];
+    __weak typeof(self) inputOwner=self;
+    self.axs_cachekeeper_searchInput.axs_cachekeeper_changed_handler=^{ [inputOwner axs_cachekeeper_render]; };
+    self.axs_cachekeeper_searchInput.axs_cachekeeper_focus_failed=^{
+        typeof(self) owner=inputOwner;if (!owner || owner.presentedViewController) return;
+        UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"搜索暂时无法编辑" message:@"输入控件未获得焦点。请退出此页后重新进入；若重复发生，请反馈是否能看到取消按钮。" preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+        [owner presentViewController:alert animated:YES completion:nil];
+    };
+    [self.view addSubview:self.axs_cachekeeper_searchInput];
     self.tabWrap = [[UIView alloc] initWithFrame:CGRectZero];
     self.tabWrap.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.tabs = [[UISegmentedControl alloc] initWithItems:@[@"已开启", @"用户应用", @"巨魔应用", @"收藏应用"]];
@@ -140,14 +142,14 @@ static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSErr
     self.navigationItem.rightBarButtonItems=@[
         [[UIBarButtonItem alloc] initWithTitle:@"检测全部" style:UIBarButtonItemStylePlain target:self action:@selector(scanAll)],
         [[UIBarButtonItem alloc] initWithTitle:@"诊断" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_diagnostics)]];
-    for (UIView *view in @[self.searchBar,self.tabWrap,self.tabs,self.table]) view.translatesAutoresizingMaskIntoConstraints=NO;
+    for (UIView *view in @[self.axs_cachekeeper_searchInput,self.tabWrap,self.tabs,self.table]) view.translatesAutoresizingMaskIntoConstraints=NO;
     UILayoutGuide *safe=self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
-        [self.searchBar.topAnchor constraintEqualToAnchor:safe.topAnchor],
-        [self.searchBar.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
-        [self.searchBar.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
-        [self.searchBar.heightAnchor constraintEqualToConstant:56],
-        [self.tabWrap.topAnchor constraintEqualToAnchor:self.searchBar.bottomAnchor],
+        [self.axs_cachekeeper_searchInput.topAnchor constraintEqualToAnchor:safe.topAnchor],
+        [self.axs_cachekeeper_searchInput.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [self.axs_cachekeeper_searchInput.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [self.axs_cachekeeper_searchInput.heightAnchor constraintEqualToConstant:56],
+        [self.tabWrap.topAnchor constraintEqualToAnchor:self.axs_cachekeeper_searchInput.bottomAnchor],
         [self.tabWrap.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [self.tabWrap.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
         [self.tabWrap.heightAnchor constraintEqualToConstant:46],
@@ -174,7 +176,7 @@ static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSErr
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(axs_cachekeeper_application_inactive:) name:UIApplicationWillResignActiveNotification object:nil];
 }
 - (void)axs_cachekeeper_diagnostics {
-    [self.searchBar resignFirstResponder];
+    [self.axs_cachekeeper_searchInput axs_cachekeeper_dismiss_keyboard];
     [self.navigationController pushViewController:[[AxsCacheKeeperDiagnosticsPage alloc] initWithApps:self.apps] animated:YES];
 }
 - (void)tabChanged:(UISegmentedControl *)sender {
@@ -337,7 +339,7 @@ static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSErr
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     self.axs_cachekeeper_visible=NO;self.axs_cachekeeper_menuVisible=NO;
-    [self.searchBar resignFirstResponder];
+    [self.axs_cachekeeper_searchInput axs_cachekeeper_dismiss_keyboard];
     [self axs_cachekeeper_application_inactive:nil];
 }
 - (void)dealloc { [self.batchTimer invalidate];[NSNotificationCenter.defaultCenter removeObserver:self]; }
@@ -364,7 +366,7 @@ static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSErr
     if (readError) {
         [self axs_cachekeeper_configuration_error];[self axs_cachekeeper_refresh_after_write];return;
     }
-    if ([existing[@"remaining"] count]) return;
+    if ([existing[@"remaining"] count] && ![existing[@"error"] length]) return;
     NSMutableArray *bundles=[NSMutableArray array];
     for (NSDictionary *app in self.apps) [bundles addObject:app[@"id"]];
     if (!bundles.count) return;
@@ -376,11 +378,6 @@ static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSErr
     } else self.batchSnapshot=request;
     [self axs_cachekeeper_refresh_after_write];
 }
-- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText { (void)searchBar;(void)searchText;[self axs_cachekeeper_render]; }
-- (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar { [searchBar resignFirstResponder]; }
-- (void)searchBarTextDidBeginEditing:(UISearchBar *)searchBar { [searchBar setShowsCancelButton:YES animated:NO]; }
-- (void)searchBarTextDidEndEditing:(UISearchBar *)searchBar { [searchBar setShowsCancelButton:NO animated:NO]; }
-- (void)searchBarCancelButtonClicked:(UISearchBar *)searchBar { searchBar.text=@"";[searchBar resignFirstResponder];[self axs_cachekeeper_render]; }
 - (void)updateBatch {
     if (!self.axs_cachekeeper_visible || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
     // Poll only cached source metadata each second. Installed-app metadata has a separate cadence.
@@ -418,6 +415,7 @@ static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSErr
         for (NSString *name in [self.sourceErrors.allKeys sortedArrayUsingSelector:@selector(compare:)])
             [failed addObject:names[name] ?: @"清理回执"];
         self.appsError=failed.count ? [NSString stringWithFormat:@"%@读取失败，保留上次可读结果；尚无旧记录的项目暂不显示。",[failed.array componentsJoinedByString:@"、"]] : nil;
+        if ([self.batchSnapshot[@"error"] length]) self.appsError=[NSString stringWithFormat:@"%@\n批量检测已停止：%@。修复后可点重试。",self.appsError ?: @"",self.batchSnapshot[@"error"]];
         self.axs_cachekeeper_renderPending=YES;
     }
     if (self.axs_cachekeeper_renderPending) [self axs_cachekeeper_render];
@@ -425,10 +423,11 @@ static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSErr
 - (void)axs_cachekeeper_render {
     if (![self axs_cachekeeper_can_render]) { self.axs_cachekeeper_renderPending=YES;return; }
     self.axs_cachekeeper_renderPending=NO;
-    self.sections=[AxsCacheKeeperAppList sectionsForApps:self.apps states:self.statesSnapshot favorites:self.favorites tab:self.selectedTab query:self.searchBar.text];
-    BOOL active=[self.batchSnapshot[@"remaining"] count]>0;
+    self.sections=[AxsCacheKeeperAppList sectionsForApps:self.apps states:self.statesSnapshot favorites:self.favorites tab:self.selectedTab query:self.axs_cachekeeper_searchInput.axs_cachekeeper_text];
+    BOOL stopped=[self.batchSnapshot[@"error"] length]>0;
+    BOOL active=[self.batchSnapshot[@"remaining"] count]>0 && !stopped;
     self.navigationItem.rightBarButtonItem.enabled=!active && self.apps.count>0 && !self.sourceErrors[@"batch.plist"];
-    self.navigationItem.rightBarButtonItem.title=active ? [NSString stringWithFormat:@"%@/%@",self.batchSnapshot[@"completed"],self.batchSnapshot[@"total"]] : @"检测全部";
+    self.navigationItem.rightBarButtonItem.title=active ? [NSString stringWithFormat:@"%@/%@",self.batchSnapshot[@"completed"],self.batchSnapshot[@"total"]] : stopped ? @"重试检测" : @"检测全部";
     [self.table reloadData];
 }
 - (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {

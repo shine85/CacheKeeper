@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <time.h>
 #import "AxsCacheKeeperPolicy.h"
+#import "AxsCacheKeeperRecords.h"
 #import "AxsCacheKeeperSweep.h"
 #import "AxsCacheKeeperCleanupJob.h"
 #import "AxsCacheKeeperCleanupRules.h"
@@ -29,18 +30,29 @@ static NSURL *Container(NSString *bundle) {
 }
 void CKScanRequests(void) {
     static BOOL busy;
+    static NSDictionary *pendingBatchReceipt;
     if (busy) return;
     NSString *folder=jbroot(@"/var/mobile/Library/CacheKeeper");
     NSString *requestPath=[folder stringByAppendingPathComponent:@"request.plist"];
-    NSDictionary *request=[NSDictionary dictionaryWithContentsOfFile:requestPath];
+    NSError *requestError=nil;
+    NSDictionary *request=axs_cachekeeper_read_input(requestPath,&requestError);
+    if (requestError) { NSLog(@"[CacheKeeper] 检测请求无效，未执行");return; }
     NSString *batchPath=[folder stringByAppendingPathComponent:@"batch.plist"];
-    NSMutableDictionary *batch=[[NSDictionary dictionaryWithContentsOfFile:batchPath] mutableCopy];
+    NSError *batchError=nil;
+    NSMutableDictionary *batch=[axs_cachekeeper_read_input(batchPath,&batchError) mutableCopy];
+    if (pendingBatchReceipt) {
+        if (batchError) return;
+        pendingBatchReceipt=axs_cachekeeper_retry_batch_receipt(pendingBatchReceipt,batch,^BOOL(NSDictionary *receipt) {
+            return [receipt writeToFile:batchPath atomically:YES];
+        });
+        return;
+    }
+    if (!request && batchError) { NSLog(@"[CacheKeeper] 批量检测请求无效，未执行");return; }
     BOOL batchItem=NO;
     if (!request && [batch[@"remaining"] count]) {
-        NSMutableArray *remaining=[batch[@"remaining"] mutableCopy];
-        NSString *next=remaining.firstObject;
-        batch[@"remaining"]=remaining;
-        [batch writeToFile:batchPath atomically:YES];
+        if ([batch[@"error"] length]) return;
+        if (![batch[@"token"] isKindOfClass:NSString.class] || ![batch[@"token"] length]) { NSLog(@"[CacheKeeper] 批量检测缺少请求标识，未执行");return; }
+        NSString *next=[batch[@"remaining"] firstObject];
         request=@{@"bundle":next,@"token":batch[@"token"]};
         batchItem=YES;
     }
@@ -81,7 +93,9 @@ void CKScanRequests(void) {
             if (!entries || NSProcessInfo.processInfo.systemUptime>directoryDeadline) complete=NO;
             [rows addObject:@{@"path":relative,@"bytes":@(size),@"complete":@(complete),@"manageable":@(![candidate[@"readOnly"] boolValue])}];
         }
-        NSMutableDictionary *history=[[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"snapshots.plist"]] mutableCopy]?:[NSMutableDictionary new];
+        NSError *historyError=nil;
+        NSMutableDictionary *history=[axs_cachekeeper_read_records([folder stringByAppendingPathComponent:@"snapshots.plist"],&historyError) mutableCopy];
+        if (!history && !historyError) history=[NSMutableDictionary new];
         NSDictionary *old=history[bundle];
         NSMutableDictionary *groupPaths=[NSMutableDictionary new];
         for (NSString *identifier in groups) groupPaths[identifier]=[groups[identifier] path];
@@ -89,20 +103,21 @@ void CKScanRequests(void) {
             @"error":home ? (directoryError.localizedDescription ?: @"") : @"此 APP 没有可读取的标准数据容器"} mutableCopy];
         history[bundle]=result;
         NSError *saveError=nil;
-        if (![history writeToURL:[NSURL fileURLWithPath:[folder stringByAppendingPathComponent:@"snapshots.plist"]] error:&saveError]) {
+        BOOL historySaved=!historyError && [history writeToURL:[NSURL fileURLWithPath:[folder stringByAppendingPathComponent:@"snapshots.plist"]] error:&saveError];
+        if (historyError) result[@"error"]=historyError.localizedDescription;
+        else if (!historySaved) {
             result[@"error"]=[NSString stringWithFormat:@"%@\n检测结果未能持久保存：%@（%@/%ld）。检查配置目录可写性后重试。",result[@"error"],saveError.localizedDescription,saveError.domain,(long)saveError.code];
             NSLog(@"[CacheKeeper] %@",result[@"error"]);
         }
+        NSString *batchFailure=historySaved ? nil : result[@"error"];
         if (!batchItem && ![result writeToURL:[NSURL fileURLWithPath:[folder stringByAppendingPathComponent:@"scan.plist"]] error:&saveError]) NSLog(@"[CacheKeeper] 检测回执写入失败：%@",saveError);
         dispatch_async(dispatch_get_main_queue(),^{
             if (batchItem) {
-                NSMutableDictionary *current=[[NSDictionary dictionaryWithContentsOfFile:batchPath] mutableCopy];
-                if ([current[@"token"] isEqual:token]) {
-                    NSMutableArray *left=[current[@"remaining"] mutableCopy];
-                    if ([left.firstObject isEqual:bundle]) [left removeObjectAtIndex:0];
-                    current[@"remaining"]=left;
-                    current[@"completed"]=@([current[@"completed"] unsignedIntegerValue]+1);
-                    [current writeToFile:batchPath atomically:YES];
+                NSDictionary *current=axs_cachekeeper_read_input(batchPath,NULL);
+                NSDictionary *next=axs_cachekeeper_batch_result(current,token,bundle,batchFailure);
+                if (next && ![next writeToFile:batchPath atomically:YES]) {
+                    pendingBatchReceipt=next;
+                    NSLog(@"[CacheKeeper] 批量检测回执保存失败，仅重试保存，不重复扫描");
                 }
             }
             busy=NO;
@@ -114,7 +129,9 @@ void CKInspectRequests(void) {
     if (busy) return;
     NSString *folder=jbroot(@"/var/mobile/Library/CacheKeeper");
     NSString *file=[folder stringByAppendingPathComponent:@"inspectionRequest.plist"];
-    NSDictionary *request=[NSDictionary dictionaryWithContentsOfFile:file];
+    NSError *requestError=nil;
+    NSDictionary *request=axs_cachekeeper_read_input(file,&requestError);
+    if (requestError) { NSLog(@"[CacheKeeper] 深度检测请求无效，未执行");return; }
     NSString *bundle=request[@"bundle"],*relative=request[@"path"],*token=request[@"token"];
     if (!axs_cachekeeper_bundle_id(bundle) || !axs_cachekeeper_relative_path(relative) ||
         ![token isKindOfClass:NSString.class] || !token.length || [token isEqual:lastToken]) return;
@@ -126,7 +143,13 @@ void CKInspectRequests(void) {
     busy=YES;lastToken=[token copy];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
         NSString *output=[folder stringByAppendingPathComponent:[NSString stringWithFormat:@"Status/%@.inspection.plist",bundle]];
-        NSMutableDictionary *saved=[[[NSDictionary dictionaryWithContentsOfFile:output] objectForKey:@"reports"] mutableCopy] ?: [NSMutableDictionary new];
+        NSError *historyError=nil;
+        NSDictionary *history=axs_cachekeeper_read_records(output,&historyError);
+        if (historyError) {
+            NSLog(@"[CacheKeeper] 深度档案损坏或不可读，保留原文件并停止检测");
+            dispatch_async(dispatch_get_main_queue(),^{busy=NO;});return;
+        }
+        NSMutableDictionary *saved=[history[@"reports"] mutableCopy] ?: [NSMutableDictionary new];
         NSError *error=nil;NSURL *root=nil;
         for (NSDictionary *target in ([request[@"cancel"] boolValue] ? @[] : axs_cachekeeper_scan_targets(home,groups,&error)))
             if ([target[@"path"] isEqual:relative]) { root=target[@"root"];break; }
@@ -144,12 +167,15 @@ void CKInspectRequests(void) {
         NSTimeInterval written=0;
         while (YES) {
             @autoreleasepool {
-                NSDictionary *current=[NSDictionary dictionaryWithContentsOfFile:file];
+                NSDictionary *current=axs_cachekeeper_read_input(file,NULL);
                 BOOL cancelled=![current[@"token"] isEqual:token] || [current[@"cancel"] boolValue];
                 if (!cancelled) [inspection advance:256];
                 BOOL done=!inspection || inspection.complete || cancelled;
                 NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
                 if (done || now-written>=1) {
+                    NSError *savedError=nil;
+                    axs_cachekeeper_read_records(output,&savedError);
+                    if (savedError) { NSLog(@"[CacheKeeper] 深度档案在检测期间损坏或不可读，停止写入并保留原文件");break; }
                     NSMutableDictionary *report=inspection ? [[inspection report] mutableCopy] : [@{@"complete":@(!cancelled),@"coverageComplete":@NO,@"error":cancelled ? @"" : (error.localizedDescription ?: @"目录已消失、被保护或不属于此 APP 的可见父目录")} mutableCopy];
                     report[@"token"]=token;report[@"bundle"]=bundle;report[@"path"]=relative;report[@"cancelled"]=@(cancelled);report[@"updated"]=NSDate.date;
                     saved[relative]=report;
@@ -206,8 +232,11 @@ static NSString *axs_cachekeeper_network_status(NSString *bundle) {
 void axs_cachekeeper_request_cleanup(NSString *bundle) {
     if (!axs_cachekeeper_bundle_id(bundle)) return;
     axs_cachekeeper_configure_receipts();
-    NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:[axs_cachekeeper_folder() stringByAppendingPathComponent:@"directories.plist"]];
-    NSDictionary *states = [NSDictionary dictionaryWithContentsOfFile:[axs_cachekeeper_folder() stringByAppendingPathComponent:@"appEnabled.plist"]];
+    NSError *selectionError=nil;
+    NSDictionary *selection = axs_cachekeeper_read_input([axs_cachekeeper_folder() stringByAppendingPathComponent:@"directories.plist"],&selectionError);
+    NSError *stateError=nil;
+    NSDictionary *states = axs_cachekeeper_read_input([axs_cachekeeper_folder() stringByAppendingPathComponent:@"appEnabled.plist"],&stateError);
+    if (selectionError || stateError) { NSLog(@"[CacheKeeper] 手动清理配置无效，未执行");return; }
     if (!axs_cachekeeper_app_enabled(states[bundle])) return;
     // 任务 9：三种模式共用清理引擎，prevent 不再短路——手动检测目录同样走门控与清理流程。
     if (!axs_cachekeeper_can_clean(selection,states,bundle)) return;
@@ -228,8 +257,8 @@ void CKApplyDirectorySwitches(void) {
     // 实例观测独立于清理忙碌状态：每轮入口先记录各已启用 APP 当前运行实例，
     // 使长任务存续期间发生的新实例启停也能被门控采样的绑定比对发现；
     // 同时维护挂起稳定跟踪（同一实例被系统挂起的起始时刻），供放行判定使用。
-    NSDictionary *observedStates = [NSDictionary dictionaryWithContentsOfFile:
-        [axs_cachekeeper_folder() stringByAppendingPathComponent:@"appEnabled.plist"]];
+    NSDictionary *observedStates = axs_cachekeeper_read_input(
+        [axs_cachekeeper_folder() stringByAppendingPathComponent:@"appEnabled.plist"],NULL);
     // 周期起点差集清理：以当前启用集合为准，配置键直接移除的 bundle 其挂起起点与
     // 执行实例记录一并作废；配置读不到时全部作废（方案任务 2 补齐）。
     NSMutableSet *enabledBundles = [NSMutableSet new];
@@ -260,13 +289,13 @@ void CKApplyDirectorySwitches(void) {
     NSString *folder = axs_cachekeeper_folder();
     NSString *selectionFile = [folder stringByAppendingPathComponent:@"directories.plist"];
     NSString *stateFile = [folder stringByAppendingPathComponent:@"appEnabled.plist"];
-    NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:selectionFile];
-    NSDictionary *states = [NSDictionary dictionaryWithContentsOfFile:stateFile];
-    if ((!selection && [NSFileManager.defaultManager fileExistsAtPath:selectionFile]) ||
-        (!states && [NSFileManager.defaultManager fileExistsAtPath:stateFile])) {
+    NSError *selectionError=nil,*stateError=nil;
+    NSDictionary *selection = axs_cachekeeper_read_input(selectionFile,&selectionError);
+    NSDictionary *states = axs_cachekeeper_read_input(stateFile,&stateError);
+    if (selectionError || stateError) {
         // 配置不可读：无法枚举应观测的 bundle，全部挂起起点作废，不继承未持续维护的窗口。
         [AxsCacheKeeperProcessObservation invalidateAllBundles];
-        NSLog(@"[CacheKeeper] 用户配置不可读，取消旧作业并重试待保存回执");
+        NSLog(@"[CacheKeeper] 用户配置不可读或字段无效，取消旧作业并重试待保存回执");
         selection=@{}; states=@{};
     }
     NSMutableSet *bundles = [NSMutableSet setWithArray:selection.allKeys ?: @[]];
@@ -489,10 +518,8 @@ void CKApplyDirectorySwitches(void) {
             BOOL (^sampleGate)(void) = ^BOOL {
                 __block BOOL allowed = NO;
                 dispatch_sync(dispatch_get_main_queue(), ^{
-                    NSDictionary *currentSelection = [NSDictionary dictionaryWithContentsOfFile:selectionFile];
-                    NSDictionary *currentStates = [NSDictionary dictionaryWithContentsOfFile:stateFile];
-                    BOOL readable = (currentSelection || ![NSFileManager.defaultManager fileExistsAtPath:selectionFile]) &&
-                        (currentStates || ![NSFileManager.defaultManager fileExistsAtPath:stateFile]);
+                    NSDictionary *currentSelection=nil,*currentStates=nil;
+                    BOOL readable=axs_cachekeeper_cleanup_inputs(selectionFile,stateFile,bundle,&currentSelection,&currentStates);
                     NSArray *currentPaths = axs_cachekeeper_effective_paths(currentSelection[bundle],currentStates[bundle],discovered);
                     BOOL selected = [currentPaths isEqual:paths] && [axs_cachekeeper_mode(currentStates[bundle]) isEqual:mode] &&
                         [axs_cachekeeper_log_paths(currentStates[bundle]) isEqual:axs_cachekeeper_log_paths(states[bundle])] &&

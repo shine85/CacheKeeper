@@ -1,12 +1,13 @@
 # 抖音 ALog 日志回收
 
-本次范围为 `com.ss.iphone.ugc.Aweme` 的 `41.1.0`，规则 ID `douyin-alog`、修订 `1`。这是首个生产文件规则，不代表抖音媒体、草稿、下载或其他字节 APP 已适配。
+本次范围为 `com.ss.iphone.ugc.Aweme` 的 `41.1.0`，规则 ID `douyin-alog`、修订 `2`。这是有限的日志文件规则，不代表抖音媒体、草稿、下载或其他字节 APP 已适配。
 
 ## 依据与边界
 
 - 本地真机截图存在 `Library/alog`；此前工程记录及夹具已记录 `BDALog_20261111_193314.alog.iOS.1128` 这类复合名称。原始报告与截图不进入仓库。
 - 火山引擎官方 `volcengine/APMPlus_SPM@2a3d56d0cc8ab5e1a6f4f59c8f48ad72e9d22682`，`Frameworks/APMPlus_APMLog.xcframework/ios-arm64/APMPlus_APMLog.framework/Headers/RangersAPMALogUtil.h` 说明 ALog 按磁盘上限删除最早日志，并按有效期删除过期日志；说明其日志用途及逐文件回收方式，不证明整个目录所有内容可删。仅参考职责，没有复制 SDK 源码。
-- 删除只匹配 `Library/alog` 下完整文件名 `BDALog_八位日期_六位时间.alog.iOS.数字`。未知名、数据库/plist 特征、媒体特征、用户排除、必要状态子树保留；硬链接不删；不足 60 秒或预检后变化的文件延期。
+- 删除只匹配 `Library/alog/ready` 或 `Library/alog/default/ready` 下完整文件名 `BDALog_八位日期_六位时间.alog.iOS.数字`；模块日志须为 `Library/alog/模块/ready/模块_BDALog_八位日期_六位时间.alog.iOS.数字`，目录名与文件前缀必须相同。
+- 2026-11-14 截图证实 `AWELive/ready` 完成日志被旧规则遗漏，并展示 AWELive、Timor、IM、Knowledge、MainFrame、Commerce、CJPay、MetaSec 的 SDK 模块命名。修订 2 仅接收这些模块的上述完成日志契约；`prepare`（包括 `.mmap2`）、未知模块/文件名、数据库/plist 特征、媒体特征、用户排除、必要状态子树仍保留。硬链接不删；不足 60 秒或预检后变化的文件延期。
 - ALog 可能持有映射或打开的描述符，因此仅系统观测为 Absent/Terminated 才放行。挂起满 60 秒仍不放行此规则。`processExited` 由 Scanner 覆盖提供，参与 job 签名；真正删除推进前重新核对退出状态、APP 版本和配置。旧日志定级不能绕过更严格的专属规则。
 - 此有限日志规则按产品版本、SDK 文件契约及文件证据匹配，不调用 APP 私有 ABI。当前缺少安装构建号，未宣称完成构建映射；涉及媒体索引或下载管理器的后续规则仍要求版本/构建及资源恢复证据。本规则也须真机验收，不能把源码或夹具通过视为设备成功。
 

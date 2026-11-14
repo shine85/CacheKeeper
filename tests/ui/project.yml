@@ -14,20 +14,21 @@ targets:
     type: application
     platform: iOS
     sources:
-      - path: InputHarness.m
+      - path: ../../tests/ui/InputHarness.m
       - path: ../../Prefs/Settings.m
+      - path: ../../Prefs/SearchInput.m
       - path: ../../Prefs/DiagnosticsPage.m
       - path: ../../AxsCacheKeeperDiagnostics.m
       - path: ../../AxsCacheKeeperAppList.m
     settings:
       base:
-        HEADER_SEARCH_PATHS: "$(SRCROOT)/include $(SRCROOT)/../include"
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/../../tests/ui/include $(SRCROOT)/../../tests/include"
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
   InputUITests:
     type: bundle.ui-testing
     platform: iOS
     sources:
-      - path: InputUITests.swift
+      - path: ../../tests/ui/InputUITests.swift
     dependencies:
       - target: InputHarness
     settings:
