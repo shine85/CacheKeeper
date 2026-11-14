@@ -15,17 +15,34 @@
 @interface AxsCacheKeeperInputTestDelegate : UIResponder <UIApplicationDelegate,UINavigationControllerDelegate>
 @property(nonatomic,strong) UIWindow *window;
 @property(nonatomic,strong) UIView *axs_cachekeeper_testOverlay;
+@property(nonatomic,strong) UINavigationBar *axs_cachekeeper_testHostBar;
 @end
 @implementation AxsCacheKeeperInputTestDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     (void)application;(void)options;
     self.window=[[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:[CKSettings new]];
+    CKSettings *settings=[CKSettings new];
+    UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:settings];
+    if ([NSProcessInfo.processInfo.arguments containsObject:@"--search-host-navigation-bar"]) {
+        navigation.navigationBarHidden=YES;
+        settings.additionalSafeAreaInsets=UIEdgeInsetsMake(44,0,0,0);
+    }
     navigation.delegate=self;self.window.rootViewController=navigation;
     [self.window makeKeyAndVisible];return YES;
 }
 - (void)navigationController:(UINavigationController *)navigation didShowViewController:(UIViewController *)controller animated:(BOOL)animated {
     (void)animated;
+    if ([controller isKindOfClass:CKSettings.class] &&
+        [NSProcessInfo.processInfo.arguments containsObject:@"--search-host-navigation-bar"]) {
+        [navigation.view layoutIfNeeded];
+        CGFloat compactBottom=[controller.view convertPoint:CGPointMake(0,controller.view.safeAreaInsets.top) toView:self.window].y;
+        // Device 119.1: the reported inner bar is hidden, while another host bar occupies 91 points.
+        UINavigationBar *bar=[[UINavigationBar alloc] initWithFrame:CGRectMake(0,compactBottom-44,self.window.bounds.size.width,91)];
+        bar.accessibilityIdentifier=@"CacheKeeperTestHostNavigationBar";
+        [bar setItems:@[[[UINavigationItem alloc] initWithTitle:@"Host navigation"]] animated:NO];
+        [self.window addSubview:bar];self.axs_cachekeeper_testHostBar=bar;
+        [controller.view setNeedsLayout];
+    }
     if ([controller isKindOfClass:CKSettings.class] &&
         [NSProcessInfo.processInfo.arguments containsObject:@"--search-external-overlay"]) {
         AxsCacheKeeperSearchInput *input=[controller valueForKey:@"axs_cachekeeper_searchInput"];

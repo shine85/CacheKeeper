@@ -1,6 +1,32 @@
 import XCTest
 
 final class SearchRoutingUITests: XCTestCase {
+    func testExpandedHostNavigationBarKeepsSearchEditable() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--search-host-navigation-bar"]
+        app.launch()
+        let bar = app.navigationBars["CacheKeeperTestHostNavigationBar"]
+        XCTAssertTrue(bar.waitForExistence(timeout: 15))
+        let field = app.textFields["CacheKeeperAppSearch"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        let clearOfBar = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            field.frame.minY >= bar.frame.maxY
+        }, object: nil)
+        let layout = XCTWaiter.wait(for: [clearOfBar], timeout: 5)
+        XCTAssertEqual(layout, .completed, "Search must clear the visible host bar even when the inner bar is hidden")
+        guard layout == .completed else { return }
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        field.typeText("Cache")
+        let cancel = app.buttons["取消"]
+        XCTAssertTrue(cancel.exists)
+        cancel.tap()
+        let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: app.keyboards.firstMatch)
+        XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed)
+        app.segmentedControls.buttons["用户应用"].tap()
+        XCTAssertTrue(app.segmentedControls.buttons["用户应用"].isSelected)
+    }
+
     private func snapshot(_ app: XCUIApplication) throws -> [String: Any] {
         app.buttons["诊断"].tap()
         let result = app.staticTexts["CacheKeeperTestSearchRoute"]

@@ -7,6 +7,7 @@
 
 @interface CKSettings : PSViewController
 - (void)axs_cachekeeper_diagnostics;
+- (void)updateBatch;
 @end
 // Only the event marker is synthetic; all hierarchy, bounds and hit testing below use UIKit.
 @interface AxsCacheKeeperProbeTouchEvent : UIEvent
@@ -99,6 +100,43 @@
 }
 - (NSDictionary *)axs_cachekeeper_last {
     return [[self.probe axs_cachekeeper_snapshot][@"events"] lastObject];
+}
+- (void)testSearchClearsExternalNavigationBarAndReturnsAfterCollapse {
+    CKSettings *settings=[CKSettings new];
+    settings.additionalSafeAreaInsets=UIEdgeInsetsMake(44,0,0,0);
+    UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:settings];
+    navigation.navigationBarHidden=YES;navigation.delegate=self;
+    self.expectedControllerClass=CKSettings.class;
+    self.navigationFinished=[self expectationWithDescription:@"Settings appeared in hidden inner navigation"];
+    XCTestExpectation *shown=self.navigationFinished;
+    self.window.rootViewController=navigation;
+    [self waitForExpectations:@[shown] timeout:10];
+    [self.window layoutIfNeeded];
+    AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+    UITextField *field=input.axs_cachekeeper_field;
+    CGFloat originalTop=[field convertRect:field.bounds toView:self.window].origin.y;
+    CGFloat safeTop=[settings.view convertPoint:CGPointMake(0,settings.view.safeAreaInsets.top) toView:self.window].y;
+    XCTAssertTrue(settings.navigationController.navigationBar.hidden);
+    UINavigationBar *bar=[[UINavigationBar alloc] initWithFrame:CGRectMake(0,safeTop-44,self.window.bounds.size.width,91)];
+    [self.window addSubview:bar];
+    for (NSNumber *height in @[@91,@120,@44,@91]) {
+        CGRect frame=bar.frame;frame.size.height=height.doubleValue;bar.frame=frame;
+        [settings.view setNeedsLayout];[settings.view layoutIfNeeded];
+        [settings updateBatch];[settings.view layoutIfNeeded];
+        XCTAssertEqualWithAccuracy(bar.frame.origin.y,safeTop-44,0.5);
+        XCTAssertEqualWithAccuracy(bar.frame.size.height,height.doubleValue,0.5);
+        XCTAssertFalse(bar.hidden);XCTAssertTrue(bar.userInteractionEnabled);
+        CGRect fieldRect=[field convertRect:field.bounds toView:self.window];
+        XCTAssertGreaterThanOrEqual(CGRectGetMinY(fieldRect),CGRectGetMaxY(bar.frame));
+        if (height.doubleValue==44) XCTAssertEqualWithAccuracy(fieldRect.origin.y,originalTop,0.5);
+        CGPoint center=CGPointMake(CGRectGetMidX(fieldRect),CGRectGetMidY(fieldRect));
+        UIView *hit=[self.window hitTest:center withEvent:nil];
+        XCTAssertTrue(hit==field || [hit isDescendantOfView:field]);
+    }
+    bar.hidden=YES;
+    [settings.view setNeedsLayout];[settings.view layoutIfNeeded];[settings updateBatch];[settings.view layoutIfNeeded];
+    XCTAssertEqualWithAccuracy([field convertRect:field.bounds toView:self.window].origin.y,originalTop,0.5);
+    [bar removeFromSuperview];
 }
 - (void)testProducerBooleansSurviveStrictProjectionAndReport {
     [self.probe axs_cachekeeper_record:AxsCacheKeeperSearchEventDidAppear];
