@@ -124,7 +124,7 @@ void axs_cachekeeper_run_review_followup_tests(NSString *fixture) {
         ckcheck(!axs_cachekeeper_read_records(file,&failure) && failure,@"历史读写共同入口拒绝损坏的嵌套容器");
         ckcheck([[NSData dataWithContentsOfFile:file] isEqual:original],@"损坏历史保留原始字节");
     }
-    NSDictionary *goodHistory=@{bundle:@{@"rows":@[@{@"path":@"Library/Caches",@"bytes":@1,@"complete":@YES}],@"recentScans":@[],@"updated":NSDate.date,@"futureField":@1}};
+    NSDictionary *goodHistory=@{bundle:@{@"rows":@[@{@"path":@"Library/Caches",@"bytes":@1,@"complete":@YES}],@"recentScans":@[],@"updated":[NSDate dateWithTimeIntervalSince1970:100],@"futureField":@1}};
     NSString *historyFile=[configHome stringByAppendingPathComponent:@"snapshots.plist"];
     ckcheck([goodHistory writeToFile:historyFile atomically:YES] && [axs_cachekeeper_read_records(historyFile,NULL) isEqual:goodHistory],@"合法旧历史与未知扩展字段继续可读");
     NSDictionary *batch=@{@"token":@"save-test",@"remaining":@[bundle,@"test.next"],@"completed":@2,@"total":@4};

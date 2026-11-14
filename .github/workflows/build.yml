@@ -40,7 +40,17 @@ jobs:
         run: python3 tests/run_configuration_red.py
 
       - name: 原生回归测试
-        run: python3 tests/run_native_tests.py
+        run: |
+          set -o pipefail
+          python3 tests/run_native_tests.py 2>&1 | tee tmp/native-tests.log
+
+      - name: 保存原生回归日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-test-log
+          path: tmp/native-tests.log
+          if-no-files-found: ignore
 
       - name: UIKit 点按与键盘回归
         if: success() || failure()
