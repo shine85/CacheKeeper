@@ -52,6 +52,8 @@
 @property(nonatomic,weak) AxsCacheKeeperSearchInput *activeInput;
 @property(nonatomic,strong) XCTestExpectation *navigationFinished;
 @property(nonatomic) Class expectedControllerClass;
+@property(nonatomic,weak) UINavigationController *expectedNavigation;
+@property(nonatomic,weak) UIViewController *expectedController;
 @end
 @implementation AxsCacheKeeperSearchProbeTests
 - (void)setUp {
@@ -102,8 +104,11 @@
 }
 - (void)navigationController:(UINavigationController *)navigationController didShowViewController:(UIViewController *)viewController animated:(BOOL)animated {
     (void)navigationController;(void)animated;
-    if (self.navigationFinished && [viewController isKindOfClass:self.expectedControllerClass]) {
+    BOOL matches=self.expectedController ? (navigationController==self.expectedNavigation && viewController==self.expectedController) :
+        [viewController isKindOfClass:self.expectedControllerClass];
+    if (self.navigationFinished && matches) {
         [self.navigationFinished fulfill];self.navigationFinished=nil;
+        self.expectedNavigation=nil;self.expectedController=nil;
     }
 }
 - (NSDictionary *)axs_cachekeeper_last {
@@ -132,14 +137,27 @@
             XCTAssertLessThanOrEqual(nav.navigationBar.bounds.size.height,44.5);
         }
         UIViewController *detail=[UIViewController new];
+        host.axs_cachekeeper_inner.delegate=self;
+        self.expectedNavigation=host.axs_cachekeeper_inner;self.expectedController=detail;
+        XCTestExpectation *pushed=[self expectationWithDescription:@"Inner navigation delivered detail didShow"];
+        self.navigationFinished=pushed;
         [host.axs_cachekeeper_inner pushViewController:detail animated:NO];
+        [self waitForExpectations:@[pushed] timeout:10];
         XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,mode.integerValue);
+        self.expectedNavigation=host.axs_cachekeeper_inner;self.expectedController=settings;
+        XCTestExpectation *popped=[self expectationWithDescription:@"Inner navigation delivered settings didShow"];
+        self.navigationFinished=popped;
         [host.axs_cachekeeper_inner popViewControllerAnimated:NO];
+        [self waitForExpectations:@[popped] timeout:10];
         [nav.view layoutIfNeeded];[settings updateBatch];
         XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
         // A subsequent host change belongs to the host and must not be overwritten on release.
         host.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAlways;
+        self.expectedNavigation=host.axs_cachekeeper_inner;self.expectedController=detail;
+        XCTestExpectation *repushed=[self expectationWithDescription:@"Host override preserved after detail didShow"];
+        self.navigationFinished=repushed;
         [host.axs_cachekeeper_inner pushViewController:detail animated:NO];
+        [self waitForExpectations:@[repushed] timeout:10];
         XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways);
         XCTestExpectation *dismissed=[self expectationWithDescription:@"Nested navigation dismissed"];
         [self.owner dismissViewControllerAnimated:NO completion:^{ [dismissed fulfill]; }];
