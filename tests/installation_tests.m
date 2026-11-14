@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <dispatch/dispatch.h>
+#import <objc/runtime.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #import "../AxsCacheKeeperInstallation.h"
@@ -31,15 +32,27 @@ static NSString *aibundle(NSString *fixture, NSString *name) {
 @end
 @implementation AxsCacheKeeperInstallationTestProxy
 @end
-@interface LSApplicationWorkspace : NSObject
+@interface AxsCacheKeeperInstallationTestWorkspace : NSObject
 + (instancetype)defaultWorkspace;
 - (NSArray *)allInstalledApplications;
 @end
 static NSArray *aiinstalled;
-@implementation LSApplicationWorkspace
-+ (instancetype)defaultWorkspace { static LSApplicationWorkspace *workspace;static dispatch_once_t once;dispatch_once(&once,^{workspace=[self new];});return workspace; }
+@implementation AxsCacheKeeperInstallationTestWorkspace
++ (instancetype)defaultWorkspace {
+    static AxsCacheKeeperInstallationTestWorkspace *workspace;static dispatch_once_t once;
+    // The IMP also runs with the system class as self; always construct the test workspace explicitly.
+    dispatch_once(&once,^{workspace=[AxsCacheKeeperInstallationTestWorkspace new];});return workspace;
+}
 - (NSArray *)allInstalledApplications { return aiinstalled; }
 @end
+
+static BOOL axs_cachekeeper_installation_test_getter_abi(Method method) {
+    if (!method) return NO;
+    NSMethodSignature *signature=[NSMethodSignature signatureWithObjCTypes:method_getTypeEncoding(method)];
+    return signature.numberOfArguments==2 && signature.methodReturnType[0]=='@' && signature.methodReturnLength==sizeof(id) &&
+        ([signature getArgumentTypeAtIndex:0][0]=='@' || [signature getArgumentTypeAtIndex:0][0]=='#') &&
+        [signature getArgumentTypeAtIndex:1][0]==':';
+}
 
 static void aicleanup(NSString *fixture, NSString *name, NSDictionary *snapshot, NSURL *url, BOOL allow) {
     NSString *home=[fixture stringByAppendingPathComponent:name];
@@ -120,6 +133,16 @@ void axs_cachekeeper_run_installation_tests(NSString *fixture) {
         aicheck(!axs_cachekeeper_installation_snapshot([NSURL fileURLWithPath:invalid],@"test.installation",@"2.0",nil),@"系统与Info版本冲突等待稳定");
         NSString *oversize=aibundle(fixture,@"oversize");aiput([oversize stringByAppendingPathComponent:@"Info.plist"],[NSMutableData dataWithLength:1024*1024+1]);
         aicheck(!axs_cachekeeper_installation_snapshot([NSURL fileURLWithPath:oversize],@"test.installation",@"1.0",nil),@"超限Info有界拒绝");
+        Class workspaceClass=NSClassFromString(@"LSApplicationWorkspace");
+        aicheck(workspaceClass!=Nil,@"运行环境缺少真实LSApplicationWorkspace，无法执行提供器测试");
+        Method systemGetter=class_getClassMethod(workspaceClass,NSSelectorFromString(@"defaultWorkspace"));
+        Method fixtureGetter=class_getClassMethod(AxsCacheKeeperInstallationTestWorkspace.class,@selector(defaultWorkspace));
+        aicheck(axs_cachekeeper_installation_test_getter_abi(systemGetter) && axs_cachekeeper_installation_test_getter_abi(fixtureGetter),
+            @"系统或替身defaultWorkspace缺失，或不符合id(id,SEL) getter ABI");
+        IMP originalGetter=method_getImplementation(systemGetter),testGetter=method_getImplementation(fixtureGetter);
+        aicheck(originalGetter && testGetter,@"系统及替身getter必须有可恢复的实现");
+        @try {
+        aicheck(method_setImplementation(systemGetter,testGetter)==originalGetter,@"只替换已有系统getter并保存原实现");
         NSString *root=aibundle(fixture,@"provider");AxsCacheKeeperInstallationTestProxy *proxy=[AxsCacheKeeperInstallationTestProxy new];
         proxy.applicationIdentifier=@"test.installation";proxy.applicationType=@"User";proxy.localizedName=@"测试";proxy.shortVersionString=@"1.0";proxy.bundleURL=[NSURL fileURLWithPath:root];aiinstalled=@[proxy];
         NSMutableDictionary *cache=[NSMutableDictionary new];
@@ -168,7 +191,11 @@ void axs_cachekeeper_run_installation_tests(NSString *fixture) {
         aicheck(axs_cachekeeper_installed_applications(trollCache,nil).count==0,@"当前有效路径明确在管理范围外时不复用旧分类");
         proxy.bundleURL=nil;
         aicheck(axs_cachekeeper_installed_applications(trollCache,nil).count==0,@"未知System来源不能凭缺路径扩展管理边界");
-        aiinstalled=nil;
+        } @finally {
+            method_setImplementation(systemGetter,originalGetter);
+            aiinstalled=nil;
+        }
+        aicheck(method_getImplementation(systemGetter)==originalGetter,@"提供器测试完成后恢复系统getter实现");
         puts("PASS: installation identity, bounded metadata, shared provider and real cleanup cancellation");
     }});
 }
