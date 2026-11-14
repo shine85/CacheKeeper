@@ -7,11 +7,12 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+  actions: write
 jobs:
   prune:
     runs-on: ubuntu-latest
     steps:
-      - name: 只保留最新 2 个 Release
+      - name: 只保留最新 2 个 Release，连标签一起删
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -23,7 +24,44 @@ jobs:
             if [ "$i" -le "$keep" ]; then
               echo "保留 $tag"
             else
-              echo "删除 $tag"
-              gh release delete "$tag" --repo ${{ github.repository }} --yes
+              echo "删除发布及标签 $tag"
+              gh release delete "$tag" --repo ${{ github.repository }} --yes --cleanup-tag
+            fi
+          done
+      - name: 删除孤儿标签（无对应 Release 的旧版本标签）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/${{ github.repository }}/tags?per_page=100" --jq '.[].name' > /tmp/all_tags.txt
+          gh release list --repo ${{ github.repository }} --limit 100 --json tagName --jq '.[].tagName' > /tmp/kept_tags.txt
+          while read -r tag; do
+            case "$tag" in
+              v[0-9]*) ;;
+              *) echo "跳过非版本标签 $tag"; continue ;;
+            esac
+            if ! grep -qx "$tag" /tmp/kept_tags.txt; then
+              echo "删除孤儿标签 $tag"
+              gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag"
+            fi
+          done < /tmp/all_tags.txt
+      - name: 只保留最新发布对应运行及最新一次运行的产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          keep_runs=""
+          for tag in $(gh release list --repo ${{ github.repository }} --limit 2 --json tagName --jq '.[].tagName'); do
+            sha=$(gh api "repos/${{ github.repository }}/git/ref/tags/$tag" --jq '.object.sha')
+            run_id=$(gh api "repos/${{ github.repository }}/actions/workflows/build.yml/runs?head_sha=$sha&per_page=1" --jq '.workflow_runs[0].id // empty')
+            if [ -n "$run_id" ]; then keep_runs="$keep_runs $run_id"; fi
+          done
+          latest_run=$(gh api "repos/${{ github.repository }}/actions/workflows/build.yml/runs?per_page=1" --jq '.workflow_runs[0].id // empty')
+          if [ -n "$latest_run" ]; then keep_runs="$keep_runs $latest_run"; fi
+          echo "保留运行:$keep_runs"
+          gh api --paginate "repos/${{ github.repository }}/actions/artifacts?per_page=100" --jq '.artifacts[] | "\(.id) \(.workflow_run.id)"' | while read -r id run; do
+            if echo "$keep_runs" | grep -qw "$run"; then
+              echo "保留产物 $id（运行 $run）"
+            else
+              echo "删除产物 $id（运行 $run）"
+              gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id"
             fi
           done
