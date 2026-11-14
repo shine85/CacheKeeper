@@ -16,7 +16,8 @@ concurrency:
 jobs:
   build:
     name: 测试、编译与检查 deb
-    runs-on: macos-15
+    # macos-15 的 arm64 池连续未分配 runner；宿主改为 Intel，设备目标仍由 Makefile 定义。
+    runs-on: macos-15-intel
     timeout-minutes: 30
     env:
       THEOS: ${{ github.workspace }}/tmp/theos
