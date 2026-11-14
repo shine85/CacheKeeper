@@ -2,11 +2,17 @@
 #import <substrate.h>
 #import <objc/runtime.h>
 #include <stdatomic.h>
+#include <dlfcn.h>
+#include <string.h>
+#if __has_feature(ptrauth_calls)
+#include <ptrauth.h>
+#endif
 
 @interface AxsCacheKeeperNetworkCapacity : NSObject
 @property(nonatomic) NSUInteger desired;
 @property(nonatomic) uint64_t request;
 @property(nonatomic) BOOL pending;
+@property(nonatomic) BOOL restorationUnverified;
 @end
 @implementation AxsCacheKeeperNetworkCapacity
 @end
@@ -16,6 +22,7 @@ static NSObject *axs_cachekeeper_cache_lock;
 static BOOL axs_cachekeeper_prevent_network;
 static atomic_bool axs_cachekeeper_network_hooks_requested;
 static uint64_t axs_cachekeeper_capacity_request;
+static const char *axs_cachekeeper_network_class_image;
 
 // 栈帧只保存地址，不持有可能被类簇初始化释放的 receiver；全局链表只在锁内访问。
 typedef struct AxsCacheKeeperNetworkInitialization {
@@ -23,6 +30,7 @@ typedef struct AxsCacheKeeperNetworkInitialization {
     NSUInteger forwarded, desired;
     uint64_t beganAtRequest, request;
     BOOL suppressed;
+    BOOL restorationUnverified;
     struct AxsCacheKeeperNetworkInitialization *parent, *next, *root;
 } AxsCacheKeeperNetworkInitialization;
 static __thread AxsCacheKeeperNetworkInitialization *axs_cachekeeper_thread_initialization;
@@ -32,6 +40,29 @@ static id (*axs_cachekeeper_original_init_path)(id __attribute__((ns_consumed)),
 static id (*axs_cachekeeper_original_init_url)(id __attribute__((ns_consumed)), SEL, NSUInteger, NSUInteger, NSURL *) __attribute__((ns_returns_retained));
 static void (*axs_cachekeeper_original_set_shared)(id, SEL, NSURLCache *);
 
+static void axs_cachekeeper_unknown_initialization_source(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSLog(@"[CacheKeeper] NSURLCache 初始化调用来源不可确认；保留 setter 请求，初始磁盘容量恢复未验证");
+    });
+}
+typedef NS_ENUM(NSUInteger, AxsCacheKeeperCapacitySource) {
+    AxsCacheKeeperCapacitySourceInternal,
+    AxsCacheKeeperCapacitySourceExplicit,
+    AxsCacheKeeperCapacitySourceUnverified
+};
+static AxsCacheKeeperCapacitySource axs_cachekeeper_capacity_source(AxsCacheKeeperNetworkInitialization *frame, const Dl_info *source) {
+    if (!axs_cachekeeper_network_class_image || !source->dli_fname) return AxsCacheKeeperCapacitySourceUnverified;
+    // 已确认其他 image 的 APP / SDK / 框架转发属于显式请求，即使该 image 没有符号。
+    if (strcmp(source->dli_fname,axs_cachekeeper_network_class_image)) return AxsCacheKeeperCapacitySourceExplicit;
+    BOOL sameThread=NO;
+    for (AxsCacheKeeperNetworkInitialization *active=axs_cachekeeper_thread_initialization;active;active=active->parent)
+        if (active->root==frame) { sameThread=YES; break; }
+    if (sameThread && source->dli_saddr && source->dli_sname &&
+        (!strcmp(source->dli_sname,"-[NSURLCache initWithMemoryCapacity:diskCapacity:diskPath:]") ||
+         !strcmp(source->dli_sname,"-[NSURLCache initWithMemoryCapacity:diskCapacity:directoryURL:]"))) return AxsCacheKeeperCapacitySourceInternal;
+    return AxsCacheKeeperCapacitySourceUnverified;
+}
 static AxsCacheKeeperNetworkInitialization *axs_cachekeeper_initializing_cache(NSURLCache *cache) {
     uintptr_t address=(uintptr_t)(__bridge void *)cache;
     for (AxsCacheKeeperNetworkInitialization *frame=axs_cachekeeper_initializations;frame;frame=frame->next)
@@ -59,21 +90,39 @@ static void axs_cachekeeper_track_cache(NSURLCache *cache) {
     }
 }
 static void axs_cachekeeper_set_capacity(NSURLCache *cache, SEL selector, NSUInteger capacity) {
+    Dl_info source={0};
+    // 取直接调用方；初始化结束后的明确请求也必须能解除该对象的来源未确认状态。
+    void *caller=__builtin_extract_return_addr(__builtin_return_address(0));
+#if __has_feature(ptrauth_calls)
+    caller=ptrauth_strip(caller,ptrauth_key_return_address);
+#endif
+    dladdr(caller,&source);
+    BOOL reportUnverified=NO;
     @synchronized (axs_cachekeeper_cache_lock) {
         AxsCacheKeeperNetworkInitialization *frame=axs_cachekeeper_initializing_cache(cache);
-        // 显式 setter（包括零）都比初始化参数新；不能按数值猜测调用者意图。
+        AxsCacheKeeperCapacitySource origin=axs_cachekeeper_capacity_source(frame,&source);
+        // 只有已确认的系统原初始化器直接调用属于参数实施；其他 setter（包括零）是新请求。
         if (frame) {
-            frame->desired=capacity;
-            frame->request=++axs_cachekeeper_capacity_request;
+            if (origin!=AxsCacheKeeperCapacitySourceInternal) {
+                frame->desired=capacity;
+                frame->request=++axs_cachekeeper_capacity_request;
+                frame->restorationUnverified=origin==AxsCacheKeeperCapacitySourceUnverified &&
+                    (frame->suppressed || axs_cachekeeper_prevent_network);
+                reportUnverified=frame->restorationUnverified;
+            }
             frame->suppressed |= axs_cachekeeper_prevent_network;
         } else {
             AxsCacheKeeperNetworkCapacity *state=axs_cachekeeper_capacity_state(cache);
             state.desired=capacity;
             state.request=++axs_cachekeeper_capacity_request;
-            state.pending=axs_cachekeeper_prevent_network;
+            state.restorationUnverified=origin==AxsCacheKeeperCapacitySourceUnverified &&
+                (state.pending || axs_cachekeeper_prevent_network);
+            state.pending=axs_cachekeeper_prevent_network || state.restorationUnverified;
+            reportUnverified=state.restorationUnverified;
         }
         axs_cachekeeper_original_set_capacity(cache, selector, axs_cachekeeper_prevent_network ? 0 : capacity);
     }
+    if (reportUnverified) axs_cachekeeper_unknown_initialization_source();
 }
 static void axs_cachekeeper_begin_initialization(AxsCacheKeeperNetworkInitialization *frame, id object, NSUInteger disk) {
     @synchronized (axs_cachekeeper_cache_lock) {
@@ -102,13 +151,17 @@ static void axs_cachekeeper_finish_initialization(AxsCacheKeeperNetworkInitializ
         if (state.request>frame->beganAtRequest && state.request>frame->request) {
             frame->desired=state.desired;
             frame->request=state.request;
+            frame->restorationUnverified=state.restorationUnverified;
         }
         BOOL restore=frame->suppressed || state.pending;
         state.desired=frame->desired;
         state.request=frame->request;
-        state.pending=axs_cachekeeper_prevent_network;
-        if (axs_cachekeeper_prevent_network || restore)
+        state.restorationUnverified=frame->restorationUnverified;
+        state.pending=axs_cachekeeper_prevent_network || state.restorationUnverified;
+        if (axs_cachekeeper_prevent_network || restore) {
             axs_cachekeeper_original_set_capacity(cache,@selector(setDiskCapacity:),axs_cachekeeper_prevent_network ? 0 : state.desired);
+            if (!axs_cachekeeper_prevent_network && cache.diskCapacity!=state.desired) state.pending=YES;
+        }
         // 发布最终状态与移除活动帧必须原子完成，否则关闭/新请求会落在两者之间。
         axs_cachekeeper_end_initialization(frame);
     }
@@ -156,6 +209,7 @@ BOOL axs_cachekeeper_configure_network_cache(BOOL prevent) {
     dispatch_once(&once, ^{
         axs_cachekeeper_capacities = [NSMapTable weakToStrongObjectsMapTable];
         axs_cachekeeper_cache_lock = [NSObject new];
+        axs_cachekeeper_network_class_image=class_getImageName(NSURLCache.class);
         MSHookMessageEx(NSURLCache.class, @selector(setDiskCapacity:), (IMP)axs_cachekeeper_set_capacity, (IMP *)&axs_cachekeeper_original_set_capacity);
         MSHookMessageEx(NSURLCache.class, @selector(initWithMemoryCapacity:diskCapacity:diskPath:), (IMP)axs_cachekeeper_init_path, (IMP *)&axs_cachekeeper_original_init_path);
         SEL urlInitializer = @selector(initWithMemoryCapacity:diskCapacity:directoryURL:);
@@ -177,14 +231,22 @@ BOOL axs_cachekeeper_configure_network_cache(BOOL prevent) {
             NSUInteger desired=prevent ? 0 : state.desired;
             axs_cachekeeper_original_set_capacity(cache, @selector(setDiskCapacity:), desired);
             BOOL matches=cache.diskCapacity == desired;
-            applied &= matches;
-            if (!prevent && matches) state.pending=NO;
+            BOOL verified=matches && !state.restorationUnverified;
+            applied &= prevent ? matches : verified;
+            if (!prevent && verified) state.pending=NO;
         }
     }
     // 先发布禁止状态，新建 sharedURLCache 也从零磁盘容量开始；原初始化器不持全局锁。
     NSURLCache *shared=prevent ? NSURLCache.sharedURLCache : nil;
     if (shared) axs_cachekeeper_track_cache(shared);
     @synchronized (axs_cachekeeper_cache_lock) {
+        // 在返回结果的同一临界区检查，包含尚未发布的帧及两次加锁之间出现的新未知请求。
+        if (!prevent) {
+            for (AxsCacheKeeperNetworkCapacity *state in axs_cachekeeper_capacities.objectEnumerator.allObjects)
+                if (state.restorationUnverified) return NO;
+            for (AxsCacheKeeperNetworkInitialization *frame=axs_cachekeeper_initializations;frame;frame=frame->next)
+                if (frame->root->restorationUnverified) return NO;
+        }
         return applied && axs_cachekeeper_prevent_network==prevent && (!prevent || shared.diskCapacity==0);
     }
 }

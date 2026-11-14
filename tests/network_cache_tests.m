@@ -1,7 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #include <dlfcn.h>
-#include <execinfo.h>
 #include <string.h>
 #import "../AxsCacheKeeperNetworkCache.h"
 
@@ -10,39 +9,44 @@ static id (*axs_cachekeeper_test_real_path)(id __attribute__((ns_consumed)), SEL
 static id (*axs_cachekeeper_test_real_url)(id __attribute__((ns_consumed)), SEL, NSUInteger, NSUInteger, NSURL *) __attribute__((ns_returns_retained));
 static NSMutableArray<NSDictionary *> *axs_cachekeeper_test_network_calls;
 static NSURLCache *(^axs_cachekeeper_test_after_init)(NSURLCache *);
+static void (^axs_cachekeeper_test_before_init)(void);
 static BOOL axs_cachekeeper_test_observe_network;
 static BOOL axs_cachekeeper_test_network_prepared;
-static IMP axs_cachekeeper_test_real_setter;
-static void (*axs_cachekeeper_test_next_setter)(id, SEL, NSUInteger);
-static BOOL axs_cachekeeper_test_trace_limited;
-static NSUInteger axs_cachekeeper_test_traced_setters;
-static __thread NSUInteger axs_cachekeeper_test_real_init_depth;
 
-// 只诊断当前合成 limited 夹具；不输出缓存路径或应用内容，不改变真实调用。
-static void axs_cachekeeper_test_trace_address(const char *label, NSUInteger index, void *address) {
-    Dl_info info={0};
-    dladdr(address,&info);
-    const char *image=info.dli_fname ? strrchr(info.dli_fname,'/') : NULL;
-    if (image) image++; else image=info.dli_fname ? info.dli_fname : "unresolved";
-    fprintf(stderr,"NETWORK_TRACE %s[%lu] image=%s symbol=%s offset=%llu\n",label,(unsigned long)index,
-        image,info.dli_sname ? info.dli_sname : "unresolved",
-        info.dli_saddr ? (unsigned long long)((uintptr_t)address-(uintptr_t)info.dli_saddr) : 0);
-}
-static void axs_cachekeeper_test_trace_setter(id object, SEL selector, NSUInteger capacity) {
-    if (axs_cachekeeper_test_trace_limited && axs_cachekeeper_test_traced_setters++<12) {
-        fprintf(stderr,"NETWORK_TRACE setter capacity=%lu realInitDepth=%lu class=%s\n",
-            (unsigned long)capacity,(unsigned long)axs_cachekeeper_test_real_init_depth,object_getClassName(object));
-        axs_cachekeeper_test_trace_address("caller",0,__builtin_extract_return_addr(__builtin_return_address(0)));
-        void *frames[8];
-        int count=backtrace(frames,8);
-        for (int index=1;index<count;index++) axs_cachekeeper_test_trace_address("stack",(NSUInteger)index,frames[index]);
+typedef NS_ENUM(NSUInteger, AxsCacheKeeperTestSourceMode) {
+    AxsCacheKeeperTestSourceNormal, AxsCacheKeeperTestSourceHelper,
+    AxsCacheKeeperTestSourceNoSymbol, AxsCacheKeeperTestSourceAnonymous
+};
+static __thread AxsCacheKeeperTestSourceMode axs_cachekeeper_test_source_mode;
+static __thread NSUInteger axs_cachekeeper_test_source_injections;
+static const char *axs_cachekeeper_test_cache_image;
+
+// 仅测试链接覆盖 dladdr：真实解析后，仅改当前测试线程的已确认 NSURLCache 初始化来源。
+// Foundation、生产 Hook 和原 setter 都照常执行，不改变直接 caller 或新增生产测试 API。
+int dladdr(const void *address, Dl_info *info) {
+    static int (*real)(const void *,Dl_info *);
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        real=(void *)dlsym(RTLD_NEXT,"dladdr");
+        if (!real || (void *)real==(void *)&dladdr) {
+            fprintf(stderr,"FAIL: network source shim could not resolve the real dladdr\n");
+            exit(1);
+        }
+    });
+    int result=real(address,info);
+    if (result && axs_cachekeeper_test_source_mode!=AxsCacheKeeperTestSourceNormal &&
+        axs_cachekeeper_test_cache_image && info->dli_fname && info->dli_sname &&
+        !strcmp(info->dli_fname,axs_cachekeeper_test_cache_image) &&
+        (!strcmp(info->dli_sname,"-[NSURLCache initWithMemoryCapacity:diskCapacity:diskPath:]") ||
+         !strcmp(info->dli_sname,"-[NSURLCache initWithMemoryCapacity:diskCapacity:directoryURL:]"))) {
+        axs_cachekeeper_test_source_injections++;
+        if (axs_cachekeeper_test_source_mode==AxsCacheKeeperTestSourceHelper)
+            info->dli_sname="axs_cachekeeper_test_unknown_system_helper";
+        else if (axs_cachekeeper_test_source_mode==AxsCacheKeeperTestSourceNoSymbol) {
+            info->dli_sname=NULL; info->dli_saddr=NULL;
+        } else { memset(info,0,sizeof(*info)); return 0; }
     }
-    axs_cachekeeper_test_next_setter(object,selector,capacity);
-}
-static void axs_cachekeeper_test_install_setter_trace(void) {
-    if (axs_cachekeeper_test_next_setter) return;
-    Method setter=class_getInstanceMethod(NSURLCache.class,@selector(setDiskCapacity:));
-    axs_cachekeeper_test_next_setter=(void *)method_setImplementation(setter,(IMP)axs_cachekeeper_test_trace_setter);
+    return result;
 }
 
 static void axs_cachekeeper_network_require(BOOL condition, NSString *message) {
@@ -60,40 +64,35 @@ static NSURLCache *axs_cachekeeper_test_finish_init(NSURLCache *result) {
     }
     return result;
 }
+static void axs_cachekeeper_test_start_init(void) {
+    void (^action)(void)=axs_cachekeeper_test_before_init;
+    axs_cachekeeper_test_before_init=nil;
+    if (action) action();
+}
 static id axs_cachekeeper_test_init_path(id object __attribute__((ns_consumed)), SEL selector, NSUInteger memory, NSUInteger disk, NSString *path) __attribute__((ns_returns_retained));
 static id axs_cachekeeper_test_init_path(id object __attribute__((ns_consumed)), SEL selector, NSUInteger memory, NSUInteger disk, NSString *path) {
     axs_cachekeeper_test_record_init(@"path",memory,disk);
-    if (axs_cachekeeper_test_trace_limited) fprintf(stderr,"NETWORK_TRACE path enter memory=%lu disk=%lu\n",(unsigned long)memory,(unsigned long)disk);
-    id result=nil;
-    axs_cachekeeper_test_real_init_depth++;
-    @try { result=axs_cachekeeper_test_real_path(object,selector,memory,disk,path); }
-    @finally { axs_cachekeeper_test_real_init_depth--; }
-    if (axs_cachekeeper_test_trace_limited) fprintf(stderr,"NETWORK_TRACE path return memory=%lu disk=%lu\n",(unsigned long)[result memoryCapacity],(unsigned long)[result diskCapacity]);
-    return axs_cachekeeper_test_finish_init(result);
+    axs_cachekeeper_test_start_init();
+    return axs_cachekeeper_test_finish_init(axs_cachekeeper_test_real_path(object,selector,memory,disk,path));
 }
 static id axs_cachekeeper_test_init_url(id object __attribute__((ns_consumed)), SEL selector, NSUInteger memory, NSUInteger disk, NSURL *url) __attribute__((ns_returns_retained));
 static id axs_cachekeeper_test_init_url(id object __attribute__((ns_consumed)), SEL selector, NSUInteger memory, NSUInteger disk, NSURL *url) {
     axs_cachekeeper_test_record_init(@"url",memory,disk);
-    if (axs_cachekeeper_test_trace_limited) fprintf(stderr,"NETWORK_TRACE url enter memory=%lu disk=%lu\n",(unsigned long)memory,(unsigned long)disk);
-    id result=nil;
-    axs_cachekeeper_test_real_init_depth++;
-    @try { result=axs_cachekeeper_test_real_url(object,selector,memory,disk,url); }
-    @finally { axs_cachekeeper_test_real_init_depth--; }
-    if (axs_cachekeeper_test_trace_limited) fprintf(stderr,"NETWORK_TRACE url return memory=%lu disk=%lu\n",(unsigned long)[result memoryCapacity],(unsigned long)[result diskCapacity]);
-    return axs_cachekeeper_test_finish_init(result);
+    axs_cachekeeper_test_start_init();
+    return axs_cachekeeper_test_finish_init(axs_cachekeeper_test_real_url(object,selector,memory,disk,url));
 }
 
 void axs_cachekeeper_prepare_network_cache_tests(void) {
     if (axs_cachekeeper_test_network_prepared) return;
     axs_cachekeeper_test_network_prepared=YES;
     axs_cachekeeper_test_network_calls=[NSMutableArray array];
+    axs_cachekeeper_test_cache_image=class_getImageName(NSURLCache.class);
     Method path=class_getInstanceMethod(NSURLCache.class,@selector(initWithMemoryCapacity:diskCapacity:diskPath:));
     axs_cachekeeper_network_require(path!=NULL,@"Foundation path 初始化器可用");
     axs_cachekeeper_test_real_path=(void *)method_setImplementation(path,(IMP)axs_cachekeeper_test_init_path);
     Method url=class_getInstanceMethod(NSURLCache.class,@selector(initWithMemoryCapacity:diskCapacity:directoryURL:));
     if (url) axs_cachekeeper_test_real_url=(void *)method_setImplementation(url,(IMP)axs_cachekeeper_test_init_url);
     IMP setter=method_getImplementation(class_getInstanceMethod(NSURLCache.class,@selector(setDiskCapacity:)));
-    axs_cachekeeper_test_real_setter=setter;
     axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(NO),@"初始关闭返回成功");
     axs_cachekeeper_network_require(method_getImplementation(path)==(IMP)axs_cachekeeper_test_init_path &&
         setter==method_getImplementation(class_getInstanceMethod(NSURLCache.class,@selector(setDiskCapacity:))),
@@ -104,6 +103,15 @@ static NSURLCache *axs_cachekeeper_test_create_cache(NSString *fixture, NSString
     NSString *path=[fixture stringByAppendingPathComponent:name];
     if (url) return [[NSURLCache alloc] initWithMemoryCapacity:1048576 diskCapacity:8388608 directoryURL:[NSURL fileURLWithPath:path isDirectory:YES]];
     return [[NSURLCache alloc] initWithMemoryCapacity:1048576 diskCapacity:8388608 diskPath:path];
+}
+static NSURLCache *axs_cachekeeper_test_create_unknown_cache(NSString *fixture, NSString *name, BOOL url, AxsCacheKeeperTestSourceMode mode) {
+    axs_cachekeeper_test_source_mode=mode;
+    axs_cachekeeper_test_source_injections=0;
+    @try {
+        NSURLCache *cache=axs_cachekeeper_test_create_cache(fixture,name,url);
+        axs_cachekeeper_network_require(axs_cachekeeper_test_source_injections>0,@"未知来源夹具必须命中真实初始化器调用");
+        return cache;
+    } @finally { axs_cachekeeper_test_source_mode=AxsCacheKeeperTestSourceNormal; }
 }
 static void axs_cachekeeper_test_assert_boundary(NSString *kind, NSUInteger disk) {
     NSDictionary *entry=axs_cachekeeper_test_network_calls.firstObject;
@@ -129,15 +137,8 @@ void axs_cachekeeper_run_network_cache_tests(NSString *fixture) {
 
         axs_cachekeeper_test_observe_network=NO;
         axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(YES),@"开启限制");
-        // 在生产 Hook 外观察入口，生产直接调用原 setter 时不会伪装成一次 APP 请求。
-        axs_cachekeeper_test_install_setter_trace();
         axs_cachekeeper_test_observe_network=YES;
         [axs_cachekeeper_test_network_calls removeAllObjects];
-        axs_cachekeeper_test_traced_setters=0;
-        axs_cachekeeper_test_trace_limited=YES;
-        axs_cachekeeper_test_trace_address("path-original",0,(void *)axs_cachekeeper_test_real_path);
-        if (axs_cachekeeper_test_real_url) axs_cachekeeper_test_trace_address("url-original",0,(void *)axs_cachekeeper_test_real_url);
-        axs_cachekeeper_test_trace_address("setter-original",0,(void *)axs_cachekeeper_test_real_setter);
         NSURLCache *limited=axs_cachekeeper_test_create_cache(fixture,[kind stringByAppendingString:@"-limited"],url);
         axs_cachekeeper_test_assert_boundary(kind,0);
         axs_cachekeeper_network_require(limited.diskCapacity==0 && limited.memoryCapacity==1048576,@"实际返回对象限制磁盘且保留内存");
@@ -145,7 +146,6 @@ void axs_cachekeeper_run_network_cache_tests(NSString *fixture) {
         NSUInteger restoredDisk=limited.diskCapacity;
         fprintf(stderr,"NETWORK_TRACE restore kind=%s applied=%d disk=%lu memory=%lu\n",kind.UTF8String,
             restored,(unsigned long)restoredDisk,(unsigned long)limited.memoryCapacity);
-        axs_cachekeeper_test_trace_limited=NO;
         axs_cachekeeper_network_require(restored && restoredDisk==8388608,@"关闭恢复原始初始化请求，不恢复被压成的零");
         limited.diskCapacity=33554432;
         axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(NO) && limited.diskCapacity==33554432,@"重复关闭不覆盖后续应用容量");
@@ -167,6 +167,20 @@ void axs_cachekeeper_run_network_cache_tests(NSString *fixture) {
         NSURLCache *zeroRequested=axs_cachekeeper_test_create_cache(fixture,[kind stringByAppendingString:@"-in-init-zero"],url);
         axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(NO) && zeroRequested.diskCapacity==0,
             @"真实初始化期间显式请求零不能被误当成内部转发而丢失");
+
+        axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(YES),@"系统转发零请求测试开启限制");
+        axs_cachekeeper_test_after_init=^NSURLCache *(NSURLCache *cache) {
+            NSInvocation *request=[NSInvocation invocationWithMethodSignature:[cache methodSignatureForSelector:@selector(setDiskCapacity:)]];
+            request.target=cache;
+            request.selector=@selector(setDiskCapacity:);
+            NSUInteger capacity=0;
+            [request setArgument:&capacity atIndex:2];
+            [request invoke];
+            return cache;
+        };
+        NSURLCache *invokedZero=axs_cachekeeper_test_create_cache(fixture,[kind stringByAppendingString:@"-in-init-invoked-zero"],url);
+        axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(NO) && invokedZero.diskCapacity==0,
+            @"由 NSInvocation 转发的应用零请求也不能误当作 NSURLCache 初始化器内部设置");
 
         axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(YES),@"初始化中多次请求测试开启限制");
         axs_cachekeeper_test_after_init=^NSURLCache *(NSURLCache *cache) { cache.diskCapacity=25165824; cache.diskCapacity=0; return cache; };
@@ -242,9 +256,60 @@ void axs_cachekeeper_run_network_cache_tests(NSString *fixture) {
         switchedTwice.diskCapacity=33554432;
         axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(NO) && switchedTwice.diskCapacity==33554432,
             @"短暂开启的初始化恢复完成后，重复关闭不覆盖后续请求");
+
+        for (NSNumber *sourceMode in @[@(AxsCacheKeeperTestSourceHelper),@(AxsCacheKeeperTestSourceNoSymbol),@(AxsCacheKeeperTestSourceAnonymous)]) {
+            AxsCacheKeeperTestSourceMode mode=sourceMode.unsignedIntegerValue;
+            NSString *name=[NSString stringWithFormat:@"%@-unknown-%lu",kind,(unsigned long)mode];
+            axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(YES),@"未知来源测试启用限制");
+            NSURLCache *unknown=axs_cachekeeper_test_create_unknown_cache(fixture,name,url,mode);
+            axs_cachekeeper_network_require(unknown.diskCapacity==0 && unknown.memoryCapacity==1048576,@"未知来源仍限制磁盘且保持真实内存容量");
+            axs_cachekeeper_network_require(!axs_cachekeeper_configure_network_cache(NO),@"未知来源即使实际容量等于记录也不得报告已验证恢复");
+            axs_cachekeeper_network_require(!axs_cachekeeper_configure_network_cache(NO),@"重复关闭不能清除未知来源状态");
+            axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(YES) && !axs_cachekeeper_configure_network_cache(NO),@"再次开启关闭不能清除未知来源状态");
+            unknown.diskCapacity=0;
+            axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(NO) && unknown.diskCapacity==0,@"返回后明确的 APP 零请求可解除未确认状态");
+
+            axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(YES),@"未知来源后新请求测试开启限制");
+            axs_cachekeeper_test_after_init=^NSURLCache *(NSURLCache *cache) { cache.diskCapacity=0; return cache; };
+            NSURLCache *resolved=axs_cachekeeper_test_create_unknown_cache(fixture,[name stringByAppendingString:@"-resolved"],url,mode);
+            axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(NO) && resolved.diskCapacity==0,@"初始化中后续明确零请求可解除未确认状态");
+
+            axs_cachekeeper_test_before_init=^{ axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(YES),@"关闭状态进入后开启未知来源测试"); };
+            axs_cachekeeper_test_after_init=^NSURLCache *(NSURLCache *cache) {
+                dispatch_semaphore_t completed=dispatch_semaphore_create(0);
+                __block BOOL applied=YES;
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^{
+                    applied=axs_cachekeeper_configure_network_cache(NO);
+                    dispatch_semaphore_signal(completed);
+                });
+                axs_cachekeeper_network_require(dispatch_semaphore_wait(completed,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0 && !applied,
+                    @"其他线程关闭时，活动初始化帧的未知恢复也不能提前报告成功");
+                return cache;
+            };
+            NSURLCache *unknownSwitched=axs_cachekeeper_test_create_unknown_cache(fixture,[name stringByAppendingString:@"-off-on-off"],url,mode);
+            axs_cachekeeper_network_require(!axs_cachekeeper_configure_network_cache(NO),@"off-on-off 返回后仍保留未确认恢复");
+            unknownSwitched.diskCapacity=33554432;
+            axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(NO) && unknownSwitched.diskCapacity==33554432,@"明确新容量解除未确认状态，关闭不覆盖新值");
+
+            axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(YES),@"nil 初始化返回测试开启限制");
+            axs_cachekeeper_test_after_init=^NSURLCache *(NSURLCache *cache) { (void)cache; return nil; };
+            NSURLCache *missing=axs_cachekeeper_test_create_unknown_cache(fixture,[name stringByAppendingString:@"-nil"],url,mode);
+            axs_cachekeeper_network_require(!missing && axs_cachekeeper_configure_network_cache(NO),@"nil 返回移除未知活动帧，不能遗留全局失败");
+
+            axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(YES),@"异常初始化退出测试开启限制");
+            axs_cachekeeper_test_after_init=^NSURLCache *(NSURLCache *cache) {
+                (void)cache;
+                @throw [NSException exceptionWithName:@"AxsCacheKeeperTestInitializationFailure" reason:@"fixture" userInfo:nil];
+            };
+            BOOL caught=NO;
+            @try { (void)axs_cachekeeper_test_create_unknown_cache(fixture,[name stringByAppendingString:@"-exception"],url,mode); }
+            @catch (NSException *exception) { caught=[exception.name isEqual:@"AxsCacheKeeperTestInitializationFailure"]; }
+            axs_cachekeeper_network_require(caught && axs_cachekeeper_configure_network_cache(NO),@"异常退出移除未知活动帧，不能遗留全局失败");
+        }
         axs_cachekeeper_test_observe_network=NO;
     }
     axs_cachekeeper_test_after_init=nil;
+    axs_cachekeeper_test_before_init=nil;
     [axs_cachekeeper_test_network_calls removeAllObjects];
     axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(NO),@"测试退出关闭限制");
     puts("PASS: NSURLCache real initializer boundary, restoration, latest requests and concurrent toggle");
