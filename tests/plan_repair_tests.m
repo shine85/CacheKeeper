@@ -53,6 +53,10 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     AxsCacheKeeperCleanupDecision *alogDecision=[AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:alogVersion relativePath:alogPath state:exited evidence:clearLog];
     check(alogDecision.disposition==AxsCacheKeeperCleanupDelete && alogDecision.basis==AxsCacheKeeperCleanupBasisAppRule,
         @"内置抖音规则应识别已退出进程的 ALog 日志，不能仍全部待识别");
+    NSString *modulePath=@"Library/alog/AWELive/ready/AWELive_BDALog_20261114_085325.alog.iOS.1128";
+    check([AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:alogVersion relativePath:modulePath state:exited evidence:clearLog].disposition==AxsCacheKeeperCleanupDelete,@"真实截图中的模块前缀ready日志应能回收");
+    for (NSString *keptPath in @[@"Library/alog/Timor/prepare/Timor_BDALog.mmap2.iOS.1128",@"Library/alog/AWELive/ready/Other_BDALog_20261114_085325.alog.iOS.1128",@"Library/alog/Unverified/ready/Unverified_BDALog_20261114_085325.alog.iOS.1128"])
+        check([AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:alogVersion relativePath:keptPath state:exited evidence:clearLog].disposition!=AxsCacheKeeperCleanupDelete,@"prepare映射、模块不一致与未确认模块仍保留");
     for (NSString *otherVersion in @[@"",@"41.1.1",@"41.1.0.1"])
         check([AxsCacheKeeperCleanupRules decisionForBundle:alogBundle version:otherVersion relativePath:alogPath state:exited evidence:clearLog].disposition!=AxsCacheKeeperCleanupDelete,@"未验版本不继承 ALog 删除授权");
     check([AxsCacheKeeperCleanupRules decisionForBundle:@"com.example.other" version:alogVersion relativePath:alogPath state:exited evidence:clearLog].disposition!=AxsCacheKeeperCleanupDelete,@"同名目录不跨 APP 放行");

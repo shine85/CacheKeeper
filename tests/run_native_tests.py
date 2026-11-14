@@ -30,6 +30,7 @@ try:
                     str(root / "tests" / "diagnostics_tests.m"),
                     str(root / "tests" / "app_list_tests.m"),
                     str(root / "tests" / "app_retention_tests.m"),
+                    str(root / "tests" / "presentation_tests.m"),
                     str(root / "AxsCacheKeeperDiagnostics.m"),
                     str(root / "AxsCacheKeeperAppList.m"),
                     "-o", str(output / "cache-tests")], check=True, timeout=60)

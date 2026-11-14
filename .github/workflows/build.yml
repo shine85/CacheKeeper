@@ -32,6 +32,20 @@ jobs:
       - name: 原生回归测试
         run: python3 tests/run_native_tests.py
 
+      - name: UIKit 点按与键盘回归
+        if: success() || failure()
+        run: |
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          python3 tests/run_ui_tests.py
+
+      - name: 保存 UIKit 回归结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: UIKit-input-results
+          path: tmp/input-ui-tests/Results.xcresult
+          if-no-files-found: ignore
+
       - name: 获取 RootHide Theos
         uses: actions/checkout@v4
         with:
