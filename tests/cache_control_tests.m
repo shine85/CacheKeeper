@@ -79,6 +79,9 @@ extern void axs_cachekeeper_run_diagnostics_tests(NSString *fixture);
 extern void axs_cachekeeper_run_app_list_tests(NSString *fixture);
 extern void axs_cachekeeper_run_presentation_tests(void);
 extern void axs_cachekeeper_run_app_retention_tests(NSString *fixture);
+extern void axs_cachekeeper_run_installation_tests(NSString *fixture);
+extern void axs_cachekeeper_prepare_network_cache_tests(void);
+extern void axs_cachekeeper_run_network_cache_tests(NSString *fixture);
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
@@ -1607,6 +1610,7 @@ int main(int argc, const char *argv[]) {
         partial=[h3 mutableCopy];partial[@"recentScans"]=@[h1,h1,h1,h2,h2];
         require(axs_cachekeeper_recent_scans(partial).count==4, @"只保留最近四次旧记录加本轮，防止快照递归膨胀");
 
+        axs_cachekeeper_prepare_network_cache_tests();
         IMP originalSetter=method_getImplementation(class_getInstanceMethod(NSURLCache.class,@selector(setDiskCapacity:)));
         IMP originalInitializer=method_getImplementation(class_getInstanceMethod(NSURLCache.class,@selector(initWithMemoryCapacity:diskCapacity:diskPath:)));
         require(axs_cachekeeper_configure_network_cache(NO), @"未启用状态可直接返回");
@@ -1702,6 +1706,8 @@ int main(int argc, const char *argv[]) {
         axs_cachekeeper_run_app_list_tests(fixture);
         axs_cachekeeper_run_presentation_tests();
         axs_cachekeeper_run_app_retention_tests(fixture);
+        axs_cachekeeper_run_installation_tests(fixture);
+        axs_cachekeeper_run_network_cache_tests(fixture);
         puts("PASS: configuration, modes, deduplication, age, protected files, cleanup, cancellation, permission restoration, receipts and URLCache");
     }
     return 0;

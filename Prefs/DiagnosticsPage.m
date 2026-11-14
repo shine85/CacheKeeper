@@ -1,9 +1,11 @@
 #import "DiagnosticsPage.h"
 #import "../AxsCacheKeeperDiagnostics.h"
+#import "../AxsCacheKeeperInstallation.h"
 #include <roothide.h>
 
 @interface AxsCacheKeeperDiagnosticsPage ()
-@property(nonatomic,copy) NSArray *apps;
+@property(nonatomic,strong) NSMutableDictionary *installationCache;
+@property(nonatomic,strong) dispatch_queue_t collectionQueue;
 @property(nonatomic,strong) UITextView *text;
 @property(nonatomic,strong) UIButton *collectButton;
 @property(nonatomic,strong) UIButton *exportButton;
@@ -25,9 +27,10 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
 }
 
 @implementation AxsCacheKeeperDiagnosticsPage
-- (instancetype)initWithApps:(NSArray<NSDictionary *> *)apps {
+- (instancetype)init {
     self=[super init];if (self) {
-        _apps=[apps copy];
+        _installationCache=[NSMutableDictionary new];
+        _collectionQueue=dispatch_queue_create("dev.local.cachekeeper.diagnostics",DISPATCH_QUEUE_SERIAL);
         _status=@"尚未采集；采集结果仅保留在当前页面内存中。";
     }return self;
 }
@@ -42,7 +45,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     [super viewDidLoad];self.title=@"诊断采集";self.view.backgroundColor=UIColor.systemGroupedBackgroundColor;
     self.text=[UITextView new];self.text.editable=NO;self.text.backgroundColor=UIColor.clearColor;
     self.text.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody];self.text.adjustsFontForContentSizeCategory=YES;
-    self.text.text=@"快速汇总已配置 APP 的现有记录，包含已关闭的配置。每个 APP 读取一次，总数固定；不会自动检测目录或深度扫描。\n\n报告包含 APP 与插件版本、开关、目录统计、清理回执、网络状态和已有深度档案。每条记录保留原时间，缺失、损坏和覆盖不完整会明确标注。\n\n未知路径、账号和私人文件名会匿名化；不导出文件内容、原始日志或设备标识。\n\n采集后只保留内存报告，不自动保存。手动点“导出报告”后，才生成临时分享文件；分享结束清理副本。只有你主动“存储到文件”的报告会保留。离开本页会释放内存报告。\n\n需要新数据时，在具体 APP 的目录页执行检测，再回来采集即可。";
+    self.text.text=@"快速汇总安装快照与当前配置中 APP 的现有记录，包含新装未配置和已关闭的 APP。新装未配置 APP 保持禁用。每轮总数固定；不会自动检测目录或深度扫描。\n\n报告包含实际提供的 APP 名称、版本与构建号、插件版本、开关、目录统计、清理回执、网络状态和已有深度档案。每条记录保留原时间，缺失、损坏和覆盖不完整会明确标注。每次采集重新获取安装列表；安装信息仅反映本轮快照；未在快照中出现不代表已卸载，来源缺失或损坏会标记不可用。\n\n未知路径、账号和私人文件名会匿名化；不导出文件内容、原始日志或设备标识。\n\n采集后只保留内存报告，不自动保存。手动点“导出报告”后，才生成临时分享文件；分享结束清理副本。只有你主动“存储到文件”的报告会保留。离开本页会释放内存报告。\n\n需要新数据时，在具体 APP 的目录页执行检测，再回来采集即可。";
     self.collectButton=[self axs_cachekeeper_button:@"采集诊断" action:@selector(axs_cachekeeper_collect)];
     self.exportButton=[self axs_cachekeeper_button:@"导出报告" action:@selector(axs_cachekeeper_export)];
     self.progressLabel=[UILabel new];self.progressLabel.numberOfLines=0;
@@ -72,7 +75,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
 - (void)axs_cachekeeper_collect {
     if (self.collecting || self.sharing) return;
     self.collecting=YES;self.reportData=nil;self.completed=0;self.total=0;
-    self.status=@"正在读取配置和已有记录…";[self axs_cachekeeper_refresh];
+    self.status=@"正在获取当前安装列表、配置和已有记录…";[self axs_cachekeeper_refresh];
     NSUInteger generation=++self.generation;
     NSBundle *bundle=[NSBundle bundleForClass:self.class];
 #if defined(__arm64e__)
@@ -81,8 +84,12 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     NSString *architecture=@"arm64";
 #endif
     NSDictionary *environment=@{@"os":UIDevice.currentDevice.systemVersion,@"architecture":architecture,@"pluginVersion":[bundle objectForInfoDictionaryKey:@"CacheKeeperPackageVersion"] ?: @"unknown"};
-    NSArray *apps=self.apps;__weak typeof(self) weak=self;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+    NSMutableDictionary *installationCache=self.installationCache;__weak typeof(self) weak=self;
+    dispatch_async(self.collectionQueue,^{
+        // Reuse unchanged package metadata, but obtain current membership on every collection.
+        NSError *installationError=nil;
+        NSArray *apps=axs_cachekeeper_installed_applications(installationCache,&installationError);
+        if (installationError) apps=nil;
         AxsCacheKeeperDiagnostics *session=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:jbroot(@"/var/mobile/Library/CacheKeeper")];
         NSDictionary *report=[session reportWithApps:apps environment:environment progress:^(NSUInteger completed,NSUInteger total) {
             dispatch_async(dispatch_get_main_queue(),^{
@@ -98,8 +105,8 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
             AxsCacheKeeperDiagnosticsPage *page=weak;if (!page || page.generation!=generation) return;
             page.collecting=NO;page.reportData=data;
             page.status=data ? [NSString stringWithFormat:@"已汇总 %lu/%lu 个 APP。报告仅在内存，点击“导出报告”保存。",(unsigned long)page.completed,(unsigned long)page.total] : @"报告生成失败，尚未保存；可以重新采集。";
-            if (data && (![@[@"available",@"missing"] containsObject:report[@"sourceStates"][@"configuration"]] || ![@[@"available",@"missing"] containsObject:report[@"sourceStates"][@"selection"]]))
-                page.status=@"报告已在内存生成，但部分配置损坏或不可读；可导出查看错误状态。";
+            if (data && (![@[@"available",@"missing"] containsObject:report[@"sourceStates"][@"configuration"]] || ![@[@"available",@"missing"] containsObject:report[@"sourceStates"][@"selection"]] || ![report[@"sourceStates"][@"installedApplications"] isEqual:@"available"]))
+                page.status=@"报告已在内存生成，但安装列表或部分配置不可用；可导出查看来源状态。";
             [page axs_cachekeeper_refresh];
             if (!data && page.view.window) [page axs_cachekeeper_message:[NSString stringWithFormat:@"报告生成失败（代码 %ld）。",(long)error.code]];
         });

@@ -20,6 +20,7 @@ targets:
       - path: ../../Prefs/DiagnosticsPage.m
       - path: ../../AxsCacheKeeperDiagnostics.m
       - path: ../../AxsCacheKeeperAppList.m
+      - path: ../../AxsCacheKeeperInstallation.m
     settings:
       base:
         HEADER_SEARCH_PATHS: "$(SRCROOT)/../../tests/ui/include $(SRCROOT)/../../tests/include"

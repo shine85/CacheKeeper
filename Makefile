@@ -6,7 +6,7 @@ FINALPACKAGE = 1
 DEBUG = 0
 include $(THEOS)/makefiles/common.mk
 BUNDLE_NAME = CacheKeeperPrefs
-CacheKeeperPrefs_FILES = Prefs/Settings.m Prefs/SearchInput.m Prefs/ScanPage.m Prefs/InspectionPage.m Prefs/DiagnosticsPage.m AxsCacheKeeperDiagnostics.m AxsCacheKeeperAppList.m
+CacheKeeperPrefs_FILES = Prefs/Settings.m Prefs/SearchInput.m Prefs/ScanPage.m Prefs/InspectionPage.m Prefs/DiagnosticsPage.m AxsCacheKeeperDiagnostics.m AxsCacheKeeperAppList.m AxsCacheKeeperInstallation.m
 CacheKeeperPrefs_INSTALL_PATH = /Library/PreferenceBundles
 CacheKeeperPrefs_CFLAGS = -fobjc-arc
 CacheKeeperPrefs_FRAMEWORKS = UIKit Foundation
@@ -18,7 +18,7 @@ include $(THEOS_MAKE_PATH)/bundle.mk
 TWEAK_NAME = CacheKeeper
 CacheKeeper_FILES = Cleaner.m Desktop.xm Permissions.m Scanner.m Baseline.m AxsCacheKeeperNetworkCache.m AxsCacheKeeperDirectories.m AxsCacheKeeperInspection.m AxsCacheKeeperProcessObservation.m AxsCacheKeeperCleanupJob.m AxsCacheKeeperCleanupRules.m AxsCacheKeeperReceipts.m AxsCacheKeeperCleanupSchedule.m
 CacheKeeper_CFLAGS = -fobjc-arc -IVendor
-CacheKeeper_FILES += AxsCacheKeeperDependencySnapshot.m
+CacheKeeper_FILES += AxsCacheKeeperDependencySnapshot.m AxsCacheKeeperInstallation.m
 CacheKeeper_FRAMEWORKS = UIKit Foundation
 CacheKeeper_LIBRARIES = roothide sandy substrate
 CacheKeeper_LDFLAGS = -LVendor

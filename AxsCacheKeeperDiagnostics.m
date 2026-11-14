@@ -9,6 +9,12 @@ static NSDictionary *AxsCacheKeeperDiagnosticRead(NSString *folder,NSString *nam
     if (![value isKindOfClass:NSDictionary.class]) return @{@"state":@"invalid",@"errorCode":@(error.code)};
     return @{@"state":@"available",@"data":value};
 }
+static NSMutableSet<NSString *> *AxsCacheKeeperDiagnosticConfiguredBundles(NSDictionary *states,NSDictionary *directories) {
+    NSMutableSet *bundles=[NSMutableSet new];
+    for (NSDictionary *read in @[states,directories])
+        for (id bundle in [read[@"data"] allKeys]) if (axs_cachekeeper_bundle_id(bundle)) [bundles addObject:bundle];
+    return bundles;
+}
 // 白名单投影：自由文本与未知字段永不原样进入分享文件。
 @interface AxsCacheKeeperDiagnosticRedactor : NSObject
 @property(nonatomic,strong) NSMutableDictionary *aliases;
@@ -111,11 +117,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticRead(NSString *folder,NSString *nam
 - (instancetype)initWithFolder:(NSString *)folder {
     self=[super init];if (!self) return nil;
     _folder=[folder copy];
-    NSMutableSet *bundles=[NSMutableSet new];
-    for (NSString *file in @[@"appEnabled.plist",@"directories.plist"]) {
-        NSDictionary *read=AxsCacheKeeperDiagnosticRead(folder,file);
-        for (id bundle in [read[@"data"] allKeys]) if (axs_cachekeeper_bundle_id(bundle)) [bundles addObject:bundle];
-    }
+    NSMutableSet *bundles=AxsCacheKeeperDiagnosticConfiguredBundles(AxsCacheKeeperDiagnosticRead(folder,@"appEnabled.plist"),AxsCacheKeeperDiagnosticRead(folder,@"directories.plist"));
     _bundles=[bundles.allObjects sortedArrayUsingSelector:@selector(compare:)];
     return self;
 }
@@ -128,14 +130,33 @@ static NSDictionary *AxsCacheKeeperDiagnosticRead(NSString *folder,NSString *nam
     NSDictionary *states=AxsCacheKeeperDiagnosticRead(self.folder,@"appEnabled.plist");
     NSDictionary *directories=AxsCacheKeeperDiagnosticRead(self.folder,@"directories.plist");
     NSDictionary *snapshots=AxsCacheKeeperDiagnosticRead(self.folder,@"snapshots.plist");
-    NSMutableArray *exported=[NSMutableArray new];
-    if (progress) progress(0,self.bundles.count);
-    for (NSString *bundle in self.bundles) {
-        NSMutableDictionary *app=[@{@"bundle":bundle} mutableCopy];
-        for (NSDictionary *installed in apps) if ([installed isKindOfClass:NSDictionary.class] && [installed[@"id"] isEqual:bundle]) {
-            app[@"installedMetadataAvailable"]=@YES;
-            for (NSString *key in @[@"name",@"version"]) if ([installed[key] isKindOfClass:NSString.class]) app[key]=installed[key];break;
+    NSMutableSet *bundleSet=AxsCacheKeeperDiagnosticConfiguredBundles(states,directories);
+    NSMutableDictionary *installedMetadata=[NSMutableDictionary new];
+    BOOL installedSnapshotAvailable=[apps isKindOfClass:NSArray.class];
+    if (installedSnapshotAvailable) for (id installed in [apps copy]) {
+        if (![installed isKindOfClass:NSDictionary.class] || !axs_cachekeeper_bundle_id(installed[@"id"])) {
+            installedSnapshotAvailable=NO;continue;
         }
+        NSString *bundle=[installed[@"id"] copy];
+        [bundleSet addObject:bundle];
+        if (installedMetadata[bundle]) continue;
+        NSMutableDictionary *metadata=[NSMutableDictionary new];
+        for (NSString *key in @[@"name",@"version",@"build"])
+            if ([installed[key] isKindOfClass:NSString.class]) metadata[key]=[installed[key] copy];
+        if ([@[@"verified",@"versionUnknown",@"unavailable"] containsObject:installed[@"installationState"] ?: NSNull.null])
+            metadata[@"installationState"]=installed[@"installationState"];
+        installedMetadata[bundle]=metadata;
+    }
+    // 本轮集合在首次进度回调前固定；之后的配置变更由下一轮读取。
+    NSArray *bundles=[bundleSet.allObjects sortedArrayUsingSelector:@selector(compare:)];
+    NSMutableArray *exported=[NSMutableArray new];
+    if (progress) progress(0,bundles.count);
+    for (NSString *bundle in bundles) {
+        NSMutableDictionary *app=[@{@"bundle":bundle} mutableCopy];
+        NSDictionary *installed=installedMetadata[bundle];
+        app[@"installedMetadataAvailable"]=@(installed!=nil);
+        app[@"installedMetadataState"]=installed ? @"available" : (installedSnapshotAvailable ? @"notInSnapshot" : @"unavailable");
+        if (installed) [app addEntriesFromDictionary:installed];
         app[@"configurationState"]=states[@"state"];app[@"selectionState"]=directories[@"state"];
         id state=states[@"data"][bundle];
         app[@"configurationPresent"]=@(state!=nil);
@@ -154,7 +175,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticRead(NSString *folder,NSString *nam
         for (NSArray *source in @[@[@"cleanup",@"auto"],@[@"inspection",@"inspection"],@[@"network",@"network"],@[@"probe",@"probe"]])
             app[source[0]]=[redactor axs_cachekeeper_record:AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.%@.plist",bundle,source[1]])];
         [exported addObject:app];
-        if (progress) progress(exported.count,self.bundles.count);
+        if (progress) progress(exported.count,bundles.count);
     }
     NSMutableDictionary *env=[NSMutableDictionary new];
     for (NSString *key in @[@"os",@"architecture",@"pluginVersion"]) if ([environment[key] isKindOfClass:NSString.class]) env[key]=environment[key];
@@ -167,12 +188,12 @@ static NSDictionary *AxsCacheKeeperDiagnosticRead(NSString *folder,NSString *nam
     }
     NSTimeInterval finished=NSDate.date.timeIntervalSince1970;
     // 汇总结束不代表新扫描完成；输入记录各自的原始时间戳保持不变。
-    NSDictionary *collection=@{@"mode":@"savedRecords",@"phase":@"complete",@"total":@(self.bundles.count),
+    NSDictionary *collection=@{@"mode":@"savedRecords",@"phase":@"complete",@"total":@(bundles.count),
         @"completed":@(exported.count),@"started":@(started.timeIntervalSince1970),@"finished":@(finished),@"rescanned":@NO};
     return @{@"schemaVersion":@2,@"generatedAt":@(finished),@"environment":env,@"apps":exported,
-        @"sourceStates":@{@"configuration":states[@"state"],@"selection":directories[@"state"],@"snapshots":snapshots[@"state"]},
+        @"sourceStates":@{@"configuration":states[@"state"],@"selection":directories[@"state"],@"snapshots":snapshots[@"state"],@"installedApplications":installedSnapshotAvailable ? @"available" : @"unavailable"},
         @"batch":[redactor axs_cachekeeper_record:batch],
         @"collection":collection,
-        @"notes":@[@"只汇总插件已保存记录，不重新扫描 APP；历史、缺失与损坏状态保留。各记录时间不同，不是原子快照。",@"汇总完成不等于清理完成或深度检测完成；覆盖、失败、取消、截断与原始时间分别判断。",@"字节是逻辑记录值；硬链接孪生大小不等于实际释放空间。",@"未知路径组件和账号已匿名化；自由文本只导出原因类别，不含文件内容或原始日志。"]};
+        @"notes":@[@"按传入安装快照与当前配置的并集汇总已有记录；缺配置 APP 保持禁用。notInSnapshot 只表示传入快照缺条目，不确认卸载；安装来源缺失或含坏身份条目时标记 unavailable。",@"只汇总插件已保存记录，不重新扫描 APP；历史、缺失与损坏状态保留。各记录时间不同，不是原子快照。",@"汇总完成不等于清理完成或深度检测完成；覆盖、失败、取消、截断与原始时间分别判断。",@"字节是逻辑记录值；硬链接孪生大小不等于实际释放空间。",@"未知路径组件和账号已匿名化；自由文本只导出原因类别，不含文件内容或原始日志。"]};
 }
 @end

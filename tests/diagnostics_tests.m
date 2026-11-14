@@ -7,9 +7,117 @@ static void dxcheck(BOOL condition, NSString *message) {
 static void dxwrite(NSString *folder,NSString *file,NSDictionary *value) {
     dxcheck([value writeToFile:[folder stringByAppendingPathComponent:file] atomically:YES],@"写入诊断夹具");
 }
+static NSDictionary *dxapp(NSDictionary *report,NSString *bundle) {
+    for (NSDictionary *app in report[@"apps"]) if ([app[@"bundle"] isEqual:bundle]) return app;
+    return nil;
+}
+static NSDictionary *dxfiles(NSString *folder) {
+    NSMutableDictionary *files=[NSMutableDictionary new];
+    for (NSString *path in [NSFileManager.defaultManager subpathsAtPath:folder]) {
+        NSString *full=[folder stringByAppendingPathComponent:path];
+        NSDictionary *attributes=[NSFileManager.defaultManager attributesOfItemAtPath:full error:nil];
+        if ([attributes[NSFileType] isEqual:NSFileTypeRegular])
+            files[path]=@[[NSData dataWithContentsOfFile:full],attributes[NSFileModificationDate]];
+    }
+    return files;
+}
+static void dxinventory(Class cls,NSString *fixture) {
+    NSString *folder=[fixture stringByAppendingPathComponent:@"diagnostics-install-union"];
+    dxcheck([NSFileManager.defaultManager createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:nil],@"创建安装集合夹具");
+    NSDictionary *states=@{@"test.inventory.configured":@YES,@"test.inventory.overlap":@NO,@"../invalid":@YES};
+    dxwrite(folder,@"appEnabled.plist",states);
+    dxwrite(folder,@"directories.plist",@{@"test.inventory.paths":@[@"Library/Caches"]});
+    NSArray *apps=@[@{@"id":@"test.inventory.overlap",@"name":@"已配置"},
+        @{@"id":@"test.inventory.new",@"name":@"新安装",@"version":@"2.0",@"build":@"200"},
+        @{@"id":@"test.inventory.new",@"name":@"重复安装条目"},
+        @{@"id":@"test.inventory.named",@"name":@42,@"version":@[],@"build":@{}}];
+    AxsCacheKeeperDiagnostics *session=[[cls alloc] initWithFolder:folder];
+    NSDictionary *before=dxfiles(folder);
+    NSSet *beforePaths=[NSSet setWithArray:[NSFileManager.defaultManager subpathsAtPath:folder]];
+    // 旧实现只遍历 init 的配置键：这里的新安装 APP 会缺席，形成针对真实报告的红灯。
+    for (NSUInteger round=0;round<2;round++) {
+        __block NSUInteger callbacks=0;
+        NSDictionary *report=[session reportWithApps:apps environment:@{} progress:^(NSUInteger completed,NSUInteger total) {
+            dxcheck(total==5 && completed==callbacks,@"安装配置并集的进度每轮固定为 0 至 5");callbacks++;
+        }];
+        dxcheck([[report[@"apps"] valueForKey:@"bundle"] isEqual:@[@"test.inventory.configured",@"test.inventory.named",@"test.inventory.new",@"test.inventory.overlap",@"test.inventory.paths"]],@"新安装未配置 APP 出现在去重排序的报告中，安装与配置重叠只出现一次");
+        dxcheck(callbacks==6 && [report[@"collection"][@"completed"] isEqual:@5],@"重复采集不累积进度与任务");
+        NSDictionary *fresh=dxapp(report,@"test.inventory.new");
+        dxcheck([fresh[@"configuration"][@"enabled"] isEqual:@NO] && [fresh[@"configurationPresent"] isEqual:@NO] &&
+            [fresh[@"configurationState"] isEqual:@"missing"] && [fresh[@"selectionState"] isEqual:@"missing"],@"新安装缺配置必须禁用并保留逐 APP 缺失状态");
+        dxcheck([fresh[@"installedMetadataAvailable"] isEqual:@YES] && [fresh[@"installedMetadataState"] isEqual:@"available"] &&
+            [fresh[@"name"] isEqual:@"新安装"] && [fresh[@"version"] isEqual:@"2.0"] && [fresh[@"build"] isEqual:@"200"],@"保留有效安装身份以及实际提供的名称版本构建");
+        NSDictionary *unknown=dxapp(report,@"test.inventory.named");
+        dxcheck(!unknown[@"name"] && !unknown[@"version"] && !unknown[@"build"],@"未知或坏类型安装字段不伪造值");
+        NSDictionary *retained=dxapp(report,@"test.inventory.configured");
+        dxcheck([retained[@"configuration"][@"enabled"] isEqual:@YES] && [retained[@"installedMetadataAvailable"] isEqual:@NO] &&
+            [retained[@"installedMetadataState"] isEqual:@"notInSnapshot"],@"不在传入快照的已有配置仍保留，只描述快照缺条目");
+        dxcheck([report[@"sourceStates"][@"installedApplications"] isEqual:@"available"] &&
+            [report[@"collection"][@"rescanned"] isEqual:@NO] && !report[@"collection"][@"tasks"],@"有效安装快照仅参与内存汇总，不能触发扫描队列");
+        dxcheck([NSJSONSerialization dataWithJSONObject:report options:0 error:nil]!=nil,@"安装并集报告可序列化");
+    }
+    dxcheck([before isEqual:dxfiles(folder)] && [beforePaths isEqual:[NSSet setWithArray:[NSFileManager.defaultManager subpathsAtPath:folder]]],@"安装未配置 APP 汇总零配置或请求改写、零新文件");
+    NSMutableDictionary *changed=[states mutableCopy];changed[@"test.inventory.later"]=@NO;
+    dxwrite(folder,@"appEnabled.plist",changed);
+    dxwrite(folder,@"directories.plist",@{@"test.inventory.paths":@[@"Library/Caches"],@"test.inventory.laterpaths":@[@"tmp"]});
+    NSDictionary *refreshed=[session reportWithApps:apps environment:@{}];
+    dxcheck([refreshed[@"collection"][@"total"] isEqual:@7] && dxapp(refreshed,@"test.inventory.later") && dxapp(refreshed,@"test.inventory.laterpaths"),@"同会话重采使用当前两种配置键，不沿用 init 快照");
+
+    NSDictionary *unreadableInstallation=[session reportWithApps:@[@{@"id":@"test.inventory.new",@"installationState":@"unavailable",@"installationError":@"private-user/path"},
+        @{@"id":@"test.inventory.named",@"installationState":@"private-state"}] environment:@{}];
+    NSDictionary *unreadableApp=dxapp(unreadableInstallation,@"test.inventory.new");
+    dxcheck([unreadableApp[@"installedMetadataState"] isEqual:@"available"] && [unreadableApp[@"installationState"] isEqual:@"unavailable"] && !unreadableApp[@"installationError"],
+        @"系统列表有APP与安装文件核验失败分开，不泄露原始错误");
+    dxcheck(!dxapp(unreadableInstallation,@"test.inventory.named")[@"installationState"],@"任意安装状态文本不进入导出");
+
+    for (id unavailable in @[NSNull.null,@42,@{},@"bad snapshot"]) {
+        NSDictionary *report=[session reportWithApps:unavailable==NSNull.null ? nil : unavailable environment:@{}];
+        NSDictionary *configured=dxapp(report,@"test.inventory.configured");
+        dxcheck([report[@"apps"] count]==5 && [report[@"sourceStates"][@"installedApplications"] isEqual:@"unavailable"] &&
+            [configured[@"installedMetadataState"] isEqual:@"unavailable"] && [configured[@"installedMetadataAvailable"] isEqual:@NO],@"nil 和坏形状快照无法判定安装缺席，配置仍保留");
+    }
+    NSArray *invalidApps=@[@42,@"not a dictionary",NSNull.null,@{},@{@"id":@42},@{@"id":@""},@{@"id":@"../escape"},
+        @{@"id":@"test.inventory.valid",@"name":@"有效条目"}];
+    NSDictionary *partial=[session reportWithApps:(id)invalidApps environment:@{}];
+    dxcheck([[partial[@"apps"] valueForKey:@"bundle"] isEqual:@[@"test.inventory.configured",@"test.inventory.later",@"test.inventory.laterpaths",@"test.inventory.overlap",@"test.inventory.paths",@"test.inventory.valid"]],@"坏安装字典或 ID 被拒绝，有效条目仍纳入");
+    dxcheck([dxapp(partial,@"test.inventory.valid")[@"installedMetadataState"] isEqual:@"available"] &&
+        [dxapp(partial,@"test.inventory.configured")[@"installedMetadataState"] isEqual:@"unavailable"] &&
+        [partial[@"sourceStates"][@"installedApplications"] isEqual:@"unavailable"],@"部分坏快照不能用于缺席结论，有效安装条目仍有元数据");
+    NSDictionary *absent=[session reportWithApps:@[] environment:@{}];
+    dxcheck([dxapp(absent,@"test.inventory.configured")[@"installedMetadataState"] isEqual:@"notInSnapshot"] &&
+        [absent[@"sourceStates"][@"installedApplications"] isEqual:@"available"],@"有效空快照与未知安装来源分开");
+
+    dxcheck([[@"invalid plist" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:[folder stringByAppendingPathComponent:@"appEnabled.plist"] atomically:YES],@"写入坏配置来源");
+    NSDictionary *damaged=[session reportWithApps:@[@{@"id":@"test.inventory.new"}] environment:@{}];
+    dxcheck([damaged[@"sourceStates"][@"configuration"] isEqual:@"invalid"] &&
+        [dxapp(damaged,@"test.inventory.new")[@"configurationState"] isEqual:@"invalid"] &&
+        [dxapp(damaged,@"test.inventory.new")[@"configuration"][@"enabled"] isEqual:@NO],@"坏配置来源区别于未配置，新安装仍禁用");
+    dxcheck([damaged[@"apps"] count]==3 && !dxapp(damaged,@"test.inventory.configured"),@"当前配置不可读时不冒充旧 init 配置仍有效");
+    NSString *missing=[fixture stringByAppendingPathComponent:@"diagnostics-installed-without-files"];
+    AxsCacheKeeperDiagnostics *empty=[[cls alloc] initWithFolder:missing];
+    NSDictionary *emptyReport=[empty reportWithApps:@[@{@"id":@"test.inventory.new"}] environment:@{}];
+    dxcheck([emptyReport[@"apps"] count]==1 && [dxapp(emptyReport,@"test.inventory.new")[@"configurationState"] isEqual:@"missing"] &&
+        [dxapp(emptyReport,@"test.inventory.new")[@"configuration"][@"enabled"] isEqual:@NO] &&
+        ![NSFileManager.defaultManager fileExistsAtPath:missing],@"全无配置文件仍汇总已安装 APP，但不创建配置目录或开关");
+    NSString *fixedFolder=[fixture stringByAppendingPathComponent:@"diagnostics-fixed-install-union"];
+    dxcheck([NSFileManager.defaultManager createDirectoryAtPath:fixedFolder withIntermediateDirectories:YES attributes:nil error:nil],@"创建集合冻结夹具");
+    dxwrite(fixedFolder,@"appEnabled.plist",@{@"test.fixed.original":@NO});
+    AxsCacheKeeperDiagnostics *fixed=[[cls alloc] initWithFolder:fixedFolder];
+    __block NSUInteger fixedCallbacks=0;
+    NSArray *fixedApps=@[@{@"id":@"test.fixed.installed"}];
+    NSDictionary *first=[fixed reportWithApps:fixedApps environment:@{} progress:^(NSUInteger completed,NSUInteger total) {
+        dxcheck(total==2 && completed==fixedCallbacks,@"回调期间新增配置不能扩张本轮集合与总数");
+        if (!completed) dxwrite(fixedFolder,@"appEnabled.plist",@{@"test.fixed.original":@NO,@"test.fixed.added":@YES});
+        fixedCallbacks++;
+    }];
+    dxcheck(fixedCallbacks==3 && [first[@"apps"] count]==2 && !dxapp(first,@"test.fixed.added"),@"本轮完整使用初始配置与安装集合");
+    NSDictionary *next=[fixed reportWithApps:fixedApps environment:@{}];
+    dxcheck([next[@"apps"] count]==3 && [dxapp(next,@"test.fixed.added")[@"configuration"][@"enabled"] isEqual:@YES],@"回调期间保存的配置只在下一轮汇总出现");
+}
 void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     Class cls=NSClassFromString(@"AxsCacheKeeperDiagnostics");
     dxcheck(cls!=Nil,@"应提供可调用的诊断采集实现");
+    dxinventory(cls,fixture);
     NSString *folder=[fixture stringByAppendingPathComponent:@"diagnostics"];
     dxcheck([NSFileManager.defaultManager createDirectoryAtPath:[folder stringByAppendingPathComponent:@"Status"] withIntermediateDirectories:YES attributes:nil error:nil],@"创建夹具");
     NSDictionary *states=@{@"test.active":@{@"enabled":@YES,@"mode":@"auto"},@"test.disabled":@{@"enabled":@NO},@"../invalid":@YES};
@@ -21,12 +129,12 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     dxwrite(folder,@"Status/test.active.inspection.plist",@{@"reports":@{@"Library/Caches":@{@"path":@"Library/Caches",@"complete":@YES,@"coverageComplete":@NO,@"twinDisplayTruncated":@YES,@"bytes":@100,@"error":@"private-user https://secret.example/token",@"largest":@[@{@"path":path,@"bytes":@83,@"type":@"未知二进制"}],@"linkTwins":@[@{@"source":path,@"twin":[@"容器/Library/Caches/" stringByAppendingString:path],@"bytes":@83}]}}});
     AxsCacheKeeperDiagnostics *session=[[cls alloc] initWithFolder:folder];
     dxcheck([session.bundles isEqual:@[@"test.active",@"test.disabled",@"test.paths"]],@"配置并集包含关闭项，拒绝越界键");
-    NSDictionary *report=[session reportWithApps:@[@{@"id":@"test.active",@"name":@"测试",@"version":@"1.0"},@{@"id":@"test.unconfigured",@"name":@"不应导出"}] environment:@{@"os":@"16.2",@"deviceName":@"private-device"}];
+    NSDictionary *report=[session reportWithApps:@[@{@"id":@"test.active",@"name":@"测试",@"version":@"1.0"},@{@"id":@"test.unconfigured",@"name":@"新装未配置"}] environment:@{@"os":@"16.2",@"deviceName":@"private-device"}];
     NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:nil];
     dxcheck(json!=nil,@"报告可序列化 JSON");
     NSString *text=[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
-    for (NSString *private in @[secret,@"123456789",@"private-UUID",@"private-user",@"secret.example",@"private-device",@"test.unconfigured"])
-        dxcheck(![text containsString:private],@"输出不得包含私人路径、文本或未配置 APP");
+    for (NSString *private in @[secret,@"123456789",@"private-UUID",@"private-user",@"secret.example",@"private-device"])
+        dxcheck(![text containsString:private],@"输出不得包含私人路径、文本或设备标识");
     NSDictionary *app=report[@"apps"][0];
     NSDictionary *inspection=app[@"inspection"][@"data"][@"reports"][0];
     dxcheck([inspection[@"bytes"] intValue]==100 && ![inspection[@"coverageComplete"] boolValue] && [inspection[@"twinDisplayTruncated"] boolValue],@"保留字节和覆盖/截断状态");

@@ -4,49 +4,13 @@
 #include <roothide.h>
 #import "../AxsCacheKeeperPolicy.h"
 #import "../AxsCacheKeeperAppList.h"
+#import "../AxsCacheKeeperInstallation.h"
 #import "DiagnosticsPage.h"
 #import "SearchInput.h"
 
 static id axs_cachekeeper_app_property(id object, NSString *name) {
     SEL selector=NSSelectorFromString(name);
     return [object respondsToSelector:selector] ? ((id(*)(id,SEL))objc_msgSend)(object,selector) : nil;
-}
-
-// Called only by the list reader queue. No UIKit state or LS proxies cross into the UI snapshot.
-static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSError **error) {
-    id manager=axs_cachekeeper_app_property(NSClassFromString(@"LSApplicationWorkspace"),@"defaultWorkspace");
-    NSArray *installed=axs_cachekeeper_app_property(manager,@"allInstalledApplications");
-    if (![installed isKindOfClass:NSArray.class]) {
-        if (error) *error=[NSError errorWithDomain:@"dev.local.cachekeeper.app-list" code:1 userInfo:nil];
-        return nil;
-    }
-    NSMutableDictionary *apps=[NSMutableDictionary new];
-    for (id proxy in installed) {
-        NSString *type=axs_cachekeeper_app_property(proxy,@"applicationType");
-        NSURL *url=axs_cachekeeper_app_property(proxy,@"bundleURL");
-        NSString *bundle=axs_cachekeeper_app_property(proxy,@"applicationIdentifier");
-        if (!axs_cachekeeper_bundle_id(bundle)) continue;
-        BOOL container=[url isKindOfClass:NSURL.class] && axs_cachekeeper_container_bundle_path(url.path);
-        if ([type isEqual:@"System"] && (!container || [bundle hasPrefix:@"com.apple."])) continue;
-        NSString *name=axs_cachekeeper_app_property(proxy,@"localizedName");
-        NSString *effectiveName=([name isKindOfClass:NSString.class] && name.length) ? name : bundle;
-        NSString *version=axs_cachekeeper_app_property(proxy,@"shortVersionString");
-        version=([version isKindOfClass:NSString.class] && version.length) ? version : @"";
-        NSString *source=[type isEqual:@"System"] ? @"troll" : @"user";
-        NSDictionary *cached=cache[bundle];
-        if (cached && [cached[@"name"] isEqual:effectiveName] && [(cached[@"version"] ?: @"") isEqual:version] && [cached[@"source"] isEqual:source]) {
-            apps[bundle]=cached;continue;
-        }
-        NSDictionary *app=axs_cachekeeper_application_entry(bundle,name,type,url);
-        if (!app) continue;
-        NSString *pinyin=[effectiveName stringByApplyingTransform:NSStringTransformMandarinToLatin reverse:NO] ?: effectiveName;
-        pinyin=[pinyin stringByApplyingTransform:NSStringTransformStripCombiningMarks reverse:NO] ?: pinyin;
-        NSMutableDictionary *entry=[app mutableCopy];entry[@"source"]=source;entry[@"pinyin"]=pinyin;
-        if (version.length) entry[@"version"]=version;
-        apps[bundle]=[entry copy];
-    }
-    [cache setDictionary:apps];
-    return [apps.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b) { return [a[@"id"] compare:b[@"id"]]; }];
 }
 
 @interface UIImage (CacheKeeperIcon)
@@ -165,7 +129,7 @@ static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSErr
     NSMutableDictionary *metadataCache=[NSMutableDictionary new];
     __weak typeof(self) weak=self;
     self.axs_cachekeeper_appList=[[AxsCacheKeeperAppList alloc] initWithFolder:jbroot(@"/var/mobile/Library/CacheKeeper") applicationsProvider:^NSArray *(NSError **error) {
-        return axs_cachekeeper_installed_apps(metadataCache,error);
+        return axs_cachekeeper_installed_applications(metadataCache,error);
     } completion:^(NSDictionary *snapshot) {
         typeof(self) strong=weak;
         if (!strong || !strong.axs_cachekeeper_visible || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
@@ -177,7 +141,7 @@ static NSArray *axs_cachekeeper_installed_apps(NSMutableDictionary *cache, NSErr
 }
 - (void)axs_cachekeeper_diagnostics {
     [self.axs_cachekeeper_searchInput axs_cachekeeper_dismiss_keyboard];
-    [self.navigationController pushViewController:[[AxsCacheKeeperDiagnosticsPage alloc] initWithApps:self.apps] animated:YES];
+    [self.navigationController pushViewController:[[AxsCacheKeeperDiagnosticsPage alloc] init] animated:YES];
 }
 - (void)tabChanged:(UISegmentedControl *)sender {
     self.selectedTab = sender.selectedSegmentIndex;

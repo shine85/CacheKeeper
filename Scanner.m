@@ -16,6 +16,7 @@
 #import "AxsCacheKeeperReceipts.h"
 #import "AxsCacheKeeperCleanupSchedule.h"
 #import "AxsCacheKeeperInspection.h"
+#import "AxsCacheKeeperInstallation.h"
 static id SRead(id target,NSString *name) { SEL s=NSSelectorFromString(name);return [target respondsToSelector:s]?((id(*)(id,SEL))objc_msgSend)(target,s):nil; }
 static id AxsCacheKeeperAppProxy(NSString *bundle) {
     Class proxy=NSClassFromString(@"LSApplicationProxy"); SEL selector=NSSelectorFromString(@"applicationProxyForIdentifier:");
@@ -253,7 +254,7 @@ void axs_cachekeeper_request_cleanup(NSString *bundle) {
 void CKApplyDirectorySwitches(void) {
     static BOOL busy;
     static dispatch_queue_t queue;
-    static NSMutableDictionary *jobs, *finished, *discovery, *purgeDiscovery, *unresolvedRanges, *jobReports;
+    static NSMutableDictionary *jobs, *finished, *discovery, *purgeDiscovery, *unresolvedRanges, *jobReports, *installations;
     // 实例观测独立于清理忙碌状态：每轮入口先记录各已启用 APP 当前运行实例，
     // 使长任务存续期间发生的新实例启停也能被门控采样的绑定比对发现；
     // 同时维护挂起稳定跟踪（同一实例被系统挂起的起始时刻），供放行判定使用。
@@ -284,6 +285,7 @@ void CKApplyDirectorySwitches(void) {
         // 未确认内容不阻塞其他根；登记的范围在规则/版本/排除/内容均未变且非手动重查时，
         // 跳过深度复查（不建 sweep），沿用登记的残留计数；任一触发条件变化即重新分析。
         unresolvedRanges = [NSMutableDictionary new]; jobReports = [NSMutableDictionary new];
+        installations = [NSMutableDictionary new];
         axs_cachekeeper_configure_receipts();
     }
     NSString *folder = axs_cachekeeper_folder();
@@ -341,9 +343,10 @@ void CKApplyDirectorySwitches(void) {
                 reason=@"APP 进程已被系统挂起（未在执行），稳定确认中；持续挂起满 60 秒后自动清理";
             }
         }
-        id rawVersion=SRead(AxsCacheKeeperAppProxy(bundle),@"shortVersionString");
-        NSString *version=[rawVersion isKindOfClass:NSString.class] ? rawVersion : @"";
-        targets[bundle] = @{@"version":version, @"processExited":@(exec==AxsCacheKeeperExecAbsent || exec==AxsCacheKeeperExecTerminated), @"roots":roots, @"paths":paths, @"home":home.path ?: @"", @"mode":mode,
+        id app=AxsCacheKeeperAppProxy(bundle);
+        id rawVersion=SRead(app,@"shortVersionString"),bundleURL=SRead(app,@"bundleURL");
+        // Only system proxy values cross the queue; installation files are sampled in the worker.
+        targets[bundle] = @{@"systemVersion":rawVersion ?: NSNull.null, @"bundleURL":bundleURL ?: NSNull.null, @"processExited":@(exec==AxsCacheKeeperExecAbsent || exec==AxsCacheKeeperExecTerminated), @"roots":roots, @"paths":paths, @"home":home.path ?: @"", @"mode":mode,
             @"manual":@(manual), @"process":@(process), @"processReason":reason ?: @"",
             @"instance":instance, @"revision":@([AxsCacheKeeperProcessObservation revisionForBundle:bundle]), @"confidence":@(confidence)};
     }
@@ -362,11 +365,37 @@ void CKApplyDirectorySwitches(void) {
         for (NSString *bundle in discovery.allKeys) if (!targets[bundle]) [discovery removeObjectForKey:bundle];
         for (NSString *bundle in purgeDiscovery.allKeys) if (!targets[bundle]) [purgeDiscovery removeObjectForKey:bundle];
         for (NSString *bundle in unresolvedRanges.allKeys) if (!targets[bundle]) [unresolvedRanges removeObjectForKey:bundle];
+        for (NSString *bundle in installations.allKeys) if (!targets[bundle]) [installations removeObjectForKey:bundle];
+        void (^invalidateInstallation)(NSString *,NSString *)=^(NSString *bundle,NSString *message) {
+            [AxsCacheKeeperCleanupSchedule retireJob:jobs[bundle] bundle:bundle message:message];
+            [jobs removeObjectForKey:bundle];[jobReports removeObjectForKey:bundle];[finished removeObjectForKey:bundle];
+            [unresolvedRanges removeObjectForKey:bundle];[discovery removeObjectForKey:bundle];[purgeDiscovery removeObjectForKey:bundle];
+            [installations removeObjectForKey:bundle];
+        };
         for (NSString *bundle in targets) {
-            NSDictionary *target = targets[bundle];
+            NSMutableDictionary *target = [targets[bundle] mutableCopy];
             NSArray *roots = target[@"roots"], *paths = target[@"paths"];
             BOOL manual = [target[@"manual"] boolValue];
             NSString *mode = target[@"mode"];
+            NSError *installationError=nil;
+            id systemVersion=target[@"systemVersion"]==NSNull.null ? nil : target[@"systemVersion"];
+            NSDictionary *previousInstallation=installations[bundle];
+            NSDictionary *installation=previousInstallation;
+            BOOL installationValid=installation && axs_cachekeeper_validate_installation_snapshot(installation,target[@"bundleURL"],systemVersion,nil);
+            if (installation && !installationValid)
+                invalidateInstallation(bundle,@"安装身份复核失败，已停止旧作业并撤销旧范围缓存");
+            if (!installationValid)
+                installation=axs_cachekeeper_installation_snapshot(target[@"bundleURL"],bundle,systemVersion,&installationError);
+            if (!installation) {
+                invalidateInstallation(bundle,@"安装身份不可用，已停止旧作业并撤销旧范围缓存");
+                [AxsCacheKeeperReceipts updateStatusForBundle:bundle phase:@"error" message:installationError.localizedDescription ?: @"无法确认 APP 安装身份" failed:1 effectivePaths:paths discoveredPaths:nil directories:nil];
+                continue;
+            }
+            NSString *installationID=installation[@"fingerprint"];
+            if (![previousInstallation[@"fingerprint"] isEqual:installationID])
+                invalidateInstallation(bundle,@"APP 安装包已变化，已停止旧作业并重新核验范围");
+            installations[bundle]=installation;
+            target[@"version"]=installation[@"version"] ?: @"";
             NSArray *restoreExclusions=[AxsCacheKeeperCleanupSchedule restoreExclusions:restored home:target[@"home"]];
             if (![target[@"home"] length]) {
                 [AxsCacheKeeperCleanupSchedule retireJob:jobs[bundle] bundle:bundle message:@"APP 数据容器不可用，已停止本轮清理"];
@@ -452,7 +481,7 @@ void CKApplyDirectorySwitches(void) {
             // 容器路径已在签名内（roots 为绝对路径，含 home 前缀）：重装换容器即签名变化，静默期失效。
             // 任务 8 起签名不再含 fullClear（该键已废止，标准缓存统一按平台规则处理）。
             NSString *exclusionsString = [axs_cachekeeper_exclusions(states[bundle]) componentsJoinedByString:@"\n"] ?: @"";
-            NSString *signature = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@", [roots componentsJoinedByString:@"\n"], mode, target[@"instance"], [purgePaths componentsJoinedByString:@"\n"], exclusionsString, [AxsCacheKeeperCleanupRules rulesVersion], target[@"version"], [axs_cachekeeper_log_paths(states[bundle]) componentsJoinedByString:@"\n"], [restoreExclusions componentsJoinedByString:@"\n"], target[@"revision"], target[@"processExited"]];
+            NSString *signature = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@", [roots componentsJoinedByString:@"\n"], mode, target[@"instance"], [purgePaths componentsJoinedByString:@"\n"], exclusionsString, [AxsCacheKeeperCleanupRules rulesVersion], target[@"version"], [axs_cachekeeper_log_paths(states[bundle]) componentsJoinedByString:@"\n"], [restoreExclusions componentsJoinedByString:@"\n"], target[@"revision"], target[@"processExited"], installationID];
             NSDictionary *done = finished[bundle];
             // 静默期（方案任务 3，P1-3＋扩展）：1800 秒只给真正干净的完成轮——结束原因 Completed
             //（触顶/未确认轮不算，哪怕 0 删除）、无删除、无失败、无变化、无近期待处理文件、
@@ -515,8 +544,11 @@ void CKApplyDirectorySwitches(void) {
             // （256 项，远不足 2 秒），采样量 ≤36 次/周期，远低于逐文件采样的 9216 次
             // （#42 实证：逐文件采样把单周期拖到约 10 秒；审计 #42 后续，用户 12:19 定）。
             // 作业每周期每根调用一次本块（预检与删除都一样）；根内不再重采。
+            __block NSError *installationGateError=nil;
             BOOL (^sampleGate)(void) = ^BOOL {
                 __block BOOL allowed = NO;
+                __block NSURL *currentBundleURL=nil;
+                __block NSString *currentSystemVersion=nil;
                 dispatch_sync(dispatch_get_main_queue(), ^{
                     NSDictionary *currentSelection=nil,*currentStates=nil;
                     BOOL readable=axs_cachekeeper_cleanup_inputs(selectionFile,stateFile,bundle,&currentSelection,&currentStates);
@@ -527,23 +559,30 @@ void CKApplyDirectorySwitches(void) {
                     // 未知目录候选集须同步复核：中途被定级为日志或手动排除的目录，本轮立即停手，下一轮改走日志模式。
                     NSArray *currentPurgePaths = axs_cachekeeper_purge_paths(purgeCandidates, currentStates[bundle]);
                     BOOL purgeOK = [currentPurgePaths isEqual:purgePaths];
-                    id currentVersion=SRead(AxsCacheKeeperAppProxy(bundle),@"shortVersionString");
-                    NSString *currentVersionString=[currentVersion isKindOfClass:NSString.class] ? currentVersion : @"";
-                    BOOL versionOK=[currentVersionString isEqual:target[@"version"]];
+                    id currentApp=AxsCacheKeeperAppProxy(bundle);
+                    currentBundleURL=SRead(currentApp,@"bundleURL");
+                    currentSystemVersion=SRead(currentApp,@"shortVersionString");
                     // 实例绑定：任务存续期间观测到不同实例运行过，说明目标缓存可能已被新实例接管，旧任务过期。
                     NSString *seen = [AxsCacheKeeperProcessObservation lastExecutingIdentityForBundle:bundle];
                     BOOL instanceOK = ![jobInstance length] || ![seen length] || [seen isEqual:jobInstance];
                     // 仅清理未知目录的任务没有缓存根，currentPaths 为空是正常态：任一根存在即放行。
                     // 任务 9：三种模式共用引擎，门控不再按模式拦截清理（模式只决定网络限制）。
                     allowed = readable && selected && (currentPaths.count || currentPurgePaths.count) && [Container(bundle).path isEqual:target[@"home"]] &&
-                        axs_cachekeeper_gate_open(bundle, jobInstance, [target[@"processExited"] boolValue]) && instanceOK && purgeOK && versionOK &&
+                        axs_cachekeeper_gate_open(bundle, jobInstance, [target[@"processExited"] boolValue]) && instanceOK && purgeOK &&
                         [AxsCacheKeeperProcessObservation revisionForBundle:bundle]==[target[@"revision"] unsignedIntegerValue];
                 });
-                return allowed;
+                // Metadata I/O stays off the main thread. Per-root/per-batch sampling is not an atomic install lock.
+                BOOL sameInstallation=axs_cachekeeper_validate_installation_snapshot(installation,currentBundleURL,currentSystemVersion,&installationGateError);
+                return allowed && sameInstallation;
             };
             // 单周期推进由作业驱动：Checking 阶段只预检全部根；全部预检完成才转入删除，
             // 120 秒期限从首次真实删除推进起算；2000 项全作业共享硬上限（方案任务 3）。
             [job advanceCycleWithPerRootLimit:256 gate:sampleGate];
+            if (installationGateError) {
+                invalidateInstallation(bundle,installationGateError.localizedDescription);
+                [AxsCacheKeeperReceipts updateStatusForBundle:bundle phase:@"waiting" message:installationGateError.localizedDescription failed:1 effectivePaths:paths discoveredPaths:nil directories:nil];
+                continue;
+            }
             NSUInteger removed=job.removed, protectedCount=job.protectedCount, inspected=job.inspected;
             unsigned long long bytes=job.bytes;
             BOOL checking=job.phase==AxsCacheKeeperCleanupPhaseChecking;

@@ -30,9 +30,12 @@ try:
                     str(root / "tests" / "diagnostics_tests.m"),
                     str(root / "tests" / "app_list_tests.m"),
                     str(root / "tests" / "app_retention_tests.m"),
+                    str(root / "tests" / "installation_tests.m"),
+                    str(root / "tests" / "network_cache_tests.m"),
                     str(root / "tests" / "presentation_tests.m"),
                     str(root / "AxsCacheKeeperDiagnostics.m"),
                     str(root / "AxsCacheKeeperAppList.m"),
+                    str(root / "AxsCacheKeeperInstallation.m"),
                     "-o", str(output / "cache-tests")], check=True, timeout=60)
     subprocess.run([str(output / "cache-tests"), str(output / "fixtures")], check=True, timeout=60)
 finally:

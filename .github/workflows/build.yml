@@ -39,6 +39,12 @@ jobs:
       - name: 验证配置执行边界红绿回归
         run: python3 tests/run_configuration_red.py
 
+      - name: 验证新增应用诊断遗漏基线
+        run: python3 tests/run_diagnostics_red.py
+
+      - name: 验证网络缓存初始化限制基线
+        run: python3 tests/run_network_initialization_red.py
+
       - name: 原生回归测试
         run: |
           set -o pipefail
