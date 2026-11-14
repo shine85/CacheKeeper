@@ -59,7 +59,6 @@ jobs:
           if-no-files-found: ignore
 
       - name: UIKit 点按与键盘回归
-        if: success() || failure()
         run: |
           brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
           python3 tests/run_ui_tests.py

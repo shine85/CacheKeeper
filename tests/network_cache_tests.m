@@ -1,5 +1,8 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#include <dlfcn.h>
+#include <execinfo.h>
+#include <string.h>
 #import "../AxsCacheKeeperNetworkCache.h"
 
 // 在生产 Hook 捕获原 IMP 前加透明观察层；每次仍调用 Foundation 的真实初始化器。
@@ -9,6 +12,38 @@ static NSMutableArray<NSDictionary *> *axs_cachekeeper_test_network_calls;
 static NSURLCache *(^axs_cachekeeper_test_after_init)(NSURLCache *);
 static BOOL axs_cachekeeper_test_observe_network;
 static BOOL axs_cachekeeper_test_network_prepared;
+static IMP axs_cachekeeper_test_real_setter;
+static void (*axs_cachekeeper_test_next_setter)(id, SEL, NSUInteger);
+static BOOL axs_cachekeeper_test_trace_limited;
+static NSUInteger axs_cachekeeper_test_traced_setters;
+static __thread NSUInteger axs_cachekeeper_test_real_init_depth;
+
+// 只诊断当前合成 limited 夹具；不输出缓存路径或应用内容，不改变真实调用。
+static void axs_cachekeeper_test_trace_address(const char *label, NSUInteger index, void *address) {
+    Dl_info info={0};
+    dladdr(address,&info);
+    const char *image=info.dli_fname ? strrchr(info.dli_fname,'/') : NULL;
+    if (image) image++; else image=info.dli_fname ? info.dli_fname : "unresolved";
+    fprintf(stderr,"NETWORK_TRACE %s[%lu] image=%s symbol=%s offset=%llu\n",label,(unsigned long)index,
+        image,info.dli_sname ? info.dli_sname : "unresolved",
+        info.dli_saddr ? (unsigned long long)((uintptr_t)address-(uintptr_t)info.dli_saddr) : 0);
+}
+static void axs_cachekeeper_test_trace_setter(id object, SEL selector, NSUInteger capacity) {
+    if (axs_cachekeeper_test_trace_limited && axs_cachekeeper_test_traced_setters++<12) {
+        fprintf(stderr,"NETWORK_TRACE setter capacity=%lu realInitDepth=%lu class=%s\n",
+            (unsigned long)capacity,(unsigned long)axs_cachekeeper_test_real_init_depth,object_getClassName(object));
+        axs_cachekeeper_test_trace_address("caller",0,__builtin_extract_return_addr(__builtin_return_address(0)));
+        void *frames[8];
+        int count=backtrace(frames,8);
+        for (int index=1;index<count;index++) axs_cachekeeper_test_trace_address("stack",(NSUInteger)index,frames[index]);
+    }
+    axs_cachekeeper_test_next_setter(object,selector,capacity);
+}
+static void axs_cachekeeper_test_install_setter_trace(void) {
+    if (axs_cachekeeper_test_next_setter) return;
+    Method setter=class_getInstanceMethod(NSURLCache.class,@selector(setDiskCapacity:));
+    axs_cachekeeper_test_next_setter=(void *)method_setImplementation(setter,(IMP)axs_cachekeeper_test_trace_setter);
+}
 
 static void axs_cachekeeper_network_require(BOOL condition, NSString *message) {
     if (!condition) { fprintf(stderr, "FAIL: network initialization: %s\n", message.UTF8String); exit(1); }
@@ -28,12 +63,24 @@ static NSURLCache *axs_cachekeeper_test_finish_init(NSURLCache *result) {
 static id axs_cachekeeper_test_init_path(id object __attribute__((ns_consumed)), SEL selector, NSUInteger memory, NSUInteger disk, NSString *path) __attribute__((ns_returns_retained));
 static id axs_cachekeeper_test_init_path(id object __attribute__((ns_consumed)), SEL selector, NSUInteger memory, NSUInteger disk, NSString *path) {
     axs_cachekeeper_test_record_init(@"path",memory,disk);
-    return axs_cachekeeper_test_finish_init(axs_cachekeeper_test_real_path(object,selector,memory,disk,path));
+    if (axs_cachekeeper_test_trace_limited) fprintf(stderr,"NETWORK_TRACE path enter memory=%lu disk=%lu\n",(unsigned long)memory,(unsigned long)disk);
+    id result=nil;
+    axs_cachekeeper_test_real_init_depth++;
+    @try { result=axs_cachekeeper_test_real_path(object,selector,memory,disk,path); }
+    @finally { axs_cachekeeper_test_real_init_depth--; }
+    if (axs_cachekeeper_test_trace_limited) fprintf(stderr,"NETWORK_TRACE path return memory=%lu disk=%lu\n",(unsigned long)[result memoryCapacity],(unsigned long)[result diskCapacity]);
+    return axs_cachekeeper_test_finish_init(result);
 }
 static id axs_cachekeeper_test_init_url(id object __attribute__((ns_consumed)), SEL selector, NSUInteger memory, NSUInteger disk, NSURL *url) __attribute__((ns_returns_retained));
 static id axs_cachekeeper_test_init_url(id object __attribute__((ns_consumed)), SEL selector, NSUInteger memory, NSUInteger disk, NSURL *url) {
     axs_cachekeeper_test_record_init(@"url",memory,disk);
-    return axs_cachekeeper_test_finish_init(axs_cachekeeper_test_real_url(object,selector,memory,disk,url));
+    if (axs_cachekeeper_test_trace_limited) fprintf(stderr,"NETWORK_TRACE url enter memory=%lu disk=%lu\n",(unsigned long)memory,(unsigned long)disk);
+    id result=nil;
+    axs_cachekeeper_test_real_init_depth++;
+    @try { result=axs_cachekeeper_test_real_url(object,selector,memory,disk,url); }
+    @finally { axs_cachekeeper_test_real_init_depth--; }
+    if (axs_cachekeeper_test_trace_limited) fprintf(stderr,"NETWORK_TRACE url return memory=%lu disk=%lu\n",(unsigned long)[result memoryCapacity],(unsigned long)[result diskCapacity]);
+    return axs_cachekeeper_test_finish_init(result);
 }
 
 void axs_cachekeeper_prepare_network_cache_tests(void) {
@@ -46,6 +93,7 @@ void axs_cachekeeper_prepare_network_cache_tests(void) {
     Method url=class_getInstanceMethod(NSURLCache.class,@selector(initWithMemoryCapacity:diskCapacity:directoryURL:));
     if (url) axs_cachekeeper_test_real_url=(void *)method_setImplementation(url,(IMP)axs_cachekeeper_test_init_url);
     IMP setter=method_getImplementation(class_getInstanceMethod(NSURLCache.class,@selector(setDiskCapacity:)));
+    axs_cachekeeper_test_real_setter=setter;
     axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(NO),@"初始关闭返回成功");
     axs_cachekeeper_network_require(method_getImplementation(path)==(IMP)axs_cachekeeper_test_init_path &&
         setter==method_getImplementation(class_getInstanceMethod(NSURLCache.class,@selector(setDiskCapacity:))),
@@ -81,12 +129,24 @@ void axs_cachekeeper_run_network_cache_tests(NSString *fixture) {
 
         axs_cachekeeper_test_observe_network=NO;
         axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(YES),@"开启限制");
+        // 在生产 Hook 外观察入口，生产直接调用原 setter 时不会伪装成一次 APP 请求。
+        axs_cachekeeper_test_install_setter_trace();
         axs_cachekeeper_test_observe_network=YES;
         [axs_cachekeeper_test_network_calls removeAllObjects];
+        axs_cachekeeper_test_traced_setters=0;
+        axs_cachekeeper_test_trace_limited=YES;
+        axs_cachekeeper_test_trace_address("path-original",0,(void *)axs_cachekeeper_test_real_path);
+        if (axs_cachekeeper_test_real_url) axs_cachekeeper_test_trace_address("url-original",0,(void *)axs_cachekeeper_test_real_url);
+        axs_cachekeeper_test_trace_address("setter-original",0,(void *)axs_cachekeeper_test_real_setter);
         NSURLCache *limited=axs_cachekeeper_test_create_cache(fixture,[kind stringByAppendingString:@"-limited"],url);
         axs_cachekeeper_test_assert_boundary(kind,0);
         axs_cachekeeper_network_require(limited.diskCapacity==0 && limited.memoryCapacity==1048576,@"实际返回对象限制磁盘且保留内存");
-        axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(NO) && limited.diskCapacity==8388608,@"关闭恢复原始初始化请求，不恢复被压成的零");
+        BOOL restored=axs_cachekeeper_configure_network_cache(NO);
+        NSUInteger restoredDisk=limited.diskCapacity;
+        fprintf(stderr,"NETWORK_TRACE restore kind=%s applied=%d disk=%lu memory=%lu\n",kind.UTF8String,
+            restored,(unsigned long)restoredDisk,(unsigned long)limited.memoryCapacity);
+        axs_cachekeeper_test_trace_limited=NO;
+        axs_cachekeeper_network_require(restored && restoredDisk==8388608,@"关闭恢复原始初始化请求，不恢复被压成的零");
         limited.diskCapacity=33554432;
         axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(NO) && limited.diskCapacity==33554432,@"重复关闭不覆盖后续应用容量");
 
