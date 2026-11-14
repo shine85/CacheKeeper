@@ -15,6 +15,18 @@ output.mkdir(parents=True)
 try:
     subprocess.run([sys.executable, str(root / "tests" / "run_diagnostic_channel_export_red.py")],
                    check=True, timeout=60)
+    # Keep the implementation in Objective-C and the caller in Objective-C++, as in Logos.
+    # Run this before UIKit so missing C linkage fails in the native stage.
+    channel_object = output / "diagnostic-channel.o"
+    channel_linkage = output / "diagnostic-channel-linkage"
+    subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
+                    "-I" + str(root / "tests" / "include"), "-c",
+                    str(root / "AxsCacheKeeperDiagnosticChannel.m"), "-o", str(channel_object)],
+                   check=True, timeout=60)
+    subprocess.run([compiler, "clang++", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
+                    "-framework", "Foundation", str(root / "tests" / "diagnostic_channel_linkage_tests.mm"),
+                    str(channel_object), "-o", str(channel_linkage)], check=True, timeout=60)
+    subprocess.run([str(channel_linkage)], check=True, timeout=60)
     subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
                     "-I" + str(root / "tests" / "include"), "-framework", "Foundation",
                     str(root / "tests" / "cache_control_tests.m"), str(root / "Baseline.m"),

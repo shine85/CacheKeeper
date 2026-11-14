@@ -14,6 +14,10 @@
 // A client without an authenticated reply leaves serverRegister notObserved.
 // Only a reply authenticated with its kernel audit trailer can expose the server's fixed state.
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Call only from the existing SpringBoard host. Schedules background initialization immediately;
 // callback (if provided) runs on that private queue, once per invocation. No main-thread I/O.
 void axs_cachekeeper_diagnostic_channel_start(void (^completion)(NSDictionary *status));
@@ -22,3 +26,7 @@ void axs_cachekeeper_diagnostic_channel_start(void (^completion)(NSDictionary *s
 // deadline including identity and bootstrap operations; individual kernel calls may overrun it.
 // A verified HELLO proves only the message channel; it grants no APP/container read capability.
 NSDictionary *axs_cachekeeper_diagnostic_channel_hello(void);
+
+#ifdef __cplusplus
+}
+#endif
