@@ -125,8 +125,10 @@ static BOOL axs_cachekeeper_pdf_relative(NSString *path) {
     _limits=(AxsCacheKeeperPDFInspectionLimits){MIN(limits.entryLimit,caps.entryLimit),MIN(limits.sampleByteLimit,caps.sampleByteLimit),
         isfinite(limits.seconds) && limits.seconds>=0 ? MIN(limits.seconds,caps.seconds) : 0,
         MIN(limits.depthLimit,caps.depthLimit),MIN(limits.descriptorLimit,caps.descriptorLimit)};
-    _clock=clock ? [clock copy] : ^NSTimeInterval{return NSProcessInfo.processInfo.systemUptime;};
-    _read=readBlock ? [readBlock copy] : ^ssize_t(int fd,void *buffer,size_t count){return pread(fd,buffer,count,0);};
+    _clock=[clock copy];
+    if (!_clock) _clock=^NSTimeInterval{return NSProcessInfo.processInfo.systemUptime;};
+    _read=[readBlock copy];
+    if (!_read) _read=^ssize_t(int fd,void *buffer,size_t count){return pread(fd,buffer,count,0);};
     _beforeRead=[beforeRead copy];_started=_clock();_lastTime=_started;
     if (!isfinite(_started) || _started<0 || !isfinite(limits.seconds) || limits.seconds<0 || !axs_cachekeeper_pdf_relative(relative)) {
         _started=_lastTime=0;[self axs_cachekeeper_pdf_failure:@"input" code:EINVAL];[self axs_cachekeeper_pdf_finish:@"error" clear:YES];return self;
