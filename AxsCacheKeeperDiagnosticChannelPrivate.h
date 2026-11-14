@@ -82,6 +82,9 @@ BOOL axs_cachekeeper_channel_receive_result(mach_msg_return_t, mach_port_t, BOOL
                                             AxsCacheKeeperChannelBuffer *, AxsCacheKeeperChannelDecoded *, AxsCacheKeeperChannelFailure *);
 // Destroys delivered rights (including complex/OOL messages), but never the destination receive right.
 void axs_cachekeeper_channel_destroy_received(AxsCacheKeeperChannelBuffer *);
+// Only ports allocated by this module, without a guard. Removes the owned receive right and,
+// when true, exactly one still-owned send uref; does not discard unrelated rights sharing a name.
+kern_return_t axs_cachekeeper_channel_release_receive(mach_port_t, BOOL ownsSend);
 BOOL axs_cachekeeper_channel_remember(AxsCacheKeeperChannelReplayCache *, const AxsCacheKeeperChannelDecoded *,
                                       double now, AxsCacheKeeperChannelFailure *);
 BOOL axs_cachekeeper_channel_identity_blob(const uint8_t *, size_t, const char *expected);

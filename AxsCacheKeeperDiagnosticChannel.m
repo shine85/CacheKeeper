@@ -101,6 +101,11 @@ void axs_cachekeeper_channel_destroy_received(AxsCacheKeeperChannelBuffer *buffe
     buffer->header.msgh_local_port=MACH_PORT_NULL;
     mach_msg_destroy(&buffer->header);memset(buffer,0,sizeof(*buffer));
 }
+kern_return_t axs_cachekeeper_channel_release_receive(mach_port_t port,BOOL ownsSend) {
+    // SDK 16.5 mach_port.h:528; XNU ipc_right_destruct reduces srdelta send urefs before
+    // destroying receive. These mach_port_allocate ports are unguarded, so guard is zero.
+    return mach_port_destruct(mach_task_self(),port,ownsSend ? -1 : 0,0);
+}
 BOOL axs_cachekeeper_channel_receive_result(mach_msg_return_t mr,mach_port_t port,BOOL reply,double deadline,
                                             AxsCacheKeeperChannelBuffer *buffer,AxsCacheKeeperChannelDecoded *decoded,AxsCacheKeeperChannelFailure *failure) {
     memset(decoded,0,sizeof(*decoded));
@@ -326,7 +331,7 @@ NSDictionary *axs_cachekeeper_diagnostic_channel_hello(void) {
         failure=(AxsCacheKeeperChannelFailure){response.message.stage,response.message.domain,response.message.code,YES,YES};
         return axs_cachekeeper_channel_result(response.message.status==AxsCacheKeeperChannelOccupied ? @"busy" : @"rejected",failure,selfState,@"verified",@"verified");
     } @finally {
-        if (MACH_PORT_VALID(replyPort)) mach_port_destroy(mach_task_self(),replyPort);
+        if (MACH_PORT_VALID(replyPort)) axs_cachekeeper_channel_release_receive(replyPort,NO);
         if (MACH_PORT_VALID(service)) mach_port_deallocate(mach_task_self(),service);
         if (MACH_PORT_VALID(bootstrap)) mach_port_deallocate(mach_task_self(),bootstrap);
         pthread_mutex_unlock(&axs_cachekeeper_channel_client_lock);
@@ -359,7 +364,7 @@ static NSDictionary *axs_cachekeeper_channel_register(dispatch_queue_t queue) {
     if (!axs_cachekeeper_channel_self(YES,deadline,&failure))
         return axs_cachekeeper_channel_result(@"unavailable",failure,failure.unexpected ? @"unexpected" : @"unavailable",@"notObserved",@"notObserved");
     if (!bootstrap_register || !bootstrap_look_up) { axs_cachekeeper_channel_fail(&failure,AxsCacheKeeperChannelAPI,AxsCacheKeeperChannelPOSIXError,ENOSYS,NO);return axs_cachekeeper_channel_result(@"unavailable",failure,@"verified",@"notObserved",@"notObserved"); }
-    mach_port_t bootstrap=MACH_PORT_NULL,port=MACH_PORT_NULL,existing=MACH_PORT_NULL;
+    mach_port_t bootstrap=MACH_PORT_NULL,port=MACH_PORT_NULL,existing=MACH_PORT_NULL;BOOL ownsSend=NO;
     @try {
         kern_return_t kr=task_get_bootstrap_port(mach_task_self(),&bootstrap);
         if (kr==KERN_SUCCESS) {
@@ -370,22 +375,25 @@ static NSDictionary *axs_cachekeeper_channel_register(dispatch_queue_t queue) {
         if (kr!=KERN_SUCCESS) { axs_cachekeeper_channel_fail(&failure,AxsCacheKeeperChannelRegister,AxsCacheKeeperChannelMachError,kr,NO);return axs_cachekeeper_channel_result(@"unavailable",failure,@"verified",@"notObserved",@"failed"); }
         if (!axs_cachekeeper_channel_budget(deadline,&failure)) return axs_cachekeeper_channel_result(@"unavailable",failure,@"verified",@"notObserved",@"notObserved");
         kr=mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&port);
-        if (kr==KERN_SUCCESS) kr=mach_port_insert_right(mach_task_self(),port,port,MACH_MSG_TYPE_MAKE_SEND);
+        if (kr==KERN_SUCCESS) {kr=mach_port_insert_right(mach_task_self(),port,port,MACH_MSG_TYPE_MAKE_SEND);ownsSend=kr==KERN_SUCCESS;}
         mach_port_limits_t limits={.mpl_qlimit=1};
         if (kr==KERN_SUCCESS) kr=mach_port_set_attributes(mach_task_self(),port,MACH_PORT_LIMITS_INFO,(mach_port_info_t)&limits,MACH_PORT_LIMITS_INFO_COUNT);
         if (kr==KERN_SUCCESS) kr=bootstrap_register(bootstrap,axs_cachekeeper_channel_service,port);
         if (kr!=KERN_SUCCESS) { axs_cachekeeper_channel_fail(&failure,AxsCacheKeeperChannelRegister,AxsCacheKeeperChannelMachError,kr,NO);return axs_cachekeeper_channel_result(@"unavailable",failure,@"verified",@"notObserved",@"failed"); }
         if (!axs_cachekeeper_channel_budget(deadline,&failure)) return axs_cachekeeper_channel_result(@"unavailable",failure,@"verified",@"notObserved",@"verified");
+        kr=mach_port_deallocate(mach_task_self(),port);
+        if (kr!=KERN_SUCCESS) { axs_cachekeeper_channel_fail(&failure,AxsCacheKeeperChannelRegister,AxsCacheKeeperChannelMachError,kr,NO);return axs_cachekeeper_channel_result(@"unavailable",failure,@"verified",@"notObserved",@"verified"); }
+        ownsSend=NO;
         dispatch_source_t source=dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV,port,0,queue);
         if (!source) { axs_cachekeeper_channel_fail(&failure,AxsCacheKeeperChannelRegister,AxsCacheKeeperChannelPOSIXError,ENOMEM,NO);return axs_cachekeeper_channel_result(@"unavailable",failure,@"verified",@"notObserved",@"verified"); }
         mach_port_t ownedPort=port;dispatch_source_set_event_handler(source,^{axs_cachekeeper_channel_server_message(ownedPort);});
-        dispatch_source_set_cancel_handler(source,^{mach_port_destroy(mach_task_self(),ownedPort);});
-        mach_port_deallocate(mach_task_self(),port);port=MACH_PORT_NULL;
+        dispatch_source_set_cancel_handler(source,^{axs_cachekeeper_channel_release_receive(ownedPort,NO);});
+        port=MACH_PORT_NULL;
         axs_cachekeeper_channel_server_source=source;dispatch_resume(source);
         return axs_cachekeeper_channel_result(@"listening",(AxsCacheKeeperChannelFailure){AxsCacheKeeperChannelRegister,0,0,NO},@"verified",@"notObserved",@"verified");
     } @finally {
         if (MACH_PORT_VALID(existing)) mach_port_deallocate(mach_task_self(),existing);
-        if (MACH_PORT_VALID(port)) mach_port_destroy(mach_task_self(),port);
+        if (MACH_PORT_VALID(port)) axs_cachekeeper_channel_release_receive(port,ownsSend);
         if (MACH_PORT_VALID(bootstrap)) mach_port_deallocate(mach_task_self(),bootstrap);
     }
 }

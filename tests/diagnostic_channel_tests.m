@@ -25,9 +25,31 @@ static BOOL axs_cachekeeper_channel_test_has_send(mach_port_t port) {
     mach_port_type_t type=0;
     return mach_port_type(mach_task_self(),port,&type)==KERN_SUCCESS && (type&MACH_PORT_TYPE_SEND);
 }
+static void axs_cachekeeper_channel_test_release_receive(mach_port_t port,BOOL ownsSend) {
+    axs_cachekeeper_channel_test_check(axs_cachekeeper_channel_release_receive(port,ownsSend)==KERN_SUCCESS,"release only the owned receive/send rights with SDK-supported API");
+}
 
 void axs_cachekeeper_run_diagnostic_channel_tests(void) {
     @autoreleasepool {
+        mach_port_type_t releasedType=0;
+        mach_port_t receiveOnly=axs_cachekeeper_channel_test_port(NO);
+        axs_cachekeeper_channel_test_release_receive(receiveOnly,NO);
+        axs_cachekeeper_channel_test_check(mach_port_type(mach_task_self(),receiveOnly,&releasedType)==KERN_INVALID_NAME,"receive-only teardown leaves no name or dead-name ref");
+        mach_port_t receiveAndSend=axs_cachekeeper_channel_test_port(YES);
+        axs_cachekeeper_channel_test_release_receive(receiveAndSend,YES);
+        axs_cachekeeper_channel_test_check(mach_port_type(mach_task_self(),receiveAndSend,&releasedType)==KERN_INVALID_NAME,"failed registration teardown consumes receive plus exactly its own send ref");
+        mach_port_t handedToSource=axs_cachekeeper_channel_test_port(YES);
+        axs_cachekeeper_channel_test_check(mach_port_deallocate(mach_task_self(),handedToSource)==KERN_SUCCESS &&
+            mach_port_type(mach_task_self(),handedToSource,&releasedType)==KERN_SUCCESS && releasedType==MACH_PORT_TYPE_RECEIVE,"successful registration drops its local send ref before source owns receive");
+        axs_cachekeeper_channel_test_release_receive(handedToSource,NO);
+        mach_port_t sharedName=axs_cachekeeper_channel_test_port(YES);
+        axs_cachekeeper_channel_test_check(mach_port_mod_refs(mach_task_self(),sharedName,MACH_PORT_RIGHT_SEND,1)==KERN_SUCCESS,"hold an additional independently owned send reference");
+        axs_cachekeeper_channel_test_release_receive(sharedName,YES);
+        mach_port_urefs_t remainingDeadRefs=0;
+        axs_cachekeeper_channel_test_check(mach_port_get_refs(mach_task_self(),sharedName,MACH_PORT_RIGHT_DEAD_NAME,&remainingDeadRefs)==KERN_SUCCESS && remainingDeadRefs==1,
+            "teardown preserves the other owner's reference as one dead-name ref");
+        axs_cachekeeper_channel_test_check(mach_port_deallocate(mach_task_self(),sharedName)==KERN_SUCCESS &&
+            mach_port_type(mach_task_self(),sharedName,&releasedType)==KERN_INVALID_NAME,"other owner releases its own final reference separately");
         __block NSDictionary *publicStatus;
         dispatch_group_t group=dispatch_group_create();
         dispatch_group_async(group,dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
@@ -126,7 +148,7 @@ void axs_cachekeeper_run_diagnostic_channel_tests(void) {
             portStatus.mps_sorights==1,"send timeout leaves exactly the queued request's send-once right");
         axs_cachekeeper_channel_test_check(axs_cachekeeper_channel_receive(blockedServer,NO,axs_cachekeeper_channel_now()+0.1,&received,&decoded,&failure),"receive original queued message after failed send cleanup");
         axs_cachekeeper_channel_destroy_received(&received);
-        mach_port_destroy(mach_task_self(),blockedServer);mach_port_destroy(mach_task_self(),blockedClient);
+        axs_cachekeeper_channel_test_release_receive(blockedServer,YES);axs_cachekeeper_channel_test_release_receive(blockedClient,NO);
 
         axs_cachekeeper_channel_encode(&request,NO,nonce,server,client,AxsCacheKeeperChannelRequest,(AxsCacheKeeperChannelFailure){0});
         axs_cachekeeper_channel_test_send(&request.header);memset(&received,0,sizeof(received));
@@ -182,7 +204,7 @@ void axs_cachekeeper_run_diagnostic_channel_tests(void) {
         mach_port_type_t destinationType=0;
         axs_cachekeeper_channel_test_check(mach_port_type(mach_task_self(),server,&destinationType)==KERN_SUCCESS && (destinationType&MACH_PORT_TYPE_RECEIVE),
             "BODY_ERROR cleanup preserves destination receive right");
-        mach_port_destroy(mach_task_self(),descriptorPort);
+        axs_cachekeeper_channel_test_release_receive(descriptorPort,NO);
 
         struct { mach_msg_header_t header;uint8_t payload[1024]; } oversized={0};
         oversized.header.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,0);oversized.header.msgh_size=sizeof(oversized);oversized.header.msgh_remote_port=server;
@@ -192,7 +214,7 @@ void axs_cachekeeper_run_diagnostic_channel_tests(void) {
         axs_cachekeeper_channel_test_check(!axs_cachekeeper_channel_receive(server,NO,begin+0.02,&received,&decoded,&failure) && failure.code==MACH_RCV_TIMED_OUT &&
             axs_cachekeeper_channel_now()-begin<0.5,"oversized request did not remain queued; actual short receive timeout");
         axs_cachekeeper_channel_test_check(!axs_cachekeeper_channel_receive(server,NO,axs_cachekeeper_channel_now()-1,&received,&decoded,&failure) && failure.stage==AxsCacheKeeperChannelTimeout,"expired shared deadline does not restart");
-        mach_port_destroy(mach_task_self(),server);mach_port_destroy(mach_task_self(),client);
+        axs_cachekeeper_channel_test_release_receive(server,YES);axs_cachekeeper_channel_test_release_receive(client,NO);
         puts("PASS: real Mach HELLO codec, audit token binding, rights cleanup, stale/wrong-process rejection and bounded timeouts (iOS hosts unverified)");
     }
 }
