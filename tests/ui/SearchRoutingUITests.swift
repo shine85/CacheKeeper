@@ -1,6 +1,55 @@
 import XCTest
 
 final class SearchRoutingUITests: XCTestCase {
+    func testCompactListVisualStatesAndSearch() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--compact-visual", "-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launch()
+        let field = app.textFields["CacheKeeperAppSearch"]
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        let normalHeight = field.frame.height
+        let portraitWidth = field.frame.width
+        XCTAssertTrue(app.staticTexts["网盘"].exists)
+        XCTAssertFalse(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Synthetic long rule")).firstMatch.exists)
+        func capture(_ name: String) {
+            let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        capture("compact-list-light")
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        field.typeText("drive")
+        XCTAssertTrue(app.staticTexts["网盘"].exists)
+        XCTAssertFalse(app.staticTexts["播客"].exists)
+        capture("compact-search-editing")
+        app.buttons["取消"].tap()
+        XCTAssertTrue(app.staticTexts["播客"].exists)
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            field.frame.width > portraitWidth + 100
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [landscape], timeout: 5), .completed)
+        capture("compact-list-landscape")
+        XCUIDevice.shared.orientation = .portrait
+        app.terminate()
+        app.launchArguments += ["--dark"]
+        app.launch()
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        capture("compact-list-dark")
+        app.terminate()
+        app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        XCTAssertGreaterThan(field.frame.height, normalHeight + 10, "Accessibility text size must actually affect layout")
+        field.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["取消"].isHittable)
+        capture("compact-search-accessibility")
+        app.buttons["取消"].tap()
+    }
+
     func testExpandedHostNavigationBarKeepsSearchEditable() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--search-host-navigation-bar"]

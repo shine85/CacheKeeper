@@ -1,5 +1,6 @@
 #import "SearchInput.h"
 #import "SearchDiagnostics.h"
+#include <math.h>
 
 @interface AxsCacheKeeperSearchInput () <UITextFieldDelegate,UIGestureRecognizerDelegate>
 @property(nonatomic,strong) UITextField *axs_cachekeeper_field;
@@ -14,8 +15,18 @@
     self.axs_cachekeeper_field.placeholder=@"搜索应用";
     self.axs_cachekeeper_field.accessibilityLabel=@"搜索应用";
     self.axs_cachekeeper_field.accessibilityIdentifier=@"CacheKeeperAppSearch";
-    self.axs_cachekeeper_field.borderStyle=UITextBorderStyleRoundedRect;
-    self.axs_cachekeeper_field.backgroundColor=UIColor.secondarySystemGroupedBackgroundColor;
+    self.axs_cachekeeper_field.borderStyle=UITextBorderStyleNone;
+    self.axs_cachekeeper_field.backgroundColor=UIColor.tertiarySystemFillColor;
+    self.axs_cachekeeper_field.layer.cornerRadius=10;
+    UIView *leading=[[UIView alloc] initWithFrame:CGRectMake(0,0,36,44)];
+    leading.userInteractionEnabled=NO;
+    UIImageView *glass=[[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]];
+    glass.frame=CGRectMake(12,14,16,16);glass.contentMode=UIViewContentModeScaleAspectFit;
+    glass.autoresizingMask=UIViewAutoresizingFlexibleTopMargin|UIViewAutoresizingFlexibleBottomMargin;
+    glass.tintColor=UIColor.secondaryLabelColor;glass.isAccessibilityElement=NO;
+    [leading addSubview:glass];
+    self.axs_cachekeeper_field.leftView=leading;
+    self.axs_cachekeeper_field.leftViewMode=UITextFieldViewModeAlways;
     self.axs_cachekeeper_field.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     self.axs_cachekeeper_field.adjustsFontForContentSizeCategory=YES;
     self.axs_cachekeeper_field.clearButtonMode=UITextFieldViewModeWhileEditing;
@@ -27,6 +38,10 @@
     [self.axs_cachekeeper_cancel_button setTitle:@"取消" forState:UIControlStateNormal];
     [self.axs_cachekeeper_cancel_button addTarget:self action:@selector(axs_cachekeeper_cancel) forControlEvents:UIControlEventTouchUpInside];
     self.axs_cachekeeper_cancel_button.hidden=YES;
+    self.axs_cachekeeper_cancel_button.titleLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    self.axs_cachekeeper_cancel_button.titleLabel.adjustsFontForContentSizeCategory=YES;
+    NSLayoutConstraint *cancelWidth=[self.axs_cachekeeper_cancel_button.widthAnchor constraintGreaterThanOrEqualToConstant:44];
+    cancelWidth.priority=UILayoutPriorityDefaultHigh;cancelWidth.active=YES;
     [self.axs_cachekeeper_cancel_button setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [self.axs_cachekeeper_cancel_button setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     UIStackView *stack=[[UIStackView alloc] initWithArrangedSubviews:@[self.axs_cachekeeper_field,self.axs_cachekeeper_cancel_button]];
@@ -41,6 +56,14 @@
     UITapGestureRecognizer *tap=[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(axs_cachekeeper_tapped)];
     tap.cancelsTouchesInView=NO;tap.delaysTouchesBegan=NO;tap.delegate=self;[self addGestureRecognizer:tap];
     return self;
+}
+- (CGSize)intrinsicContentSize {
+    return CGSizeMake(UIViewNoIntrinsicMetric,MAX(44,ceil(self.axs_cachekeeper_field.font.lineHeight)+12)+12);
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    self.axs_cachekeeper_field.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody compatibleWithTraitCollection:self.traitCollection];
+    [self invalidateIntrinsicContentSize];
 }
 - (NSString *)axs_cachekeeper_text { return self.axs_cachekeeper_field.text ?: @""; }
 - (BOOL)axs_cachekeeper_focus {

@@ -1,6 +1,18 @@
 #pragma once
 #import <Foundation/Foundation.h>
 
+// A compact link to the last record, never a claim that cleanup is live or the app is empty.
+static inline NSString *axs_cachekeeper_presentation_app_record(NSDictionary *report) {
+    if (![report isKindOfClass:NSDictionary.class] || !report.count) return @"尚无清理记录";
+    NSString *phase=[report[@"phase"] isKindOfClass:NSString.class] ? report[@"phase"] : nil;
+    if ([report[@"failed"] unsignedIntegerValue] || [phase isEqual:@"error"]) return @"上次记录：有失败 · 查看详情";
+    if ([phase isEqual:@"waiting"]) return @"上次记录：等待处理";
+    if ([phase isEqual:@"cleaning"]) return @"上次记录：清理中";
+    if ([phase isEqual:@"complete"] && [report[@"coverageComplete"] isKindOfClass:NSNumber.class] &&
+        ![report[@"coverageComplete"] boolValue]) return @"上次记录：覆盖未完整";
+    return @"清理记录 · 查看详情";
+}
+
 // Display-only contracts. Directory coverage never inherits app discovery coverage;
 // cleanup byte counters never substitute for a directory size snapshot.
 static inline NSString *axs_cachekeeper_presentation_time(id updated) {

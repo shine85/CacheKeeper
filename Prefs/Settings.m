@@ -6,6 +6,7 @@
 #import "../AxsCacheKeeperPolicy.h"
 #import "../AxsCacheKeeperAppList.h"
 #import "../AxsCacheKeeperInstallation.h"
+#import "../AxsCacheKeeperPresentation.h"
 #import "DiagnosticsPage.h"
 #import "SearchInput.h"
 #import "SearchDiagnostics.h"
@@ -42,6 +43,9 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @property(nonatomic,strong) AxsCacheKeeperSearchInput *axs_cachekeeper_searchInput;
 @property(nonatomic,strong) NSLayoutConstraint *axs_cachekeeper_searchTop;
 @property(nonatomic,weak) UINavigationBar *axs_cachekeeper_hostBar;
+@property(nonatomic,weak) UINavigationItem *axs_cachekeeper_compactItem;
+@property(nonatomic) UINavigationItemLargeTitleDisplayMode axs_cachekeeper_previousTitleMode;
+@property(nonatomic) BOOL axs_cachekeeper_updatingTitle;
 @property(nonatomic,assign) NSInteger selectedTab;
 @property(nonatomic,strong) NSArray *apps;
 @property(nonatomic,strong) NSArray *sections;
@@ -73,6 +77,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"缓存管家";
+    self.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeNever;
     self.apps = @[];
     self.sections = @[];
     self.favorites = [NSSet set];
@@ -97,6 +102,10 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     [self.view addSubview:self.tabWrap];
     self.table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
     self.table.keyboardDismissMode=UIScrollViewKeyboardDismissModeOnDrag;
+    self.table.rowHeight=UITableViewAutomaticDimension;
+    self.table.estimatedRowHeight=72;
+    self.table.sectionHeaderTopPadding=0;
+    self.table.contentInsetAdjustmentBehavior=UIScrollViewContentInsetAdjustmentNever;
     self.table.dataSource = self; self.table.delegate = self;
     [self.view addSubview:self.table];
     self.axs_cachekeeper_searchDiagnostics=[[AxsCacheKeeperSearchDiagnostics alloc] initWithField:self.axs_cachekeeper_searchInput.axs_cachekeeper_field input:self.axs_cachekeeper_searchInput root:self.view table:self.table owner:self];
@@ -122,7 +131,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
         self.axs_cachekeeper_searchTop,
         [self.axs_cachekeeper_searchInput.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [self.axs_cachekeeper_searchInput.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
-        [self.axs_cachekeeper_searchInput.heightAnchor constraintEqualToConstant:56],
+        [self.axs_cachekeeper_searchInput.heightAnchor constraintGreaterThanOrEqualToConstant:56],
         [self.tabWrap.topAnchor constraintEqualToAnchor:self.axs_cachekeeper_searchInput.bottomAnchor],
         [self.tabWrap.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [self.tabWrap.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
@@ -176,6 +185,10 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     if (section >= self.sections.count) return nil;
     return self.sections[section][@"title"];
 }
+- (CGFloat)tableView:(UITableView *)table heightForHeaderInSection:(NSInteger)section {
+    (void)table;(void)section;
+    return MAX(28,[UIFont preferredFontForTextStyle:UIFontTextStyleFootnote].lineHeight+12);
+}
 - (NSArray *)sectionIndexTitlesForTableView:(UITableView *)table {
     if (self.sections.count < 2) return nil;
     NSMutableArray *titles = [NSMutableArray new];
@@ -188,44 +201,46 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     NSUInteger shown = 0;
     for (NSDictionary *item in self.sections) shown += [item[@"apps"] count];
     if (!shown) {
+        if (self.axs_cachekeeper_searchInput.axs_cachekeeper_text.length) return @"没有匹配的应用，可换个名称或包名搜索。";
         if (self.selectedTab == 0) return @"暂无已开启缓存控制的 APP，在「用户应用」或「巨魔应用」里打开开关即可。";
         if (self.selectedTab == 3) return @"暂无收藏，长按应用选择「收藏应用」。";
         return @"此分类下没有 APP。";
     }
-    return [NSString stringWithFormat:@"共 %lu 个 APP（不含系统应用）· 点击设置，默认不开启。\n只有主动开启的 APP 才应用缓存控制；可打开总开关，也可在检测后单项或一键开启。检测和切换模式不启用 APP，微信等特殊 APP 保持关闭即可。", (unsigned long)self.apps.count];
+    return [NSString stringWithFormat:@"当前 %lu 个应用 · 点击查看详情\n仅对已开启的应用执行缓存控制。", (unsigned long)shown];
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
     NSDictionary *app = self.sections[path.section][@"apps"][path.row];
-    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
-    cell.imageView.image = [self axs_cachekeeper_icon:app];
-    cell.imageView.layer.cornerRadius = 10;
-    cell.imageView.clipsToBounds = YES;
+    UITableViewCell *cell=[table dequeueReusableCellWithIdentifier:@"AxsCacheKeeperAppCell"];
+    if (!cell) cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"AxsCacheKeeperAppCell"];
+    UIListContentConfiguration *content=[UIListContentConfiguration subtitleCellConfiguration];
+    content.image=[self axs_cachekeeper_icon:app];
+    content.imageProperties.maximumSize=CGSizeMake(36,36);
+    content.imageProperties.reservedLayoutSize=CGSizeMake(36,36);
+    content.imageProperties.cornerRadius=8;
+    content.imageToTextPadding=12;
+    content.directionalLayoutMargins=NSDirectionalEdgeInsetsMake(10,16,10,16);
     BOOL starred = [self.favorites containsObject:app[@"id"]];
-    cell.textLabel.text = starred ? [app[@"name"] stringByAppendingString:@" ★"] : app[@"name"];
+    content.text=starred ? [app[@"name"] stringByAppendingString:@" ★"] : app[@"name"];
+    content.textProperties.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    content.textProperties.numberOfLines=0;
+    content.secondaryTextProperties.font=[UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    content.secondaryTextProperties.color=UIColor.secondaryLabelColor;
+    content.secondaryTextProperties.numberOfLines=0;
     NSDictionary *status=self.statusSnapshot[app[@"id"]];
-    cell.detailTextLabel.numberOfLines = 0;
-    id savedScan=self.scanHistory[app[@"id"]];
-    NSDictionary *scan=[savedScan isKindOfClass:NSDictionary.class] ? savedScan : nil;
     NSString *bundleLine = app[@"version"] ? [NSString stringWithFormat:@"%@ · %@", app[@"id"], app[@"version"]] : app[@"id"];
-    NSString *summaryText=[bundleLine stringByAppendingFormat:@"\n%@", axs_cachekeeper_summary(scan,status)];
-    NSMutableAttributedString *summaryStyled=[[NSMutableAttributedString alloc] initWithString:summaryText];
-    NSRange totalLine=[summaryText rangeOfString:@"累计清理 "];
-    NSRange lastLine=[summaryText rangeOfString:@"上次清理："];
-    NSUInteger redStart=totalLine.location!=NSNotFound?totalLine.location:lastLine.location;
-    if (redStart!=NSNotFound) {
-        NSUInteger scanFrom=(lastLine.location!=NSNotFound && lastLine.location>=redStart)?lastLine.location:redStart;
-        NSUInteger lineEnd=scanFrom;
-        while (lineEnd<summaryText.length && [summaryText characterAtIndex:lineEnd]!='\n') lineEnd++;
-        [summaryStyled addAttribute:NSForegroundColorAttributeName value:UIColor.systemRedColor range:NSMakeRange(redStart,lineEnd-redStart)];
-    }
-    cell.detailTextLabel.attributedText=summaryStyled;
     UISwitch *toggle = [UISwitch new]; toggle.accessibilityIdentifier = app[@"id"];
     NSDictionary *directories=self.directoriesSnapshot;
     NSDictionary *states=self.statesSnapshot;
     toggle.on=axs_cachekeeper_app_enabled(states[app[@"id"]]);
     toggle.enabled=!self.sourceErrors[@"appEnabled.plist"] && !self.sourceErrors[@"directories.plist"];
-    if (!toggle.on) cell.detailTextLabel.text=[[bundleLine stringByAppendingString:@"\n未开启缓存控制\n"] stringByAppendingString:axs_cachekeeper_summary(scan,nil)];
-    else if (!axs_cachekeeper_selected_paths(directories,states,app[@"id"]).count && !axs_cachekeeper_auto_discover(states[app[@"id"]])) cell.detailTextLabel.text=[bundleLine stringByAppendingString:@"\n总开关已开启；没有文件清理目录，网络缓存按独立选项执行"];
+    NSString *record=toggle.on ? axs_cachekeeper_presentation_app_record(status) : nil;
+    if (toggle.on && !status && !axs_cachekeeper_selected_paths(directories,states,app[@"id"]).count && !axs_cachekeeper_auto_discover(states[app[@"id"]])) record=@"未选清理目录 · 点击设置";
+    if (!toggle.enabled) record=@"配置读取失败 · 暂不可修改";
+    else if (self.sourceErrors[[NSString stringWithFormat:@"Status/%@.auto.plist",app[@"id"]]]) record=@"清理记录读取失败";
+    content.secondaryText=record ? [bundleLine stringByAppendingFormat:@"\n%@",record] : bundleLine;
+    cell.contentConfiguration=content;
+    cell.accessibilityHint=@"轻点查看应用详情；右侧开关控制是否启用";
+    toggle.accessibilityLabel=[app[@"name"] stringByAppendingString:@"缓存控制"];
     [toggle addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = toggle; cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     return cell;
@@ -324,10 +339,43 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
         CGRectGetMinY(rect)>CGRectGetMinY(safe)+1.0/window.screen.scale) return 0;
     return MAX(0,CGRectGetMaxY(rect)-CGRectGetMinY(safe));
 }
+- (void)axs_cachekeeper_restore_compact_title {
+    UINavigationItem *item=self.axs_cachekeeper_compactItem;
+    UINavigationItemLargeTitleDisplayMode previous=self.axs_cachekeeper_previousTitleMode;
+    self.axs_cachekeeper_compactItem=nil;
+    if (item.largeTitleDisplayMode==UINavigationItemLargeTitleDisplayModeNever)
+        item.largeTitleDisplayMode=previous;
+}
+- (void)axs_cachekeeper_update_compact_title {
+    if (!self.axs_cachekeeper_visible || !self.view.window || self.axs_cachekeeper_updatingTitle) return;
+    UINavigationItem *candidate=nil;
+    // Only a real ancestor navigation controller whose current top contains this page owns its title.
+    // An unrelated overlay bar remains untouched and is handled by the geometry clearance below.
+    UIViewController *child=self;
+    for (UIViewController *parent=child.parentViewController;parent;child=parent,parent=parent.parentViewController) {
+        if (![parent isKindOfClass:UINavigationController.class]) continue;
+        UINavigationController *navigation=(UINavigationController *)parent;
+        UINavigationBar *bar=navigation.navigationBar;
+        if (navigation.topViewController!=child || bar.topItem!=child.navigationItem ||
+            child==self || bar.hidden || bar.alpha<=0.01 || bar.window!=self.view.window) continue;
+        candidate=child.navigationItem;break;
+    }
+    if (candidate==self.axs_cachekeeper_compactItem) return;
+    self.axs_cachekeeper_updatingTitle=YES;
+    [self axs_cachekeeper_restore_compact_title];
+    if (candidate) {
+        // Save before the setter: UIKit may synchronously lay out the container.
+        self.axs_cachekeeper_compactItem=candidate;
+        self.axs_cachekeeper_previousTitleMode=candidate.largeTitleDisplayMode;
+        candidate.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeNever;
+    }
+    self.axs_cachekeeper_updatingTitle=NO;
+}
 - (BOOL)axs_cachekeeper_update_search_top {
     if (!self.isViewLoaded || !self.axs_cachekeeper_visible || !self.axs_cachekeeper_searchTop) return NO;
     UIView *root=self.view;UIWindow *window=root.window;
     if (!window) { self.axs_cachekeeper_hostBar=nil;return NO; }
+    [self axs_cachekeeper_update_compact_title];
     CGRect safe=root.safeAreaLayoutGuide.layoutFrame;
     if (CGRectIsEmpty(safe) || !isfinite(safe.origin.x) || !isfinite(safe.origin.y) ||
         !isfinite(safe.size.width) || !isfinite(safe.size.height)) return NO;
@@ -367,6 +415,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventWillAppear];
     [super viewWillAppear:animated];
     self.axs_cachekeeper_visible=YES;self.axs_cachekeeper_menuVisible=NO;
+    [self axs_cachekeeper_update_search_top];
     [self axs_cachekeeper_application_active:nil];
 }
 - (void)viewDidAppear:(BOOL)animated {
@@ -376,8 +425,9 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 }
 - (void)viewWillDisappear:(BOOL)animated {
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_freeze:AxsCacheKeeperSearchEventWillDisappear];
-    [super viewWillDisappear:animated];
     self.axs_cachekeeper_visible=NO;self.axs_cachekeeper_menuVisible=NO;
+    [self axs_cachekeeper_restore_compact_title];
+    [super viewWillDisappear:animated];
     self.axs_cachekeeper_hostBar=nil;
     [self.axs_cachekeeper_searchInput axs_cachekeeper_dismiss_keyboard];
     [self axs_cachekeeper_application_inactive:nil];

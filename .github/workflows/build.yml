@@ -68,7 +68,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: UIKit-input-results
-          path: tmp/input-ui-tests/Results.xcresult
+          path: |
+            tmp/input-ui-tests/Results.xcresult
+            tmp/input-ui-tests/Screenshots
           if-no-files-found: ignore
 
       - name: 获取 RootHide Theos

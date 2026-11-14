@@ -5,6 +5,13 @@ static void pcheck(BOOL condition, NSString *message) {
     if (!condition) { fprintf(stderr,"FAIL: presentation: %s\n",message.UTF8String); exit(1); }
 }
 void axs_cachekeeper_run_presentation_tests(void) {
+    pcheck([axs_cachekeeper_presentation_app_record(nil) isEqual:@"尚无清理记录"],@"没有回执不显示成功");
+    pcheck([axs_cachekeeper_presentation_app_record(@{@"phase":@"complete",@"failed":@2}) containsString:@"有失败"],@"失败优先于阶段");
+    pcheck([axs_cachekeeper_presentation_app_record(@{@"phase":@"waiting"}) containsString:@"等待处理"],@"等待记录不能当正在清理");
+    pcheck([axs_cachekeeper_presentation_app_record(@{@"phase":@"cleaning"}) containsString:@"清理中"],@"仅表达回执记录的阶段");
+    pcheck([axs_cachekeeper_presentation_app_record(@{@"phase":@"complete",@"coverageComplete":@NO}) containsString:@"覆盖未完整"],@"结束阶段不掩盖覆盖缺口");
+    pcheck([axs_cachekeeper_presentation_app_record(@{@"phase":@"complete",@"coverageComplete":@YES,@"bytes":@999}) isEqual:@"清理记录 · 查看详情"],@"紧凑行不把结束或计数字节当清空和实际释放");
+    pcheck([axs_cachekeeper_presentation_app_record(@{@"phase":@42,@"coverageComplete":@[]}) isEqual:@"清理记录 · 查看详情"],@"旧记录的未知阶段不强转或臆测");
     NSDate *old=[NSDate dateWithTimeIntervalSince1970:1794441600];
     NSDate *recent=[old dateByAddingTimeInterval:86400];
     NSDictionary *receipt=@{@"complete":@YES,@"measurementComplete":@YES,@"coverageComplete":@YES,

@@ -12,6 +12,54 @@
 }
 @end
 @interface CKSettings : PSViewController
+- (void)axs_cachekeeper_application_active:(NSNotification *)notification;
+- (void)axs_cachekeeper_render;
+@end
+// The visual fixture drives the production controller with synthetic metadata, without device reads/writes.
+@interface AxsCacheKeeperVisualSettings : CKSettings
+@end
+@implementation AxsCacheKeeperVisualSettings
+- (void)axs_cachekeeper_application_active:(NSNotification *)notification {
+    (void)notification;
+    if (![[self valueForKey:@"apps"] count]) {
+        NSArray *names=@[@"阿尔法笔记",@"播客",@"地图",@"读书",@"旅行",@"视频",@"网盘",@"音乐"];
+        NSArray *pinyin=@[@"Alpha",@"Bo ke",@"Di tu",@"Du shu",@"Lv xing",@"Shi pin",@"Wang pan",@"Yin yue"];
+        NSArray *ids=@[@"notes",@"podcasts",@"maps",@"reader",@"travel",@"video",@"drive",@"music"];
+        NSMutableArray *apps=[NSMutableArray new];
+        for (NSUInteger i=0;i<names.count;i++) [apps addObject:@{@"name":names[i],@"pinyin":[@"App " stringByAppendingString:pinyin[i]],
+            @"id":[@"example." stringByAppendingString:ids[i]],@"source":@"user",@"version":@"1.0"}];
+        [self setValue:apps forKey:@"apps"];
+        [self setValue:@{@"example.drive":@{@"enabled":@YES},@"example.video":@{@"enabled":@YES}} forKey:@"statesSnapshot"];
+        [self setValue:@{@"example.drive":@{@"phase":@"complete",@"coverageComplete":@YES,@"removed":@1539,@"bytes":@544232448,@"message":@"Synthetic long rule text must stay in details."},
+            @"example.video":@{@"phase":@"error",@"failed":@1}} forKey:@"statusSnapshot"];
+        [self setValue:@{} forKey:@"directoriesSnapshot"];[self setValue:@{} forKey:@"sourceErrors"];
+        [self setValue:@{} forKey:@"batchSnapshot"];[self setValue:nil forKey:@"appsError"];
+        [self setValue:@1 forKey:@"selectedTab"];
+        ((UISegmentedControl *)[self valueForKey:@"tabs"]).selectedSegmentIndex=1;
+    }
+    [self axs_cachekeeper_render];
+}
+@end
+@interface AxsCacheKeeperTestNestedHost : UIViewController
+@property(nonatomic,strong) UINavigationController *axs_cachekeeper_inner;
+- (instancetype)initWithSettings:(CKSettings *)settings;
+@end
+@implementation AxsCacheKeeperTestNestedHost
+- (instancetype)initWithSettings:(CKSettings *)settings {
+    if (!(self=[super init])) return nil;
+    self.title=@"缓存管家";
+    self.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAlways;
+    self.axs_cachekeeper_inner=[[UINavigationController alloc] initWithRootViewController:settings];
+    self.axs_cachekeeper_inner.navigationBarHidden=YES;
+    return self;
+}
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    [self addChildViewController:self.axs_cachekeeper_inner];
+    UIView *content=self.axs_cachekeeper_inner.view;content.frame=self.view.bounds;
+    content.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:content];[self.axs_cachekeeper_inner didMoveToParentViewController:self];
+}
 @end
 @interface CKScanPage : UITableViewController
 @property(nonatomic,copy) NSString *bundle;
@@ -28,6 +76,16 @@
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     (void)application;(void)options;
     self.window=[[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    if ([NSProcessInfo.processInfo.arguments containsObject:@"--compact-visual"]) {
+        AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+        AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+        UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:host];
+        navigation.navigationBar.prefersLargeTitles=YES;
+        [settings loadViewIfNeeded];host.navigationItem.rightBarButtonItems=settings.navigationItem.rightBarButtonItems;
+        if ([NSProcessInfo.processInfo.arguments containsObject:@"--dark"]) self.window.overrideUserInterfaceStyle=UIUserInterfaceStyleDark;
+        else self.window.overrideUserInterfaceStyle=UIUserInterfaceStyleLight;
+        self.window.rootViewController=navigation;[self.window makeKeyAndVisible];return YES;
+    }
     CKSettings *settings=[CKSettings new];
     UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:settings];
     if ([NSProcessInfo.processInfo.arguments containsObject:@"--search-host-navigation-bar"]) {

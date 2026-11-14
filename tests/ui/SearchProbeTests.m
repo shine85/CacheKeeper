@@ -11,6 +11,12 @@
 @end
 @interface AxsCacheKeeperTestHostBarContainer : UIView
 @end
+@interface AxsCacheKeeperVisualSettings : CKSettings
+@end
+@interface AxsCacheKeeperTestNestedHost : UIViewController
+@property(nonatomic,strong) UINavigationController *axs_cachekeeper_inner;
+- (instancetype)initWithSettings:(CKSettings *)settings;
+@end
 // Only the event marker is synthetic; all hierarchy, bounds and hit testing below use UIKit.
 @interface AxsCacheKeeperProbeTouchEvent : UIEvent
 @end
@@ -102,6 +108,43 @@
 }
 - (NSDictionary *)axs_cachekeeper_last {
     return [[self.probe axs_cachekeeper_snapshot][@"events"] lastObject];
+}
+- (void)testCompactTitleUsesAncestorItemAndRestoresOnInnerNavigation {
+    for (NSNumber *mode in @[@(UINavigationItemLargeTitleDisplayModeAutomatic),@(UINavigationItemLargeTitleDisplayModeAlways)]) {
+        AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+        AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+        host.navigationItem.largeTitleDisplayMode=mode.integerValue;
+        UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:host];
+        nav.navigationBar.prefersLargeTitles=YES;nav.modalPresentationStyle=UIModalPresentationFullScreen;
+        XCTestExpectation *shown=[self expectationWithDescription:@"Nested navigation appeared"];
+        [self.owner presentViewController:nav animated:NO completion:^{ [shown fulfill]; }];
+        [self waitForExpectations:@[shown] timeout:10];
+        [nav.view layoutIfNeeded];
+        AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+        for (NSUInteger i=0;i<3;i++) {
+            [settings updateBatch];
+            XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
+            XCTAssertTrue(nav.navigationBar.prefersLargeTitles);
+            XCTAssertTrue(host.axs_cachekeeper_inner.navigationBarHidden);
+            CGRect rect=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window];
+            CGRect bar=[nav.navigationBar convertRect:nav.navigationBar.bounds toView:self.window];
+            XCTAssertGreaterThanOrEqual(rect.origin.y,CGRectGetMaxY(bar));
+            XCTAssertLessThanOrEqual(nav.navigationBar.bounds.size.height,44.5);
+        }
+        UIViewController *detail=[UIViewController new];
+        [host.axs_cachekeeper_inner pushViewController:detail animated:NO];
+        XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,mode.integerValue);
+        [host.axs_cachekeeper_inner popViewControllerAnimated:NO];
+        [nav.view layoutIfNeeded];[settings updateBatch];
+        XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
+        // A subsequent host change belongs to the host and must not be overwritten on release.
+        host.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAlways;
+        [host.axs_cachekeeper_inner pushViewController:detail animated:NO];
+        XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways);
+        XCTestExpectation *dismissed=[self expectationWithDescription:@"Nested navigation dismissed"];
+        [self.owner dismissViewControllerAnimated:NO completion:^{ [dismissed fulfill]; }];
+        [self waitForExpectations:@[dismissed] timeout:10];
+    }
 }
 - (void)testSearchClearsExternalNavigationBarAndReturnsAfterCollapse {
     CKSettings *settings=[CKSettings new];
