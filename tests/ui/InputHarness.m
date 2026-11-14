@@ -1,5 +1,7 @@
 #import <UIKit/UIKit.h>
 #import "Preferences/PSViewController.h"
+#import "../../Prefs/SearchInput.h"
+#import "../../Prefs/DiagnosticsPage.h"
 @implementation PSViewController
 @end
 @interface CKSettings : PSViewController
@@ -10,15 +12,54 @@
 @end
 @implementation CKScanPage
 @end
-@interface AxsCacheKeeperInputTestDelegate : UIResponder <UIApplicationDelegate>
+@interface AxsCacheKeeperInputTestDelegate : UIResponder <UIApplicationDelegate,UINavigationControllerDelegate>
 @property(nonatomic,strong) UIWindow *window;
+@property(nonatomic,strong) UIView *axs_cachekeeper_testOverlay;
 @end
 @implementation AxsCacheKeeperInputTestDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     (void)application;(void)options;
     self.window=[[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    self.window.rootViewController=[[UINavigationController alloc] initWithRootViewController:[CKSettings new]];
+    UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:[CKSettings new]];
+    navigation.delegate=self;self.window.rootViewController=navigation;
     [self.window makeKeyAndVisible];return YES;
+}
+- (void)navigationController:(UINavigationController *)navigation didShowViewController:(UIViewController *)controller animated:(BOOL)animated {
+    (void)animated;
+    if ([controller isKindOfClass:CKSettings.class] &&
+        [NSProcessInfo.processInfo.arguments containsObject:@"--search-external-overlay"]) {
+        AxsCacheKeeperSearchInput *input=[controller valueForKey:@"axs_cachekeeper_searchInput"];
+        [navigation.view layoutIfNeeded];
+        // A sibling above the content bypasses its root hitTest, as opposed to the existing inner-overlay fixture.
+        UIView *overlay=[[UIView alloc] initWithFrame:[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:navigation.view]];
+        overlay.backgroundColor=UIColor.clearColor;overlay.isAccessibilityElement=YES;
+        overlay.accessibilityIdentifier=@"CacheKeeperTestExternalOverlay";
+        overlay.accessibilityLabel=@"Search overlay ready";
+        [navigation.view addSubview:overlay];self.axs_cachekeeper_testOverlay=overlay;
+    }
+    if (![controller isKindOfClass:AxsCacheKeeperDiagnosticsPage.class]) return;
+    NSDictionary *snapshot=[controller valueForKey:@"axs_cachekeeper_searchSnapshot"];
+    NSDictionary *route=[snapshot[@"events"] lastObject][@"hitRoute"];
+    BOOL observed=NO;
+    for (NSDictionary *event in snapshot[@"events"])
+        if ([event[@"event"] isEqual:@"rootHit"] && [event[@"observedHit"] isEqual:@"field"]) observed=YES;
+    // Test-only accessibility output: never shipped in the PreferenceBundle.
+    NSDictionary *result=@{@"state":snapshot[@"state"] ?: NSNull.null,
+        @"probeRevision":snapshot[@"probeRevision"] ?: NSNull.null,
+        @"events":[snapshot[@"events"] valueForKey:@"event"] ?: @[],@"observedFieldTouch":@(observed),
+        @"rootCenterHit":route[@"rootCenterHit"] ?: NSNull.null,
+        @"windowHitRole":route[@"windowHit"][@"role"] ?: NSNull.null,
+        @"windowHitKind":route[@"windowHit"][@"kind"] ?: NSNull.null,
+        @"windowHitInsideRoot":route[@"windowHitInsideRoot"] ?: NSNull.null,
+        @"windowHitInsideNavigationBar":route[@"windowHitInsideNavigationBar"] ?: NSNull.null,
+        @"sameHit":route[@"sameHit"] ?: NSNull.null};
+    NSData *json=[NSJSONSerialization dataWithJSONObject:result options:0 error:nil];
+    UILabel *label=[[UILabel alloc] initWithFrame:CGRectMake(8,controller.view.bounds.size.height-45,controller.view.bounds.size.width-16,28)];
+    label.autoresizingMask=UIViewAutoresizingFlexibleTopMargin|UIViewAutoresizingFlexibleWidth;
+    label.text=@"Search routing test result";label.accessibilityIdentifier=@"CacheKeeperTestSearchRoute";
+    label.accessibilityLabel=[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
+    [controller.view addSubview:label];
+    [self.axs_cachekeeper_testOverlay removeFromSuperview];self.axs_cachekeeper_testOverlay=nil;
 }
 @end
 int main(int argc,char *argv[]) {

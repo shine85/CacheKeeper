@@ -363,6 +363,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 }
 - (void)updateBatch {
     if (!self.axs_cachekeeper_visible || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
+    [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_sample];
     // Poll only cached source metadata each second. Installed-app metadata has a separate cadence.
     NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
     BOOL apps=now-self.axs_cachekeeper_lastApplicationsRefresh>=30;

@@ -10,11 +10,11 @@ typedef NS_ENUM(NSUInteger,AxsCacheKeeperSearchEvent) {
     AxsCacheKeeperSearchEventShouldBegin, AxsCacheKeeperSearchEventDidBegin, AxsCacheKeeperSearchEventDidEnd,
     AxsCacheKeeperSearchEventFocus, AxsCacheKeeperSearchEventFocusNoWindow, AxsCacheKeeperSearchEventFocusDisabled,
     AxsCacheKeeperSearchEventFocusHidden, AxsCacheKeeperSearchEventFocusAccepted, AxsCacheKeeperSearchEventFocusRejected,
-    AxsCacheKeeperSearchEventDismiss
+    AxsCacheKeeperSearchEventDismiss, AxsCacheKeeperSearchEventSampled
 };
 static inline NSArray<NSString *> *axs_cachekeeper_search_event_names(void) {
     return @[@"loaded",@"willAppear",@"didAppear",@"willDisappear",@"diagnostics",@"rootHit",@"shouldBegin",
-        @"didBegin",@"didEnd",@"focus",@"focusNoWindow",@"focusDisabled",@"focusHidden",@"focusAccepted",@"focusRejected",@"dismiss"];
+        @"didBegin",@"didEnd",@"focus",@"focusNoWindow",@"focusDisabled",@"focusHidden",@"focusAccepted",@"focusRejected",@"dismiss",@"sampled"];
 }
 static inline BOOL axs_cachekeeper_search_bool(id value) {
     return [value isKindOfClass:NSNumber.class] && CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID();
@@ -46,21 +46,54 @@ static inline NSDictionary *axs_cachekeeper_search_view_projection(id value) {
     if (!axs_cachekeeper_search_number(value[@"alpha"],0,1,NO)) return nil;
     out[@"alpha"]=@([value[@"alpha"] doubleValue]);return [out copy];
 }
+static inline NSDictionary *axs_cachekeeper_search_hit_projection(id value) {
+    if (![value isKindOfClass:NSDictionary.class]) return nil;
+    NSDictionary *enums=@{@"role":@[@"field",@"search",@"table",@"root",@"navigationBar",@"navigationContainer",@"window",@"other",@"none"],
+        @"kind":@[@"textField",@"navigationBar",@"toolbar",@"tabBar",@"control",@"scrollView",@"stackView",@"visualEffect",@"image",@"label",@"window",@"view",@"none"]};
+    NSMutableDictionary *out=[NSMutableDictionary new];
+    for (NSString *key in enums) {
+        if (![value[key] isKindOfClass:NSString.class] || ![enums[key] containsObject:value[key]]) return nil;
+        out[key]=[value[key] copy];
+    }
+    NSDictionary *view=axs_cachekeeper_search_view_projection(value[@"view"]);if (!view) return nil;
+    out[@"view"]=view;return [out copy];
+}
+static inline NSDictionary *axs_cachekeeper_search_route_projection(id value) {
+    if (![value isKindOfClass:NSDictionary.class] || ![value[@"rootCenterHit"] isKindOfClass:NSString.class] ||
+        ![@[@"field",@"search",@"table",@"other",@"none"] containsObject:value[@"rootCenterHit"]]) return nil;
+    NSDictionary *hit=axs_cachekeeper_search_hit_projection(value[@"windowHit"]);
+    NSDictionary *bar=axs_cachekeeper_search_view_projection(value[@"navigationBar"]);
+    if (!hit || !bar || ![value[@"hitAncestors"] isKindOfClass:NSArray.class] ||
+        [value[@"hitAncestors"] count]>AxsCacheKeeperSearchAncestorLimit) return nil;
+    NSMutableDictionary *out=[@{@"rootCenterHit":[value[@"rootCenterHit"] copy],@"windowHit":hit,@"navigationBar":bar} mutableCopy];
+    for (NSString *key in @[@"hitAncestorsTruncated",@"windowHitInsideRoot",@"windowHitInsideNavigationBar",@"sameHit"]) {
+        if (!axs_cachekeeper_search_bool(value[key])) return nil;out[key]=@([value[key] boolValue]);
+    }
+    NSMutableArray *ancestors=[NSMutableArray new];
+    for (id ancestor in value[@"hitAncestors"]) {
+        NSDictionary *descriptor=axs_cachekeeper_search_hit_projection(ancestor);if (!descriptor) return nil;
+        [ancestors addObject:descriptor];
+    }
+    out[@"hitAncestors"]=[ancestors copy];return [out copy];
+}
 static inline NSDictionary *axs_cachekeeper_search_diagnostics_projection(id value) {
     if (!value) return @{@"state":@"notObserved"};
     NSDictionary *invalid=@{@"state":@"invalid"};
     if (![value isKindOfClass:NSDictionary.class] ||
         !axs_cachekeeper_search_number(value[@"schemaVersion"],1,1,YES) ||
-        !axs_cachekeeper_search_number(value[@"probeRevision"],1,1,YES) ||
+        !axs_cachekeeper_search_number(value[@"probeRevision"],1,2,YES) ||
         ![value[@"state"] isKindOfClass:NSString.class] || ![@[@"recording",@"frozen"] containsObject:value[@"state"]] ||
         !axs_cachekeeper_search_bool(value[@"truncated"]) ||
         ![value[@"events"] isKindOfClass:NSArray.class] || [value[@"events"] count]>AxsCacheKeeperSearchEventLimit) return invalid;
+    NSUInteger revision=[value[@"probeRevision"] unsignedIntegerValue];
+    NSArray *eventNames=axs_cachekeeper_search_event_names();
+    if (revision==1) eventNames=[eventNames subarrayWithRange:NSMakeRange(0,AxsCacheKeeperSearchEventSampled)];
     NSArray *roles=@[@"field",@"search",@"table",@"other",@"none"];
     NSMutableArray *events=[NSMutableArray new];
     for (id event in value[@"events"]) {
         if (![event isKindOfClass:NSDictionary.class]) return invalid;
         NSMutableDictionary *out=[NSMutableDictionary new];
-        NSDictionary *enums=@{@"event":axs_cachekeeper_search_event_names(),@"centerHit":roles,
+        NSDictionary *enums=@{@"event":eventNames,@"centerHit":roles,
             @"observedHit":@[@"field",@"search",@"table",@"other",@"none",@"notObserved"],
             @"scene":@[@"unattached",@"foregroundActive",@"foregroundInactive",@"background",@"unknown"]};
         for (NSString *key in enums) {
@@ -84,8 +117,13 @@ static inline NSDictionary *axs_cachekeeper_search_diagnostics_projection(id val
             NSDictionary *node=axs_cachekeeper_search_view_projection(ancestor[@"view"]);if (!node) return invalid;
             [ancestors addObject:@{@"role":[ancestor[@"role"] copy],@"view":node}];
         }
-        out[@"ancestors"]=[ancestors copy];[events addObject:[out copy]];
+        out[@"ancestors"]=[ancestors copy];
+        if (revision==2) {
+            NSDictionary *route=axs_cachekeeper_search_route_projection(event[@"hitRoute"]);if (!route) return invalid;
+            out[@"hitRoute"]=route;
+        }
+        [events addObject:[out copy]];
     }
-    return @{@"schemaVersion":@1,@"probeRevision":@1,@"state":[value[@"state"] copy],
+    return @{@"schemaVersion":@1,@"probeRevision":@(revision),@"state":[value[@"state"] copy],
         @"truncated":@([value[@"truncated"] boolValue]),@"events":[events copy]};
 }

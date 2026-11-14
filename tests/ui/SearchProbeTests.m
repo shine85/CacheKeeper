@@ -15,6 +15,15 @@
 - (UIEventType)type { return UIEventTypeTouches; }
 - (NSTimeInterval)timestamp { return 1; }
 @end
+@interface AxsCacheKeeperProbeRootView : AxsCacheKeeperSearchRootView
+@property(nonatomic) NSUInteger axs_cachekeeper_nilEventQueries;
+@end
+@implementation AxsCacheKeeperProbeRootView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (!event) self.axs_cachekeeper_nilEventQueries++;
+    return [super hitTest:point withEvent:event];
+}
+@end
 @interface AxsCacheKeeperProbeHostController : UIViewController
 @property(nonatomic,strong) XCTestExpectation *axs_cachekeeper_appeared;
 @end
@@ -29,6 +38,7 @@
 @property(nonatomic,strong) AxsCacheKeeperProbeHostController *owner;
 @property(nonatomic,strong) AxsCacheKeeperSearchRootView *root;
 @property(nonatomic,strong) AxsCacheKeeperSearchInput *input;
+@property(nonatomic,strong) UITableView *table;
 @property(nonatomic,strong) AxsCacheKeeperSearchDiagnostics *probe;
 @property(nonatomic,weak) AxsCacheKeeperSearchInput *activeInput;
 @property(nonatomic,strong) XCTestExpectation *navigationFinished;
@@ -42,10 +52,10 @@
     AxsCacheKeeperProbeHostController *owner=[AxsCacheKeeperProbeHostController new];self.owner=owner;
     XCTestExpectation *visible=[self expectationWithDescription:@"UIKit delivered host viewDidAppear"];
     owner.axs_cachekeeper_appeared=visible;
-    self.root=[[AxsCacheKeeperSearchRootView alloc] initWithFrame:self.window.bounds];owner.view=self.root;
+    self.root=[[AxsCacheKeeperProbeRootView alloc] initWithFrame:self.window.bounds];owner.view=self.root;
     self.window.rootViewController=owner;
     self.input=[[AxsCacheKeeperSearchInput alloc] initWithFrame:CGRectMake(0,80,390,56)];[self.root addSubview:self.input];
-    UITableView *table=[[UITableView alloc] initWithFrame:CGRectMake(0,160,390,500)];[self.root addSubview:table];
+    UITableView *table=[[UITableView alloc] initWithFrame:CGRectMake(0,160,390,500)];self.table=table;[self.root addSubview:table];
     self.probe=[[AxsCacheKeeperSearchDiagnostics alloc] initWithField:self.input.axs_cachekeeper_field input:self.input root:self.root table:table owner:owner];
     self.input.axs_cachekeeper_diagnostics=self.probe;self.root.axs_cachekeeper_diagnostics=self.probe;
     [self.window makeKeyAndVisible];[self waitForExpectations:@[visible] timeout:10];
@@ -65,7 +75,7 @@
     [self waitForExpectations:@[hidden] timeout:10];
     XCTAssertTrue(self.window.hidden);
     self.window.rootViewController=nil;[self.previousKeyWindow makeKeyWindow];
-    self.probe=nil;self.input=nil;self.root=nil;self.owner=nil;self.window=nil;self.previousKeyWindow=nil;[super tearDown];
+    self.probe=nil;self.input=nil;self.table=nil;self.root=nil;self.owner=nil;self.window=nil;self.previousKeyWindow=nil;[super tearDown];
 }
 - (void)axs_cachekeeper_focus:(AxsCacheKeeperSearchInput *)input {
     XCTAssertEqual(input.window,self.window);XCTAssertTrue(self.window.isKeyWindow);
@@ -102,8 +112,15 @@
         id value=raw[key][@"centerInsideBounds"];XCTAssertNotNil(value);
         if (value) XCTAssertEqual(CFGetTypeID((__bridge CFTypeRef)value),CFBooleanGetTypeID(),@"%@ bounds result must originate as a boolean",key);
     }
+    NSDictionary *route=raw[@"hitRoute"];
+    XCTAssertNotNil(route);
+    for (NSString *key in @[@"hitAncestorsTruncated",@"windowHitInsideRoot",@"windowHitInsideNavigationBar",@"sameHit"]) {
+        id value=route[key];XCTAssertNotNil(value);
+        if (value) XCTAssertEqual(CFGetTypeID((__bridge CFTypeRef)value),CFBooleanGetTypeID(),@"%@ must originate as CFBoolean",key);
+    }
     NSDictionary *snapshot=[self.probe axs_cachekeeper_freeze:AxsCacheKeeperSearchEventDiagnostics];
     XCTAssertEqualObjects(snapshot[@"state"],@"frozen");XCTAssertEqual([snapshot[@"events"] count],2u);
+    XCTAssertEqualObjects(snapshot[@"probeRevision"],@2);
     NSString *folder=[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
     AxsCacheKeeperDiagnostics *session=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:folder];
     NSDictionary *report=[session reportWithApps:@[] environment:@{@"searchUI":snapshot}];
@@ -128,6 +145,62 @@
     for (NSDictionary *ancestor in last[@"ancestors"])
         if (![ancestor[@"view"][@"centerInsideBounds"] boolValue] && ![ancestor[@"view"][@"clips"] boolValue]) foundBoundsMiss=YES;
     XCTAssertTrue(foundBoundsMiss);
+}
+- (void)testRouteSeparatesWindowOverlayFromRootLocalHit {
+    UIViewController *owner=[UIViewController new];
+    AxsCacheKeeperSearchRootView *root=[[AxsCacheKeeperSearchRootView alloc] initWithFrame:self.window.bounds];owner.view=root;
+    AxsCacheKeeperSearchInput *input=[[AxsCacheKeeperSearchInput alloc] initWithFrame:CGRectMake(0,120,390,56)];[root addSubview:input];
+    UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:owner];nav.modalPresentationStyle=UIModalPresentationFullScreen;
+    XCTestExpectation *visible=[self expectationWithDescription:@"Navigation host visible for route capture"];
+    [self.owner presentViewController:nav animated:NO completion:^{ [visible fulfill]; }];
+    [self waitForExpectations:@[visible] timeout:10];[root layoutIfNeeded];[input layoutIfNeeded];
+    AxsCacheKeeperSearchDiagnostics *probe=[[AxsCacheKeeperSearchDiagnostics alloc] initWithField:input.axs_cachekeeper_field input:input root:root table:nil owner:owner];
+    root.axs_cachekeeper_diagnostics=probe;
+    [probe axs_cachekeeper_record:AxsCacheKeeperSearchEventDidAppear];
+    NSDictionary *normal=[[probe axs_cachekeeper_snapshot][@"events"] lastObject][@"hitRoute"];
+    XCTAssertEqualObjects(normal[@"rootCenterHit"],@"field");XCTAssertEqualObjects(normal[@"windowHit"][@"role"],@"field");
+    XCTAssertTrue([normal[@"windowHitInsideRoot"] boolValue]);XCTAssertTrue([normal[@"sameHit"] boolValue]);
+    UIView *overlay=[[UIView alloc] initWithFrame:[input convertRect:input.bounds toView:nav.view]];[nav.view addSubview:overlay];
+    [probe axs_cachekeeper_record:AxsCacheKeeperSearchEventDidAppear];
+    NSDictionary *route=[[probe axs_cachekeeper_snapshot][@"events"] lastObject][@"hitRoute"];
+    XCTAssertEqualObjects(route[@"rootCenterHit"],@"field");
+    XCTAssertEqualObjects(route[@"windowHit"][@"role"],@"navigationContainer");XCTAssertEqualObjects(route[@"windowHit"][@"kind"],@"view");
+    XCTAssertFalse([route[@"windowHitInsideRoot"] boolValue]);XCTAssertFalse([route[@"windowHitInsideNavigationBar"] boolValue]);
+    XCTAssertFalse([route[@"sameHit"] boolValue]);XCTAssertTrue([route[@"navigationBar"][@"windowRect"][@"valid"] boolValue]);
+    XCTAssertTrue([[route[@"hitAncestors"] valueForKey:@"role"] containsObject:@"navigationContainer"]);
+    XCTAssertEqual([(NSArray *)[probe axs_cachekeeper_snapshot][@"events"] count],2u);
+}
+- (void)testSamplingDeduplicatesSearchStateAndIgnoresTableScrolling {
+    for (NSUInteger i=0;i<24;i++) [self.probe axs_cachekeeper_sample];
+    NSDictionary *snapshot=[self.probe axs_cachekeeper_snapshot];
+    XCTAssertEqual([(NSArray *)snapshot[@"events"] count],1u);XCTAssertEqualObjects(snapshot[@"events"][0][@"event"],@"sampled");
+    XCTAssertFalse([snapshot[@"truncated"] boolValue]);
+    self.table.contentOffset=CGPointMake(0,40);[self.probe axs_cachekeeper_sample];
+    XCTAssertEqual([(NSArray *)[self.probe axs_cachekeeper_snapshot][@"events"] count],1u);
+    UITextField *field=self.input.axs_cachekeeper_field;
+    CGPoint point=[field convertPoint:CGPointMake(CGRectGetMidX(field.bounds),CGRectGetMidY(field.bounds)) toView:self.root];
+    [self.root hitTest:point withEvent:[AxsCacheKeeperProbeTouchEvent new]];
+    [self.probe axs_cachekeeper_sample];
+    NSArray *events=[self.probe axs_cachekeeper_snapshot][@"events"];
+    XCTAssertEqual(events.count,2u);XCTAssertEqualObjects([events lastObject][@"event"],@"rootHit");
+    UIView *overlay=[[UIView alloc] initWithFrame:self.input.frame];[self.root addSubview:overlay];
+    [self.probe axs_cachekeeper_sample];[self.probe axs_cachekeeper_sample];
+    XCTAssertEqual([(NSArray *)[self.probe axs_cachekeeper_snapshot][@"events"] count],3u);
+    XCTAssertEqualObjects([self axs_cachekeeper_last][@"hitRoute"][@"windowHit"][@"role"],@"root");
+    [overlay removeFromSuperview];self.input.alpha=0.8;
+    [self.probe axs_cachekeeper_sample];
+    XCTAssertEqual([(NSArray *)[self.probe axs_cachekeeper_snapshot][@"events"] count],4u);
+    snapshot=[self.probe axs_cachekeeper_freeze:AxsCacheKeeperSearchEventDiagnostics];
+    NSUInteger queries=((AxsCacheKeeperProbeRootView *)self.root).axs_cachekeeper_nilEventQueries;
+    self.input.hidden=YES;[self.probe axs_cachekeeper_sample];
+    XCTAssertEqualObjects(snapshot,[self.probe axs_cachekeeper_snapshot]);
+    XCTAssertEqual(((AxsCacheKeeperProbeRootView *)self.root).axs_cachekeeper_nilEventQueries,queries);
+    [self.probe axs_cachekeeper_clear];[self.probe axs_cachekeeper_sample];
+    XCTAssertEqual([(NSArray *)[self.probe axs_cachekeeper_snapshot][@"events"] count],0u);
+    self.input.hidden=NO;[self.probe axs_cachekeeper_begin];[self.probe axs_cachekeeper_sample];
+    XCTAssertEqual([(NSArray *)[self.probe axs_cachekeeper_snapshot][@"events"] count],1u);
+    [self.input removeFromSuperview];[self.probe axs_cachekeeper_sample];
+    XCTAssertEqual([(NSArray *)[self.probe axs_cachekeeper_snapshot][@"events"] count],1u);
 }
 - (void)testRootObservationReturnsOriginalHitAndDoesNotSelfRecurse {
     UITextField *field=self.input.axs_cachekeeper_field;
@@ -178,8 +251,26 @@
     [self.probe axs_cachekeeper_record:AxsCacheKeeperSearchEventDidAppear];
     NSDictionary *last=[self axs_cachekeeper_last];
     XCTAssertEqual([(NSArray *)last[@"ancestors"] count],6u);XCTAssertTrue([last[@"ancestorsTruncated"] boolValue]);
+    XCTAssertEqual([(NSArray *)last[@"hitRoute"][@"hitAncestors"] count],6u);
+    XCTAssertTrue([last[@"hitRoute"][@"hitAncestorsTruncated"] boolValue]);
     __weak AxsCacheKeeperSearchDiagnostics *weakProbe=self.probe;
     self.probe=nil;XCTAssertNil(weakProbe);
+}
+- (void)testSnapshotDoesNotRetainUIKitOwners {
+    __weak UIViewController *weakOwner;__weak UINavigationController *weakNavigation;
+    __weak UIView *weakRoot;__weak UITextField *weakField;
+    AxsCacheKeeperSearchDiagnostics *probe;NSDictionary *snapshot;
+    @autoreleasepool {
+        UIViewController *owner=[UIViewController new];UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:owner];
+        UIView *root=owner.view;UITextField *field=[[UITextField alloc] initWithFrame:CGRectMake(0,0,100,44)];[root addSubview:field];
+        [nav loadViewIfNeeded];
+        weakOwner=owner;weakNavigation=nav;weakRoot=root;weakField=field;
+        probe=[[AxsCacheKeeperSearchDiagnostics alloc] initWithField:field input:root root:root table:nil owner:owner];
+        [probe axs_cachekeeper_record:AxsCacheKeeperSearchEventLoaded];snapshot=[probe axs_cachekeeper_snapshot];
+    }
+    XCTAssertNil(weakOwner);XCTAssertNil(weakNavigation);XCTAssertNil(weakRoot);XCTAssertNil(weakField);
+    XCTAssertEqualObjects(snapshot[@"state"],@"recording");XCTAssertEqual([(NSArray *)snapshot[@"events"] count],1u);
+    [probe axs_cachekeeper_sample];XCTAssertEqualObjects(snapshot,[probe axs_cachekeeper_snapshot]);
 }
 - (void)testSettingsTransfersFrozenSnapshotBeforeResigning {
     CKSettings *settings=[CKSettings new];UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:settings];

@@ -6,6 +6,7 @@
 - (instancetype)initWithField:(UITextField *)field input:(UIView *)input root:(UIView *)root table:(UIView *)table owner:(UIViewController *)owner;
 - (void)axs_cachekeeper_begin;
 - (void)axs_cachekeeper_record:(AxsCacheKeeperSearchEvent)event;
+- (void)axs_cachekeeper_sample;
 - (NSDictionary *)axs_cachekeeper_freeze:(AxsCacheKeeperSearchEvent)event;
 - (NSDictionary *)axs_cachekeeper_snapshot;
 - (void)axs_cachekeeper_clear;
