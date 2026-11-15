@@ -17,6 +17,9 @@
 @property(nonatomic,strong) UINavigationController *axs_cachekeeper_inner;
 - (instancetype)initWithSettings:(CKSettings *)settings;
 @end
+@interface AxsCacheKeeperTestForwardingHost : AxsCacheKeeperTestNestedHost
+@property(nonatomic) BOOL axs_cachekeeper_forwardsItem;
+@end
 // Only the event marker is synthetic; all hierarchy, bounds and hit testing below use UIKit.
 @interface AxsCacheKeeperProbeTouchEvent : UIEvent
 @end
@@ -226,6 +229,72 @@
         [self.owner dismissViewControllerAnimated:NO completion:^{ [dismissed fulfill]; }];
         [self waitForExpectations:@[dismissed] timeout:10];
     }
+}
+- (void)testForwardedWrapperItemKeepsInstalledBarCompactAndRestoresItsOriginalState {
+    // Rejecting the installed bar item merely because the wrapper now forwards another item
+    // releases the existing claim and moves the search. All navigation state here is UIKit's.
+    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+    AxsCacheKeeperTestForwardingHost *host=[[AxsCacheKeeperTestForwardingHost alloc] initWithSettings:settings];
+    UINavigationItem *installedItem=host.navigationItem;
+    installedItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAlways;
+    UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:host];
+    nav.navigationBar.prefersLargeTitles=YES;nav.modalPresentationStyle=UIModalPresentationFullScreen;
+    XCTestExpectation *shown=[self expectationWithDescription:@"Forwarding wrapper appeared with its original item installed"];
+    [self.owner presentViewController:nav animated:NO completion:^{ [shown fulfill]; }];
+    [self waitForExpectations:@[shown] timeout:10];
+    [nav.view layoutIfNeeded];[settings updateBatch];[settings.view layoutIfNeeded];
+    XCTAssertEqual(nav.topViewController,host);
+    XCTAssertEqual(nav.navigationBar.topItem,installedItem);
+    XCTAssertEqual(host.navigationItem,installedItem);
+    AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+    UITextField *field=input.axs_cachekeeper_field;
+    CGRect initialFieldRect=[field convertRect:field.bounds toView:self.window];
+    BOOL initialClaimValid=installedItem.largeTitleDisplayMode==UINavigationItemLargeTitleDisplayModeNever &&
+        !nav.navigationBar.prefersLargeTitles && nav.navigationBar.bounds.size.height<=44.5 &&
+        field.window==self.window && !CGRectIsEmpty(initialFieldRect) && !CGRectIsNull(initialFieldRect) &&
+        isfinite(initialFieldRect.origin.x) && isfinite(initialFieldRect.origin.y) &&
+        isfinite(initialFieldRect.size.width) && isfinite(initialFieldRect.size.height);
+    XCTAssertTrue(initialClaimValid,@"FIXTURE INVALID: initial compact claim and attached search geometry were not established");
+    if (!initialClaimValid) return;
+    CGFloat compactTop=initialFieldRect.origin.y;
+    CGFloat pixel=1.0/self.window.screen.scale;
+    UINavigationItem *contentItem=settings.navigationItem;
+    UINavigationItemLargeTitleDisplayMode contentMode=contentItem.largeTitleDisplayMode;
+    host.axs_cachekeeper_forwardsItem=YES;
+    BOOL fixtureValid=nav.topViewController==host && nav.navigationBar.topItem==installedItem &&
+        host.navigationItem==contentItem && installedItem!=contentItem;
+    XCTAssertTrue(fixtureValid,@"FIXTURE INVALID: UIKit synchronized the forwarded item; no installed-item mismatch was established");
+    if (!fixtureValid) return;
+    for (NSUInteger refresh=0;refresh<3;refresh++) {
+        [settings updateBatch];[nav.view layoutIfNeeded];[settings.view layoutIfNeeded];
+        if (nav.navigationBar.topItem!=installedItem) {
+            XCTFail(@"FIXTURE INVALID: UIKit replaced the installed item during refresh; do not treat this as the requested RED");
+            return;
+        }
+        XCTAssertEqual(installedItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever,
+            @"The actual visible bar item must retain the compact claim after wrapper forwarding");
+        XCTAssertFalse(nav.navigationBar.prefersLargeTitles,@"The visible bar must stay compact when the wrapper getter changes");
+        XCTAssertLessThanOrEqual(nav.navigationBar.bounds.size.height,44.5);
+        CGRect rect=[field convertRect:field.bounds toView:self.window];
+        CGRect bar=[nav.navigationBar convertRect:nav.navigationBar.bounds toView:self.window];
+        XCTAssertGreaterThanOrEqual(CGRectGetMinY(rect),CGRectGetMaxY(bar));
+        XCTAssertEqualWithAccuracy(CGRectGetMinY(rect),compactTop,pixel,@"Forwarding must not move the search down after appearance");
+        UIView *hit=[self.window hitTest:CGPointMake(CGRectGetMidX(rect),CGRectGetMidY(rect)) withEvent:nil];
+        XCTAssertTrue(hit==field || [hit isDescendantOfView:field]);
+        XCTAssertEqual(contentItem.largeTitleDisplayMode,contentMode);
+    }
+    [self axs_cachekeeper_focus:input];[self axs_cachekeeper_dismiss:input];
+    UIViewController *detail=[UIViewController new];
+    host.axs_cachekeeper_inner.delegate=self;
+    self.expectedNavigation=host.axs_cachekeeper_inner;self.expectedController=detail;
+    XCTestExpectation *pushed=[self expectationWithDescription:@"Forwarding wrapper left the settings page"];
+    self.navigationFinished=pushed;
+    [host.axs_cachekeeper_inner pushViewController:detail animated:NO];
+    [self waitForExpectations:@[pushed] timeout:10];
+    XCTAssertEqual(installedItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways,
+        @"Release must restore the exact installed item, even when the getter now returns the detail item");
+    XCTAssertTrue(nav.navigationBar.prefersLargeTitles);
+    XCTAssertEqual(contentItem.largeTitleDisplayMode,contentMode);
 }
 - (void)testUpdateBatchShrinksStaleExpandedHostBar {
     // 124.1 device: the host bar re-expanded after appearance (mode still Never, frame stale

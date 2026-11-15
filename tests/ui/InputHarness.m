@@ -61,6 +61,17 @@
     [self.view addSubview:content];[self.axs_cachekeeper_inner didMoveToParentViewController:self];
 }
 @end
+// A real container may forward its item after UIKit has already installed its own item.
+// Keep UINavigationController and UINavigationBar untouched so the probe must verify that
+// UIKit really retains the installed item before it exercises the production controller.
+@interface AxsCacheKeeperTestForwardingHost : AxsCacheKeeperTestNestedHost
+@property(nonatomic) BOOL axs_cachekeeper_forwardsItem;
+@end
+@implementation AxsCacheKeeperTestForwardingHost
+- (UINavigationItem *)navigationItem {
+    return self.axs_cachekeeper_forwardsItem ? self.axs_cachekeeper_inner.topViewController.navigationItem : [super navigationItem];
+}
+@end
 @interface CKScanPage : UITableViewController
 @property(nonatomic,copy) NSString *bundle;
 @property(nonatomic,copy) NSString *appName;
