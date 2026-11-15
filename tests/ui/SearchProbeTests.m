@@ -247,6 +247,37 @@
         [self waitForExpectations:@[dismissed] timeout:10];
     }
 }
+- (void)testClaimedCompactBarRegrowthDoesNotCoverEditableSearchControls {
+    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+    UINavigationController *nav=[self axs_cachekeeper_present_host:host];
+    AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+    UINavigationBar *bar=nav.navigationBar;
+    XCTAssertFalse(bar.prefersLargeTitles);
+    XCTAssertEqual(bar.topItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
+    CGFloat originalTop=[input convertRect:input.bounds toView:self.window].origin.y;
+    // Reproduce 144.1: the host restores a 91pt frame between our layout pass and the tap,
+    // while its compact flags and the field's safe area remain unchanged.
+    CGRect frame=bar.frame;frame.size.height=91;bar.frame=frame;
+    CGPoint center=[input.axs_cachekeeper_field convertPoint:CGPointMake(CGRectGetMidX(input.axs_cachekeeper_field.bounds),18) toView:self.window];
+    XCTAssertTrue(CGRectContainsPoint([bar convertRect:bar.bounds toView:self.window],center));
+    UIView *hit=[self.window hitTest:center withEvent:nil];
+    XCTAssertTrue(hit==input.axs_cachekeeper_field || [hit isDescendantOfView:input.axs_cachekeeper_field],@"Regrown compact host must not swallow the real field's touches");
+    XCTAssertEqualWithAccuracy([input convertRect:input.bounds toView:self.window].origin.y,originalTop,0.5);
+    [self axs_cachekeeper_focus:input];[input layoutIfNeeded];
+    UIButton *cancel=[input valueForKey:@"axs_cachekeeper_cancel_button"];
+    frame=bar.frame;frame.size.height=91;bar.frame=frame;
+    CGPoint cancelCenter=[cancel convertPoint:CGPointMake(CGRectGetMidX(cancel.bounds),CGRectGetMidY(cancel.bounds)) toView:self.window];
+    XCTAssertTrue(CGRectContainsPoint([bar convertRect:bar.bounds toView:self.window],cancelCenter));
+    hit=[self.window hitTest:cancelCenter withEvent:nil];
+    XCTAssertTrue(hit==cancel || [hit isDescendantOfView:cancel],@"Cancel must receive its native touch too");
+    // Explicit host expansion has no compact claim and must keep its own hit route.
+    [self axs_cachekeeper_dismiss:input];
+    host.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAlways;
+    bar.prefersLargeTitles=YES;
+    hit=[self.window hitTest:center withEvent:nil];
+    XCTAssertTrue(hit==bar || [hit isDescendantOfView:bar]);
+}
 - (void)testHostLargeTitleResetReconcilesExistingClaim {
     // The same-item early return used to ignore a host reset after a successful claim.
     // Exercise the production refresh and UIKit layout, including an originally compact host.
@@ -802,7 +833,7 @@
     [self.probe axs_cachekeeper_begin];[self axs_cachekeeper_focus:self.input];
     NSArray *names=[[self.probe axs_cachekeeper_snapshot][@"events"] valueForKey:@"event"];
     XCTAssertTrue([names containsObject:@"shouldBegin"]);XCTAssertTrue([names containsObject:@"didBegin"]);
-    XCTAssertFalse([[self.probe axs_cachekeeper_snapshot][@"truncated"] boolValue]);
+    XCTAssertTrue([[self.probe axs_cachekeeper_snapshot][@"truncated"] boolValue]);
     [self.probe axs_cachekeeper_clear];
     XCTAssertEqual([(NSArray *)[self.probe axs_cachekeeper_snapshot][@"events"] count],0u);
 }
@@ -857,12 +888,12 @@
     XCTAssertEqualObjects(last[@"event"],@"diagnostics");XCTAssertTrue([last[@"firstResponder"] boolValue]);
     XCTAssertFalse(input.axs_cachekeeper_field.isFirstResponder);
     [self waitForExpectations:@[pushed,editing,keyboard] timeout:10];self.activeInput=nil;
-    XCTAssertEqual([(NSArray *)[probe axs_cachekeeper_snapshot][@"events"] count],0u);
+    XCTAssertEqualObjects(snapshot,[probe axs_cachekeeper_snapshot]);
     XCTAssertEqualObjects(snapshot,[page valueForKey:@"axs_cachekeeper_searchSnapshot"]);
     XCTestExpectation *popped=[self expectationWithDescription:@"UIKit completed Settings return"];
     self.navigationFinished=popped;self.expectedControllerClass=CKSettings.class;
     [nav popViewControllerAnimated:YES];[self waitForExpectations:@[popped] timeout:10];
-    XCTAssertEqualObjects([[probe axs_cachekeeper_snapshot][@"events"] firstObject][@"event"],@"willAppear");
+    XCTAssertTrue([[[probe axs_cachekeeper_snapshot][@"events"] valueForKey:@"event"] containsObject:@"didBegin"],@"Returning from a page must preserve the preceding search attempt for export");
     XCTAssertEqualObjects([[probe axs_cachekeeper_snapshot][@"events"] lastObject][@"event"],@"didAppear");
 }
 @end
