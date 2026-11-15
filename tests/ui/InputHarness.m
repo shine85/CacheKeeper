@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import "Preferences/PSViewController.h"
 #import "../../Prefs/SearchInput.h"
+#import "../../Prefs/SearchHitRouting.h"
 #import "../../Prefs/DiagnosticsPage.h"
 @implementation PSViewController
 @end
@@ -85,7 +86,58 @@
     return self.axs_cachekeeper_aliasedItem ?: [super navigationItem];
 }
 @end
-// Restore the observed host geometry after a settled production layout, without changing flags/items.
+// Inject the observed late regrowth at touch dispatch; AX snapshots may arrive after UIKit has relaid out.
+@interface AxsCacheKeeperRegrowingWindow : UIWindow
+@property(nonatomic,weak) CKSettings *axs_cachekeeper_settings;
+@property(nonatomic,weak) UINavigationBar *axs_cachekeeper_bar;
+@property(nonatomic) NSUInteger axs_cachekeeper_armed;
+@property(nonatomic) BOOL axs_cachekeeper_probing;
+@property(nonatomic,strong) NSMutableDictionary *axs_cachekeeper_samples;
+@end
+@implementation AxsCacheKeeperRegrowingWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    CKSettings *settings=self.axs_cachekeeper_settings;UINavigationBar *bar=self.axs_cachekeeper_bar;
+    if (!event || event.type!=UIEventTypeTouches || !self.axs_cachekeeper_armed || self.axs_cachekeeper_probing ||
+        !settings || bar.window!=self) return [super hitTest:point withEvent:event];
+    AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+    UIView *target=[settings.view hitTest:[settings.view convertPoint:point fromView:self] withEvent:nil];
+    if (![input axs_cachekeeper_owns_enabled_hit:target]) return [super hitTest:point withEvent:event];
+    self.axs_cachekeeper_probing=YES;
+    @try {
+        CGFloat topBefore=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self].origin.y;
+        CGRect frame=bar.frame;frame.size.height=91;bar.frame=frame;
+        CGRect barRect=[bar convertRect:bar.bounds toView:self];
+        // Test the untouched production binding first: the fixture must never repair it before the real touch.
+        UIView *actual=[super hitTest:point withEvent:event];
+        UIView *original=nil;
+        [AxsCacheKeeperSearchHitRouting axs_cachekeeper_release_bar:bar owner:(id)settings];
+        @try { original=[super hitTest:point withEvent:nil]; }
+        @finally { [AxsCacheKeeperSearchHitRouting axs_cachekeeper_claim_bar:bar owner:(id)settings]; }
+        CGFloat topAfter=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self].origin.y;
+        NSString *key=[NSString stringWithFormat:@"%lu",(unsigned long)self.axs_cachekeeper_armed];
+        if (!self.axs_cachekeeper_samples) self.axs_cachekeeper_samples=[NSMutableDictionary new];
+        NSDictionary *previous=self.axs_cachekeeper_samples[key];
+        BOOL passed=CGRectContainsPoint(barRect,point) && original==bar && actual==target && fabs(topAfter-topBefore)<0.5;
+        self.axs_cachekeeper_samples[key]=@{@"passed":@(passed && (!previous || [previous[@"passed"] boolValue])),
+            @"queries":@([previous[@"queries"] unsignedIntegerValue]+1),@"barHeight":@(barRect.size.height),
+            @"overlap":@(CGRectContainsPoint(barRect,point)),@"originalBareBar":@(original==bar),
+            @"productionHitMatchesTarget":@(actual==target),@"fieldTopBefore":@(topBefore),@"fieldTopAfter":@(topAfter),
+            @"originalClass":original ? NSStringFromClass(original.class) : @"nil",
+            @"actualClass":actual ? NSStringFromClass(actual.class) : @"nil"};
+        if (!previous) NSLog(@"REGROWTH_TOUCH %@ %@",key,self.axs_cachekeeper_samples[key]);
+        return actual;
+    } @finally { self.axs_cachekeeper_probing=NO; }
+}
+@end
+@interface AxsCacheKeeperRegrowthEvidenceLabel : UILabel
+@property(nonatomic,weak) AxsCacheKeeperRegrowingWindow *axs_cachekeeper_source;
+@end
+@implementation AxsCacheKeeperRegrowthEvidenceLabel
+- (NSString *)accessibilityLabel {
+    NSData *json=[NSJSONSerialization dataWithJSONObject:self.axs_cachekeeper_source.axs_cachekeeper_samples ?: @{} options:0 error:nil];
+    return [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
+}
+@end
 @interface AxsCacheKeeperRegrowingNavigationController : UINavigationController
 @property(nonatomic) NSUInteger axs_cachekeeper_regrow_count;
 - (void)axs_cachekeeper_regrow;
@@ -96,7 +148,9 @@
     CKSettings *settings=(id)host.axs_cachekeeper_inner.topViewController;
     host.navigationItem.leftBarButtonItem.title=[NSString stringWithFormat:@"重现遮挡 %lu",(unsigned long)++self.axs_cachekeeper_regrow_count];
     [settings axs_cachekeeper_layout_compact_navigation];[settings.view layoutIfNeeded];
-    CGRect frame=self.navigationBar.frame;frame.size.height=91;self.navigationBar.frame=frame;
+    AxsCacheKeeperRegrowingWindow *window=(id)self.view.window;
+    window.axs_cachekeeper_settings=settings;window.axs_cachekeeper_bar=self.navigationBar;
+    window.axs_cachekeeper_armed=self.axs_cachekeeper_regrow_count;
 }
 @end
 @interface CKScanPage : UITableViewController
@@ -113,11 +167,13 @@
 @implementation AxsCacheKeeperInputTestDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     (void)application;(void)options;
-    self.window=[[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    BOOL regrown=[NSProcessInfo.processInfo.arguments containsObject:@"--search-regrown-bar"] &&
+        [NSProcessInfo.processInfo.arguments containsObject:@"--compact-visual"];
+    Class windowClass=regrown ? AxsCacheKeeperRegrowingWindow.class : UIWindow.class;
+    self.window=[[windowClass alloc] initWithFrame:UIScreen.mainScreen.bounds];
     if ([NSProcessInfo.processInfo.arguments containsObject:@"--compact-visual"]) {
         AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
         AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
-        BOOL regrown=[NSProcessInfo.processInfo.arguments containsObject:@"--search-regrown-bar"];
         UINavigationController *navigation=regrown ? [[AxsCacheKeeperRegrowingNavigationController alloc] initWithRootViewController:host] : [[UINavigationController alloc] initWithRootViewController:host];
         navigation.navigationBar.prefersLargeTitles=YES;
         [settings loadViewIfNeeded];host.navigationItem.rightBarButtonItems=settings.navigationItem.rightBarButtonItems;
@@ -128,7 +184,13 @@
         }
         if ([NSProcessInfo.processInfo.arguments containsObject:@"--dark"]) self.window.overrideUserInterfaceStyle=UIUserInterfaceStyleDark;
         else self.window.overrideUserInterfaceStyle=UIUserInterfaceStyleLight;
-        self.window.rootViewController=navigation;[self.window makeKeyAndVisible];return YES;
+        self.window.rootViewController=navigation;[self.window makeKeyAndVisible];
+        if (regrown) {
+            AxsCacheKeeperRegrowthEvidenceLabel *label=[[AxsCacheKeeperRegrowthEvidenceLabel alloc] initWithFrame:CGRectMake(8,self.window.bounds.size.height-34,self.window.bounds.size.width-16,22)];
+            label.text=@"Touch dispatch evidence";label.accessibilityIdentifier=@"CacheKeeperRegrowthEvidence";
+            label.axs_cachekeeper_source=(id)self.window;label.userInteractionEnabled=NO;[self.window addSubview:label];
+        }
+        return YES;
     }
     CKSettings *settings=[CKSettings new];
     UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:settings];

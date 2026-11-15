@@ -1,7 +1,7 @@
 import XCTest
 
 final class SearchRoutingUITests: XCTestCase {
-    func testRegrownOwnedBarKeepsNativeSearchAndCancelTappable() {
+    func testRegrownOwnedBarKeepsNativeSearchAndCancelTappable() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--compact-visual", "--search-regrown-bar", "-AppleLanguages", "(zh-Hans)"]
         app.launch()
@@ -14,35 +14,49 @@ final class SearchRoutingUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [compact], timeout: 5), .completed)
         let top = field.frame.minY
         var calls = 0
-        func overlap(_ control: XCUIElement) {
+        func armRegrowth() {
             let trigger = app.buttons["CacheKeeperRegrowHost"]
             trigger.tap()
             calls += 1
             XCTAssertEqual(trigger.label, "重现遮挡 \(calls)", "Host action must actually execute")
-            XCTAssertGreaterThan(bar.frame.maxY, control.frame.midY, "Fixture must cover the tapped control with the real owned bar")
             XCTAssertEqual(field.frame.minY, top, accuracy: 0.5)
         }
+        func verifyTouch() throws {
+            let json = try XCTUnwrap(app.staticTexts["CacheKeeperRegrowthEvidence"].label.data(using: .utf8))
+            let samples = try XCTUnwrap(JSONSerialization.jsonObject(with: json) as? [String: Any])
+            let sample = try XCTUnwrap(samples[String(calls)] as? [String: Any], "A real touch must exercise the armed overlap")
+            XCTAssertEqual(sample["passed"] as? Bool, true, "Every real hit query must preserve routing: \(sample)")
+            XCTAssertEqual(sample["overlap"] as? Bool, true)
+            XCTAssertEqual(sample["originalBareBar"] as? Bool, true, "Without the production binding the same point must hit the bare bar")
+            XCTAssertEqual(sample["productionHitMatchesTarget"] as? Bool, true)
+            XCTAssertEqual(try XCTUnwrap(sample["barHeight"] as? Double), 91, accuracy: 0.5)
+            XCTAssertEqual(try XCTUnwrap(sample["fieldTopBefore"] as? Double), Double(top), accuracy: 0.5)
+            XCTAssertEqual(try XCTUnwrap(sample["fieldTopAfter"] as? Double), Double(top), accuracy: 0.5)
+        }
         for _ in 0..<3 {
-            overlap(field)
+            armRegrowth()
             field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
             XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            try verifyTouch()
             field.typeText("drive")
             XCTAssertTrue(app.staticTexts["网盘"].exists)
             XCTAssertFalse(app.staticTexts["播客"].exists)
             let clear = field.buttons.firstMatch
             XCTAssertTrue(clear.exists)
-            overlap(clear)
+            armRegrowth()
             clear.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
             XCTAssertTrue(app.staticTexts["播客"].exists, "The native clear button must reset the filter")
+            try verifyTouch()
             let cancel = app.buttons["取消"]
-            overlap(cancel)
+            armRegrowth()
             cancel.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
             let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: app.keyboards.firstMatch)
             XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed)
             XCTAssertTrue(app.staticTexts["播客"].exists)
+            try verifyTouch()
         }
         // The host's own actions must still receive their native touches.
-        overlap(field)
+        armRegrowth()
         XCTAssertFalse(app.keyboards.firstMatch.exists)
     }
 
