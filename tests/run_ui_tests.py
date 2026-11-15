@@ -37,11 +37,20 @@ subprocess.run(["codesign", "--verify", "--deep", "--strict",
 # input test alone took 268 seconds and the suite was cut off mid-test. Raise only the
 # execution budget; no assertion or timeout inside the tests changes.
 try:
+    # The real WebKit session runs in a fresh host, isolated from the forty-view capacity probe.
+    # Fail here before spending time on XCUI, while retaining every check on successful builds.
     subprocess.run(["xcodebuild", "test-without-building", *build_options,
+                    "-only-testing:WebKitIntegrationTests",
+                    "-resultBundlePath", str(output / "WebKitResults.xcresult"),
+                    "-parallel-testing-enabled", "NO"], check=True, timeout=420)
+    subprocess.run(["xcodebuild", "test-without-building", *build_options,
+                    "-skip-testing:WebKitIntegrationTests",
                     "-resultBundlePath", str(output / "Results.xcresult"),
                     "-parallel-testing-enabled", "NO"], check=True, timeout=900)
 finally:
-    if (output / "Results.xcresult").exists():
-        subprocess.run(["xcrun", "xcresulttool", "export", "attachments",
-                        "--path", str(output / "Results.xcresult"),
-                        "--output-path", str(output / "Screenshots")], check=True, timeout=60)
+    for result, screenshots in [("WebKitResults.xcresult", "WebKitScreenshots"),
+                                ("Results.xcresult", "Screenshots")]:
+        if (output / result).exists():
+            subprocess.run(["xcrun", "xcresulttool", "export", "attachments",
+                            "--path", str(output / result),
+                            "--output-path", str(output / screenshots)], check=True, timeout=60)

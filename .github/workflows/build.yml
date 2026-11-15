@@ -71,6 +71,8 @@ jobs:
           path: |
             tmp/input-ui-tests/Results.xcresult
             tmp/input-ui-tests/Screenshots
+            tmp/input-ui-tests/WebKitResults.xcresult
+            tmp/input-ui-tests/WebKitScreenshots
           if-no-files-found: ignore
 
       - name: 获取 RootHide Theos
