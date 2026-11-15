@@ -169,6 +169,60 @@
         [self waitForExpectations:@[dismissed] timeout:10];
     }
 }
+- (void)testHostLargeTitleResetReconcilesExistingClaim {
+    // The same-item early return used to ignore a host reset after a successful claim.
+    // Exercise the production refresh and UIKit layout, including an originally compact host.
+    for (NSNumber *previousPrefers in @[@YES,@NO]) {
+        AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+        AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+        host.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAutomatic;
+        UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:host];
+        nav.navigationBar.prefersLargeTitles=previousPrefers.boolValue;
+        nav.modalPresentationStyle=UIModalPresentationFullScreen;
+        XCTestExpectation *shown=[self expectationWithDescription:@"Host reset fixture appeared"];
+        [self.owner presentViewController:nav animated:NO completion:^{ [shown fulfill]; }];
+        [self waitForExpectations:@[shown] timeout:10];
+        [nav.view layoutIfNeeded];[settings updateBatch];[settings.view layoutIfNeeded];
+        AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+        UITextField *field=input.axs_cachekeeper_field;
+        XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
+        XCTAssertFalse(nav.navigationBar.prefersLargeTitles);
+        CGFloat compactHeight=nav.navigationBar.bounds.size.height;
+        CGFloat compactTop=[field convertRect:field.bounds toView:self.window].origin.y;
+        CGFloat pixel=1.0/self.window.screen.scale;
+        for (NSUInteger reset=0;reset<3;reset++) {
+            nav.navigationBar.prefersLargeTitles=YES;
+            [settings updateBatch];
+            for (NSUInteger layout=0;layout<3;layout++) {
+                [nav.view setNeedsLayout];[nav.view layoutIfNeeded];
+                [settings.view setNeedsLayout];[settings.view layoutIfNeeded];
+                [settings updateBatch];
+                XCTAssertFalse(nav.navigationBar.prefersLargeTitles,@"A current claim must reconcile the host reset");
+                XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
+                XCTAssertEqualWithAccuracy(nav.navigationBar.bounds.size.height,compactHeight,pixel);
+                CGRect rect=[field convertRect:field.bounds toView:self.window];
+                CGRect bar=[nav.navigationBar convertRect:nav.navigationBar.bounds toView:self.window];
+                XCTAssertGreaterThanOrEqual(CGRectGetMinY(rect),CGRectGetMaxY(bar));
+                XCTAssertEqualWithAccuracy(rect.origin.y,compactTop,pixel);
+                UIView *hit=[self.window hitTest:CGPointMake(CGRectGetMidX(rect),CGRectGetMidY(rect)) withEvent:nil];
+                XCTAssertTrue(hit==field || [hit isDescendantOfView:field]);
+            }
+        }
+        UIViewController *detail=[UIViewController new];
+        host.axs_cachekeeper_inner.delegate=self;
+        self.expectedNavigation=host.axs_cachekeeper_inner;self.expectedController=detail;
+        XCTestExpectation *pushed=[self expectationWithDescription:@"Host reset fixture left the list"];
+        self.navigationFinished=pushed;
+        [host.axs_cachekeeper_inner pushViewController:detail animated:NO];
+        [self waitForExpectations:@[pushed] timeout:10];
+        [settings updateBatch];
+        XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAutomatic);
+        XCTAssertEqual(nav.navigationBar.prefersLargeTitles,previousPrefers.boolValue,@"Repeated resets must not replace the saved original value");
+        XCTestExpectation *dismissed=[self expectationWithDescription:@"Host reset fixture dismissed"];
+        [self.owner dismissViewControllerAnimated:NO completion:^{ [dismissed fulfill]; }];
+        [self waitForExpectations:@[dismissed] timeout:10];
+    }
+}
 - (void)testUpdateBatchShrinksStaleExpandedHostBar {
     // 124.1 device: the host bar re-expanded after appearance (mode still Never, frame stale
     // at ~91pt), so the geometry clearance held ~47pt. A viewDidAppear-only force cannot catch
