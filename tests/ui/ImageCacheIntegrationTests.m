@@ -40,6 +40,7 @@
 @property(nonatomic,strong) NSMutableDictionary *context;
 @property(nonatomic,copy) NSString *home;
 @property(nonatomic,strong) NSMutableArray<SDImageCache *> *owners;
+@property(atomic) NSUInteger contextReads;
 @end
 @implementation ImageCacheIntegrationTests
 - (void)setUp {
@@ -49,9 +50,9 @@
     self.context=[@{@"valid":@YES,@"appState":@{@"enabled":@YES,@"mode":@"clean",@"autoDiscover":@YES,@"excludedPaths":@[]},
         @"selected":@[],@"home":self.home,@"bundle":@"cachekeeper.owned.integration",@"version":@"1.0",
         @"installation":@"owned-fixture-install",@"reportWritable":@YES} mutableCopy];
-    self.owners=[NSMutableArray new];__weak typeof(self) weakSelf=self;
+    self.owners=[NSMutableArray new];self.contextReads=0;__weak typeof(self) weakSelf=self;
     self.engine=[[AxsCacheKeeperImageCache alloc] initWithContextProvider:^NSDictionary *{
-        ImageCacheIntegrationTests *test=weakSelf;@synchronized(test) {return [test.context copy] ?: @{};}
+        ImageCacheIntegrationTests *test=weakSelf;@synchronized(test) {test.contextReads++;return [test.context copy] ?: @{};}
     } observer:nil];
     [self.engine usePinnedSDKForIntegrationTests];[self.engine startObserving];[self axs_cachekeeper_refresh];
 }
@@ -170,6 +171,35 @@
     [owner storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"later-write"];
     XCTAssertNil([owner diskImageDataForKey:@"later-write"]);
     [self axs_cachekeeper_refresh];XCTAssertEqual([self.engine.receipt[@"writesBlocked"] unsignedIntegerValue],1u);
+}
+- (void)testUnboundOwnersRequestAtMostOneWriteDrivenRefresh {
+    [self axs_cachekeeper_state:@{@"enabled":@YES,@"mode":@"clean",@"excludedPaths":@[@"Library/Caches"]}];
+    SDImageCache *first=[self axs_cachekeeper_owner:@"excluded-overlap" config:nil];
+    XCTAssertEqualObjects(self.engine.receipt[@"reason"],@"scopeNotAuthorized");
+    NSUInteger before=self.contextReads;
+    for (NSUInteger i=0;i<5;i++) [first storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"kept-excluded"];
+    [self axs_cachekeeper_refresh];
+    XCTAssertGreaterThanOrEqual(self.contextReads,before+1);
+    XCTAssertLessThanOrEqual(self.contextReads,before+2,@"one initial SDK write may schedule one probe; never one per write");
+    before=self.contextReads;
+    for (NSUInteger i=0;i<5;i++) [first storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"kept-excluded"];
+    [self axs_cachekeeper_refresh];
+    XCTAssertEqual(self.contextReads,before+1,@"later writes to an unbound scope must not poll configuration");
+    XCTAssertNotNil([first diskImageDataForKey:@"kept-excluded"]);
+    SDImageCache *second=[self axs_cachekeeper_owner:@"excluded-overlap" config:nil];
+    [self axs_cachekeeper_state:@{@"enabled":@YES,@"mode":@"clean"}];
+    XCTAssertEqualObjects(self.engine.receipt[@"reason"],@"overlappingOwners");
+    before=self.contextReads;
+    for (NSUInteger i=0;i<5;i++) [second storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"kept-overlap"];
+    [self axs_cachekeeper_refresh];
+    XCTAssertLessThanOrEqual(self.contextReads,before+2);
+    before=self.contextReads;
+    for (NSUInteger i=0;i<5;i++) [second storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"kept-overlap"];
+    [self axs_cachekeeper_refresh];
+    XCTAssertEqual(self.contextReads,before+1,@"unbound overlapping owners must not poll configuration on writes");
+    XCTAssertNotNil([second diskImageDataForKey:@"kept-overlap"]);
+    XCTAssertEqual([self.engine.receipt[@"eligible"] unsignedIntegerValue],0u);
+    XCTAssertEqual([self.engine.receipt[@"submitted"] unsignedIntegerValue],0u);
 }
 - (void)testActualSDWebImageDiskRestrictionPreservesMemoryAndRestoresOnDisable {
     SDImageCache *owner=[self axs_cachekeeper_owner:@"normal" config:nil];

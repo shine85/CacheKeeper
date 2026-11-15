@@ -70,7 +70,7 @@ static BOOL AxsCacheKeeperImageKnownUUID(const void *base) {
 @property(nonatomic,strong) id initialAttributes;
 @property(nonatomic,weak) id initialFileManager;
 @property(nonatomic,copy) NSString *initialReason;
-@property(nonatomic) BOOL rootRefreshPending;
+@property(nonatomic) BOOL rootRefreshAttempted;
 @property(atomic) BOOL invalidated;
 @property(nonatomic,strong) dispatch_queue_t queue;
 @property(nonatomic,copy) NSString *path;
@@ -420,18 +420,16 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
     dispatch_async(self.work,^{[self axs_cachekeeper_refresh];});
 }
 - (void)axs_cachekeeper_observeCreatedRoot:(AxsCacheKeeperImageBinding *)binding {
-    // 5.15.5 creates the root on first SDK write. Coalesce that event without reading files
-    // in the hook, and never reopen admission for an already-bound or invalidated identity.
+    // 5.15.5 creates the root on first SDK write. Recheck each unbound owner at most once;
+    // failed writes/scopes then wait for normal configuration or lifecycle refreshes.
+    // This also covers a write racing the initial worker probe, without polling in the hook.
     NSDictionary *context=self.context;
     if (![context[@"valid"] boolValue] || !axs_cachekeeper_app_enabled(context[@"appState"])) return;
     @synchronized(binding) {
-        if (!binding || binding.initialReason || binding.identity || binding.invalidated || binding.rootRefreshPending) return;
-        binding.rootRefreshPending=YES;
+        if (!binding || binding.initialReason || binding.identity || binding.invalidated || binding.rootRefreshAttempted) return;
+        binding.rootRefreshAttempted=YES;
     }
-    dispatch_async(self.work,^{
-        [self axs_cachekeeper_refresh];
-        @synchronized(binding) {binding.rootRefreshPending=NO;}
-    });
+    dispatch_async(self.work,^{[self axs_cachekeeper_refresh];});
 }
 - (void)axs_cachekeeper_refresh {
     NSUInteger generation;@synchronized(self) {generation=self.generation;}
