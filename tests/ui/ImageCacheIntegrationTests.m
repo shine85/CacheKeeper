@@ -3,6 +3,7 @@
 #import "../../AxsCacheKeeperImageCache.h"
 #import "../../AxsCacheKeeperCleanupRules.h"
 #include <sys/stat.h>
+#import <objc/runtime.h>
 
 // The private queue getter is verified against the fixed SDK source and the saved device ABI.
 @interface SDImageCache (AxsCacheKeeperImageTestQueue)
@@ -11,6 +12,27 @@
 @interface AxsCacheKeeperImageTestCustomDisk : SDDiskCache
 @end
 @implementation AxsCacheKeeperImageTestCustomDisk
+@end
+@interface AxsCacheKeeperImageTestCustomConfig : SDImageCacheConfig
+@end
+@implementation AxsCacheKeeperImageTestCustomConfig
+@end
+@interface AxsCacheKeeperImageTestMutatingMemory : SDMemoryCache
+@end
+@implementation AxsCacheKeeperImageTestMutatingMemory
+- (instancetype)initWithConfig:(SDImageCacheConfig *)config {
+    if ((self=[super initWithConfig:config])) config.ioQueueAttributes=nil;
+    return self;
+}
+@end
+@interface AxsCacheKeeperImageTestSubstitutingMemory : SDMemoryCache
+@end
+@implementation AxsCacheKeeperImageTestSubstitutingMemory
+- (instancetype)initWithConfig:(SDImageCacheConfig *)config {
+    if (!(self=[super initWithConfig:config])) return nil;
+    config.ioQueueAttributes=nil;config.memoryCacheClass=SDMemoryCache.class;
+    return (id)[[SDMemoryCache alloc] initWithConfig:config];
+}
 @end
 
 @interface ImageCacheIntegrationTests : XCTestCase
@@ -57,7 +79,23 @@
     SDImageCacheConfig *actual=config ?: [SDImageCacheConfig new];
     actual.shouldRemoveExpiredDataWhenEnterBackground=NO;actual.shouldRemoveExpiredDataWhenTerminate=NO;
     SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:space diskCacheDirectory:[self.home stringByAppendingPathComponent:@"Library/Caches"] config:actual];
-    XCTAssertNotNil(owner);[self.owners addObject:owner];[self axs_cachekeeper_refresh];return owner;
+    XCTAssertNotNil(owner);[self.owners addObject:owner];
+    if (!config) {
+        // Stop at the contract failure, before queue/cleanup assertions create cascades.
+        NSDictionary *detail=[self.engine instanceDiagnosticsForIntegrationTests:owner];
+        BOOL continuing=self.continueAfterFailure;self.continueAfterFailure=NO;
+        XCTAssertEqualObjects(detail[@"initialReason"],@"none",@"standard SDK admission: %@",detail);
+        XCTAssertEqualObjects(detail[@"currentReason"],@"none",@"standard SDK admission: %@",detail);
+        self.continueAfterFailure=continuing;
+    }
+    // 5.15.5 creates the cache root lazily on its first actual write; 5.21.7 creates it in init.
+    // Let the SDK establish its own root, even when this test later rejects the owner.
+    if (![NSFileManager.defaultManager fileExistsAtPath:owner.diskCachePath]) {
+        [owner storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"fixture-root-seed"];
+        XCTAssertNotNil([owner diskImageDataForKey:@"fixture-root-seed"]);
+        dispatch_sync(owner.ioQueue,^{[owner.diskCache removeDataForKey:@"fixture-root-seed"];});
+    }
+    [self axs_cachekeeper_refresh];return owner;
 }
 - (void)axs_cachekeeper_wait:(BOOL (^)(NSDictionary *))test description:(NSString *)description {
     NSPredicate *predicate=[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *unused) {(void)object;(void)unused;return test(self.engine.receipt);}];
@@ -66,6 +104,73 @@
     XCTAssertNotNil(axs_cachekeeper_image_cache_projection(self.engine.receipt));
 }
 - (NSData *)axs_cachekeeper_payload {return [@"owned image-cache fixture" dataUsingEncoding:NSUTF8StringEncoding];}
+- (void)testStandardMemoryKVOConfigurationIsAdmittedButCustomConfigurationIsNot {
+    SDImageCache *standard=[self axs_cachekeeper_owner:@"standard-kvo" config:nil];
+    XCTAssertNotEqual(object_getClass(standard.config),SDImageCacheConfig.class);
+    XCTAssertEqual(class_getSuperclass(object_getClass(standard.config)),SDImageCacheConfig.class);
+    XCTAssertEqual([standard.config class],SDImageCacheConfig.class);
+    XCTAssertEqualObjects([self.engine instanceDiagnosticsForIntegrationTests:standard][@"configKind"],@"standardKVO");
+    standard.config.maxMemoryCost=4096;standard.config.maxMemoryCount=17;
+    XCTAssertEqual(((SDMemoryCache *)standard.memoryCache).totalCostLimit,4096u);
+    XCTAssertEqual(((SDMemoryCache *)standard.memoryCache).countLimit,17u);
+    [self axs_cachekeeper_refresh];XCTAssertEqual([self.engine.receipt[@"eligible"] unsignedIntegerValue],1u);
+    SDImageCache *custom=[self axs_cachekeeper_owner:@"custom-config" config:[AxsCacheKeeperImageTestCustomConfig new]];
+    XCTAssertEqualObjects([self.engine instanceDiagnosticsForIntegrationTests:custom][@"initialReason"],@"configurationClass");
+    XCTAssertEqual([self.engine.receipt[@"eligible"] unsignedIntegerValue],1u);
+    [self axs_cachekeeper_state:@{@"enabled":@YES,@"mode":@"auto"}];
+    [custom storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"custom-kept"];
+    XCTAssertNotNil([custom diskImageDataForKey:@"custom-kept"]);
+    [self.engine didEnterBackgroundWithTime:YES];
+    [self axs_cachekeeper_wait:^BOOL(NSDictionary *r) {return [r[@"apiCompleted"] unsignedIntegerValue]==1 && ![r[@"pending"] unsignedIntegerValue];} description:@"only standard KVO owner cleared"];
+    XCTAssertNotNil([custom diskImageDataForKey:@"custom-kept"]);
+}
+- (void)testCustomMemoryBackendCannotDisguiseAConcurrentQueue {
+    SDImageCacheConfig *config=[SDImageCacheConfig new];
+    config.ioQueueAttributes=DISPATCH_QUEUE_CONCURRENT;config.memoryCacheClass=AxsCacheKeeperImageTestMutatingMemory.class;
+    SDImageCache *owner=[self axs_cachekeeper_owner:@"mutating-memory" config:config];
+    XCTAssertNil(owner.config.ioQueueAttributes,@"custom memory initializer altered only the config after queue creation");
+    dispatch_semaphore_t entered=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0),second=dispatch_semaphore_create(0);
+    dispatch_async(owner.ioQueue,^{dispatch_semaphore_signal(entered);dispatch_semaphore_wait(release,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC));});
+    XCTAssertEqual(dispatch_semaphore_wait(entered,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),0L);
+    dispatch_async(owner.ioQueue,^{dispatch_semaphore_signal(second);});
+    long concurrent=dispatch_semaphore_wait(second,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC));
+    dispatch_semaphore_signal(release);XCTAssertEqual(concurrent,0L,@"the actual SDK queue stayed concurrent");
+    XCTAssertEqualObjects([self.engine instanceDiagnosticsForIntegrationTests:owner][@"initialReason"],@"memoryBackend");
+    SDImageCacheConfig *substituting=[SDImageCacheConfig new];
+    substituting.ioQueueAttributes=DISPATCH_QUEUE_CONCURRENT;substituting.memoryCacheClass=AxsCacheKeeperImageTestSubstitutingMemory.class;
+    SDImageCache *substitute=[self axs_cachekeeper_owner:@"substituting-memory" config:substituting];
+    XCTAssertEqual(object_getClass(substitute.memoryCache),SDMemoryCache.class);
+    XCTAssertEqual(substitute.config.memoryCacheClass,SDMemoryCache.class);XCTAssertNil(substitute.config.ioQueueAttributes);
+    XCTAssertEqualObjects([self.engine instanceDiagnosticsForIntegrationTests:substitute][@"initialReason"],@"memoryBackend");
+    [self axs_cachekeeper_state:@{@"enabled":@YES,@"mode":@"auto"}];
+    XCTAssertEqual([self.engine.receipt[@"eligible"] unsignedIntegerValue],0u);
+    XCTAssertEqual([self.engine.receipt[@"restricted"] unsignedIntegerValue],0u);
+    [owner storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"ordinary"];
+    [substitute storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"substitute-ordinary"];
+    [self.engine didEnterBackgroundWithTime:YES];[self axs_cachekeeper_refresh];
+    XCTAssertNotNil([owner diskImageDataForKey:@"ordinary"]);
+    XCTAssertNotNil([substitute diskImageDataForKey:@"substitute-ordinary"]);
+    XCTAssertEqual([self.engine.receipt[@"submitted"] unsignedIntegerValue],0u);
+}
+- (void)testFirstSDKWriteAdmitsALazyRootAndKeepsTheFirstPayload {
+    SDImageCacheConfig *config=[SDImageCacheConfig new];
+    config.shouldRemoveExpiredDataWhenEnterBackground=NO;config.shouldRemoveExpiredDataWhenTerminate=NO;
+    SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"lazy-root" diskCacheDirectory:[self.home stringByAppendingPathComponent:@"Library/Caches"] config:config];
+    [self.owners addObject:owner];[self axs_cachekeeper_refresh];
+    XCTAssertEqualObjects([self.engine instanceDiagnosticsForIntegrationTests:owner][@"currentReason"],@"none");
+    BOOL rootExists=[NSFileManager.defaultManager fileExistsAtPath:owner.diskCachePath];
+    XCTAssertEqual([self.engine.receipt[@"eligible"] unsignedIntegerValue],rootExists ? 1u : 0u);
+    if (!rootExists) XCTAssertEqualObjects(self.engine.receipt[@"reason"],@"pathChanged");
+    [owner storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"first-write"];
+    // No explicit refresh: the real write must schedule discovery of a 5.15.5 lazy root.
+    [self axs_cachekeeper_wait:^BOOL(NSDictionary *r) {return [r[@"eligible"] unsignedIntegerValue]==1;} description:@"actual SDK root creation observed"];
+    [self axs_cachekeeper_state:@{@"enabled":@YES,@"mode":@"auto"}];
+    XCTAssertNotNil([owner diskImageDataForKey:@"first-write"]);
+    XCTAssertEqual([self.engine.receipt[@"writesBlocked"] unsignedIntegerValue],0u);
+    [owner storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"later-write"];
+    XCTAssertNil([owner diskImageDataForKey:@"later-write"]);
+    [self axs_cachekeeper_refresh];XCTAssertEqual([self.engine.receipt[@"writesBlocked"] unsignedIntegerValue],1u);
+}
 - (void)testActualSDWebImageDiskRestrictionPreservesMemoryAndRestoresOnDisable {
     SDImageCache *owner=[self axs_cachekeeper_owner:@"normal" config:nil];
     XCTAssertEqual([self.engine.receipt[@"eligible"] unsignedIntegerValue],1u);
@@ -323,7 +428,8 @@
     [self axs_cachekeeper_state:@{@"enabled":@YES,@"mode":@"auto"}];
     XCTAssertEqual([self.engine.receipt[@"restricted"] unsignedIntegerValue],64u);
     SDImageCache *first=self.owners.firstObject;
-    SDImageCache *overflow=[self axs_cachekeeper_owner:@"capacity-0" config:nil];
+    // This owner is intentionally unregistered, so it does not use the standard admission preflight.
+    SDImageCache *overflow=[self axs_cachekeeper_owner:@"capacity-0" config:[SDImageCacheConfig new]];
     XCTAssertEqual([self.engine.receipt[@"eligible"] unsignedIntegerValue],0u);
     XCTAssertEqual([self.engine.receipt[@"restricted"] unsignedIntegerValue],0u);
     XCTAssertEqualObjects(self.engine.receipt[@"reason"],@"observationLimit");

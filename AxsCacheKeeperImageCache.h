@@ -18,5 +18,7 @@ typedef NSDictionary * (^AxsCacheKeeperImageContextProvider)(void);
 #if AXS_CACHEKEEPER_IMAGE_TESTING
 // The integration target links the actual SDK at the fixed source revision. No fake SDK class.
 - (void)usePinnedSDKForIntegrationTests;
+// Closed reason codes only; no paths, keys, object descriptions or identities.
+- (NSDictionary *)instanceDiagnosticsForIntegrationTests:(id)owner;
 #endif
 @end

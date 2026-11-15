@@ -29,10 +29,14 @@ build_options = ["-project", str(output / "CacheKeeperInputTests.xcodeproj"),
 
 def verify_sdk_revision(expected):
     resolved = output / "CacheKeeperInputTests.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
-    pins = json.loads(resolved.read_text(encoding="utf-8"))["pins"]
+    package = json.loads(resolved.read_text(encoding="utf-8"))
+    pins = package.get("pins") if isinstance(package, dict) else None
+    if not isinstance(pins, list) or any(not isinstance(pin, dict) for pin in pins):
+        raise ValueError("SDWebImage Package.resolved has invalid pins")
     matches = [pin for pin in pins if pin.get("identity") == "sdwebimage"]
-    if len(matches) != 1 or matches[0].get("state", {}).get("revision") != expected:
-        raise SystemExit(f"FAIL: SDWebImage build did not resolve required source {expected}")
+    state = matches[0].get("state") if len(matches) == 1 else None
+    if not isinstance(state, dict) or state.get("revision") != expected:
+        raise ValueError(f"SDWebImage build did not resolve required source {expected}")
     print("Verified SDWebImage source:", expected, flush=True)
 
 # Run 116 spent most of the combined deadline compiling; execution gets its own
@@ -46,46 +50,71 @@ subprocess.run(["codesign", "--verify", "--deep", "--strict",
 # Run 127 exceeded the 600-second test budget with zero assertion failures: the keyboard
 # input test alone took 268 seconds and the suite was cut off mid-test. Raise only the
 # execution budget; no assertion or timeout inside the tests changes.
+failures = []
+
+def record_failure(name, error):
+    failures.append(name)
+    print(f"FAIL: {name}: {error}", file=sys.stderr, flush=True)
+
+def run_step(name, command, timeout):
+    print("UIKit step:", name, flush=True)
+    try:
+        subprocess.run(command, check=True, timeout=timeout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+        record_failure(name, error)
+
 try:
     # The real WebKit session runs in a fresh host, isolated from the forty-view capacity probe.
-    # Fail here before spending time on XCUI, while retaining every check on successful builds.
-    subprocess.run(["xcodebuild", "test-without-building", *build_options,
-                    "-only-testing:WebKitIntegrationTests",
-                    "-resultBundlePath", str(output / "WebKitResults.xcresult"),
-                    "-parallel-testing-enabled", "NO"], check=True, timeout=420)
-    subprocess.run(["xcodebuild", "test-without-building", *build_options,
-                    "-only-testing:ImageCacheIntegrationTests",
-                    "-resultBundlePath", str(output / "ImageCacheResults.xcresult"),
-                    "-parallel-testing-enabled", "NO"], check=True, timeout=420)
-    subprocess.run(["xcodebuild", "test-without-building", *build_options,
-                    "-skip-testing:WebKitIntegrationTests",
-                    "-skip-testing:ImageCacheIntegrationTests",
-                    "-resultBundlePath", str(output / "Results.xcresult"),
-                    "-parallel-testing-enabled", "NO"], check=True, timeout=900)
+    # Once the shared build is verified, independent suites all run before failure is reported.
+    run_step("WebKit", ["xcodebuild", "test-without-building", *build_options,
+                         "-only-testing:WebKitIntegrationTests",
+                         "-resultBundlePath", str(output / "WebKitResults.xcresult"),
+                         "-parallel-testing-enabled", "NO"], timeout=420)
+    run_step("SDWebImage 5.21.7", ["xcodebuild", "test-without-building", *build_options,
+                                 "-only-testing:ImageCacheIntegrationTests",
+                                 "-resultBundlePath", str(output / "ImageCacheResults.xcresult"),
+                                 "-parallel-testing-enabled", "NO"], timeout=420)
+    run_step("Search/XCUI", ["xcodebuild", "test-without-building", *build_options,
+                             "-skip-testing:WebKitIntegrationTests",
+                             "-skip-testing:ImageCacheIntegrationTests",
+                             "-resultBundlePath", str(output / "Results.xcresult"),
+                             "-parallel-testing-enabled", "NO"], timeout=900)
     # The adapter admits both verified SDK versions. Rebuild the same behavior tests against
     # the second actual dependency, with an independent result bundle; never relabel 5.21.7.
-    spec = (ROOT / "tests/ui/project.yml").read_text(encoding="utf-8-sig")
-    current_revision = "2de3a496eaf6df9a1312862adcfd54acd73c39c0"
-    legacy_revision = "fb50c1d20f24db5322b2f8f379de3618f75fe08e"
-    if spec.count(current_revision) != 1:
-        raise SystemExit("FAIL: ambiguous SDWebImage dependency revision")
-    compatibility_spec = output / "image-sdk-5.15.5.yml"
-    compatibility_spec.write_text(spec.replace(current_revision, legacy_revision), encoding="utf-8")
-    subprocess.run(["xcodegen", "generate", "--spec", str(compatibility_spec),
-                    "--project", str(output), "--project-root", str(output)], check=True, timeout=60)
-    subprocess.run(["xcodebuild", "build-for-testing", *build_options,
-                    "-only-testing:ImageCacheIntegrationTests"], check=True, timeout=600)
-    verify_sdk_revision(legacy_revision)
-    subprocess.run(["xcodebuild", "test-without-building", *build_options,
-                    "-only-testing:ImageCacheIntegrationTests",
-                    "-resultBundlePath", str(output / "ImageCache515Results.xcresult"),
-                    "-parallel-testing-enabled", "NO"], check=True, timeout=420)
+    legacy_stage = "SDWebImage 5.15.5 preparation"
+    try:
+        spec = (ROOT / "tests/ui/project.yml").read_text(encoding="utf-8-sig")
+        current_revision = "2de3a496eaf6df9a1312862adcfd54acd73c39c0"
+        legacy_revision = "fb50c1d20f24db5322b2f8f379de3618f75fe08e"
+        if spec.count(current_revision) != 1:
+            raise ValueError("ambiguous SDWebImage dependency revision")
+        compatibility_spec = output / "image-sdk-5.15.5.yml"
+        compatibility_spec.write_text(spec.replace(current_revision, legacy_revision), encoding="utf-8")
+        legacy_stage = "SDWebImage 5.15.5 generation"
+        subprocess.run(["xcodegen", "generate", "--spec", str(compatibility_spec),
+                        "--project", str(output), "--project-root", str(output)], check=True, timeout=60)
+        legacy_stage = "SDWebImage 5.15.5 build"
+        subprocess.run(["xcodebuild", "build-for-testing", *build_options,
+                        "-only-testing:ImageCacheIntegrationTests"], check=True, timeout=600)
+        legacy_stage = "SDWebImage 5.15.5 revision"
+        verify_sdk_revision(legacy_revision)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError) as error:
+        record_failure(legacy_stage, error)
+    else:
+        run_step("SDWebImage 5.15.5", ["xcodebuild", "test-without-building", *build_options,
+                                     "-only-testing:ImageCacheIntegrationTests",
+                                     "-resultBundlePath", str(output / "ImageCache515Results.xcresult"),
+                                     "-parallel-testing-enabled", "NO"], timeout=420)
 finally:
     for result, screenshots in [("WebKitResults.xcresult", "WebKitScreenshots"),
                                 ("ImageCacheResults.xcresult", "ImageCacheScreenshots"),
                                 ("ImageCache515Results.xcresult", "ImageCache515Screenshots"),
                                 ("Results.xcresult", "Screenshots")]:
         if (output / result).exists():
-            subprocess.run(["xcrun", "xcresulttool", "export", "attachments",
-                            "--path", str(output / result),
-                            "--output-path", str(output / screenshots)], check=True, timeout=60)
+            run_step(f"attachments {result}", ["xcrun", "xcresulttool", "export", "attachments",
+                                              "--path", str(output / result),
+                                              "--output-path", str(output / screenshots)], timeout=60)
+
+if failures:
+    print("FAIL: UIKit failed suites/stages: " + ", ".join(failures), file=sys.stderr, flush=True)
+    raise SystemExit(1)
