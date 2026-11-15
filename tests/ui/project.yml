@@ -13,6 +13,12 @@ targets:
   InputHarness:
     type: application
     platform: iOS
+    info:
+      path: InputHarness-Info.plist
+      properties:
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoadsInWebContent: true
     sources:
       - path: ../../tests/ui/InputHarness.m
       - path: ../../Prefs/Settings.m
