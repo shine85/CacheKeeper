@@ -1,6 +1,7 @@
 #import <XCTest/XCTest.h>
 #import "../../Prefs/SearchInput.h"
 #import "../../Prefs/SearchDiagnostics.h"
+#import "../../Prefs/SearchNavigation.h"
 #import "../../Prefs/DiagnosticsPage.h"
 #import "../../AxsCacheKeeperDiagnostics.h"
 #import "Preferences/PSViewController.h"
@@ -16,9 +17,52 @@
 @interface AxsCacheKeeperTestNestedHost : UIViewController
 @property(nonatomic,strong) UINavigationController *axs_cachekeeper_inner;
 - (instancetype)initWithSettings:(CKSettings *)settings;
+- (instancetype)initWithContent:(UIViewController *)content;
 @end
 @interface AxsCacheKeeperTestForwardingHost : AxsCacheKeeperTestNestedHost
 @property(nonatomic) BOOL axs_cachekeeper_forwardsItem;
+@end
+@interface AxsCacheKeeperAliasedSettings : AxsCacheKeeperVisualSettings
+@property(nonatomic,strong) UINavigationItem *axs_cachekeeper_aliasedItem;
+@end
+@interface AxsCacheKeeperAppearanceCountedSettings : AxsCacheKeeperVisualSettings
+@property(nonatomic) NSUInteger axs_cachekeeper_disappearances;
+@end
+@implementation AxsCacheKeeperAppearanceCountedSettings
+- (void)viewWillDisappear:(BOOL)animated {
+    self.axs_cachekeeper_disappearances++;
+    [super viewWillDisappear:animated];
+}
+@end
+// Hold an actual UIKit navigation transition; no top-controller or bar-item properties are replaced.
+@interface AxsCacheKeeperHeldTransition : NSObject <UIViewControllerAnimatedTransitioning,UINavigationControllerDelegate>
+@property(nonatomic,strong) id<UIViewControllerContextTransitioning> axs_cachekeeper_context;
+@property(nonatomic,strong) XCTestExpectation *axs_cachekeeper_started;
+@property(nonatomic,strong) XCTestExpectation *axs_cachekeeper_finished;
+@property(nonatomic,weak) UIViewController *axs_cachekeeper_target;
+- (void)axs_cachekeeper_finish;
+@end
+@implementation AxsCacheKeeperHeldTransition
+- (NSTimeInterval)transitionDuration:(id<UIViewControllerContextTransitioning>)context { (void)context;return 0.25; }
+- (void)animateTransition:(id<UIViewControllerContextTransitioning>)context {
+    self.axs_cachekeeper_context=context;
+    UIViewController *target=[context viewControllerForKey:UITransitionContextToViewControllerKey];
+    UIView *view=[context viewForKey:UITransitionContextToViewKey];
+    view.frame=[context finalFrameForViewController:target];[context.containerView addSubview:view];
+    [self.axs_cachekeeper_started fulfill];self.axs_cachekeeper_started=nil;
+}
+- (id<UIViewControllerAnimatedTransitioning>)navigationController:(UINavigationController *)navigation
+    animationControllerForOperation:(UINavigationControllerOperation)operation fromViewController:(UIViewController *)from toViewController:(UIViewController *)to {
+    (void)navigation;(void)from;(void)to;return operation==UINavigationControllerOperationPush ? self : nil;
+}
+- (void)navigationController:(UINavigationController *)navigation didShowViewController:(UIViewController *)controller animated:(BOOL)animated {
+    (void)navigation;(void)animated;
+    if (controller==self.axs_cachekeeper_target) { [self.axs_cachekeeper_finished fulfill];self.axs_cachekeeper_finished=nil; }
+}
+- (void)axs_cachekeeper_finish {
+    id<UIViewControllerContextTransitioning> context=self.axs_cachekeeper_context;
+    [context completeTransition:YES];self.axs_cachekeeper_context=nil;
+}
 @end
 // Only the event marker is synthetic; all hierarchy, bounds and hit testing below use UIKit.
 @interface AxsCacheKeeperProbeTouchEvent : UIEvent
@@ -116,6 +160,13 @@
 }
 - (NSDictionary *)axs_cachekeeper_last {
     return [[self.probe axs_cachekeeper_snapshot][@"events"] lastObject];
+}
+- (UINavigationController *)axs_cachekeeper_present_host:(AxsCacheKeeperTestNestedHost *)host {
+    UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:host];
+    nav.navigationBar.prefersLargeTitles=YES;nav.modalPresentationStyle=UIModalPresentationFullScreen;
+    XCTestExpectation *shown=[self expectationWithDescription:@"Real nested host appeared"];
+    [self.owner presentViewController:nav animated:NO completion:^{ [shown fulfill]; }];
+    [self waitForExpectations:@[shown] timeout:10];[nav.view layoutIfNeeded];return nav;
 }
 - (void)testCompactTitleUsesAncestorItemAndRestoresOnInnerNavigation {
     for (NSNumber *mode in @[@(UINavigationItemLargeTitleDisplayModeAutomatic),@(UINavigationItemLargeTitleDisplayModeAlways)]) {
@@ -283,6 +334,20 @@
         XCTAssertTrue(hit==field || [hit isDescendantOfView:field]);
         XCTAssertEqual(contentItem.largeTitleDisplayMode,contentMode);
     }
+    AxsCacheKeeperSearchDiagnostics *probe=input.axs_cachekeeper_diagnostics;
+    [probe axs_cachekeeper_record:AxsCacheKeeperSearchEventDidAppear];
+    NSDictionary *snapshot=[probe axs_cachekeeper_snapshot];
+    NSDictionary *last=[snapshot[@"events"] lastObject];NSDictionary *ownership=nil;
+    for (NSDictionary *bar in last[@"bars"]) if ([bar[@"role"] isEqual:@"ancestor"]) ownership=bar[@"ownership"];
+    XCTAssertNotNil(ownership);
+    XCTAssertEqualObjects(ownership[@"topIsDirectChild"],@YES);
+    XCTAssertEqualObjects(ownership[@"topItemIsChildItem"],@NO);
+    XCTAssertEqualObjects(ownership[@"candidateEligible"],@YES);
+    XCTAssertEqualObjects(ownership[@"claimActive"],@YES);
+    XCTAssertEqualObjects(ownership[@"reason"],@"eligible");
+    XCTAssertEqualObjects(last[@"layout"][@"appeared"],@YES);
+    AxsCacheKeeperDiagnostics *session=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:NSTemporaryDirectory()];
+    XCTAssertEqualObjects([session reportWithApps:@[] environment:@{@"searchUI":snapshot}][@"searchUI"],snapshot);
     [self axs_cachekeeper_focus:input];[self axs_cachekeeper_dismiss:input];
     UIViewController *detail=[UIViewController new];
     host.axs_cachekeeper_inner.delegate=self;
@@ -295,6 +360,201 @@
         @"Release must restore the exact installed item, even when the getter now returns the detail item");
     XCTAssertTrue(nav.navigationBar.prefersLargeTitles);
     XCTAssertEqual(contentItem.largeTitleDisplayMode,contentMode);
+}
+- (void)testAliasedNavigationItemIsNotChangedBeforeAppearanceAndRestoresOriginalMode {
+    // A load-time write through a forwarded getter loses the host's original mode before claiming it.
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithContent:[UIViewController new]];
+    UINavigationItem *item=host.navigationItem;item.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAlways;
+    AxsCacheKeeperAliasedSettings *settings=[AxsCacheKeeperAliasedSettings new];settings.axs_cachekeeper_aliasedItem=item;
+    [settings loadViewIfNeeded];
+    XCTAssertEqual(item.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways,@"Loading an aliased page must not modify an unclaimed host item");
+    [host.axs_cachekeeper_inner setViewControllers:@[settings] animated:NO];
+    UINavigationController *nav=[self axs_cachekeeper_present_host:host];[settings updateBatch];
+    XCTAssertEqual(nav.navigationBar.topItem,item);XCTAssertEqual(settings.navigationItem,item);
+    XCTAssertEqual(item.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);XCTAssertFalse(nav.navigationBar.prefersLargeTitles);
+    UIViewController *detail=[UIViewController new];host.axs_cachekeeper_inner.delegate=self;
+    self.expectedNavigation=host.axs_cachekeeper_inner;self.expectedController=detail;
+    XCTestExpectation *pushed=[self expectationWithDescription:@"Aliased settings left the visible stack"];
+    self.navigationFinished=pushed;[host.axs_cachekeeper_inner pushViewController:detail animated:NO];
+    [self waitForExpectations:@[pushed] timeout:10];
+    XCTAssertEqual(item.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways);XCTAssertTrue(nav.navigationBar.prefersLargeTitles);
+}
+- (void)testActualTopItemReplacementRetainsTheSameBarsOriginalPreference {
+    // A new item on an already-claimed bar must not save the temporarily forced NO as its origin.
+    AxsCacheKeeperAppearanceCountedSettings *settings=[AxsCacheKeeperAppearanceCountedSettings new];
+    AxsCacheKeeperTestForwardingHost *host=[[AxsCacheKeeperTestForwardingHost alloc] initWithSettings:settings];
+    UINavigationItem *itemA=host.navigationItem;UINavigationItem *itemB=settings.navigationItem;
+    itemB.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAutomatic;
+    UINavigationController *nav=[self axs_cachekeeper_present_host:host];[settings updateBatch];
+    UINavigationBar *bar=nav.navigationBar;
+    BOOL initialClaim=bar.topItem==itemA && itemA!=itemB && itemA.largeTitleDisplayMode==UINavigationItemLargeTitleDisplayModeNever && !bar.prefersLargeTitles;
+    XCTAssertTrue(initialClaim,@"FIXTURE INVALID: item A must first hold the visible bar's compact claim");
+    if (!initialClaim) return;
+    host.axs_cachekeeper_forwardsItem=YES;
+    // UIKit rebuilds the real stack while keeping the same top controller on screen.
+    // No navigation-bar item array or read-only navigation property is replaced by the fixture.
+    [nav setViewControllers:@[[UIViewController new],host] animated:NO];
+    BOOL replaced=nav.topViewController==host && nav.navigationBar==bar && bar.topItem==itemB &&
+        settings.axs_cachekeeper_disappearances==0 && settings.view.window==self.window;
+    XCTAssertTrue(replaced,@"FIXTURE INVALID: UIKit must replace A with B on the same bar without releasing the visible page");
+    if (!replaced) return;
+    [settings updateBatch];
+    XCTAssertEqual(itemA.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways);
+    XCTAssertEqual(itemB.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);XCTAssertFalse(bar.prefersLargeTitles);
+    UIViewController *detail=[UIViewController new];host.axs_cachekeeper_inner.delegate=self;
+    self.expectedNavigation=host.axs_cachekeeper_inner;self.expectedController=detail;
+    XCTestExpectation *pushed=[self expectationWithDescription:@"Replacement item released after leaving the settings page"];
+    self.navigationFinished=pushed;[host.axs_cachekeeper_inner pushViewController:detail animated:NO];
+    [self waitForExpectations:@[pushed] timeout:10];
+    XCTAssertEqual(itemA.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways);
+    XCTAssertEqual(itemB.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAutomatic);
+    XCTAssertTrue(bar.prefersLargeTitles,@"Replacing an item must retain the bar's original YES until the last claim releases it");
+}
+- (void)testSharedItemMovingBetweenVisibleBarsRetainsItsOriginalMode {
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithContent:[UIViewController new]];
+    UINavigationItem *item=host.navigationItem;
+    AxsCacheKeeperAliasedSettings *settings=[AxsCacheKeeperAliasedSettings new];settings.axs_cachekeeper_aliasedItem=item;
+    [host.axs_cachekeeper_inner setViewControllers:@[settings] animated:NO];
+    UINavigationController *nav=[self axs_cachekeeper_present_host:host];[settings updateBatch];
+    UINavigationBar *outer=nav.navigationBar;UINavigationBar *inner=host.axs_cachekeeper_inner.navigationBar;
+    BOOL initialClaim=outer!=inner && outer.topItem==item && inner.topItem==item &&
+        item.largeTitleDisplayMode==UINavigationItemLargeTitleDisplayModeNever && !outer.prefersLargeTitles && !inner.prefersLargeTitles;
+    XCTAssertTrue(initialClaim,@"FIXTURE INVALID: real inner and outer bars must share item A with distinct initial bar preferences");
+    if (!initialClaim) return;
+    [host.axs_cachekeeper_inner setNavigationBarHidden:NO animated:NO];[settings updateBatch];
+    NSArray *both=[(id<AxsCacheKeeperSearchNavigationOwner>)settings axs_cachekeeper_search_navigation_states];
+    NSUInteger active=0;for (NSDictionary *state in both) if ([state[@"ownership"][@"claimActive"] boolValue]) active++;
+    BOOL shared=active==2 && !inner.hidden && !outer.hidden && inner.topItem==item && outer.topItem==item;
+    XCTAssertTrue(shared,@"FIXTURE INVALID: both real bars must actively share the item before one bar releases it");
+    if (!shared) return;
+    [nav setNavigationBarHidden:YES animated:NO];[settings updateBatch];
+    XCTAssertEqual(item.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever,@"A bar release must not restore an item still used by the inner claim");
+    XCTAssertTrue(outer.prefersLargeTitles);XCTAssertFalse(inner.prefersLargeTitles);
+    UIViewController *detail=[UIViewController new];host.axs_cachekeeper_inner.delegate=self;
+    self.expectedNavigation=host.axs_cachekeeper_inner;self.expectedController=detail;
+    XCTestExpectation *pushed=[self expectationWithDescription:@"Shared item released by the final visible bar"];
+    self.navigationFinished=pushed;[host.axs_cachekeeper_inner pushViewController:detail animated:NO];
+    [self waitForExpectations:@[pushed] timeout:10];
+    XCTAssertEqual(item.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways);
+    XCTAssertTrue(outer.prefersLargeTitles);XCTAssertFalse(inner.prefersLargeTitles);
+}
+- (void)testHostExplicitLargeTitlePreferenceSurvivesAnOriginallyCompactBar {
+    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+    UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:host];
+    nav.navigationBar.prefersLargeTitles=NO;nav.modalPresentationStyle=UIModalPresentationFullScreen;
+    XCTestExpectation *shown=[self expectationWithDescription:@"Originally compact host appeared"];
+    [self.owner presentViewController:nav animated:NO completion:^{[shown fulfill];}];
+    [self waitForExpectations:@[shown] timeout:10];[settings updateBatch];
+    BOOL claimed=host.navigationItem.largeTitleDisplayMode==UINavigationItemLargeTitleDisplayModeNever && !nav.navigationBar.prefersLargeTitles;
+    XCTAssertTrue(claimed,@"FIXTURE INVALID: original NO preference must be captured before the host override");
+    if (!claimed) return;
+    host.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAlways;
+    nav.navigationBar.prefersLargeTitles=YES;
+    for (NSUInteger refresh=0;refresh<3;refresh++) {
+        [settings updateBatch];
+        XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways);
+        XCTAssertTrue(nav.navigationBar.prefersLargeTitles,@"An explicit host YES must not be overwritten with the original NO");
+    }
+    UIViewController *detail=[UIViewController new];host.axs_cachekeeper_inner.delegate=self;
+    self.expectedNavigation=host.axs_cachekeeper_inner;self.expectedController=detail;
+    XCTestExpectation *pushed=[self expectationWithDescription:@"Host override survived leaving the settings page"];
+    self.navigationFinished=pushed;[host.axs_cachekeeper_inner pushViewController:detail animated:NO];
+    [self waitForExpectations:@[pushed] timeout:10];
+    XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways);
+    XCTAssertTrue(nav.navigationBar.prefersLargeTitles);
+}
+- (void)testHostModeOnlyAlwaysOverrideReleasesTheForcedBarPreference {
+    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+    UINavigationController *nav=[self axs_cachekeeper_present_host:host];[settings updateBatch];
+    BOOL claimed=host.navigationItem.largeTitleDisplayMode==UINavigationItemLargeTitleDisplayModeNever && !nav.navigationBar.prefersLargeTitles;
+    XCTAssertTrue(claimed,@"FIXTURE INVALID: the host override must start from a compact claim");
+    if (!claimed) return;
+    host.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAlways;
+    XCTAssertFalse(nav.navigationBar.prefersLargeTitles,@"This control changes only the host item mode");
+    for (NSUInteger refresh=0;refresh<3;refresh++) {
+        [settings updateBatch];
+        XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways);
+        XCTAssertTrue(nav.navigationBar.prefersLargeTitles,@"Our stale NO must not keep suppressing the host's explicit Always mode");
+    }
+}
+- (void)testInnerTopMismatchStopsBeforeAnOtherwiseMatchingOuterHost {
+    // Continuing past an off-top inner page would authorize the still-matching outer wrapper.
+    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+    UINavigationController *nav=[self axs_cachekeeper_present_host:host];
+    UIViewController *detail=[UIViewController new];host.axs_cachekeeper_inner.delegate=self;
+    self.expectedNavigation=host.axs_cachekeeper_inner;self.expectedController=detail;
+    XCTestExpectation *pushed=[self expectationWithDescription:@"Inner detail became the real top controller"];
+    self.navigationFinished=pushed;[host.axs_cachekeeper_inner pushViewController:detail animated:NO];
+    [self waitForExpectations:@[pushed] timeout:10];
+    XCTAssertEqual(nav.topViewController,host);XCTAssertEqual(host.axs_cachekeeper_inner.topViewController,detail);
+    NSArray *states=[(id<AxsCacheKeeperSearchNavigationOwner>)settings axs_cachekeeper_search_navigation_states];
+    XCTAssertEqualObjects(states.firstObject[@"ownership"][@"reason"],@"branchMismatch");
+    XCTAssertEqualObjects(states.firstObject[@"ownership"][@"candidateEligible"],@NO);
+    XCTAssertFalse([[states valueForKey:@"bar"] containsObject:nav.navigationBar],@"The shared ownership boundary must stop at the first stack mismatch");
+    [settings updateBatch];
+    XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways);XCTAssertTrue(nav.navigationBar.prefersLargeTitles);
+}
+- (void)testHostAlwaysBarKeepsItsGeometryWhileSearchClearsItBeforeInteractionReturns {
+    // Forcing every candidate shrinks an explicit Always bar; using hit testing alone ignores
+    // that same visible bar while UIKit disables interaction, then moves the search on enable.
+    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+    UINavigationController *nav=[self axs_cachekeeper_present_host:host];[settings updateBatch];
+    UINavigationBar *bar=nav.navigationBar;
+    host.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAlways;bar.prefersLargeTitles=YES;
+    // As with the existing stale-frame regression, change geometry without a content layout.
+    CGRect frame=bar.frame;frame.size.height=91;bar.frame=frame;bar.userInteractionEnabled=NO;
+    AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];UITextField *field=input.axs_cachekeeper_field;
+    CGRect barRect=[bar convertRect:bar.bounds toView:self.window];
+    CGFloat safeTop=[settings.view convertPoint:CGPointMake(0,CGRectGetMinY(settings.view.safeAreaLayoutGuide.layoutFrame)) toView:self.window].y;
+    BOOL overlaps=CGRectGetMaxY(barRect)>safeTop+1;
+    XCTAssertTrue(overlaps,@"FIXTURE INVALID: visible host bar must extend beyond the content safe edge");
+    if (!overlaps) return;
+    [settings updateBatch];
+    CGFloat disabledTop=[field convertRect:field.bounds toView:self.window].origin.y;
+    XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways);XCTAssertTrue(bar.prefersLargeTitles);
+    XCTAssertEqualWithAccuracy(bar.bounds.size.height,91,0.5,@"An explicit host mode must not be forced to a compact fitting size");
+    XCTAssertGreaterThanOrEqual(disabledTop,CGRectGetMaxY(barRect));
+    bar.userInteractionEnabled=YES;[settings updateBatch];
+    CGRect rect=[field convertRect:field.bounds toView:self.window];
+    XCTAssertEqualWithAccuracy(rect.origin.y,disabledTop,1.0/self.window.screen.scale);
+    UIView *hit=[self.window hitTest:CGPointMake(CGRectGetMidX(rect),CGRectGetMidY(rect)) withEvent:nil];
+    XCTAssertTrue(hit==field || [hit isDescendantOfView:field]);
+}
+- (void)testUnfinishedNavigationDoesNotAcquireAForwardedInstalledItem {
+    UIViewController *initial=[UIViewController new];
+    UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:initial];
+    nav.navigationBar.prefersLargeTitles=YES;nav.modalPresentationStyle=UIModalPresentationFullScreen;
+    XCTestExpectation *shown=[self expectationWithDescription:@"Transition fixture navigation appeared"];
+    [self.owner presentViewController:nav animated:NO completion:^{ [shown fulfill]; }];[self waitForExpectations:@[shown] timeout:10];
+    AxsCacheKeeperTestForwardingHost *host=[[AxsCacheKeeperTestForwardingHost alloc] initWithContent:[UIViewController new]];
+    UINavigationItem *installedItem=host.navigationItem;
+    AxsCacheKeeperHeldTransition *transition=[AxsCacheKeeperHeldTransition new];
+    XCTestExpectation *started=[self expectationWithDescription:@"UIKit navigation transition is held before completion"];
+    XCTestExpectation *finished=[self expectationWithDescription:@"UIKit completed the held navigation transition"];
+    transition.axs_cachekeeper_started=started;transition.axs_cachekeeper_finished=finished;transition.axs_cachekeeper_target=host;nav.delegate=transition;
+    [nav pushViewController:host animated:YES];[self waitForExpectations:@[started] timeout:10];
+    host.axs_cachekeeper_forwardsItem=YES;
+    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+    [host.axs_cachekeeper_inner setViewControllers:@[settings] animated:NO];
+    BOOL fixtureValid=nav.topViewController==host && nav.navigationBar.topItem==installedItem &&
+        host.navigationItem==settings.navigationItem && installedItem!=settings.navigationItem && nav.transitionCoordinator!=nil;
+    XCTAssertTrue(fixtureValid,@"FIXTURE INVALID: UIKit must retain the installed item during a real unfinished transition");
+    if (fixtureValid) {
+        [settings updateBatch];
+        XCTAssertEqual(installedItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways);
+        XCTAssertTrue(nav.navigationBar.prefersLargeTitles);
+        NSArray *states=[(id<AxsCacheKeeperSearchNavigationOwner>)settings axs_cachekeeper_search_navigation_states];
+        NSDictionary *ownership=[states lastObject][@"ownership"];
+        XCTAssertEqualObjects(ownership[@"transitioning"],@YES);XCTAssertEqualObjects(ownership[@"candidateEligible"],@NO);
+    }
+    [transition axs_cachekeeper_finish];[self waitForExpectations:@[finished] timeout:10];
+    if (!fixtureValid) return;
+    [settings updateBatch];
+    XCTAssertEqual(nav.navigationBar.topItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);XCTAssertFalse(nav.navigationBar.prefersLargeTitles);
 }
 - (void)testUpdateBatchShrinksStaleExpandedHostBar {
     // 124.1 device: the host bar re-expanded after appearance (mode still Never, frame stale

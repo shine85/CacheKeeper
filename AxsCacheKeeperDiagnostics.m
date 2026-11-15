@@ -4,6 +4,7 @@
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperSearchDiagnostics.h"
 #import "AxsCacheKeeperScanDiagnostics.h"
+#import "AxsCacheKeeperWebKitStatus.h"
 
 static NSDictionary *AxsCacheKeeperDiagnosticRead(NSString *folder,NSString *name) {
     NSError *error=nil;
@@ -221,6 +222,12 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
         if ([states[@"state"] isEqual:@"available"] && !state) app[@"configurationState"]=@"missing";
         if (!state || [state isKindOfClass:NSNumber.class]) app[@"configuration"]=@{@"enabled":@(axs_cachekeeper_app_enabled(state))};
         else app[@"configuration"]=[redactor axs_cachekeeper_record:state];
+        if ([state isKindOfClass:NSDictionary.class] && state[@"webKitDiskCache"]) {
+            NSMutableDictionary *configuration=[app[@"configuration"] mutableCopy];
+            if (axs_cachekeeper_input_boolean(state[@"webKitDiskCache"])) configuration[@"webKitDiskCache"]=state[@"webKitDiskCache"];
+            else {configuration[@"invalidRecord"]=@YES;configuration[@"invalidFields"]=[(configuration[@"invalidFields"] ?: @[]) arrayByAddingObject:@"webKitDiskCache"];}
+            app[@"configuration"]=configuration;
+        }
         if ([app[@"configuration"][@"invalidRecord"] boolValue]) app[@"configurationState"]=@"invalid";
         id paths=directories[@"data"][bundle];
         app[@"selectionPresent"]=@(paths!=nil);
@@ -232,6 +239,14 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
         app[@"scan"]=[redactor axs_cachekeeper_record:scan ? @{@"state":@"available",@"data":scan} : @{@"state":[snapshots[@"state"] isEqual:@"available"] ? @"missing" : snapshots[@"state"]}];
         for (NSArray *source in @[@[@"cleanup",@"auto"],@[@"inspection",@"inspection"],@[@"network",@"network"],@[@"probe",@"probe"]])
             app[source[0]]=[redactor axs_cachekeeper_record:AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.%@.plist",bundle,source[1]])];
+        NSDictionary *webKitRead=AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.webkit.plist",bundle]);
+        if ([webKitRead[@"state"] isEqual:@"available"]) {
+            NSMutableDictionary *webKit=[axs_cachekeeper_webkit_projection(webKitRead[@"data"]) mutableCopy];
+            if (webKit) {
+                webKit[@"updated"]=@([webKit[@"updated"] timeIntervalSince1970]);
+                app[@"webKitDiskCache"]=@{@"state":@"available",@"data":webKit};
+            } else app[@"webKitDiskCache"]=@{@"state":@"invalid"};
+        } else app[@"webKitDiskCache"]=[redactor axs_cachekeeper_record:webKitRead];
         [exported addObject:app];
         if (progress) progress(exported.count,bundles.count);
     }

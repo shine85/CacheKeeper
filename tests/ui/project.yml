@@ -46,8 +46,12 @@ targets:
     platform: iOS
     sources:
       - path: ../../tests/ui/SearchProbeTests.m
+      - path: ../../tests/ui/WebKitProbeTests.m
+      - path: ../../AxsCacheKeeperWebKitCache.m
+      - path: ../../AxsCacheKeeperWebKitObservation.m
     dependencies:
       - target: InputHarness
+      - sdk: WebKit.framework
     settings:
       base:
         HEADER_SEARCH_PATHS: "$(SRCROOT)/../../tests/ui/include $(SRCROOT)/../../tests/include"

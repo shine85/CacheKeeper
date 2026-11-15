@@ -9,6 +9,7 @@
 #import "InspectionPage.h"
 #import "../AxsCacheKeeperInspection.h"
 #import "../AxsCacheKeeperProbe.h"
+#import "../AxsCacheKeeperWebKitStatus.h"
 #include <dlfcn.h>
 
 @interface CKScanPage : UITableViewController
@@ -252,7 +253,7 @@
 }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)table { return 4; }
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
-    if (section==0) return 5;
+    if (section==0) return 6;
     if (section==1) return MAX((NSUInteger)1,self.cacheRows.count);
     if (section==2) return self.unknownRows.count ? 1+(self.showUnknownData ? self.unknownRows.count : 0) : 0;
     return self.otherRows.count ? 1+(self.showOtherData ? self.otherRows.count : 0) : 0;
@@ -266,7 +267,7 @@
     return self.otherRows.count ? @"混合用途与共享数据" : nil;
 }
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
-    if (section==0) return @"一键开启 = 自动模式 + 网络磁盘缓存限制 + 新增缓存自动发现。可能增加流量和重复加载，网络选项可随时关闭。";
+    if (section==0) return @"一键开启 = 自动模式 + 网络磁盘缓存限制 + 新增缓存自动发现。网页缓存回收需单独开启。可能增加流量和重复加载，各选项可随时关闭。";
     if (section==2) return self.unknownRows.count ? @"点击目录进入只读深度检测：类型组成、文件时间与最大文件。未知不等于必需，也不等于垃圾。未知内容暂不自动清理，待专属识别规则按占用适配；已定级为日志的目录仅清理日志特征文件。每目录开关默认开启（参与内容审查）；关闭则保留该目录，不自动清理。" : nil;
     if (section==3) return self.otherRows.count ? @"这些目录可能同时包含资源、业务状态或缓存，尚未逐项确认；不自动清理。已知敏感持久化目录已隐藏。" : nil;
     NSString *message=@"检测目录只更新大小快照，不删除 APP 文件；等待期间显示值不会自行重算。首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后处理。标准缓存目录（Library/Caches、tmp）内的文件按平台缓存用途约定处理，不按类型保留（数据库、无后缀文件也清理；已确认的草稿、唯一副本、必要状态例外）；未知目录暂不自动清理，待专属识别规则按占用适配。已选目录内新增内容自动覆盖；新增标准缓存根按自动发现选项纳入，手动关闭的目录保持排除。点击目录查看实际删除和失败记录。";
@@ -327,6 +328,12 @@
         UISwitch *toggle=[UISwitch new];toggle.on=axs_cachekeeper_url_cache_enabled(states[self.bundle]);
         toggle.enabled=axs_cachekeeper_wants_restriction(states[self.bundle]);
         cell.detailTextLabel.text=toggle.enabled ? @"仅限标准 NSURLCache，可能增加流量；不改变内存缓存" : @"只清理模式不限制网络缓存；选项已保留";
+        NSDictionary *result=[self axs_cachekeeper_display:[NSString stringWithFormat:@"Status/%@.network.plist",self.bundle]];
+        if (axs_cachekeeper_input_boolean(result[@"prevent"]) && axs_cachekeeper_input_boolean(result[@"applied"])) {
+            NSString *status=[result[@"prevent"] boolValue] ? ([result[@"applied"] boolValue] ? @"磁盘容量已置零" : @"限制未生效") :
+                ([result[@"applied"] boolValue] ? @"未限制或已恢复容量" : @"容量恢复待重试");
+            cell.detailTextLabel.text=[cell.detailTextLabel.text stringByAppendingFormat:@"\n上次应用结果（%@）：%@",axs_cachekeeper_time_string(result[@"updated"]),status];
+        }
         cell.detailTextLabel.numberOfLines=0;
         [toggle addTarget:self action:@selector(axs_cachekeeper_network_changed:) forControlEvents:UIControlEventValueChanged];
         cell.accessoryView=toggle;return cell;
@@ -346,6 +353,24 @@
         NSDictionary *previous=[self axs_cachekeeper_display:[NSString stringWithFormat:@"Status/%@.probe.plist",self.bundle]];
         cell.detailTextLabel.text=self.probeStatus ?: (previous[@"message"] ? [NSString stringWithFormat:@"上次诊断（%@）：%@\n点击重新检查",axs_cachekeeper_time_string(previous[@"updated"]),previous[@"message"]] : @"点击后打开此 APP 一次，再返回查看注入、配置读取和网络容量的实际结果");
         cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;return cell;
+    }
+    if (path.section==0 && path.row==5) {
+        UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+        cell.textLabel.text=@"切后台回收网页缓存";
+        cell.detailTextLabel.numberOfLines=0;
+        NSDictionary *states=[self axs_cachekeeper_display:@"appEnabled.plist"];
+        id state=states[self.bundle];
+        UISwitch *toggle=[UISwitch new];toggle.on=axs_cachekeeper_webkit_disk_cache_enabled(state);
+        toggle.accessibilityIdentifier=@"CacheKeeperWebKitDiskCache";
+        [toggle addTarget:self action:@selector(axs_cachekeeper_webkit_changed:) forControlEvents:UIControlEventValueChanged];
+        NSString *detail=@"回收此 APP 使用的系统网页及媒体磁盘缓存；不请求清理 Cookie、网站数据库或离线网站存储。网页可能需要重新联网。开启后重新打开 APP，再切到后台。";
+        if (!axs_cachekeeper_app_enabled(state)) detail=[detail stringByAppendingString:@"\n此 APP 总开关关闭，暂不执行。"];
+        else if (axs_cachekeeper_exclusions(state).count) detail=[detail stringByAppendingString:@"\n已设置目录保留；系统网页接口无法按路径排除，暂不执行。"];
+        NSDictionary *record=[self axs_cachekeeper_display:[NSString stringWithFormat:@"Status/%@.webkit.plist",self.bundle]];
+        if (record.count) detail=[detail stringByAppendingFormat:@"\n上次记录（%@）：%@",axs_cachekeeper_time_string(record[@"updated"]),axs_cachekeeper_webkit_message(record)];
+        else detail=[detail stringByAppendingString:@"\n尚无执行记录；系统完成回调不代表已测得释放空间。"];
+        cell.detailTextLabel.text=detail;cell.accessoryView=toggle;
+        cell.selectionStyle=UITableViewCellSelectionStyleNone;return cell;
     }
     if ((path.section==2 || path.section==3) && path.row==0) {
         UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
@@ -477,6 +502,16 @@
     NSArray *modes=@[@"auto",@"prevent",@"clean"];
     if (control.selectedSegmentIndex<0 || control.selectedSegmentIndex>=modes.count) return;
     [self axs_cachekeeper_save_mode:modes[control.selectedSegmentIndex]];
+}
+- (void)axs_cachekeeper_webkit_changed:(UISwitch *)toggle {
+    NSString *path=[self file:@"appEnabled.plist"];
+    NSMutableDictionary *states=axs_cachekeeper_edit_configuration(path);
+    if (!states) { [self message:@"原配置不可读，停止保存。"];[self axs_cachekeeper_reload];return; }
+    NSMutableDictionary *state=axs_cachekeeper_app_state(states[self.bundle],axs_cachekeeper_app_enabled(states[self.bundle]));
+    state[@"webKitDiskCache"]=@(toggle.on);states[self.bundle]=state;
+    if (![states writeToFile:path atomically:YES]) [self message:@"网页缓存选项保存失败。"];
+    else axs_cachekeeper_notify_preferences();
+    self.actionStatus=nil;[self axs_cachekeeper_reload];
 }
 - (void)axs_cachekeeper_discovery_changed:(UISwitch *)toggle {
     NSString *path=[self file:@"appEnabled.plist"];

@@ -2,6 +2,7 @@
 #import <libSandy.h>
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperNetworkCache.h"
+#import "AxsCacheKeeperWebKitCache.h"
 #import "AxsCacheKeeperProbe.h"
 #include <roothide.h>
 #include <unistd.h>
@@ -34,6 +35,9 @@ static uint32_t axs_cachekeeper_refresh_network(void) {
     NSError *readError=nil;
     NSDictionary *states = axs_cachekeeper_read_input(statePath,&readError);
     BOOL readable = axs_cachekeeper_access && states!=nil;
+    BOOL webKitAuthorized=readable && !readError && axs_cachekeeper_state_valid(states[bundle]) &&
+        axs_cachekeeper_app_enabled(states[bundle]) && axs_cachekeeper_webkit_disk_cache_enabled(states[bundle]);
+    axs_cachekeeper_configure_webkit(axs_cachekeeper_container_eligible,axs_cachekeeper_access,webKitAuthorized);
     uint32_t diagnostic=!axs_cachekeeper_access ? axs_cachekeeper_probe_result(1,axs_cachekeeper_sandy_status) :
         (!readable ? axs_cachekeeper_probe_result(2,readError.code) : axs_cachekeeper_probe_result(3,0));
     BOOL prevent = readable && axs_cachekeeper_should_prevent(states[bundle]);

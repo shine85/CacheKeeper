@@ -13,6 +13,39 @@ if sys.platform != "darwin" or not compiler:
 output = root / "tmp" / ("cache-tests-" + str(time.time_ns()))
 output.mkdir(parents=True)
 try:
+    webkit_tests = output / "webkit-cache-tests"
+    subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
+                    "-framework", "Foundation", "-framework", "WebKit",
+                    str(root / "AxsCacheKeeperWebKitCache.m"),
+                    str(root / "tests" / "webkit_cache_tests.m"), "-o", str(webkit_tests)],
+                   check=True, timeout=60)
+    subprocess.run([str(webkit_tests)], check=True, timeout=60)
+    webkit_source = (root / "AxsCacheKeeperWebKitCache.m").read_text(encoding="utf-8-sig")
+    webkit_mutations = [
+        ("exclusion", [("if ([context[@\"excludedPaths\"] count]) return @\"exclusionUnrepresentable\";", "")],
+         "any exclusion blocks broad API"),
+        ("in-flight", [("if (_flight) { _reason=@\"inFlight\";", "if (NO) { _reason=@\"inFlight\";"),
+                        ("if (_flight || _preparing ||", "if (_preparing ||"),
+                        ("if (reason || self->_flight) return;", "if (reason) return;")],
+         "production receipt obeys closed schema"),
+    ]
+    for name, replacements, expected in webkit_mutations:
+        mutated = webkit_source
+        for before, after in replacements:
+            if mutated.count(before) != 1:
+                raise SystemExit("FAIL: ambiguous WebKit mutation target: " + name)
+            mutated = mutated.replace(before, after)
+        source = output / ("webkit-" + name + ".m")
+        source.write_text(mutated, encoding="utf-8")
+        executable = output / ("webkit-" + name)
+        subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-I" + str(root),
+                        "-framework", "Foundation", "-framework", "WebKit", str(source),
+                        str(root / "tests" / "webkit_cache_tests.m"), "-o", str(executable)],
+                       check=True, timeout=60)
+        result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=60)
+        if result.returncode == 0 or expected not in result.stderr:
+            raise SystemExit("FAIL: WebKit mutation did not hit its behavioral assertion: " + name + "\n" + result.stdout + result.stderr)
+        print("PASS: WebKit behavior mutation caught: " + name)
     subprocess.run([sys.executable, str(root / "tests" / "run_scan_diagnostics_tests.py")],
                    check=True, timeout=60)
     subprocess.run([sys.executable, str(root / "tests" / "run_hardlink_tests.py")],

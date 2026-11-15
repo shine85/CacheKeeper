@@ -76,6 +76,22 @@ static inline NSDictionary *axs_cachekeeper_search_route_projection(id value) {
     }
     out[@"hitAncestors"]=[ancestors copy];return [out copy];
 }
+static inline NSDictionary *axs_cachekeeper_search_ownership_projection(id value) {
+    if (![value isKindOfClass:NSDictionary.class] || ![value[@"reason"] isKindOfClass:NSString.class] ||
+        ![@[@"eligible",@"branchMismatch",@"barUnavailable",@"itemUnavailable",@"awaitingAppearance",@"transition"] containsObject:value[@"reason"]]) return nil;
+    NSMutableDictionary *out=[@{@"reason":[value[@"reason"] copy]} mutableCopy];
+    for (NSString *key in @[@"topIsDirectChild",@"topItemIsChildItem",@"topItemIsOwnerItem",@"candidateEligible",@"claimActive",@"transitioning",@"appeared"]) {
+        if (!axs_cachekeeper_search_bool(value[key])) return nil;out[key]=@([value[key] boolValue]);
+    }
+    return [out copy];
+}
+static inline NSDictionary *axs_cachekeeper_search_layout_projection(id value) {
+    if (![value isKindOfClass:NSDictionary.class] || !axs_cachekeeper_search_bool(value[@"appeared"]) ||
+        !axs_cachekeeper_search_number(value[@"safeTop"],-1000000,1000000,NO) ||
+        !axs_cachekeeper_search_number(value[@"searchInset"],0,1000000,NO)) return nil;
+    return @{@"appeared":@([value[@"appeared"] boolValue]),@"safeTop":@([value[@"safeTop"] doubleValue]),
+        @"searchInset":@([value[@"searchInset"] doubleValue])};
+}
 static inline NSDictionary *axs_cachekeeper_search_bar_projection(id value) {
     if (![value isKindOfClass:NSDictionary.class]) return nil;
     NSDictionary *view=axs_cachekeeper_search_view_projection(value[@"view"]);if (!view) return nil;
@@ -84,9 +100,14 @@ static inline NSDictionary *axs_cachekeeper_search_bar_projection(id value) {
         !axs_cachekeeper_search_bool(value[@"hasTopItem"]) ||
         !axs_cachekeeper_search_number(value[@"topItemMode"],0,2,YES) ||
         !axs_cachekeeper_search_bool(value[@"prefersLargeTitles"])) return nil;
-    return @{@"view":view,@"role":[value[@"role"] copy],@"hasTopItem":@([value[@"hasTopItem"] boolValue]),
+    NSMutableDictionary *out=[@{@"view":view,@"role":[value[@"role"] copy],@"hasTopItem":@([value[@"hasTopItem"] boolValue]),
         @"topItemMode":@([value[@"topItemMode"] unsignedIntegerValue]),
-        @"prefersLargeTitles":@([value[@"prefersLargeTitles"] boolValue])};
+        @"prefersLargeTitles":@([value[@"prefersLargeTitles"] boolValue])} mutableCopy];
+    if (value[@"ownership"]) {
+        NSDictionary *ownership=axs_cachekeeper_search_ownership_projection(value[@"ownership"]);
+        if (!ownership) return nil;out[@"ownership"]=ownership;
+    }
+    return [out copy];
 }
 static inline NSDictionary *axs_cachekeeper_search_diagnostics_projection(id value) {
     if (!value) return @{@"state":@"notObserved"};
@@ -130,6 +151,10 @@ static inline NSDictionary *axs_cachekeeper_search_diagnostics_projection(id val
             [ancestors addObject:@{@"role":[ancestor[@"role"] copy],@"view":node}];
         }
         out[@"ancestors"]=[ancestors copy];
+        if (event[@"layout"]) {
+            NSDictionary *layout=axs_cachekeeper_search_layout_projection(event[@"layout"]);
+            if (!layout) return invalid;out[@"layout"]=layout;
+        }
         if (event[@"bars"] || event[@"barsTruncated"]) {
             if (![event[@"bars"] isKindOfClass:NSArray.class] || [event[@"bars"] count]>AxsCacheKeeperSearchBarLimit ||
                 !axs_cachekeeper_search_bool(event[@"barsTruncated"])) return invalid;

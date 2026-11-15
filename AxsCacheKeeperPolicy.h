@@ -157,7 +157,7 @@ static inline BOOL axs_cachekeeper_state_valid(id state) {
     if (!state) return YES;
     if ([state isKindOfClass:NSNumber.class]) return axs_cachekeeper_input_boolean(state);
     if (![state isKindOfClass:NSDictionary.class]) return NO;
-    for (NSString *field in @[@"enabled",@"urlCache",@"autoDiscover",@"restrict",@"processExited"])
+    for (NSString *field in @[@"enabled",@"urlCache",@"webKitDiskCache",@"autoDiscover",@"restrict",@"processExited"])
         if (state[field] && !axs_cachekeeper_input_boolean(state[field])) return NO;
     if (state[@"mode"] && ![@[@"auto",@"prevent",@"clean"] containsObject:state[@"mode"]]) return NO;
     for (NSString *field in @[@"logPaths",@"excludedPaths",@"unavailablePaths"])
@@ -325,6 +325,11 @@ static inline BOOL axs_cachekeeper_url_cache_enabled(id state) {
 static inline BOOL axs_cachekeeper_should_prevent(id state) {
     return axs_cachekeeper_app_enabled(state) && axs_cachekeeper_wants_restriction(state) && axs_cachekeeper_url_cache_enabled(state);
 }
+static inline BOOL axs_cachekeeper_webkit_disk_cache_enabled(id state) {
+    // This capability is independent of legacy modes and is never enabled by migration.
+    return [state isKindOfClass:NSDictionary.class] && axs_cachekeeper_state_valid(state) &&
+        [state[@"webKitDiskCache"] boolValue];
+}
 static inline BOOL axs_cachekeeper_auto_discover(id state) {
     // 全新 APP 默认自动发现开启：只开总开关即全自动（标准缓存根自动纳入，未知目录内容审查自动清理）；
     // 已明确关闭的（键为 @NO）保持关闭；手动排除始终有效。2026-11-12 用户要求：分目录不用逐个管。
@@ -438,6 +443,7 @@ static inline NSMutableDictionary *axs_cachekeeper_app_state(id previous, BOOL e
     // 唯一状态归一化入口（方案任务 8）：旧 fullClear 键在此丢弃（不再写入新状态），
     // 其余选择（模式、网络选项、自动发现、日志定级、手动排除）原样保留；Tweak 不写用户配置。
     return [@{@"enabled":@(enabled), @"mode":axs_cachekeeper_mode(previous), @"urlCache":@(axs_cachekeeper_url_cache_enabled(previous)),
+        @"webKitDiskCache":@(axs_cachekeeper_webkit_disk_cache_enabled(previous)),
         @"autoDiscover":@(axs_cachekeeper_auto_discover(previous)),
         @"logPaths":axs_cachekeeper_log_paths(previous),
         @"excludedPaths":axs_cachekeeper_exclusions(previous)} mutableCopy];

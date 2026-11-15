@@ -70,11 +70,13 @@
 4. 首次仅给匹配构建提供显式验证动作。请求绑定 bundle、版本、构建、规则修订、实例和 token；按真实 API 的线程约定调用，回调匹配原请求才更新该次回执。达到 15 秒无回调只标记等待超时，仍保留该实例的 in-flight 状态；晚回调或实例确实退出前，新 token 也不能并发进入同一资源动作。
 5. 资源恢复、登录和下载列表三轮验收通过后再自动触发。目标 APP 从活跃转后台且尚有执行时间时最多启动一次；若用户划掉后台导致进程已退出，明确记录未执行，等待下次符合条件的生命周期，不由 SpringBoard 代删资源树。
 
-### WebKit 网络缓存的受限备选
+### WebKit 平台磁盘缓存的独立回收
 
-`removeDataOfTypes:modifiedSince:completionHandler:` 没有逐文件、逐资源或路径排除参数；`forDataRecords:` 也不提供任意路径排除。即使仅指定 `WKWebsiteDataTypeDiskCache`，仍不能据此证明不会影响某个待保留下载副本。
+2026-11-15 修订：公开 `WKWebsiteDataTypeDiskCache` 有独立的平台可淘汰缓存契约，可作为新的系统缓存能力；不再要求证明每个历史响应永久可重新下载。该能力不用于删除百度下载副本，也不代表 APP 私有资源恢复契约已经闭合。
 
-只有在匹配安装构建中核对了真实 data store 与缓存根，并能证明**该操作的整个作用范围**没有用户排除、唯一副本或恢复性未知资源时，才可评估仅 DiskCache 的动作。任一条件不满足就禁止调用，不能先整库清理再声称“跳过排除项”。当前证据不足，**本阶段不启用百度整 store 清理**；也不把默认 store 假定为全部 WebView 使用的 store。Cookies、LocalStorage、IndexedDB、网站离线数据仍不在清理范围。
+采用默认关闭的独立 `webKitDiskCache` 选项，只观察真实 WKWebView 使用的持久 store，只向公开 API 传入 DiskCache。保留目录文件清理中的 WebKit 保护，不使用 `allWebsiteDataTypes`，不请求 Cookies、LocalStorage、IndexedDB 或离线网站存储。APP 总开关、旧网络限制和一键开启不自动授予此权限；网页和 WebKit 媒体可能需要重新联网。
+
+公开接口无法表达路径排除，任何 `excludedPaths` 非空都阻止该动作。配置、安装身份、后台执行时间和原请求状态在提交前核对；超时保持 in-flight，晚回调只归原请求。回调单独报告，物理释放字节保持未测量。真实宿主保持性、重开恢复与 iOS 16–17 仍分别验收，不能据公开类型契约宣称所有 APP 已实测适配。百度私有下载和 Swiftgram 媒体继续遵循各自资源事务与三轮放行条件。
 
 ### 下载 PDF 的完成条件
 

@@ -43,13 +43,17 @@
 @interface AxsCacheKeeperTestNestedHost : UIViewController
 @property(nonatomic,strong) UINavigationController *axs_cachekeeper_inner;
 - (instancetype)initWithSettings:(CKSettings *)settings;
+- (instancetype)initWithContent:(UIViewController *)content;
 @end
 @implementation AxsCacheKeeperTestNestedHost
 - (instancetype)initWithSettings:(CKSettings *)settings {
+    return [self initWithContent:settings];
+}
+- (instancetype)initWithContent:(UIViewController *)content {
     if (!(self=[super init])) return nil;
     self.title=@"缓存管家";
     self.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAlways;
-    self.axs_cachekeeper_inner=[[UINavigationController alloc] initWithRootViewController:settings];
+    self.axs_cachekeeper_inner=[[UINavigationController alloc] initWithRootViewController:content];
     self.axs_cachekeeper_inner.navigationBarHidden=YES;
     return self;
 }
@@ -70,6 +74,14 @@
 @implementation AxsCacheKeeperTestForwardingHost
 - (UINavigationItem *)navigationItem {
     return self.axs_cachekeeper_forwardsItem ? self.axs_cachekeeper_inner.topViewController.navigationItem : [super navigationItem];
+}
+@end
+@interface AxsCacheKeeperAliasedSettings : AxsCacheKeeperVisualSettings
+@property(nonatomic,strong) UINavigationItem *axs_cachekeeper_aliasedItem;
+@end
+@implementation AxsCacheKeeperAliasedSettings
+- (UINavigationItem *)navigationItem {
+    return self.axs_cachekeeper_aliasedItem ?: [super navigationItem];
 }
 @end
 @interface CKScanPage : UITableViewController

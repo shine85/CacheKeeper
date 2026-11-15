@@ -210,6 +210,29 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     dxcheck([badReport[@"apps"][1][@"cleanup"][@"data"][@"directories"][0][@"invalidRecord"] boolValue],@"损坏目录记录明确标记");
     dxcheck([badReport[@"apps"][0][@"network"][@"data"][@"prevent"] isEqual:@YES] && [badReport[@"apps"][0][@"network"][@"data"][@"applied"] isEqual:@NO],@"网络限制请求和实际生效结果保留");
     dxcheck([badReport[@"batch"][@"state"] isEqual:@"invalid"],@"损坏扫描批次仍可汇总并明确标识");
+    NSMutableDictionary *webKit=[@{@"schemaVersion":@1,@"requested":@YES,@"timedOut":@NO,
+        @"state":@"completed",@"reason":@"none",@"persistentStores":@1,@"nonPersistentStores":@0,
+        @"submitted":@1,@"completed":@1,@"pending":@0,@"bytesState":@"notMeasured",@"updated":oldDate} mutableCopy];
+    dxwrite(folder,@"Status/test.active.webkit.plist",webKit);
+    NSDictionary *webKitReport=[session reportWithApps:@[] environment:@{}];
+    NSDictionary *webKitExport=dxapp(webKitReport,@"test.active")[@"webKitDiskCache"];
+    dxcheck([webKitExport[@"state"] isEqual:@"available"] && [webKitExport[@"data"][@"state"] isEqual:@"completed"] &&
+        [webKitExport[@"data"][@"updated"] isEqual:@100] && [webKitExport[@"data"][@"bytesState"] isEqual:@"notMeasured"] &&
+        !webKitExport[@"data"][@"bytes"],@"网页原生回调与原始时间完整导出且不虚构释放字节");
+    dxcheck([NSJSONSerialization dataWithJSONObject:webKitReport options:0 error:nil]!=nil,@"网页回执导出将日期转换为JSON数值");
+    webKit[@"submitted"]=@2;
+    dxwrite(folder,@"Status/test.active.webkit.plist",webKit);
+    dxcheck([dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"webKitDiskCache"][@"state"] isEqual:@"invalid"],@"网页回执丢失已提交请求不能伪装完成");
+    webKit[@"submitted"]=@1;
+    webKit[@"url"]=@"https://private-canary.example/account-secret";
+    dxwrite(folder,@"Status/test.active.webkit.plist",webKit);
+    NSDictionary *unsafeWebKit=[session reportWithApps:@[] environment:@{}];
+    NSData *unsafeJSON=[NSJSONSerialization dataWithJSONObject:unsafeWebKit options:0 error:nil];
+    dxcheck([dxapp(unsafeWebKit,@"test.active")[@"webKitDiskCache"][@"state"] isEqual:@"invalid"] &&
+        ![[[NSString alloc] initWithData:unsafeJSON encoding:NSUTF8StringEncoding] containsString:@"private-canary"],@"网页回执拒绝未知字段且不泄漏URL");
+    [webKit removeObjectForKey:@"url"];webKit[@"pending"]=@"1";
+    dxwrite(folder,@"Status/test.active.webkit.plist",webKit);
+    dxcheck([dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"webKitDiskCache"][@"state"] isEqual:@"invalid"],@"网页回执坏类型不能伪装完成");
     dxcheck([[NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"appEnabled.plist"]] isEqual:states],@"整个汇总流程不修改开关");
     dxwrite(folder,@"appEnabled.plist",@{@"test.active":@{@"enabled":@YES,@"mode":@42},@"test.disabled":@"invalid"});
     dxwrite(folder,@"directories.plist",@{@"test.active":@42,@"test.paths":@[@"Library/Caches",@42]});

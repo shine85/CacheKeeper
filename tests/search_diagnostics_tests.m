@@ -178,6 +178,53 @@ void axs_cachekeeper_run_search_diagnostics_tests(void) {
         @{@"view":barNode,@"role":@"inner",@"hasTopItem":@NO,@"topItemMode":@0,@"prefersLargeTitles":@NO}];
     barsFixture[@"events"][0][@"barsTruncated"]=@NO;
     axs_cachekeeper_search_check([project(barsFixture) isEqual:barsFixture],@"导航栏枚举必须完整进入同一份诊断 JSON");
+    NSMutableDictionary *ownershipFixture=axs_cachekeeper_search_mutable(barsFixture);
+    ownershipFixture[@"events"][0][@"bars"][0][@"ownership"]=[@{@"topIsDirectChild":@YES,
+        @"topItemIsChildItem":@NO,@"topItemIsOwnerItem":@NO,@"candidateEligible":@YES,@"claimActive":@YES,
+        @"transitioning":@NO,@"appeared":@YES,@"reason":@"eligible"} mutableCopy];
+    ownershipFixture[@"events"][0][@"layout"]=[@{@"appeared":@YES,@"safeTop":@44,@"searchInset":@47} mutableCopy];
+    NSDictionary *ownershipResult=project(ownershipFixture);
+    axs_cachekeeper_search_check([ownershipResult isEqual:ownershipFixture],@"实际宿主归属与安全区避让须进入真实导出，旧快照仍可省略");
+    NSMutableDictionary *privateOwnership=axs_cachekeeper_search_mutable(ownershipFixture);
+    axs_cachekeeper_search_add_private(privateOwnership);
+    axs_cachekeeper_search_check([project(privateOwnership) isEqual:ownershipResult],@"归属和布局未知字段同样移除，不外传标题或对象信息");
+    for (NSString *key in @[@"topIsDirectChild",@"topItemIsChildItem",@"topItemIsOwnerItem",@"candidateEligible",@"claimActive",@"transitioning",@"appeared"]) {
+        for (id value in @[@0,@1,@"true",NSNull.null]) {
+            NSMutableDictionary *bad=axs_cachekeeper_search_mutable(ownershipFixture);
+            bad[@"events"][0][@"bars"][0][@"ownership"][key]=value;
+            axs_cachekeeper_search_check([project(bad)[@"state"] isEqual:@"invalid"],@"归属布尔必须拒绝数字和字符串");
+        }
+        NSMutableDictionary *missing=axs_cachekeeper_search_mutable(ownershipFixture);
+        [missing[@"events"][0][@"bars"][0][@"ownership"] removeObjectForKey:key];
+        axs_cachekeeper_search_check([project(missing)[@"state"] isEqual:@"invalid"],@"提供归属状态时不得缺失任一判断字段");
+    }
+    for (id reason in @[@"private-sentinel",@1,NSNull.null]) {
+        NSMutableDictionary *bad=axs_cachekeeper_search_mutable(ownershipFixture);
+        bad[@"events"][0][@"bars"][0][@"ownership"][@"reason"]=reason;
+        axs_cachekeeper_search_check([project(bad)[@"state"] isEqual:@"invalid"],@"归属原因只接受固定枚举");
+    }
+    for (NSString *reason in @[@"branchMismatch",@"barUnavailable",@"itemUnavailable",@"awaitingAppearance",@"transition"]) {
+        NSMutableDictionary *valid=axs_cachekeeper_search_mutable(ownershipFixture);
+        valid[@"events"][0][@"bars"][0][@"ownership"][@"reason"]=reason;
+        valid[@"events"][0][@"bars"][0][@"ownership"][@"candidateEligible"]=@NO;
+        valid[@"events"][0][@"bars"][0][@"ownership"][@"claimActive"]=@NO;
+        axs_cachekeeper_search_check([project(valid) isEqual:valid],@"各固定拒绝原因可通过同一导出契约");
+    }
+    NSDictionary *badLayout=@{@"appeared":@[@0,@1,@"true"],
+        @"safeTop":@[@YES,@(NAN),@(INFINITY),@1000001,@(-1000001)],
+        @"searchInset":@[@YES,@(-1),@(NAN),@(INFINITY),@1000001]};
+    for (NSString *key in badLayout) {
+        for (id value in badLayout[key]) {
+            NSMutableDictionary *bad=axs_cachekeeper_search_mutable(ownershipFixture);bad[@"events"][0][@"layout"][key]=value;
+            axs_cachekeeper_search_check([project(bad)[@"state"] isEqual:@"invalid"],@"布局字段必须使用严格布尔和有界有限几何数值");
+        }
+        NSMutableDictionary *missing=axs_cachekeeper_search_mutable(ownershipFixture);[missing[@"events"][0][@"layout"] removeObjectForKey:key];
+        axs_cachekeeper_search_check([project(missing)[@"state"] isEqual:@"invalid"],@"布局证据不得缺少某个分量");
+    }
+    ownershipFixture[@"events"][0][@"bars"][0][@"ownership"][@"claimActive"]=@NO;
+    ownershipFixture[@"events"][0][@"layout"][@"searchInset"]=@0;
+    axs_cachekeeper_search_check([ownershipResult[@"events"][0][@"bars"][0][@"ownership"][@"claimActive"] isEqual:@YES] &&
+        [ownershipResult[@"events"][0][@"layout"][@"searchInset"] isEqual:@47],@"归属和布局导出不保留可变来源引用");
     NSMutableDictionary *badBars=axs_cachekeeper_search_route_fixture();
     badBars[@"events"][0][@"bars"]=@[@{@"view":badBars[@"events"][0][@"field"],@"role":@"host",@"hasTopItem":@YES,@"topItemMode":@2,@"prefersLargeTitles":@YES}];
     badBars[@"events"][0][@"barsTruncated"]=@NO;

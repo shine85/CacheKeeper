@@ -1,4 +1,5 @@
 #import "SearchDiagnostics.h"
+#import "SearchNavigation.h"
 
 @interface AxsCacheKeeperSearchDiagnostics ()
 @property(nonatomic,weak) UITextField *field;
@@ -144,18 +145,23 @@ static void axs_cachekeeper_search_collect_bars(UIView *view,NSMutableArray *bar
                 [ancestorBars addObject:((UINavigationController *)ancestorController).navigationBar];
         }
         NSMutableArray *bars=[NSMutableArray new];BOOL barsTruncated=foundBars.count>AxsCacheKeeperSearchBarLimit;
+        id<AxsCacheKeeperSearchNavigationOwner> navigationOwner=[self.owner conformsToProtocol:@protocol(AxsCacheKeeperSearchNavigationOwner)] ? (id)self.owner : nil;
+        NSArray *navigationStates=[navigationOwner axs_cachekeeper_search_navigation_states];
         for (UINavigationBar *candidateBar in foundBars) {
             if (bars.count>=AxsCacheKeeperSearchBarLimit) break;
             UINavigationItem *topItem=candidateBar.topItem;
             NSString *role=candidateBar==navigation.navigationBar ? @"inner" :
                 [ancestorBars containsObject:candidateBar] ? @"ancestor" : @"other";
-            [bars addObject:@{@"view":axs_cachekeeper_search_view(candidateBar,window,center),@"role":role,
+            NSMutableDictionary *descriptor=[@{@"view":axs_cachekeeper_search_view(candidateBar,window,center),@"role":role,
                 @"hasTopItem":topItem ? @YES : @NO,
                 @"topItemMode":@(topItem ? topItem.largeTitleDisplayMode : UINavigationItemLargeTitleDisplayModeAutomatic),
-                @"prefersLargeTitles":candidateBar.prefersLargeTitles ? @YES : @NO}];
+                @"prefersLargeTitles":candidateBar.prefersLargeTitles ? @YES : @NO} mutableCopy];
+            for (NSDictionary *state in navigationStates)
+                if (state[@"bar"]==candidateBar) descriptor[@"ownership"]=state[@"ownership"];
+            [bars addObject:[descriptor copy]];
         }
         NSTimeInterval elapsed=NSProcessInfo.processInfo.systemUptime-self.started;
-        NSDictionary *entry=@{@"event":axs_cachekeeper_search_event_names()[event],@"elapsedMs":@((NSUInteger)MIN(3600000,MAX(0,elapsed*1000))),
+        NSMutableDictionary *entry=[@{@"event":axs_cachekeeper_search_event_names()[event],@"elapsedMs":@((NSUInteger)MIN(3600000,MAX(0,elapsed*1000))),
             @"observedHit":observedHit,@"centerHit":[self axs_cachekeeper_hit_role:hit],@"firstResponder":@(self.field.isFirstResponder),
             @"fieldEnabled":@(self.field.enabled),@"fieldCanBecomeFirstResponder":@(self.field.canBecomeFirstResponder),
             @"presented":self.owner.presentedViewController ? @YES : @NO,@"windowAttached":window ? @YES : @NO,@"windowKey":@(window.isKeyWindow),
@@ -163,7 +169,8 @@ static void axs_cachekeeper_search_collect_bars(UIView *view,NSMutableArray *bar
             @"field":axs_cachekeeper_search_view(self.field,window,center),@"input":axs_cachekeeper_search_view(self.input,window,center),
             @"root":axs_cachekeeper_search_view(self.root,window,center),@"table":axs_cachekeeper_search_view(self.table,window,center),
             @"ancestors":[ancestors copy],@"ancestorsTruncated":ancestor ? @YES : @NO,@"hitRoute":route,
-            @"bars":[bars copy],@"barsTruncated":barsTruncated ? @YES : @NO};
+            @"bars":[bars copy],@"barsTruncated":barsTruncated ? @YES : @NO} mutableCopy];
+        if (navigationOwner) entry[@"layout"]=[navigationOwner axs_cachekeeper_search_layout_state];
         if (event==AxsCacheKeeperSearchEventSampled) {
             NSMutableDictionary *state=[entry mutableCopy];
             // Table contentOffset changes on ordinary scrolling and must not evict search touch evidence.
@@ -172,7 +179,7 @@ static void axs_cachekeeper_search_collect_bars(UIView *view,NSMutableArray *bar
             self.lastSample=state;
         }
         if (self.events.count==AxsCacheKeeperSearchEventLimit) { [self.events removeObjectAtIndex:0];self.truncated=YES; }
-        [self.events addObject:entry];
+        [self.events addObject:[entry copy]];
     } @finally {
         self.capturing=NO;
     }

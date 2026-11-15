@@ -174,6 +174,20 @@ void axs_cachekeeper_run_review_followup_tests(NSString *fixture) {
         }
     }
 
+    // A new destructive capability requires explicit consent independent of legacy modes.
+    for (id oldState in @[@YES,@NO,@{},@{@"enabled":@YES,@"urlCache":@YES}])
+        ckcheck([axs_cachekeeper_app_state(oldState,YES)[@"webKitDiskCache"] isEqual:@NO],@"旧配置升级不能自动授权网页缓存回收");
+    for (NSNumber *choice in @[@NO,@YES]) {
+        NSDictionary *chosen=@{@"enabled":@YES,@"webKitDiskCache":choice,@"excludedPaths":excluded};
+        for (NSString *mode in @[@"auto",@"prevent",@"clean"])
+            for (NSNumber *enabled in @[@NO,@YES]) {
+                NSDictionary *saved=axs_cachekeeper_app_state(axs_cachekeeper_state_with_mode(chosen,mode),enabled.boolValue);
+                ckcheck([saved[@"webKitDiskCache"] isEqual:choice] && [saved[@"excludedPaths"] isEqual:excluded],@"总开关和模式往返保留网页缓存授权及排除");
+            }
+    }
+    for (id malformed in @[@"yes",@2,@[],@{}])
+        ckcheck(!axs_cachekeeper_state_valid(@{@"enabled":@YES,@"webKitDiskCache":malformed}),@"网页缓存开关非法类型拒绝整个配置");
+
     // 已确认必需例外在 APP 升级/版本缺失时继续保留，独立平台缓存仍能处理。
     [AxsCacheKeeperCleanupRules registerRule:[[AxsCacheKeeperAppRule alloc] initWithRuleID:@"preserve-business" revision:@"1" appVersion:@"1.0"
         cleanablePaths:@[@"Library/Resources"] retentionPaths:@[@"Library/Caches/business"] dependencyPaths:@[]] forBundle:bundle];
