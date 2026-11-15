@@ -19,17 +19,20 @@
 #import "AxsCacheKeeperInstallation.h"
 #import "AxsCacheKeeperPDFSession.h"
 #import "AxsCacheKeeperFileAccess.h"
+#import "AxsCacheKeeperScanDiagnostics.h"
 static id SRead(id target,NSString *name) { SEL s=NSSelectorFromString(name);return [target respondsToSelector:s]?((id(*)(id,SEL))objc_msgSend)(target,s):nil; }
 static id AxsCacheKeeperAppProxy(NSString *bundle) {
     Class proxy=NSClassFromString(@"LSApplicationProxy"); SEL selector=NSSelectorFromString(@"applicationProxyForIdentifier:");
     return [proxy respondsToSelector:selector] ? ((id(*)(id,SEL,id))objc_msgSend)(proxy,selector,bundle) : nil;
 }
-static NSURL *Container(NSString *bundle) {
-    id app=AxsCacheKeeperAppProxy(bundle);
-    NSURL *home=SRead(app,@"dataContainerURL");
-    if (![home isKindOfClass:NSURL.class]) return nil;
+static NSURL *axs_cachekeeper_container_url(id value) {
+    NSURL *home=value;
+    if (![home isKindOfClass:NSURL.class] || !home.isFileURL) return nil;
     home=home.URLByResolvingSymlinksInPath;
     return [home.path containsString:@"/Containers/Data/Application/"]?home:nil;
+}
+static NSURL *Container(NSString *bundle) {
+    return axs_cachekeeper_container_url(SRead(AxsCacheKeeperAppProxy(bundle),@"dataContainerURL"));
 }
 AxsCacheKeeperPDFRoot *axs_cachekeeper_pdf_resolve_root(NSString *bundle,NSString **stage,int *code) {
     if (stage) *stage=@"containerResolve";if (code) *code=EINVAL;
@@ -98,16 +101,17 @@ void CKScanRequests(void) {
     // 检测仍只读；让下一次满足进程条件的清理轮重新预检，不沿用旧静默/未知登记。
     if (!([request[@"diagnostic"] isKindOfClass:NSNumber.class] && [request[@"diagnostic"] boolValue]))
         [AxsCacheKeeperProcessObservation requestRecheckForBundle:bundle];
-    NSURL *home=Container(bundle);
-    Class proxy=NSClassFromString(@"LSApplicationProxy");
-    SEL lookup=NSSelectorFromString(@"applicationProxyForIdentifier:");
-    id app=[proxy respondsToSelector:lookup] ? ((id(*)(id,SEL,id))objc_msgSend)(proxy,lookup,bundle) : nil;
+    id app=AxsCacheKeeperAppProxy(bundle),providedHome=SRead(app,@"dataContainerURL");
+    NSURL *home=axs_cachekeeper_container_url(providedHome);
+    BOOL homeWasRejected=!home && providedHome!=nil;
     NSDictionary *groups=axs_cachekeeper_valid_group_homes(SRead(app,@"groupContainerURLs"));
     if (!batchItem) [NSFileManager.defaultManager removeItemAtPath:requestPath error:nil];
     busy=YES;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
         NSError *directoryError=nil;
-        NSArray *candidates=axs_cachekeeper_scan_targets(home,groups,&directoryError);
+        NSDictionary *discoveryDiagnostics=nil;
+        NSArray *candidates=axs_cachekeeper_scan_targets_diagnostics(home,groups,homeWasRejected,&directoryError,&discoveryDiagnostics);
+        NSMutableDictionary *scanDiagnostics=[discoveryDiagnostics mutableCopy];
         NSMutableArray *rows=[NSMutableArray array];
         NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+15;
         NSUInteger remainingDirectories=candidates.count;
@@ -117,18 +121,11 @@ void CKScanRequests(void) {
             NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
             NSTimeInterval directoryDeadline=now+MAX(0,deadline-now)/MAX((NSUInteger)1,remainingDirectories);
             remainingDirectories--;
-            NSURL *root=candidate[@"root"];
-            unsigned long long size=0; NSUInteger files=0; __block BOOL complete=YES;
-            NSDirectoryEnumerator *entries=[NSFileManager.defaultManager enumeratorAtURL:root includingPropertiesForKeys:nil options:0 errorHandler:^BOOL(NSURL *url,NSError *error){complete=NO;return YES;}];
-            for (NSURL *entry in entries) {
-                if (NSProcessInfo.processInfo.systemUptime>directoryDeadline || ++files>100000) {complete=NO;break;}
-                struct stat info;
-                if (lstat(entry.path.fileSystemRepresentation,&info)) {complete=NO;continue;}
-                if (S_ISLNK(info.st_mode)) continue;
-                if (S_ISREG(info.st_mode)) size+=info.st_size;
-            }
-            if (!entries || NSProcessInfo.processInfo.systemUptime>directoryDeadline) complete=NO;
-            [rows addObject:@{@"path":relative,@"bytes":@(size),@"complete":@(complete),@"manageable":@(![candidate[@"readOnly"] boolValue])}];
+            NSMutableDictionary *row=[axs_cachekeeper_measure_directory(candidate[@"root"],directoryDeadline,100000) mutableCopy];
+            NSDictionary *measurement=axs_cachekeeper_scan_scope(row[@"scanDiagnostics"],candidate[@"scope"]);
+            row[@"scanDiagnostics"]=measurement;row[@"path"]=relative;
+            row[@"manageable"]=@(![candidate[@"readOnly"] boolValue]);
+            axs_cachekeeper_scan_merge(scanDiagnostics,measurement);[rows addObject:row];
         }
         NSError *historyError=nil;
         NSMutableDictionary *history=[axs_cachekeeper_read_records([folder stringByAppendingPathComponent:@"snapshots.plist"],&historyError) mutableCopy];
@@ -137,6 +134,7 @@ void CKScanRequests(void) {
         NSMutableDictionary *groupPaths=[NSMutableDictionary new];
         for (NSString *identifier in groups) groupPaths[identifier]=[groups[identifier] path];
         NSMutableDictionary *result=[@{@"token":token,@"bundle":bundle,@"home":home.path?:@"",@"groups":groupPaths,@"rows":rows,@"updated":NSDate.date,@"previousRows":old[@"rows"]?:@[],@"recentScans":axs_cachekeeper_recent_scans(old),
+            @"scanDiagnostics":[scanDiagnostics copy],
             @"error":home ? (directoryError.localizedDescription ?: @"") : @"此 APP 没有可读取的标准数据容器"} mutableCopy];
         history[bundle]=result;
         NSError *saveError=nil;

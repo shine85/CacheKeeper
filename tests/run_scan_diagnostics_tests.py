@@ -31,6 +31,7 @@ def main() -> int:
         # Link current production implementations. A compiler/linker failure is never a passing RED.
         subprocess.run(
             [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
+             "-DAXS_CACHEKEEPER_SCAN_TESTING=1",
              "-I" + str(root / "tests" / "include"), "-framework", "Foundation",
              *map(str, sources), "-o", str(binary)],
             check=True, timeout=60,
@@ -39,6 +40,8 @@ def main() -> int:
             "missing-home": "FAIL: scan diagnostics: missing primary container must return ENOENT",
             "export": "FAIL: scan diagnostics: valid scanDiagnostics must survive real report export",
         }
+        if not args.expect_red:
+            cases["measurement"] = ""
         failed = False
         for mode, expected in cases.items():
             result = subprocess.run(

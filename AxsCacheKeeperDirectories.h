@@ -1,5 +1,10 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#include <sys/stat.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 NSArray<NSString *> *axs_cachekeeper_scan_directories(NSURL *home, NSError **error);
 // B 案清理候选发现：返回家目录下所有可枚举目录的相对路径（未知目录也在内）。
@@ -9,3 +14,15 @@ NSArray<NSString *> *axs_cachekeeper_purge_candidates(NSURL *home, NSError **err
 NSDictionary<NSString *,NSURL *> *axs_cachekeeper_valid_group_homes(NSDictionary *groups);
 NSArray<NSDictionary *> *axs_cachekeeper_scan_targets(NSURL *home, NSDictionary *groups, NSError **error);
 NSArray<NSString *> *axs_cachekeeper_discover_cache_roots(NSURL *home, NSError **error);
+NSArray<NSDictionary *> *axs_cachekeeper_scan_targets_diagnostics(NSURL *home, NSDictionary *groups, BOOL homeWasRejected, NSError **error,
+                                                                 NSDictionary **diagnostics);
+NSDictionary *axs_cachekeeper_measure_directory(NSURL *root, NSTimeInterval deadline, NSUInteger entryLimit);
+
+#if defined(AXS_CACHEKEEPER_SCAN_TESTING)
+NSDictionary *axs_cachekeeper_measure_directory_dependencies(NSURL *root, NSTimeInterval deadline, NSUInteger entryLimit,
+    NSTimeInterval (^clock)(void), int (^statBlock)(const char *,struct stat *),
+    NSEnumerator<NSURL *> *(^enumerator)(NSURL *,BOOL (^)(NSURL *,NSError *)));
+#endif
+#ifdef __cplusplus
+}
+#endif
