@@ -541,7 +541,9 @@
     nav.navigationBar.prefersLargeTitles=YES;nav.modalPresentationStyle=UIModalPresentationFullScreen;
     XCTestExpectation *shown=[self expectationWithDescription:@"Transition fixture navigation appeared"];
     [self.owner presentViewController:nav animated:NO completion:^{ [shown fulfill]; }];[self waitForExpectations:@[shown] timeout:10];
-    AxsCacheKeeperReplacementHost *host=[[AxsCacheKeeperReplacementHost alloc] initWithContent:[UIViewController new]];
+    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+    AxsCacheKeeperReplacementHost *host=[[AxsCacheKeeperReplacementHost alloc] initWithSettings:settings];
+    [host loadViewIfNeeded];
     UINavigationItem *installedItem=host.navigationItem;
     AxsCacheKeeperHeldTransition *transition=[AxsCacheKeeperHeldTransition new];
     XCTestExpectation *started=[self expectationWithDescription:@"UIKit navigation transition is held before completion"];
@@ -549,10 +551,9 @@
     transition.axs_cachekeeper_started=started;transition.axs_cachekeeper_finished=finished;transition.axs_cachekeeper_target=host;nav.delegate=transition;
     [nav pushViewController:host animated:YES];[self waitForExpectations:@[started] timeout:10];
     host.axs_cachekeeper_replacement=[[UINavigationItem alloc] initWithTitle:@"Forwarded after installation"];
-    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
-    [host.axs_cachekeeper_inner setViewControllers:@[settings] animated:NO];
     BOOL fixtureValid=nav.topViewController==host && nav.navigationBar.topItem==installedItem &&
-        host.navigationItem!=installedItem && installedItem!=settings.navigationItem && nav.transitionCoordinator!=nil;
+        host.navigationItem!=installedItem && installedItem!=settings.navigationItem && nav.transitionCoordinator!=nil &&
+        settings.parentViewController==host.axs_cachekeeper_inner && host.axs_cachekeeper_inner.parentViewController==host && settings.view.window==self.window;
     XCTAssertTrue(fixtureValid,@"FIXTURE INVALID: UIKit must retain the installed item during a real unfinished transition");
     if (fixtureValid) {
         [settings updateBatch];
@@ -564,6 +565,10 @@
     }
     [transition axs_cachekeeper_finish];[self waitForExpectations:@[finished] timeout:10];
     if (!fixtureValid) return;
+    XCTNSPredicateExpectation *settled=[[XCTNSPredicateExpectation alloc] initWithPredicate:[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *bindings) {
+        (void)object;(void)bindings;return nav.transitionCoordinator==nil && settings.transitionCoordinator==nil;
+    }] object:nil];
+    [self waitForExpectations:@[settled] timeout:5];
     [settings updateBatch];
     XCTAssertEqual(nav.navigationBar.topItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);XCTAssertFalse(nav.navigationBar.prefersLargeTitles);
 }

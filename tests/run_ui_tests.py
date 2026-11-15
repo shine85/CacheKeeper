@@ -24,10 +24,15 @@ subprocess.run(["xcrun", "simctl", "boot", device], check=False, timeout=60)
 subprocess.run(["xcrun", "simctl", "bootstatus", device, "-b"], check=True, timeout=420)
 build_options = ["-project", str(output / "CacheKeeperInputTests.xcodeproj"),
                  "-scheme", "InputHarness", "-destination", f"platform=iOS Simulator,id={device}",
-                 "-derivedDataPath", str(output / "DerivedData"), "CODE_SIGNING_ALLOWED=NO"]
+                 "-derivedDataPath", str(output / "DerivedData"),
+                 "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"]
 # Run 116 spent most of the combined deadline compiling; execution gets its own
 # unchanged 600-second budget, against exactly the products built above.
 subprocess.run(["xcodebuild", "build-for-testing", *build_options], check=True, timeout=600)
+# WebKit's simulator services require an identifiable host. Ad-hoc signing needs no account.
+subprocess.run(["codesign", "--verify", "--deep", "--strict",
+                str(output / "DerivedData/Build/Products/Debug-iphonesimulator/InputHarness.app")],
+               check=True, timeout=60)
 # Run 127 exceeded the 600-second test budget with zero assertion failures: the keyboard
 # input test alone took 268 seconds and the suite was cut off mid-test. Raise only the
 # execution budget; no assertion or timeout inside the tests changes.

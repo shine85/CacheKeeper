@@ -83,9 +83,13 @@ static NSDictionary *axs_cachekeeper_webkit_test_context(void) {
 
 @interface AxsCacheKeeperWebKitProbeTests : XCTestCase
 @property(nonatomic,strong) AxsCacheKeeperWebKitHTTPFixture *fixture;
+@property(nonatomic,strong) NSMutableArray<WKWebView *> *axs_cachekeeper_attachedViews;
 @end
 @implementation AxsCacheKeeperWebKitProbeTests
-- (void)tearDown { self.fixture=nil;[super tearDown]; }
+- (void)tearDown {
+    for (WKWebView *view in self.axs_cachekeeper_attachedViews) { [view stopLoading];[view removeFromSuperview]; }
+    self.axs_cachekeeper_attachedViews=nil;self.fixture=nil;[super tearDown];
+}
 - (void)testColdStartViewWaitsForCurrentIdentityValidation {
     XCTAssertTrue(NSThread.isMainThread);
     AxsCacheKeeperWebKitCache *engine=[[AxsCacheKeeperWebKitCache alloc] initWithPreparation:nil clock:nil observer:nil];
@@ -138,24 +142,37 @@ static NSDictionary *axs_cachekeeper_webkit_test_context(void) {
     }] object:nil];
     [self waitForExpectations:@[releasedView] timeout:5];
     XCTAssertNil(released);XCTAssertEqual(observation.pendingViewCount,0u);
-    NSMutableArray<AxsCacheKeeperObservedWebView *> *views=[NSMutableArray new];
-    for (NSUInteger index=0;index<40;index++) {
-        AxsCacheKeeperObservedWebView *view=[[AxsCacheKeeperObservedWebView alloc] initWithFrame:CGRectZero configuration:[WKWebViewConfiguration new]];
-        view.configurationReads=0;[views addObject:view];[observation captureCreatedWebView:view];
+    @autoreleasepool {
+        // These views test object identity, not process isolation. Reuse one pool instead of
+        // starting a separate WebKit process pool for each of the forty capacity candidates.
+        WKWebViewConfiguration *configuration=[WKWebViewConfiguration new];
+        configuration.processPool=[WKProcessPool new];
+        NSMutableArray<AxsCacheKeeperObservedWebView *> *views=[NSMutableArray new];
+        for (NSUInteger index=0;index<40;index++) {
+            AxsCacheKeeperObservedWebView *view=[[AxsCacheKeeperObservedWebView alloc] initWithFrame:CGRectZero configuration:configuration];
+            view.configurationReads=0;[views addObject:view];[observation captureCreatedWebView:view];
+        }
+        XCTAssertEqual(observation.pendingViewCount,32u);
+        for (AxsCacheKeeperObservedWebView *view in views) XCTAssertEqual(view.configurationReads,0u);
+        XCTAssertTrue([observation applyContext:axs_cachekeeper_webkit_test_context() forGeneration:generation]);
+        NSUInteger reads=0;for (AxsCacheKeeperObservedWebView *view in views) reads+=view.configurationReads;
+        XCTAssertEqual(reads,32u);
     }
-    XCTAssertEqual(observation.pendingViewCount,32u);
-    for (AxsCacheKeeperObservedWebView *view in views) XCTAssertEqual(view.configurationReads,0u);
-    XCTAssertTrue([observation applyContext:axs_cachekeeper_webkit_test_context() forGeneration:generation]);
-    NSUInteger reads=0;for (AxsCacheKeeperObservedWebView *view in views) reads+=view.configurationReads;
-    XCTAssertEqual(reads,32u);
 }
-- (void)axs_cachekeeper_load_fixture:(WKWebView *)view {
+- (BOOL)axs_cachekeeper_load_fixture:(WKWebView *)view {
+    UIWindow *window=UIApplication.sharedApplication.delegate.window;
+    XCTAssertNotNil(window);XCTAssertFalse(window.hidden);
+    if (!window || window.hidden) return NO;
+    // An unattached view may be suspended while simulator WebKit services cold-start.
+    if (!self.axs_cachekeeper_attachedViews) self.axs_cachekeeper_attachedViews=[NSMutableArray new];
+    [self.axs_cachekeeper_attachedViews addObject:view];[window.rootViewController.view addSubview:view];
     AxsCacheKeeperWebKitFixtureNavigation *delegate=[AxsCacheKeeperWebKitFixtureNavigation new];
     delegate.finished=[self expectationWithDescription:@"Synthetic WebKit fixture loaded"];
     XCTestExpectation *finished=delegate.finished;view.navigationDelegate=delegate;
     [view loadRequest:[NSURLRequest requestWithURL:self.fixture.url]];
     [self waitForExpectations:@[finished] timeout:15];XCTAssertNil(delegate.error);
-    view.navigationDelegate=nil;
+    BOOL loaded=delegate.finished==nil && delegate.error==nil;
+    view.navigationDelegate=nil;return loaded;
 }
 - (id)axs_cachekeeper_evaluate:(NSString *)script view:(WKWebView *)view {
     XCTestExpectation *finished=[self expectationWithDescription:@"Fixture storage operation"];
@@ -171,7 +188,7 @@ static NSDictionary *axs_cachekeeper_webkit_test_context(void) {
     // the store from a real WebView; it never discovers or creates a user's default store.
     WKWebView *view=[[WKWebView alloc] initWithFrame:CGRectMake(0,0,320,480) configuration:[WKWebViewConfiguration new]];
     WKWebsiteDataStore *store=view.configuration.websiteDataStore;XCTAssertTrue(store.isPersistent);
-    [self axs_cachekeeper_load_fixture:view];
+    if (![self axs_cachekeeper_load_fixture:view]) return;
     XCTAssertEqualObjects([self axs_cachekeeper_evaluate:@"localStorage.setItem('ck-preserved', 'fixture-value');localStorage.getItem('ck-preserved')" view:view],@"fixture-value");
     NSHTTPCookie *cookie=[NSHTTPCookie cookieWithProperties:@{NSHTTPCookieName:@"ck-preserved",NSHTTPCookieValue:@"fixture-value",
         NSHTTPCookieDomain:@"127.0.0.1",NSHTTPCookiePath:@"/",NSHTTPCookieExpires:[NSDate dateWithTimeIntervalSinceNow:3600]}];
@@ -198,7 +215,7 @@ static NSDictionary *axs_cachekeeper_webkit_test_context(void) {
 
     WKWebViewConfiguration *configuration=[WKWebViewConfiguration new];configuration.websiteDataStore=store;
     WKWebView *reopened=[[WKWebView alloc] initWithFrame:CGRectMake(0,0,320,480) configuration:configuration];
-    [self axs_cachekeeper_load_fixture:reopened];
+    if (![self axs_cachekeeper_load_fixture:reopened]) return;
     XCTAssertEqualObjects([self axs_cachekeeper_evaluate:@"localStorage.getItem('ck-preserved')" view:reopened],@"fixture-value");
     XCTestExpectation *cookieRead=[self expectationWithDescription:@"Fixture cookie preserved"];
     __block BOOL cookiePreserved=NO;

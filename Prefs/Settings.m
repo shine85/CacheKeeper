@@ -408,11 +408,11 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
 - (void)axs_cachekeeper_layout_compact_navigation {
     if (!self.axs_cachekeeper_visible || !self.axs_cachekeeper_appeared || self.axs_cachekeeper_updatingTitle) return;
     [self axs_cachekeeper_update_compact_title];
-    BOOL forced=NO;
-    for (NSDictionary *state in [self axs_cachekeeper_search_navigation_states]) {
+    // A compact bar can still leave its descendants with the old large-title safe area.
+    // Settle outer containers first, even when the bar itself already fits.
+    for (NSDictionary *state in [[self axs_cachekeeper_search_navigation_states] reverseObjectEnumerator]) {
         if (![state[@"ownership"][@"claimActive"] boolValue] || [state[@"ownership"][@"transitioning"] boolValue]) continue;
         UINavigationController *navigation=state[@"navigation"];UINavigationBar *bar=state[@"bar"];
-        if (bar.bounds.size.height<=44.5) continue;
         [navigation.view setNeedsLayout];[navigation.view layoutIfNeeded];
         // UIKit may change ownership synchronously during layout. Revalidate before forcing.
         for (NSDictionary *current in [self axs_cachekeeper_search_navigation_states]) {
@@ -420,9 +420,8 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
                 [current[@"ownership"][@"claimActive"] boolValue] && ![current[@"ownership"][@"transitioning"] boolValue] &&
                 bar.bounds.size.height>44.5) [bar sizeToFit];
         }
-        forced=YES;
     }
-    if (forced) [self axs_cachekeeper_update_search_top];
+    [self axs_cachekeeper_update_search_top];
 }
 - (BOOL)axs_cachekeeper_update_search_top {
     if (!self.isViewLoaded || !self.axs_cachekeeper_visible || !self.axs_cachekeeper_searchTop) return NO;
@@ -491,8 +490,8 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     self.axs_cachekeeper_appeared=YES;
-    [self axs_cachekeeper_update_search_top];[self.view layoutIfNeeded];
     [self axs_cachekeeper_layout_compact_navigation];
+    [self axs_cachekeeper_update_search_top];[self.view layoutIfNeeded];
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventDidAppear];
 }
 - (void)viewWillDisappear:(BOOL)animated {
