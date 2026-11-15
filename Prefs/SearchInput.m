@@ -73,6 +73,20 @@
         if (control.enabled && (hit==control || [hit isDescendantOfView:control])) return YES;
     return NO;
 }
+- (NSArray<NSValue *> *)axs_cachekeeper_visible_control_rects {
+    NSMutableArray *rects=[NSMutableArray new];
+    for (UIControl *control in @[self.axs_cachekeeper_field,self.axs_cachekeeper_cancel_button]) {
+        BOOL visible=YES;
+        for (UIView *ancestor=control;ancestor && ancestor!=self;ancestor=ancestor.superview)
+            if (ancestor.hidden || ancestor.alpha<=0.01) { visible=NO;break; }
+        if (!visible) continue;
+        CGRect rect=[control convertRect:control.bounds toView:self];
+        if (!isfinite(rect.origin.x) || !isfinite(rect.origin.y) || !isfinite(rect.size.width) || !isfinite(rect.size.height) ||
+            CGRectIsEmpty(rect) || !CGRectContainsRect(self.bounds,rect)) return @[];
+        [rects addObject:[NSValue valueWithCGRect:rect]];
+    }
+    return rects;
+}
 - (BOOL)axs_cachekeeper_focus {
     [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventFocus];
     if (!self.window) { [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventFocusNoWindow];return NO; }

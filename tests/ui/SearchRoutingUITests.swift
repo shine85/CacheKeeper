@@ -9,7 +9,12 @@ final class SearchRoutingUITests: XCTestCase {
         let bar = app.navigationBars["CacheKeeperTestRegrownBar"]
         XCTAssertTrue(field.waitForExistence(timeout: 15))
         let compact = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            bar.frame.height > 0 && bar.frame.height <= 44.5 && field.frame.minY >= bar.frame.maxY
+            guard let data = app.staticTexts["CacheKeeperRegrowthEvidence"].label.data(using: .utf8),
+                  let evidence = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]],
+                  let entry = evidence["entry"], entry["ready"] as? Bool == true,
+                  entry["fixtureAppCount"] as? Int == 8,
+                  let deliveries = entry["fixtureDeliveries"] as? Int, deliveries > 0 else { return false }
+            return bar.frame.height > 0 && bar.frame.height <= 44.5 && field.frame.minY >= bar.frame.maxY
         }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [compact], timeout: 5), .completed)
         let top = field.frame.minY
@@ -33,6 +38,14 @@ final class SearchRoutingUITests: XCTestCase {
             let json = try XCTUnwrap(app.staticTexts["CacheKeeperRegrowthEvidence"].label.data(using: .utf8))
             let samples = try XCTUnwrap(JSONSerialization.jsonObject(with: json) as? [String: Any])
             let sample = try XCTUnwrap(samples[String(calls)] as? [String: Any], "A real touch must exercise the armed overlap")
+            let entry = try XCTUnwrap(samples["entry"] as? [String: Any])
+            XCTAssertEqual(entry["fixtureAppCount"] as? Int, 8, "Real refreshes must keep the injected application source")
+            let regionChecks = try XCTUnwrap(sample["firstRegionChecks"] as? [String: Any])
+            let controls = try XCTUnwrap(regionChecks["controls"] as? [[String: Any]])
+            XCTAssertFalse(controls.isEmpty)
+            for control in controls {
+                XCTAssertEqual(control["empty"] as? Bool, true, "Control/whole-input region evidence: \(regionChecks)")
+            }
             XCTAssertEqual(sample["passed"] as? Bool, true, "Every real hit query must preserve routing: \(sample)")
             XCTAssertEqual(sample["overlap"] as? Bool, true)
             XCTAssertEqual(sample["originalBareBar"] as? Bool, true, "Without the production binding the same point must hit the bare bar")

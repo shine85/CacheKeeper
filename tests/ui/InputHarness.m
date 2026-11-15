@@ -4,6 +4,7 @@
 #import "../../Prefs/SearchInput.h"
 #import "../../Prefs/SearchHitRouting.h"
 #import "../../Prefs/DiagnosticsPage.h"
+#import "../../AxsCacheKeeperAppList.h"
 @implementation PSViewController
 @end
 @interface AxsCacheKeeperTestHostBarContainer : UIView
@@ -16,32 +17,48 @@
 @interface CKSettings : PSViewController
 - (void)axs_cachekeeper_application_active:(NSNotification *)notification;
 - (void)axs_cachekeeper_render;
-- (void)axs_cachekeeper_layout_compact_navigation;
+- (void)axs_cachekeeper_apply_pending_snapshot;
 - (void)updateBatch;
 @end
 // The visual fixture drives the production controller with synthetic metadata, without device reads/writes.
 @interface AxsCacheKeeperVisualSettings : CKSettings
+@property(nonatomic,strong) NSDictionary *axs_cachekeeper_fixtureSnapshot;
+@property(nonatomic) NSUInteger axs_cachekeeper_fixtureDeliveries;
 @end
 @implementation AxsCacheKeeperVisualSettings
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    NSArray *names=@[@"阿尔法笔记",@"播客",@"地图",@"读书",@"旅行",@"视频",@"网盘",@"音乐"];
+    NSArray *pinyin=@[@"Alpha",@"Bo ke",@"Di tu",@"Du shu",@"Lv xing",@"Shi pin",@"Wang pan",@"Yin yue"];
+    NSArray *ids=@[@"notes",@"podcasts",@"maps",@"reader",@"travel",@"video",@"drive",@"music"];
+    NSMutableArray *apps=[NSMutableArray new];
+    for (NSUInteger i=0;i<names.count;i++) [apps addObject:@{@"name":names[i],@"pinyin":[@"App " stringByAppendingString:pinyin[i]],
+        @"id":[@"example." stringByAppendingString:ids[i]],@"source":@"user",@"version":@"1.0"}];
+    self.axs_cachekeeper_fixtureSnapshot=@{@"revision":@1,@"apps":[apps copy],
+        @"states":@{@"example.drive":@{@"enabled":@YES},@"example.video":@{@"enabled":@YES}},
+        @"statuses":@{@"example.drive":@{@"phase":@"complete",@"coverageComplete":@YES,@"removed":@1539,@"bytes":@544232448,@"message":@"Synthetic long rule text must stay in details."},
+            @"example.video":@{@"phase":@"error",@"failed":@1}},
+        @"directories":@{},@"errors":@{},@"batch":@{},@"favorites":@[],@"history":@{}};
+    NSDictionary *snapshot=self.axs_cachekeeper_fixtureSnapshot;
+    __weak typeof(self) weak=self;
+    AxsCacheKeeperAppList *source=[[AxsCacheKeeperAppList alloc] initWithProvider:^NSDictionary *(BOOL refreshApplications) {
+        (void)refreshApplications;return snapshot;
+    } completion:^(NSDictionary *result) {
+        typeof(self) strong=weak;
+        if (!strong || ![[strong valueForKey:@"axs_cachekeeper_visible"] boolValue] || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
+        strong.axs_cachekeeper_fixtureDeliveries++;
+        [strong setValue:result forKey:@"axs_cachekeeper_pendingSnapshot"];
+        [strong axs_cachekeeper_apply_pending_snapshot];
+    }];
+    [(AxsCacheKeeperAppList *)[self valueForKey:@"axs_cachekeeper_appList"] invalidate];
+    [self setValue:source forKey:@"axs_cachekeeper_appList"];
+    [self setValue:@1 forKey:@"selectedTab"];
+    ((UISegmentedControl *)[self valueForKey:@"tabs"]).selectedSegmentIndex=1;
+}
 - (void)axs_cachekeeper_application_active:(NSNotification *)notification {
-    (void)notification;
-    if (![[self valueForKey:@"apps"] count]) {
-        NSArray *names=@[@"阿尔法笔记",@"播客",@"地图",@"读书",@"旅行",@"视频",@"网盘",@"音乐"];
-        NSArray *pinyin=@[@"Alpha",@"Bo ke",@"Di tu",@"Du shu",@"Lv xing",@"Shi pin",@"Wang pan",@"Yin yue"];
-        NSArray *ids=@[@"notes",@"podcasts",@"maps",@"reader",@"travel",@"video",@"drive",@"music"];
-        NSMutableArray *apps=[NSMutableArray new];
-        for (NSUInteger i=0;i<names.count;i++) [apps addObject:@{@"name":names[i],@"pinyin":[@"App " stringByAppendingString:pinyin[i]],
-            @"id":[@"example." stringByAppendingString:ids[i]],@"source":@"user",@"version":@"1.0"}];
-        [self setValue:apps forKey:@"apps"];
-        [self setValue:@{@"example.drive":@{@"enabled":@YES},@"example.video":@{@"enabled":@YES}} forKey:@"statesSnapshot"];
-        [self setValue:@{@"example.drive":@{@"phase":@"complete",@"coverageComplete":@YES,@"removed":@1539,@"bytes":@544232448,@"message":@"Synthetic long rule text must stay in details."},
-            @"example.video":@{@"phase":@"error",@"failed":@1}} forKey:@"statusSnapshot"];
-        [self setValue:@{} forKey:@"directoriesSnapshot"];[self setValue:@{} forKey:@"sourceErrors"];
-        [self setValue:@{} forKey:@"batchSnapshot"];[self setValue:nil forKey:@"appsError"];
-        [self setValue:@1 forKey:@"selectedTab"];
-        ((UISegmentedControl *)[self valueForKey:@"tabs"]).selectedSegmentIndex=1;
-    }
-    [self axs_cachekeeper_render];
+    [self setValue:self.axs_cachekeeper_fixtureSnapshot forKey:@"axs_cachekeeper_pendingSnapshot"];
+    [self axs_cachekeeper_apply_pending_snapshot];
+    [super axs_cachekeeper_application_active:notification];
 }
 @end
 @interface AxsCacheKeeperTestNestedHost : UIViewController
@@ -88,6 +105,17 @@
     return self.axs_cachekeeper_aliasedItem ?: [super navigationItem];
 }
 @end
+static NSDictionary *axs_cachekeeper_test_region_evidence(CKSettings *settings,UINavigationBar *bar) {
+    AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+    UIView *root=settings.view;CGRect safe=root.safeAreaLayoutGuide.layoutFrame;
+    CGRect whole=CGRectMake(safe.origin.x,safe.origin.y,safe.size.width,input.bounds.size.height);
+    NSMutableArray *controls=[NSMutableArray new];
+    for (NSValue *value in [input axs_cachekeeper_visible_control_rects]) {
+        CGRect rect=CGRectOffset(value.CGRectValue,safe.origin.x-input.bounds.origin.x,safe.origin.y-input.bounds.origin.y);
+        [controls addObject:[AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)settings inspect_rect:[root convertRect:rect toView:bar]]];
+    }
+    return @{@"fullInput":[AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)settings inspect_rect:[root convertRect:whole toView:bar]],@"controls":controls};
+}
 // Inject the observed late regrowth at touch dispatch; AX snapshots may arrive after UIKit has relaid out.
 @interface AxsCacheKeeperRegrowingWindow : UIWindow
 @property(nonatomic,weak) CKSettings *axs_cachekeeper_settings;
@@ -134,6 +162,7 @@
     NSUInteger ticks=[sample[@"layoutTicks"] unsignedIntegerValue];
     CGFloat height=ticks%2 ? 44 : 91;
     CGRect frame=bar.frame;frame.size.height=height;bar.frame=frame;
+    if (height==91 && !sample[@"firstRegionChecks"]) sample[@"firstRegionChecks"]=axs_cachekeeper_test_region_evidence(settings,bar);
     [settings.view setNeedsLayout];[settings.view layoutIfNeeded];[settings updateBatch];
     sample[@"layoutTicks"]=@(ticks+1);
     sample[@"hostGeometryPreserved"]=@(fabs(bar.bounds.size.height-height)<0.5 &&
@@ -182,7 +211,8 @@
             @"overlap":@(CGRectContainsPoint(barRect,point)),@"originalBareBar":@(original==bar),
             @"productionHitMatchesTarget":@(actual==target),@"fieldTopBefore":@(topBefore),@"fieldTopAfter":@(topAfter),
             @"originalClass":original ? NSStringFromClass(original.class) : @"nil",
-            @"actualClass":actual ? NSStringFromClass(actual.class) : @"nil"}];
+            @"actualClass":actual ? NSStringFromClass(actual.class) : @"nil",
+            @"touchRegionChecks":axs_cachekeeper_test_region_evidence(settings,bar)}];
         self.axs_cachekeeper_samples[key]=sample;
         if (!previous[@"passed"]) NSLog(@"REGROWTH_TOUCH %@ %@",key,self.axs_cachekeeper_samples[key]);
         return actual;
@@ -194,7 +224,14 @@
 @end
 @implementation AxsCacheKeeperRegrowthEvidenceLabel
 - (NSString *)accessibilityLabel {
-    NSData *json=[NSJSONSerialization dataWithJSONObject:self.axs_cachekeeper_source.axs_cachekeeper_samples ?: @{} options:0 error:nil];
+    AxsCacheKeeperRegrowingWindow *source=self.axs_cachekeeper_source;
+    CKSettings *settings=source.axs_cachekeeper_settings;
+    NSMutableDictionary *evidence=[source.axs_cachekeeper_samples mutableCopy] ?: [NSMutableDictionary new];
+    NSNumber *entry=[settings valueForKey:@"axs_cachekeeper_searchEntry"],*settled=[settings valueForKey:@"axs_cachekeeper_searchSettledEntry"];
+    evidence[@"entry"]=@{@"ready":@(entry.unsignedIntegerValue>0 && [entry isEqual:settled]),
+        @"fixtureAppCount":@([[settings valueForKey:@"apps"] count]),
+        @"fixtureDeliveries":[settings valueForKey:@"axs_cachekeeper_fixtureDeliveries"] ?: @0};
+    NSData *json=[NSJSONSerialization dataWithJSONObject:evidence options:0 error:nil];
     return [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
 }
 @end
@@ -207,7 +244,6 @@
     AxsCacheKeeperTestNestedHost *host=(id)self.topViewController;
     CKSettings *settings=(id)host.axs_cachekeeper_inner.topViewController;
     host.navigationItem.leftBarButtonItem.title=[NSString stringWithFormat:@"重现遮挡 %lu",(unsigned long)++self.axs_cachekeeper_regrow_count];
-    [settings axs_cachekeeper_layout_compact_navigation];[settings.view layoutIfNeeded];
     AxsCacheKeeperRegrowingWindow *window=(id)self.view.window;
     window.axs_cachekeeper_settings=settings;window.axs_cachekeeper_bar=self.navigationBar;
     window.axs_cachekeeper_armed=self.axs_cachekeeper_regrow_count;
@@ -242,6 +278,8 @@
             host.navigationItem.leftBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"重现遮挡" style:UIBarButtonItemStylePlain target:navigation action:@selector(axs_cachekeeper_regrow)];
             host.navigationItem.leftBarButtonItem.accessibilityIdentifier=@"CacheKeeperRegrowHost";
             navigation.navigationBar.accessibilityIdentifier=@"CacheKeeperTestRegrownBar";
+            ((AxsCacheKeeperRegrowingWindow *)self.window).axs_cachekeeper_settings=settings;
+            ((AxsCacheKeeperRegrowingWindow *)self.window).axs_cachekeeper_bar=navigation.navigationBar;
         }
         if ([NSProcessInfo.processInfo.arguments containsObject:@"--dark"]) self.window.overrideUserInterfaceStyle=UIUserInterfaceStyleDark;
         else self.window.overrideUserInterfaceStyle=UIUserInterfaceStyleLight;

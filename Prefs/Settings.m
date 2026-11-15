@@ -53,6 +53,8 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
 @property(nonatomic,strong) NSArray<NSDictionary *> *axs_cachekeeper_compactClaims;
 @property(nonatomic) BOOL axs_cachekeeper_updatingTitle;
 @property(nonatomic) BOOL axs_cachekeeper_appeared;
+@property(nonatomic) NSUInteger axs_cachekeeper_searchEntry;
+@property(nonatomic) NSUInteger axs_cachekeeper_searchSettledEntry;
 @property(nonatomic,assign) NSInteger selectedTab;
 @property(nonatomic,strong) NSArray *apps;
 @property(nonatomic,strong) NSArray *sections;
@@ -345,10 +347,17 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
         CGRectGetMaxX(rect)<=CGRectGetMinX(safe) || CGRectGetMinX(rect)>=CGRectGetMaxX(safe) ||
         CGRectGetMinY(rect)>CGRectGetMinY(safe)+1.0/window.screen.scale) return 0;
     if ([self axs_cachekeeper_search_owns_bar:bar]) {
-        // Always inspect the unshifted search footprint, so avoidance cannot feed back into itself.
-        CGRect input=CGRectMake(CGRectGetMinX(safe),CGRectGetMinY(safe),CGRectGetWidth(safe),self.axs_cachekeeper_searchInput.bounds.size.height);
-        if (!CGRectIsEmpty(input) && CGRectContainsRect(root.bounds,input) &&
-            [AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:self has_empty_rect:[root convertRect:input toView:bar]]) return 0;
+        AxsCacheKeeperSearchInput *input=self.axs_cachekeeper_searchInput;
+        NSArray<NSValue *> *controls=[input axs_cachekeeper_visible_control_rects];
+        BOOL empty=controls.count>0 && fabs(input.bounds.size.width-safe.size.width)<1.0/window.screen.scale;
+        // Only native controls receive the route. Padding is not an editable target, and all
+        // rectangles use the unshifted safe origin so avoidance cannot feed back into itself.
+        for (NSValue *value in controls) {
+            CGRect control=CGRectOffset(value.CGRectValue,safe.origin.x-input.bounds.origin.x,safe.origin.y-input.bounds.origin.y);
+            if (!CGRectContainsRect(root.bounds,control) ||
+                ![AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:self has_empty_rect:[root convertRect:control toView:bar]]) { empty=NO;break; }
+        }
+        if (empty) return 0;
     }
     return MAX(0,CGRectGetMaxY(rect)-CGRectGetMinY(safe));
 }
@@ -503,6 +512,7 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
     [self axs_cachekeeper_update_search_top];
 }
 - (void)viewWillAppear:(BOOL)animated {
+    self.axs_cachekeeper_searchEntry++;
     self.axs_cachekeeper_appeared=NO;
     self.axs_cachekeeper_hostBar=nil;
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_begin];
@@ -511,16 +521,6 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
     self.axs_cachekeeper_visible=YES;self.axs_cachekeeper_menuVisible=NO;
     [self axs_cachekeeper_update_search_top];
     [self axs_cachekeeper_application_active:nil];
-    __weak typeof(self) weak=self;
-    [self.transitionCoordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
-        (void)context;
-        dispatch_async(dispatch_get_main_queue(),^{
-            typeof(self) strong=weak;
-            if (!strong.axs_cachekeeper_visible || !strong.axs_cachekeeper_appeared) return;
-            [strong axs_cachekeeper_layout_compact_navigation];
-            [strong axs_cachekeeper_update_search_top];[strong.view layoutIfNeeded];
-        });
-    }];
 }
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
@@ -528,8 +528,39 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
     [self axs_cachekeeper_layout_compact_navigation];
     [self axs_cachekeeper_update_search_top];[self.view layoutIfNeeded];
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventDidAppear];
+    // Nested pages may have no coordinator in viewWillAppear; their ancestor is still finishing
+    // while viewDidAppear runs. Settle once after that real transition, never from the batch timer.
+    NSUInteger entry=self.axs_cachekeeper_searchEntry;
+    __weak typeof(self) weak=self;
+    __block BOOL queued=NO;
+    void (^settle)(void)=^{
+        if (queued) return;
+        queued=YES;
+        dispatch_async(dispatch_get_main_queue(),^{
+            queued=NO;
+            typeof(self) strong=weak;
+            if (!strong || strong.axs_cachekeeper_searchEntry!=entry || strong.axs_cachekeeper_searchSettledEntry==entry ||
+                !strong.axs_cachekeeper_visible || !strong.axs_cachekeeper_appeared) return;
+            for (UIViewController *ancestor=strong;ancestor;ancestor=ancestor.parentViewController)
+                if (ancestor.transitionCoordinator) return;
+            [strong axs_cachekeeper_layout_compact_navigation];
+            [strong axs_cachekeeper_update_search_top];[strong.view layoutIfNeeded];
+            strong.axs_cachekeeper_searchSettledEntry=entry;
+        });
+    };
+    NSMutableArray<id<UIViewControllerTransitionCoordinator>> *coordinators=[NSMutableArray new];
+    for (UIViewController *ancestor=self;ancestor;ancestor=ancestor.parentViewController)
+        if (ancestor.transitionCoordinator && [coordinators indexOfObjectIdenticalTo:ancestor.transitionCoordinator]==NSNotFound)
+            [coordinators addObject:ancestor.transitionCoordinator];
+    for (id<UIViewControllerTransitionCoordinator> coordinator in coordinators)
+        [coordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+            (void)context;settle();
+        }];
+    // The return value reports animation queuing; completion can still run when it is NO.
+    settle();
 }
 - (void)viewWillDisappear:(BOOL)animated {
+    self.axs_cachekeeper_searchEntry++;
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_freeze:AxsCacheKeeperSearchEventWillDisappear];
     self.axs_cachekeeper_visible=NO;self.axs_cachekeeper_menuVisible=NO;
     self.axs_cachekeeper_appeared=NO;

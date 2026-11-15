@@ -11,4 +11,6 @@
 - (BOOL)axs_cachekeeper_focus;
 - (void)axs_cachekeeper_dismiss_keyboard;
 - (BOOL)axs_cachekeeper_owns_enabled_hit:(UIView *)hit;
+// Visible native controls in this view's coordinates; disabled controls still reserve their space.
+- (NSArray<NSValue *> *)axs_cachekeeper_visible_control_rects;
 @end

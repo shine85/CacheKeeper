@@ -10,12 +10,12 @@
 @interface CKSettings : PSViewController
 - (void)axs_cachekeeper_diagnostics;
 - (void)updateBatch;
-- (void)axs_cachekeeper_layout_compact_navigation;
 - (void)axs_cachekeeper_restore_title_claim:(NSDictionary *)claim keepingClaims:(NSArray<NSDictionary *> *)claims;
 @end
 @interface AxsCacheKeeperTestHostBarContainer : UIView
 @end
 @interface AxsCacheKeeperVisualSettings : CKSettings
+@property(nonatomic) NSUInteger axs_cachekeeper_fixtureDeliveries;
 @end
 @interface AxsCacheKeeperTestNestedHost : UIViewController
 @property(nonatomic,strong) UINavigationController *axs_cachekeeper_inner;
@@ -95,6 +95,49 @@
     id<UIViewControllerContextTransitioning> context=self.axs_cachekeeper_context;
     [context completeTransition:YES];self.axs_cachekeeper_context=nil;
 }
+@end
+// Contract fault injection around a real UIKit coordinator: report NO while retaining the
+// real completion, and let the test observe the early queued attempt before releasing it.
+@interface AxsCacheKeeperCompletionGate : NSProxy
+@property(nonatomic,strong) id<UIViewControllerTransitionCoordinator> axs_cachekeeper_source;
+@property(nonatomic,strong) NSMutableArray<NSDictionary *> *axs_cachekeeper_deliveries;
+@property(nonatomic) NSUInteger axs_cachekeeper_requests;
+@property(nonatomic) BOOL axs_cachekeeper_released;
+- (instancetype)initWithCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator;
+- (void)axs_cachekeeper_release_completions;
+@end
+@implementation AxsCacheKeeperCompletionGate
+- (instancetype)initWithCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    _axs_cachekeeper_source=coordinator;_axs_cachekeeper_deliveries=[NSMutableArray new];return self;
+}
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)selector { return [(NSObject *)self.axs_cachekeeper_source methodSignatureForSelector:selector]; }
+- (void)forwardInvocation:(NSInvocation *)invocation { [invocation invokeWithTarget:self.axs_cachekeeper_source]; }
+- (BOOL)animateAlongsideTransition:(void (^)(id<UIViewControllerTransitionCoordinatorContext>))animation completion:(void (^)(id<UIViewControllerTransitionCoordinatorContext>))completion {
+    self.axs_cachekeeper_requests++;
+    [self.axs_cachekeeper_source animateAlongsideTransition:animation completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+        if (!completion) return;
+        if (self.axs_cachekeeper_released) completion(context);
+        else [self.axs_cachekeeper_deliveries addObject:@{@"completion":[completion copy],@"context":context}];
+    }];
+    return NO;
+}
+- (void)axs_cachekeeper_release_completions {
+    self.axs_cachekeeper_released=YES;
+    NSArray<NSDictionary *> *deliveries=[self.axs_cachekeeper_deliveries copy];
+    [self.axs_cachekeeper_deliveries removeAllObjects];
+    for (NSDictionary *delivery in deliveries) {
+        void (^completion)(id<UIViewControllerTransitionCoordinatorContext>)=delivery[@"completion"];
+        completion(delivery[@"context"]);
+    }
+}
+@end
+@interface AxsCacheKeeperCompletionGatedNavigation : UINavigationController
+@property(nonatomic,strong) AxsCacheKeeperCompletionGate *axs_cachekeeper_gate;
+- (id<UIViewControllerTransitionCoordinator>)axs_cachekeeper_actual_coordinator;
+@end
+@implementation AxsCacheKeeperCompletionGatedNavigation
+- (id<UIViewControllerTransitionCoordinator>)transitionCoordinator { return (id)self.axs_cachekeeper_gate ?: [super transitionCoordinator]; }
+- (id<UIViewControllerTransitionCoordinator>)axs_cachekeeper_actual_coordinator { return [super transitionCoordinator]; }
 @end
 // Only the event marker is synthetic; all hierarchy, bounds and hit testing below use UIKit.
 @interface AxsCacheKeeperProbeTouchEvent : UIEvent
@@ -193,12 +236,36 @@
 - (NSDictionary *)axs_cachekeeper_last {
     return [[self.probe axs_cachekeeper_snapshot][@"events"] lastObject];
 }
+- (BOOL)axs_cachekeeper_wait_for_compact_entry:(CKSettings *)settings navigation:(UINavigationController *)navigation {
+    NSPredicate *settled=[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *bindings) {
+        (void)object;(void)bindings;
+        if (![[settings valueForKey:@"axs_cachekeeper_appeared"] boolValue]) return NO;
+        if (![[settings valueForKey:@"axs_cachekeeper_searchEntry"] isEqual:[settings valueForKey:@"axs_cachekeeper_searchSettledEntry"]]) return NO;
+        for (UIViewController *ancestor=settings;ancestor;ancestor=ancestor.parentViewController)
+            if (ancestor.transitionCoordinator) return NO;
+        UINavigationBar *bar=navigation.navigationBar;
+        AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+        CGRect safe=[settings.view convertRect:settings.view.safeAreaLayoutGuide.layoutFrame toView:self.window];
+        CGRect barRect=[bar convertRect:bar.bounds toView:self.window];
+        CGRect field=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window];
+        CGFloat fieldInset=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:input].origin.y;
+        return bar.window==self.window && !bar.prefersLargeTitles && bar.bounds.size.height<=44.5 &&
+            bar.topItem.largeTitleDisplayMode==UINavigationItemLargeTitleDisplayModeNever &&
+            fabs(safe.origin.y-CGRectGetMaxY(barRect))<0.5 && fabs(field.origin.y-safe.origin.y-fieldInset)<0.5;
+    }];
+    XCTestExpectation *ready=[[XCTNSPredicateExpectation alloc] initWithPredicate:settled object:nil];
+    XCTWaiterResult result=[XCTWaiter waitForExpectations:@[ready] timeout:5];
+    XCTAssertEqual(result,XCTWaiterResultCompleted,@"The real ancestor transition and compact safe area must settle before recording a baseline; safe=%@ bar=%@",NSStringFromCGRect(settings.view.safeAreaLayoutGuide.layoutFrame),NSStringFromCGRect(navigation.navigationBar.frame));
+    return result==XCTWaiterResultCompleted;
+}
 - (UINavigationController *)axs_cachekeeper_present_host:(AxsCacheKeeperTestNestedHost *)host {
     UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:host];
     nav.navigationBar.prefersLargeTitles=YES;nav.modalPresentationStyle=UIModalPresentationFullScreen;
     XCTestExpectation *shown=[self expectationWithDescription:@"Real nested host appeared"];
     [self.owner presentViewController:nav animated:NO completion:^{ [shown fulfill]; }];
-    [self waitForExpectations:@[shown] timeout:10];[nav.view layoutIfNeeded];return nav;
+    [self waitForExpectations:@[shown] timeout:10];
+    [self axs_cachekeeper_wait_for_compact_entry:(CKSettings *)host.axs_cachekeeper_inner.topViewController navigation:nav];
+    return nav;
 }
 - (void)testCompactTitleUsesAncestorItemAndRestoresOnInnerNavigation {
     for (NSNumber *mode in @[@(UINavigationItemLargeTitleDisplayModeAutomatic),@(UINavigationItemLargeTitleDisplayModeAlways)]) {
@@ -265,13 +332,6 @@
     UINavigationController *nav=[self axs_cachekeeper_present_host:host];
     AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
     UINavigationBar *bar=nav.navigationBar;
-    NSPredicate *settled=[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *bindings) {
-        (void)object;(void)bindings;
-        return [[settings valueForKey:@"axs_cachekeeper_appeared"] boolValue] && !settings.transitionCoordinator && !host.transitionCoordinator && !nav.transitionCoordinator;
-    }];
-    XCTestExpectation *ready=[self expectationForPredicate:settled evaluatedWithObject:settings handler:nil];
-    [self waitForExpectations:@[ready] timeout:10];
-    [settings axs_cachekeeper_layout_compact_navigation];[settings.view layoutIfNeeded];
     XCTAssertFalse(bar.prefersLargeTitles);
     XCTAssertEqual(bar.topItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
     CGFloat originalTop=[input convertRect:input.bounds toView:self.window].origin.y;
@@ -286,7 +346,15 @@
     CGRect searchRect=[input convertRect:input.bounds toView:bar];
     XCTAssertFalse([AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)settings has_empty_rect:searchRect],@"Ownership alone must not authorize layout without the installed route binding");
     [AxsCacheKeeperSearchHitRouting axs_cachekeeper_claim_bar:bar owner:(id)settings];
-    XCTAssertTrue([AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)settings has_empty_rect:searchRect]);
+    NSDictionary *whole=[AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)settings inspect_rect:searchRect];
+    NSLog(@"SEARCH_REGROWTH_FULL_INPUT %@",whole);
+    NSArray<NSValue *> *controls=[input axs_cachekeeper_visible_control_rects];
+    XCTAssertGreaterThan(controls.count,0u);
+    for (NSValue *value in controls) {
+        CGRect control=[input convertRect:value.CGRectValue toView:bar];
+        NSDictionary *check=[AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)settings inspect_rect:control];
+        XCTAssertTrue([AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)settings has_empty_rect:control],@"Native control region=%@, whole input=%@",check,whole);
+    }
     XCTAssertFalse([AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)host has_empty_rect:searchRect]);
     UIView *hit=[self.window hitTest:center withEvent:nil];
     XCTAssertTrue(hit==input.axs_cachekeeper_field || [hit isDescendantOfView:input.axs_cachekeeper_field],@"Regrown compact host must not swallow the real field's touches");
@@ -332,7 +400,7 @@
         XCTestExpectation *shown=[self expectationWithDescription:@"Host reset fixture appeared"];
         [self.owner presentViewController:nav animated:NO completion:^{ [shown fulfill]; }];
         [self waitForExpectations:@[shown] timeout:10];
-        [nav.view layoutIfNeeded];[settings updateBatch];[settings.view layoutIfNeeded];
+        if (![self axs_cachekeeper_wait_for_compact_entry:settings navigation:nav]) return;
         AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
         UITextField *field=input.axs_cachekeeper_field;
         XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
@@ -385,7 +453,7 @@
     XCTestExpectation *shown=[self expectationWithDescription:@"Forwarding wrapper appeared with its original item installed"];
     [self.owner presentViewController:nav animated:NO completion:^{ [shown fulfill]; }];
     [self waitForExpectations:@[shown] timeout:10];
-    [nav.view layoutIfNeeded];[settings updateBatch];[settings.view layoutIfNeeded];
+    if (![self axs_cachekeeper_wait_for_compact_entry:settings navigation:nav]) return;
     XCTAssertEqual(nav.topViewController,host);
     XCTAssertEqual(nav.navigationBar.topItem,installedItem);
     XCTAssertEqual(host.navigationItem,installedItem);
@@ -644,6 +712,40 @@
     [settings updateBatch];
     XCTAssertEqual(nav.navigationBar.topItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);XCTAssertFalse(nav.navigationBar.prefersLargeTitles);
 }
+- (void)testEntryCompletionSurvivesNoAnimationQueuedAndAnEarlierAttempt {
+    UIViewController *initial=[UIViewController new];
+    AxsCacheKeeperCompletionGatedNavigation *nav=[[AxsCacheKeeperCompletionGatedNavigation alloc] initWithRootViewController:initial];
+    nav.navigationBar.prefersLargeTitles=YES;nav.modalPresentationStyle=UIModalPresentationFullScreen;
+    XCTestExpectation *shown=[self expectationWithDescription:@"Entry completion fixture navigation appeared"];
+    [self.owner presentViewController:nav animated:NO completion:^{ [shown fulfill]; }];
+    [self waitForExpectations:@[shown] timeout:10];
+    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+    AxsCacheKeeperHeldTransition *transition=[AxsCacheKeeperHeldTransition new];
+    XCTestExpectation *started=[self expectationWithDescription:@"A real UIKit navigation transition is held"];
+    XCTestExpectation *finished=[self expectationWithDescription:@"UIKit delivered the real transition's didShow"];
+    transition.axs_cachekeeper_started=started;transition.axs_cachekeeper_finished=finished;transition.axs_cachekeeper_target=host;nav.delegate=transition;
+    [nav pushViewController:host animated:YES];[self waitForExpectations:@[started] timeout:10];
+    id<UIViewControllerTransitionCoordinator> coordinator=[nav axs_cachekeeper_actual_coordinator];
+    XCTAssertNotNil(coordinator);
+    AxsCacheKeeperCompletionGate *gate=[[AxsCacheKeeperCompletionGate alloc] initWithCoordinator:coordinator];nav.axs_cachekeeper_gate=gate;
+    [transition axs_cachekeeper_finish];[self waitForExpectations:@[finished] timeout:10];
+    XCTestExpectation *delivered=[self expectationForPredicate:[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *bindings) {
+        (void)object;(void)bindings;return gate.axs_cachekeeper_deliveries.count>0 && [nav axs_cachekeeper_actual_coordinator]==nil;
+    }] evaluatedWithObject:nav handler:nil];
+    [self waitForExpectations:@[delivered] timeout:5];
+    // The controlled gate retains only the exposed pending-completion boundary. It does not
+    // replace UIKit's views, stack, frame, transition context, or actual completion delivery.
+    XCTestExpectation *early=[self expectationWithDescription:@"The first production queued attempt has run"];
+    dispatch_async(dispatch_get_main_queue(),^{ [early fulfill]; });
+    [self waitForExpectations:@[early] timeout:5];
+    XCTAssertGreaterThan(gate.axs_cachekeeper_requests,0u);
+    XCTAssertTrue([[settings valueForKey:@"axs_cachekeeper_appeared"] boolValue]);
+    XCTAssertNotEqualObjects([settings valueForKey:@"axs_cachekeeper_searchEntry"],[settings valueForKey:@"axs_cachekeeper_searchSettledEntry"],@"An early attempt must not mark an exposed pending transition complete");
+    nav.axs_cachekeeper_gate=nil;
+    [gate axs_cachekeeper_release_completions];
+    XCTAssertTrue([self axs_cachekeeper_wait_for_compact_entry:settings navigation:nav],@"The genuine completion must be able to schedule the final entry layout after an earlier blocked attempt");
+}
 - (void)testLayoutAndBatchKeepClaimedBlankRegrowthStableWithoutForcingHostGeometry {
     // Reintroducing either forced sizeToFit or blank-bar geometry avoidance breaks this test.
     AxsCacheKeeperLayoutCountedSettings *settings=[AxsCacheKeeperLayoutCountedSettings new];
@@ -654,7 +756,7 @@
     XCTestExpectation *shown=[self expectationWithDescription:@"Nested navigation appeared"];
     [self.owner presentViewController:nav animated:NO completion:^{ [shown fulfill]; }];
     [self waitForExpectations:@[shown] timeout:10];
-    [nav.view layoutIfNeeded];
+    if (![self axs_cachekeeper_wait_for_compact_entry:settings navigation:nav]) return;
     AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
     [settings updateBatch];
     XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
@@ -726,6 +828,75 @@
             XCTAssertEqualWithAccuracy([input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y,top,0.5,@"Avoidance must return to the same safe baseline without oscillating");
         }
     }
+}
+- (void)testPaddingContentDoesNotMoveNativeControlsButControlContentStillDoes {
+    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+    UINavigationController *nav=[self axs_cachekeeper_present_host:host];
+    AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+    [self axs_cachekeeper_focus:input];[input layoutIfNeeded];
+    CGFloat top=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y;
+    NSArray<NSValue *> *controls=[input axs_cachekeeper_visible_control_rects];
+    XCTAssertEqual(controls.count,2u,@"Both the native field (including clear) and cancel must reserve space");
+    UINavigationBar *bar=nav.navigationBar;
+    CGRect frame=bar.frame;frame.size.height=91;bar.frame=frame;
+    CGRect whole=[input convertRect:input.bounds toView:bar];
+    UILabel *label=[UILabel new];label.text=@"Host content";label.userInteractionEnabled=NO;
+    UIImageView *image=[[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"star"]];image.userInteractionEnabled=NO;
+    for (UIView *content in @[[UIControl new],label,image]) {
+        // The side margin has no native editable target. Its host content must keep its route.
+        content.frame=CGRectMake(whole.origin.x+2,whole.origin.y+6,6,6);[bar addSubview:content];
+        XCTAssertFalse([AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)settings has_empty_rect:whole],@"The former whole-input check rejects this padding content: %@",[AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)settings inspect_rect:whole]);
+        for (NSValue *value in controls) {
+            CGRect control=[input convertRect:value.CGRectValue toView:bar];
+            XCTAssertTrue([AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)settings has_empty_rect:control],@"Actual native control must remain clear: %@",[AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)settings inspect_rect:control]);
+        }
+        if ([content isKindOfClass:UIControl.class]) {
+            CGPoint point=[content convertPoint:CGPointMake(3,3) toView:self.window];
+            XCTAssertEqual([self.window hitTest:point withEvent:nil],content);
+        }
+        [settings updateBatch];
+        XCTAssertEqualWithAccuracy([input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y,top,0.5);
+        for (NSValue *value in controls) {
+            CGRect control=[input convertRect:value.CGRectValue toView:bar];
+            content.frame=CGRectMake(control.origin.x+7,control.origin.y+3,6,6);
+            for (NSNumber *interactive in @[@YES,@NO,@YES]) {
+                bar.userInteractionEnabled=interactive.boolValue;
+                [settings.view setNeedsLayout];[settings.view layoutIfNeeded];[settings updateBatch];
+                CGFloat moved=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y;
+                XCTAssertGreaterThan(moved,top+40);
+                XCTAssertGreaterThanOrEqual(moved,CGRectGetMaxY([bar convertRect:bar.bounds toView:self.window]));
+            }
+            content.frame=CGRectMake(whole.origin.x+2,whole.origin.y+6,6,6);
+            [settings updateBatch];
+            XCTAssertEqualWithAccuracy([input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y,top,0.5);
+        }
+        [content removeFromSuperview];
+    }
+    [self axs_cachekeeper_dismiss:input];
+}
+- (void)testVisualFixtureKeepsItsApplicationsAcrossRealBatchRefreshes {
+    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+    [self axs_cachekeeper_present_host:host];
+    NSArray *expected=@[@"example.notes",@"example.podcasts",@"example.maps",@"example.reader",@"example.travel",@"example.video",@"example.drive",@"example.music"];
+    for (NSUInteger pass=0;pass<3;pass++) {
+        NSUInteger before=settings.axs_cachekeeper_fixtureDeliveries;
+        [settings setValue:@0 forKey:@"axs_cachekeeper_lastApplicationsRefresh"];
+        [settings updateBatch];
+        XCTestExpectation *delivered=[self expectationForPredicate:[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *bindings) {
+            (void)object;(void)bindings;return settings.axs_cachekeeper_fixtureDeliveries>before;
+        }] evaluatedWithObject:settings handler:nil];
+        [self waitForExpectations:@[delivered] timeout:5];
+        XCTAssertEqualObjects([[settings valueForKey:@"apps"] valueForKey:@"id"],expected);
+        XCTAssertEqualObjects([settings valueForKey:@"sourceErrors"],@{});
+    }
+    AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+    input.axs_cachekeeper_field.text=@"drive";[input.axs_cachekeeper_field sendActionsForControlEvents:UIControlEventEditingChanged];
+    NSArray *filtered=[settings valueForKeyPath:@"sections.@unionOfArrays.apps"];
+    XCTAssertEqualObjects([filtered valueForKey:@"id"],(@[@"example.drive"]));
+    input.axs_cachekeeper_field.text=@"";[input.axs_cachekeeper_field sendActionsForControlEvents:UIControlEventEditingChanged];
+    XCTAssertEqual([[settings valueForKeyPath:@"sections.@unionOfArrays.apps"] count],8u);
 }
 - (void)testRealHostNavigationLayoutFollowsItsSafeAreaWithoutTickCompetition {
     AxsCacheKeeperLayoutCountedSettings *settings=[AxsCacheKeeperLayoutCountedSettings new];
