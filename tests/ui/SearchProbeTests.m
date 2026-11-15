@@ -157,6 +157,10 @@
         XCTAssertFalse(nav.navigationBar.prefersLargeTitles);
         // A subsequent host change belongs to the host and must not be overwritten on release.
         host.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAlways;
+        nav.navigationBar.prefersLargeTitles=YES;
+        [settings updateBatch];
+        XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeAlways);
+        XCTAssertTrue(nav.navigationBar.prefersLargeTitles,@"An explicit host mode change must survive refresh");
         self.expectedNavigation=host.axs_cachekeeper_inner;self.expectedController=detail;
         XCTestExpectation *repushed=[self expectationWithDescription:@"Host override preserved after detail didShow"];
         self.navigationFinished=repushed;

@@ -13,6 +13,8 @@ if sys.platform != "darwin" or not compiler:
 output = root / "tmp" / ("cache-tests-" + str(time.time_ns()))
 output.mkdir(parents=True)
 try:
+    subprocess.run([sys.executable, str(root / "tests" / "run_scan_diagnostics_tests.py"), "--expect-red"],
+                   check=True, timeout=60)
     subprocess.run([sys.executable, str(root / "tests" / "run_hardlink_tests.py")],
                    check=True, timeout=60)
     subprocess.run([sys.executable, str(root / "tests" / "run_diagnostic_channel_export_red.py")],

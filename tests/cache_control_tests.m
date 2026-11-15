@@ -333,6 +333,23 @@ int main(int argc, const char *argv[]) {
         NSArray *found=axs_cachekeeper_scan_directories([NSURL fileURLWithPath:home],&scanError);
         require(!scanError && ![found containsObject:@"Documents"] && ![found containsObject:@"Library/WebKit"] &&
             ![found containsObject:@"Library/Cookies"] && [found containsObject:@"Library/Application Support"] && [found containsObject:@"CustomData"], @"隐藏明确保护目录，混合用途与未知目录仍待分析");
+        // A missing container must not look like a successfully scanned empty container.
+        NSString *emptyHome=[fixture stringByAppendingPathComponent:@"empty-discovery-container"];
+        require([fm createDirectoryAtPath:emptyHome withIntermediateDirectories:YES attributes:nil error:nil], @"建立没有 Library 的空主容器");
+        NSError *emptyError=nil;
+        require(axs_cachekeeper_scan_directories([NSURL fileURLWithPath:emptyHome],&emptyError).count==0 && !emptyError,
+            @"存在的空主容器允许缺少可选 Library 目录");
+        NSError *missingHomeError=nil;
+        NSURL *missingHome=[NSURL fileURLWithPath:[fixture stringByAppendingPathComponent:@"missing-discovery-container"]];
+        NSArray *missingDirectories=axs_cachekeeper_scan_directories(missingHome,&missingHomeError);
+        require(!missingDirectories.count && [missingHomeError.domain isEqual:NSPOSIXErrorDomain] && missingHomeError.code==ENOENT,
+            @"缺失主容器必须返回 ENOENT 而非成功空目录");
+        NSError *missingTargetError=nil;
+        require(!axs_cachekeeper_scan_targets(missingHome,@{},&missingTargetError).count && missingTargetError.code==ENOENT,
+            @"目录扫描目标保留主容器缺失错误");
+        NSError *missingPurgeError=nil;
+        require(!axs_cachekeeper_purge_candidates(missingHome,&missingPurgeError).count && missingPurgeError.code==ENOENT,
+            @"自动候选发现保留主容器缺失错误");
         NSArray *purgeFound=axs_cachekeeper_purge_candidates([NSURL fileURLWithPath:home],&scanError);
         require([purgeFound containsObject:@"CustomData"] && [purgeFound containsObject:@"Library/Caches"], @"清理候选发现包含未知目录与缓存根（不能用 readOnly 过滤）");
         NSArray *purgeKept=axs_cachekeeper_purge_paths(purgeFound,@{@"enabled":@YES});

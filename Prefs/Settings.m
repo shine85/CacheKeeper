@@ -377,8 +377,25 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     NSMutableArray *items=[NSMutableArray new];
     for (NSDictionary *candidate in candidates) [items addObject:candidate[@"item"]];
     NSArray *claimed=[self.axs_cachekeeper_compactClaims valueForKey:@"item"] ?: @[];
-    if ([items isEqualToArray:claimed]) return;
+    BOOL sameClaims=[items isEqualToArray:claimed];
+    for (NSUInteger index=0;sameClaims && index<candidates.count;index++)
+        sameClaims=[candidates[index][@"navigation"] navigationBar]==self.axs_cachekeeper_compactClaims[index][@"bar"];
     self.axs_cachekeeper_updatingTitle=YES;
+    if (sameClaims) {
+        for (NSDictionary *candidate in candidates) {
+            UINavigationItem *item=candidate[@"item"];
+            UINavigationController *navigation=candidate[@"navigation"];
+            // Reconcile a host reset without replacing the saved pre-claim value.
+            // A different title mode is an explicit host override, not our claim.
+            if (item.largeTitleDisplayMode==UINavigationItemLargeTitleDisplayModeNever &&
+                navigation.navigationBar.prefersLargeTitles) {
+                navigation.navigationBar.prefersLargeTitles=NO;
+                [navigation.view setNeedsLayout];
+            }
+        }
+        self.axs_cachekeeper_updatingTitle=NO;
+        return;
+    }
     [self axs_cachekeeper_restore_compact_title];
     NSMutableArray<NSDictionary *> *claims=[NSMutableArray new];
     for (NSDictionary *candidate in candidates) {
