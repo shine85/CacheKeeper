@@ -10,4 +10,5 @@
 @property(nonatomic,readonly,copy) NSString *axs_cachekeeper_text;
 - (BOOL)axs_cachekeeper_focus;
 - (void)axs_cachekeeper_dismiss_keyboard;
+- (BOOL)axs_cachekeeper_owns_enabled_hit:(UIView *)hit;
 @end

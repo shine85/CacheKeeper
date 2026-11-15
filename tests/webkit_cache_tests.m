@@ -141,6 +141,21 @@ int main(void) {
         wcheck(![scheduled.receipt[@"timedOut"] boolValue] && [scheduled.receipt[@"pending"] boolValue],@"later submission resets timed-out state");
         secondDeadline();
         wcheck(![scheduled.receipt[@"timedOut"] boolValue],@"late prior-round deadline cannot mark the new round timed out");
+        context=wcontext();context[@"installation"]=@"";
+        NSDictionary *check=@{@"state":@"failed",@"errorCode":@6};
+        context[@"installationCheck"]=check;
+        AxsCacheKeeperWebKitCache *identityEngine=[[AxsCacheKeeperWebKitCache alloc] initWithPreparation:nil clock:nil observer:nil];
+        [identityEngine updateContext:context];
+        wcheck([identityEngine.receipt[@"installationCheck"] isEqual:check],@"installation failure detail survives the production receipt");
+        wcheck([identityEngine.receipt[@"reason"] isEqual:@"installationUnverified"],@"diagnostic details cannot bypass installation verification");
+        wcheck([axs_cachekeeper_webkit_message(identityEngine.receipt) containsString:@"安装版本或身份已变化"],@"installation failure has an actionable bounded message");
+        NSMutableDictionary *invalid=[identityEngine.receipt mutableCopy];
+        invalid[@"installationCheck"]=@{@"state":@"failed",@"errorCode":@YES};
+        wcheck(!axs_cachekeeper_webkit_projection(invalid),@"installation error boolean is not a numeric code");
+        invalid[@"installationCheck"]=@{@"state":@"failed",@"errorCode":@6,@"path":@"private-path-must-not-export"};
+        wcheck(!axs_cachekeeper_webkit_projection(invalid),@"installation diagnostics reject arbitrary data");
+        [invalid removeObjectForKey:@"installationCheck"];
+        wcheck(axs_cachekeeper_webkit_projection(invalid)!=nil,@"older receipts without installation details stay readable");
         puts("PASS: WebKit DiskCache action gates, generations, exclusion, single-flight and late completion");
     }
     return 0;

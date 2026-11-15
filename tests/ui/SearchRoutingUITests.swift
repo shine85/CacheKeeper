@@ -1,6 +1,51 @@
 import XCTest
 
 final class SearchRoutingUITests: XCTestCase {
+    func testRegrownOwnedBarKeepsNativeSearchAndCancelTappable() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--compact-visual", "--search-regrown-bar", "-AppleLanguages", "(zh-Hans)"]
+        app.launch()
+        let field = app.textFields["CacheKeeperAppSearch"]
+        let bar = app.navigationBars["CacheKeeperTestRegrownBar"]
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        let compact = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            bar.frame.height > 0 && bar.frame.height <= 44.5 && field.frame.minY >= bar.frame.maxY
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [compact], timeout: 5), .completed)
+        let top = field.frame.minY
+        var calls = 0
+        func overlap(_ control: XCUIElement) {
+            let trigger = app.buttons["CacheKeeperRegrowHost"]
+            trigger.tap()
+            calls += 1
+            XCTAssertEqual(trigger.label, "重现遮挡 \(calls)", "Host action must actually execute")
+            XCTAssertGreaterThan(bar.frame.maxY, control.frame.midY, "Fixture must cover the tapped control with the real owned bar")
+            XCTAssertEqual(field.frame.minY, top, accuracy: 0.5)
+        }
+        for _ in 0..<3 {
+            overlap(field)
+            field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            field.typeText("drive")
+            XCTAssertTrue(app.staticTexts["网盘"].exists)
+            XCTAssertFalse(app.staticTexts["播客"].exists)
+            let clear = field.buttons.firstMatch
+            XCTAssertTrue(clear.exists)
+            overlap(clear)
+            clear.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            XCTAssertTrue(app.staticTexts["播客"].exists, "The native clear button must reset the filter")
+            let cancel = app.buttons["取消"]
+            overlap(cancel)
+            cancel.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: app.keyboards.firstMatch)
+            XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed)
+            XCTAssertTrue(app.staticTexts["播客"].exists)
+        }
+        // The host's own actions must still receive their native touches.
+        overlap(field)
+        XCTAssertFalse(app.keyboards.firstMatch.exists)
+    }
+
     func testCompactListVisualStatesAndSearch() {
         let app = XCUIApplication()
         app.launchArguments = ["--compact-visual", "-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]

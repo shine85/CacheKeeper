@@ -25,6 +25,7 @@ targets:
       - path: ../../Prefs/Settings.m
       - path: ../../Prefs/SearchInput.m
       - path: ../../Prefs/SearchDiagnostics.m
+      - path: ../../Prefs/SearchHitRouting.m
       - path: ../../Prefs/DiagnosticsPage.m
       - path: ../../AxsCacheKeeperDiagnostics.m
       - path: ../../AxsCacheKeeperAppList.m

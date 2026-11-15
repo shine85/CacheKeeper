@@ -2,6 +2,7 @@
 #import "../../Prefs/SearchInput.h"
 #import "../../Prefs/SearchDiagnostics.h"
 #import "../../Prefs/SearchNavigation.h"
+#import "../../Prefs/SearchHitRouting.h"
 #import "../../Prefs/DiagnosticsPage.h"
 #import "../../AxsCacheKeeperDiagnostics.h"
 #import "Preferences/PSViewController.h"
@@ -9,6 +10,7 @@
 @interface CKSettings : PSViewController
 - (void)axs_cachekeeper_diagnostics;
 - (void)updateBatch;
+- (void)axs_cachekeeper_layout_compact_navigation;
 - (void)axs_cachekeeper_restore_title_claim:(NSDictionary *)claim keepingClaims:(NSArray<NSDictionary *> *)claims;
 @end
 @interface AxsCacheKeeperTestHostBarContainer : UIView
@@ -253,6 +255,13 @@
     UINavigationController *nav=[self axs_cachekeeper_present_host:host];
     AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
     UINavigationBar *bar=nav.navigationBar;
+    NSPredicate *settled=[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *bindings) {
+        (void)object;(void)bindings;
+        return [[settings valueForKey:@"axs_cachekeeper_appeared"] boolValue] && !settings.transitionCoordinator && !host.transitionCoordinator && !nav.transitionCoordinator;
+    }];
+    XCTestExpectation *ready=[self expectationForPredicate:settled evaluatedWithObject:settings handler:nil];
+    [self waitForExpectations:@[ready] timeout:10];
+    [settings axs_cachekeeper_layout_compact_navigation];[settings.view layoutIfNeeded];
     XCTAssertFalse(bar.prefersLargeTitles);
     XCTAssertEqual(bar.topItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
     CGFloat originalTop=[input convertRect:input.bounds toView:self.window].origin.y;
@@ -261,9 +270,26 @@
     CGRect frame=bar.frame;frame.size.height=91;bar.frame=frame;
     CGPoint center=[input.axs_cachekeeper_field convertPoint:CGPointMake(CGRectGetMidX(input.axs_cachekeeper_field.bounds),18) toView:self.window];
     XCTAssertTrue(CGRectContainsPoint([bar convertRect:bar.bounds toView:self.window],center));
+    // In the same valid fixture, removing only the new claim binding must restore the old failure.
+    [AxsCacheKeeperSearchHitRouting axs_cachekeeper_release_bar:bar owner:(id)settings];
+    XCTAssertEqual([self.window hitTest:center withEvent:nil],bar,@"Negative control must reproduce the original blank-bar interception");
+    [AxsCacheKeeperSearchHitRouting axs_cachekeeper_claim_bar:bar owner:(id)settings];
     UIView *hit=[self.window hitTest:center withEvent:nil];
     XCTAssertTrue(hit==input.axs_cachekeeper_field || [hit isDescendantOfView:input.axs_cachekeeper_field],@"Regrown compact host must not swallow the real field's touches");
     XCTAssertEqualWithAccuracy([input convertRect:input.bounds toView:self.window].origin.y,originalTop,0.5);
+    input.axs_cachekeeper_field.enabled=NO;
+    hit=[self.window hitTest:center withEvent:nil];
+    XCTAssertTrue(hit==bar || [hit isDescendantOfView:bar],@"A disabled field must not take the host's route");
+    input.axs_cachekeeper_field.enabled=YES;
+    UIControl *hostControl=[[UIControl alloc] initWithFrame:[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:bar]];
+    [bar addSubview:hostControl];
+    XCTAssertEqual([self.window hitTest:center withEvent:nil],hostControl,@"Host controls always retain their original route, even inside the overlap");
+    [hostControl removeFromSuperview];
+    UINavigationBar *unclaimed=[[UINavigationBar alloc] initWithFrame:[bar convertRect:bar.bounds toView:self.window]];
+    [self.window addSubview:unclaimed];
+    hit=[self.window hitTest:center withEvent:nil];
+    XCTAssertTrue(hit==unclaimed || [hit isDescendantOfView:unclaimed],@"Installing a route for one bar must not change unrelated bars");
+    [unclaimed removeFromSuperview];
     [self axs_cachekeeper_focus:input];[input layoutIfNeeded];
     UIButton *cancel=[input valueForKey:@"axs_cachekeeper_cancel_button"];
     frame=bar.frame;frame.size.height=91;bar.frame=frame;
@@ -275,6 +301,7 @@
     [self axs_cachekeeper_dismiss:input];
     host.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAlways;
     bar.prefersLargeTitles=YES;
+    frame=bar.frame;frame.size.height=91;bar.frame=frame;
     hit=[self.window hitTest:center withEvent:nil];
     XCTAssertTrue(hit==bar || [hit isDescendantOfView:bar]);
 }

@@ -83,7 +83,7 @@
     NSAssert(NSThread.isMainThread,@"WebKit coordinator requires main thread");
     if (![context isKindOfClass:NSDictionary.class]) context=@{};
     NSMutableDictionary *copy=[context mutableCopy];
-    for (NSString *key in @[@"excludedPaths",@"installation",@"process"])
+    for (NSString *key in @[@"excludedPaths",@"installation",@"process",@"installationCheck"])
         if ([copy[key] conformsToProtocol:@protocol(NSCopying)]) copy[key]=[copy[key] copy];
     BOOL wasPending=_configurationPending;
     _configurationPending=NO;
@@ -236,8 +236,10 @@
         if (reference.persistent) persistent++;else nonPersistent++;
     }
     BOOL requested=axs_cachekeeper_webkit_boolean(_context[@"requested"]) && [_context[@"requested"] boolValue];
-    return @{@"schemaVersion":@1,@"requested":@(requested),@"timedOut":@(_timedOut),@"state":_state ?: @"disabled",@"reason":_reason ?: @"notAuthorized",
+    NSMutableDictionary *receipt=[@{@"schemaVersion":@1,@"requested":@(requested),@"timedOut":@(_timedOut),@"state":_state ?: @"disabled",@"reason":_reason ?: @"notAuthorized",
         @"persistentStores":@(persistent),@"nonPersistentStores":@(nonPersistent),@"submitted":@(_submitted),@"completed":@(_completed),@"pending":@(_flight ? 1 : 0),
-        @"updated":_updated ?: NSDate.date,@"bytesState":@"notMeasured"};
+        @"updated":_updated ?: NSDate.date,@"bytesState":@"notMeasured"} mutableCopy];
+    if (_context[@"installationCheck"]) receipt[@"installationCheck"]=axs_cachekeeper_webkit_installation_check(_context[@"installationCheck"]) ?: @{@"state":@"invalid",@"errorCode":@0};
+    return [receipt copy];
 }
 @end

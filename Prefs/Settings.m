@@ -11,6 +11,7 @@
 #import "SearchInput.h"
 #import "SearchDiagnostics.h"
 #import "SearchNavigation.h"
+#import "SearchHitRouting.h"
 
 static id axs_cachekeeper_app_property(id object, NSString *name) {
     SEL selector=NSSelectorFromString(name);
@@ -42,7 +43,7 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
 // 来源判据是 applicationType，不是收据：巨魔应用报 @"System"（CoreTrust 系统级信任），商店
 // 应用报 @"User"；解密的商店 IPA 包内常带原始 StoreKit 收据，收据判据会把巨魔应用误判为
 // 商店应用（#60 真机：轻悦时光落在用户应用）。
-@interface CKSettings : PSViewController <UITableViewDataSource, UITableViewDelegate, AxsCacheKeeperSearchNavigationOwner>
+@interface CKSettings : PSViewController <UITableViewDataSource, UITableViewDelegate, AxsCacheKeeperSearchNavigationOwner, AxsCacheKeeperSearchHitOwner>
 @property(nonatomic,strong) UITableView *table;
 @property(nonatomic,strong) UISegmentedControl *tabs;
 @property(nonatomic,strong) UIView *tabWrap;
@@ -353,11 +354,33 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
     return @{@"appeared":self.axs_cachekeeper_appeared ? @YES : @NO,
         @"safeTop":@(safeTop),@"searchInset":@(inset)};
 }
+- (BOOL)axs_cachekeeper_search_passes_point:(CGPoint)point fromBar:(UINavigationBar *)bar {
+    if (!self.axs_cachekeeper_visible || !self.axs_cachekeeper_appeared || !self.viewIfLoaded.window ||
+        bar.window!=self.view.window || bar.prefersLargeTitles || !isfinite(point.x) || !isfinite(point.y)) return NO;
+    for (UIViewController *controller=self;controller;controller=controller.parentViewController)
+        if (controller.transitionCoordinator || controller.presentedViewController || controller.isBeingDismissed || controller.isMovingFromParentViewController) return NO;
+    for (UIView *ancestor=self.view;ancestor;ancestor=ancestor.superview)
+        if (ancestor.hidden || ancestor.alpha<=0.01 || !ancestor.userInteractionEnabled ||
+            ![ancestor pointInside:[ancestor convertPoint:point fromView:bar] withEvent:nil]) return NO;
+    BOOL claimed=NO;
+    for (NSDictionary *state in [self axs_cachekeeper_search_navigation_states]) {
+        if (![state[@"ownership"][@"topIsDirectChild"] boolValue]) return NO;
+        if (state[@"bar"]==bar && [state[@"ownership"][@"claimActive"] boolValue] &&
+            ![state[@"ownership"][@"transitioning"] boolValue]) claimed=YES;
+    }
+    if (!claimed) return NO;
+    CGPoint rootPoint=[self.view convertPoint:point fromView:bar];
+    // Query only the content subtree. A window query here would recursively re-enter this hook.
+    UIView *hit=[self.view hitTest:rootPoint withEvent:nil];
+    return [self.axs_cachekeeper_searchInput axs_cachekeeper_owns_enabled_hit:hit];
+}
 - (void)axs_cachekeeper_restore_title_claim:(NSDictionary *)claim keepingClaims:(NSArray<NSDictionary *> *)claims {
     UINavigationItem *item=claim[@"item"];
     if (!axs_cachekeeper_title_resource_claim(claims,@"item",item) && item.largeTitleDisplayMode==UINavigationItemLargeTitleDisplayModeNever)
         item.largeTitleDisplayMode=[claim[@"previousMode"] integerValue];
     UINavigationBar *bar=claim[@"bar"];
+    if (!axs_cachekeeper_title_resource_claim(claims,@"bar",bar))
+        [AxsCacheKeeperSearchHitRouting axs_cachekeeper_release_bar:bar owner:self];
     if (!axs_cachekeeper_title_resource_claim(claims,@"bar",bar) && !bar.prefersLargeTitles) {
         bar.prefersLargeTitles=[claim[@"previousPrefersLargeTitles"] boolValue];[bar.superview setNeedsLayout];
     }
@@ -387,6 +410,7 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
     for (NSDictionary *claim in previous)
         if (![claims containsObject:claim]) [self axs_cachekeeper_restore_title_claim:claim keepingClaims:claims];
     self.axs_cachekeeper_compactClaims=[claims copy];
+    for (NSDictionary *claim in claims) [AxsCacheKeeperSearchHitRouting axs_cachekeeper_claim_bar:claim[@"bar"] owner:self];
     for (NSDictionary *claim in claims) {
         UINavigationItem *item=claim[@"item"];
         BOOL existing=axs_cachekeeper_title_resource_claim(previous,@"item",item)!=nil;
@@ -507,7 +531,6 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
 - (void)dealloc { [self.batchTimer invalidate];[NSNotificationCenter.defaultCenter removeObserver:self]; }
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
-    [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_clear];
     self.axs_cachekeeper_searchTop.constant=0;
 }
 - (void)axs_cachekeeper_application_active:(NSNotification *)notification {
@@ -597,8 +620,11 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
     self.sections=[AxsCacheKeeperAppList sectionsForApps:self.apps states:self.statesSnapshot favorites:self.favorites tab:self.selectedTab query:self.axs_cachekeeper_searchInput.axs_cachekeeper_text];
     BOOL stopped=[self.batchSnapshot[@"error"] length]>0;
     BOOL active=[self.batchSnapshot[@"remaining"] count]>0 && !stopped;
-    self.navigationItem.rightBarButtonItem.enabled=!active && self.apps.count>0 && !self.sourceErrors[@"batch.plist"];
-    self.navigationItem.rightBarButtonItem.title=active ? [NSString stringWithFormat:@"%@/%@",self.batchSnapshot[@"completed"],self.batchSnapshot[@"total"]] : stopped ? @"重试检测" : @"检测全部";
+    UIBarButtonItem *scanButton=self.navigationItem.rightBarButtonItem;
+    BOOL enabled=!active && self.apps.count>0 && !self.sourceErrors[@"batch.plist"];
+    NSString *title=active ? [NSString stringWithFormat:@"%@/%@",self.batchSnapshot[@"completed"],self.batchSnapshot[@"total"]] : stopped ? @"重试检测" : @"检测全部";
+    if (scanButton.enabled!=enabled) scanButton.enabled=enabled;
+    if (![scanButton.title isEqual:title]) scanButton.title=title;
     [self.table reloadData];
 }
 - (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {

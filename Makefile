@@ -8,6 +8,7 @@ include $(THEOS)/makefiles/common.mk
 BUNDLE_NAME = CacheKeeperPrefs
 CacheKeeperPrefs_FILES = Prefs/Settings.m Prefs/SearchInput.m Prefs/ScanPage.m Prefs/InspectionPage.m Prefs/DiagnosticsPage.m AxsCacheKeeperDiagnostics.m AxsCacheKeeperAppList.m AxsCacheKeeperInstallation.m AxsCacheKeeperDiagnosticChannel.m
 CacheKeeperPrefs_FILES += Prefs/SearchDiagnostics.m
+CacheKeeperPrefs_FILES += Prefs/SearchHitRouting.m
 CacheKeeperPrefs_FILES += AxsCacheKeeperPDFSession.m AxsCacheKeeperPDFInspection.m
 CacheKeeperPrefs_INSTALL_PATH = /Library/PreferenceBundles
 CacheKeeperPrefs_CFLAGS = -fobjc-arc -DAXS_CACHEKEEPER_PDF_CLIENT=1

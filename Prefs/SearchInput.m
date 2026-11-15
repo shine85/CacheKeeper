@@ -67,6 +67,12 @@
     [self invalidateIntrinsicContentSize];
 }
 - (NSString *)axs_cachekeeper_text { return self.axs_cachekeeper_field.text ?: @""; }
+- (BOOL)axs_cachekeeper_owns_enabled_hit:(UIView *)hit {
+    if (!hit) return NO;
+    for (UIControl *control in @[self.axs_cachekeeper_field,self.axs_cachekeeper_cancel_button])
+        if (control.enabled && (hit==control || [hit isDescendantOfView:control])) return YES;
+    return NO;
+}
 - (BOOL)axs_cachekeeper_focus {
     [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventFocus];
     if (!self.window) { [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventFocusNoWindow];return NO; }

@@ -14,6 +14,7 @@
 @interface CKSettings : PSViewController
 - (void)axs_cachekeeper_application_active:(NSNotification *)notification;
 - (void)axs_cachekeeper_render;
+- (void)axs_cachekeeper_layout_compact_navigation;
 @end
 // The visual fixture drives the production controller with synthetic metadata, without device reads/writes.
 @interface AxsCacheKeeperVisualSettings : CKSettings
@@ -84,6 +85,20 @@
     return self.axs_cachekeeper_aliasedItem ?: [super navigationItem];
 }
 @end
+// Restore the observed host geometry after a settled production layout, without changing flags/items.
+@interface AxsCacheKeeperRegrowingNavigationController : UINavigationController
+@property(nonatomic) NSUInteger axs_cachekeeper_regrow_count;
+- (void)axs_cachekeeper_regrow;
+@end
+@implementation AxsCacheKeeperRegrowingNavigationController
+- (void)axs_cachekeeper_regrow {
+    AxsCacheKeeperTestNestedHost *host=(id)self.topViewController;
+    CKSettings *settings=(id)host.axs_cachekeeper_inner.topViewController;
+    host.navigationItem.leftBarButtonItem.title=[NSString stringWithFormat:@"重现遮挡 %lu",(unsigned long)++self.axs_cachekeeper_regrow_count];
+    [settings axs_cachekeeper_layout_compact_navigation];[settings.view layoutIfNeeded];
+    CGRect frame=self.navigationBar.frame;frame.size.height=91;self.navigationBar.frame=frame;
+}
+@end
 @interface CKScanPage : UITableViewController
 @property(nonatomic,copy) NSString *bundle;
 @property(nonatomic,copy) NSString *appName;
@@ -102,9 +117,15 @@
     if ([NSProcessInfo.processInfo.arguments containsObject:@"--compact-visual"]) {
         AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
         AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
-        UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:host];
+        BOOL regrown=[NSProcessInfo.processInfo.arguments containsObject:@"--search-regrown-bar"];
+        UINavigationController *navigation=regrown ? [[AxsCacheKeeperRegrowingNavigationController alloc] initWithRootViewController:host] : [[UINavigationController alloc] initWithRootViewController:host];
         navigation.navigationBar.prefersLargeTitles=YES;
         [settings loadViewIfNeeded];host.navigationItem.rightBarButtonItems=settings.navigationItem.rightBarButtonItems;
+        if (regrown) {
+            host.navigationItem.leftBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"重现遮挡" style:UIBarButtonItemStylePlain target:navigation action:@selector(axs_cachekeeper_regrow)];
+            host.navigationItem.leftBarButtonItem.accessibilityIdentifier=@"CacheKeeperRegrowHost";
+            navigation.navigationBar.accessibilityIdentifier=@"CacheKeeperTestRegrownBar";
+        }
         if ([NSProcessInfo.processInfo.arguments containsObject:@"--dark"]) self.window.overrideUserInterfaceStyle=UIUserInterfaceStyleDark;
         else self.window.overrideUserInterfaceStyle=UIUserInterfaceStyleLight;
         self.window.rootViewController=navigation;[self.window makeKeyAndVisible];return YES;

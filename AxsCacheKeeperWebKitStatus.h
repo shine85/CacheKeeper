@@ -10,10 +10,23 @@ static inline BOOL axs_cachekeeper_webkit_counter(id value) {
     double number=[value doubleValue];
     return isfinite(number) && number>=0 && number<=9007199254740991.0 && floor(number)==number;
 }
+static inline NSDictionary *axs_cachekeeper_webkit_installation_check(id value) {
+    if (![value isKindOfClass:NSDictionary.class] || [value count]!=2 ||
+        ![value[@"state"] isKindOfClass:NSString.class] ||
+        ![@[@"notRequested",@"verified",@"versionUnknown",@"failed",@"invalid"] containsObject:value[@"state"]] ||
+        !axs_cachekeeper_webkit_counter(value[@"errorCode"]) || [value[@"errorCode"] unsignedIntegerValue]>7) return nil;
+    if (![value[@"state"] isEqual:@"failed"] && [value[@"errorCode"] unsignedIntegerValue]!=0) return nil;
+    return @{@"state":[value[@"state"] copy],@"errorCode":[value[@"errorCode"] copy]};
+}
 // A closed projection prevents runtime identities or website content entering saved/exported state.
 static inline NSDictionary *axs_cachekeeper_webkit_projection(id value) {
     if (![value isKindOfClass:NSDictionary.class]) return nil;
     NSArray *keys=@[@"schemaVersion",@"requested",@"timedOut",@"state",@"reason",@"persistentStores",@"nonPersistentStores",@"submitted",@"completed",@"pending",@"updated",@"bytesState"];
+    // Optional for existing receipts; new data still obeys an exact, content-free schema.
+    if (value[@"installationCheck"]) {
+        if (!axs_cachekeeper_webkit_installation_check(value[@"installationCheck"])) return nil;
+        keys=[keys arrayByAddingObject:@"installationCheck"];
+    }
     if ([value count]!=keys.count || ![[NSSet setWithArray:[value allKeys]] isEqual:[NSSet setWithArray:keys]]) return nil;
     if (!axs_cachekeeper_webkit_counter(value[@"schemaVersion"]) || [value[@"schemaVersion"] unsignedIntegerValue]!=1 ||
         !axs_cachekeeper_webkit_boolean(value[@"requested"]) || !axs_cachekeeper_webkit_boolean(value[@"timedOut"])) return nil;
@@ -36,6 +49,15 @@ static inline NSString *axs_cachekeeper_webkit_message(id value) {
     NSDictionary *record=axs_cachekeeper_webkit_projection(value);
     if (!record) return @"网页缓存回执不可用或字段无效";
     NSString *reason=record[@"reason"],*state=record[@"state"];
+    if (![record[@"pending"] boolValue] && [reason isEqual:@"installationUnverified"] && record[@"installationCheck"]) {
+        NSDictionary *check=record[@"installationCheck"];
+        if ([check[@"state"] isEqual:@"versionUnknown"]) return @"安装版本信息不完整，本轮未执行";
+        if ([check[@"state"] isEqual:@"invalid"]) return @"安装校验诊断无效，本轮未执行";
+        NSArray *errors=@[@"安装校验未返回具体错误",@"安装标识或包 URL 无效",@"安装目录不可读或身份已变化",
+            @"安装信息或主程序文件不可读或身份已变化",@"安装信息读取不完整或超出大小上限",@"安装信息内容无效",
+            @"安装版本或身份已变化",@"系统应用列表不可用"];
+        if ([check[@"state"] isEqual:@"failed"]) return [errors[[check[@"errorCode"] unsignedIntegerValue]] stringByAppendingString:@"，本轮未执行"];
+    }
     if ([record[@"pending"] boolValue]) return [record[@"timedOut"] boolValue] ?
         @"系统清理回调等待超时；原请求仍在等待，未启动后续回收" :
         @"已提交网页磁盘缓存回收，等待系统回调；不代表已测得释放空间";

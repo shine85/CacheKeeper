@@ -64,8 +64,11 @@ static void axs_cachekeeper_search_collect_bars(UIView *view,NSMutableArray *bar
 }
 - (void)axs_cachekeeper_begin {
     if (self.recording) return;
-    self.events=[NSMutableArray new];self.lastSample=nil;self.truncated=NO;self.hasTouchTimestamp=NO;
-    self.started=NSProcessInfo.processInfo.systemUptime;self.recording=YES;
+    if (!self.events) {
+        self.events=[NSMutableArray new];self.truncated=NO;
+        self.started=NSProcessInfo.processInfo.systemUptime;
+    }
+    self.lastSample=nil;self.hasTouchTimestamp=NO;self.recording=YES;
 }
 - (NSString *)axs_cachekeeper_hit_role:(UIView *)view {
     if (!view) return @"none";

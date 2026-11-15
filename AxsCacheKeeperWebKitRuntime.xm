@@ -54,13 +54,21 @@ static NSDictionary *axs_cachekeeper_webkit_read_context(BOOL access) {
     BOOL enabled=valid && axs_cachekeeper_app_enabled(state);
     BOOL requested=valid && axs_cachekeeper_webkit_disk_cache_enabled(state);
     NSString *installation=@"",*process=@"";
+    NSDictionary *installationCheck=@{@"state":@"notRequested",@"errorCode":@0};
     if (enabled && requested) {
         NSURL *bundleURL=NSBundle.mainBundle.bundleURL;
         NSString *version=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
-        if (!axs_cachekeeper_webkit_installation || !axs_cachekeeper_validate_installation_snapshot(axs_cachekeeper_webkit_installation,bundleURL,version,NULL))
-            axs_cachekeeper_webkit_installation=axs_cachekeeper_installation_snapshot(bundleURL,NSBundle.mainBundle.bundleIdentifier,version,NULL);
-        if ([axs_cachekeeper_webkit_installation[@"installationState"] isEqual:@"verified"])
+        NSError *installationError=nil;
+        if (!axs_cachekeeper_webkit_installation || !axs_cachekeeper_validate_installation_snapshot(axs_cachekeeper_webkit_installation,bundleURL,version,&installationError)) {
+            installationError=nil;
+            axs_cachekeeper_webkit_installation=axs_cachekeeper_installation_snapshot(bundleURL,NSBundle.mainBundle.bundleIdentifier,version,&installationError);
+        }
+        BOOL verified=[axs_cachekeeper_webkit_installation[@"installationState"] isEqual:@"verified"];
+        if (verified)
             installation=axs_cachekeeper_webkit_installation[@"fingerprint"] ?: @"";
+        // Never persist NSError descriptions, bundle paths or version strings in runtime receipts.
+        NSInteger code=[installationError.domain isEqual:@"dev.local.cachekeeper.installation"] && installationError.code>=1 && installationError.code<=7 ? installationError.code : 0;
+        installationCheck=@{@"state":verified ? @"verified" : axs_cachekeeper_webkit_installation ? @"versionUnknown" : @"failed",@"errorCode":@(code)};
         process=axs_cachekeeper_webkit_process();
     }
     // Preserve private identity across disable/re-enable so configuration changes do not fabricate a new install.
@@ -69,7 +77,7 @@ static NSDictionary *axs_cachekeeper_webkit_read_context(BOOL access) {
     if (!process.length) process=axs_cachekeeper_webkit_process();
     NSArray *excluded=[state isKindOfClass:NSDictionary.class] && [state[@"excludedPaths"] isKindOfClass:NSArray.class] ? state[@"excludedPaths"] : @[];
     return @{@"readable":@(readable),@"valid":@(valid),@"enabled":@(enabled),@"requested":@(requested),
-        @"excludedPaths":excluded,@"installation":installation,@"process":process,@"reportWritable":@(axs_cachekeeper_webkit_report_writable)};
+        @"excludedPaths":excluded,@"installation":installation,@"installationCheck":installationCheck,@"process":process,@"reportWritable":@(axs_cachekeeper_webkit_report_writable)};
 }
 static void axs_cachekeeper_webkit_end_background(void) {
     if (axs_cachekeeper_webkit_background==UIBackgroundTaskInvalid) return;

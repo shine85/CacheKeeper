@@ -220,6 +220,14 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
         [webKitExport[@"data"][@"updated"] isEqual:@100] && [webKitExport[@"data"][@"bytesState"] isEqual:@"notMeasured"] &&
         !webKitExport[@"data"][@"bytes"],@"网页原生回调与原始时间完整导出且不虚构释放字节");
     dxcheck([NSJSONSerialization dataWithJSONObject:webKitReport options:0 error:nil]!=nil,@"网页回执导出将日期转换为JSON数值");
+    NSMutableDictionary *installationFailure=[webKit mutableCopy];
+    installationFailure[@"state"]=@"blocked";installationFailure[@"reason"]=@"installationUnverified";
+    installationFailure[@"submitted"]=@0;installationFailure[@"completed"]=@0;
+    installationFailure[@"installationCheck"]=@{@"state":@"failed",@"errorCode":@3};
+    dxwrite(folder,@"Status/test.active.webkit.plist",installationFailure);
+    NSDictionary *installationExport=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"webKitDiskCache"];
+    dxcheck([installationExport[@"data"][@"installationCheck"] isEqual:installationFailure[@"installationCheck"]],@"安装预检失败代码完整进入真实诊断导出");
+    dxwrite(folder,@"Status/test.active.webkit.plist",webKit);
     webKit[@"submitted"]=@2;
     dxwrite(folder,@"Status/test.active.webkit.plist",webKit);
     dxcheck([dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"webKitDiskCache"][@"state"] isEqual:@"invalid"],@"网页回执丢失已提交请求不能伪装完成");
