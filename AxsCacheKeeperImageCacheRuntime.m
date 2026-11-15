@@ -14,7 +14,7 @@ static BOOL axs_cachekeeper_image_access;
 static NSDictionary *axs_cachekeeper_image_installation;
 static NSDictionary *axs_cachekeeper_image_pending_report;
 static BOOL axs_cachekeeper_image_report_writable=YES;
-static UIBackgroundTaskIdentifier axs_cachekeeper_image_background=UIBackgroundTaskInvalid;
+static UIBackgroundTaskIdentifier axs_cachekeeper_image_background;
 static BOOL axs_cachekeeper_image_had_pending;
 static atomic_bool axs_cachekeeper_image_discovery_pending;
 
@@ -68,6 +68,8 @@ void axs_cachekeeper_configure_image_cache(BOOL containerEligible,BOOL configura
     if (!containerEligible) return;
     static dispatch_once_t once;
     dispatch_once(&once,^{
+        // UIKit exports this value; initialize it before any observer can finish a task.
+        axs_cachekeeper_image_background=UIBackgroundTaskInvalid;
         axs_cachekeeper_image_context_lock=[NSObject new];
         axs_cachekeeper_image_engine=[[AxsCacheKeeperImageCache alloc] initWithContextProvider:^NSDictionary *{return AxsCacheKeeperImageContext();}
             observer:^(NSDictionary *receipt) {
