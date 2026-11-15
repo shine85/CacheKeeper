@@ -3,6 +3,7 @@ import hashlib
 import pathlib
 import plistlib
 import re
+import struct
 import subprocess
 import sys
 import tarfile
@@ -42,6 +43,36 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
         if (info.get('CacheKeeperPackageVersion') != version or
                 info.get('CFBundleShortVersionString') != base or info.get('CFBundleVersion') != (build or base)):
             raise SystemExit('Preference bundle and Debian package versions disagree')
+        required_classes = {
+            '/CacheKeeper.dylib': (b'AxsCacheKeeperImageCache', b'AxsCacheKeeperWebKitCache'),
+            '/CacheKeeperPrefs': (b'AxsCacheKeeperSearchHitRouting', b'AxsCacheKeeperSearchInput'),
+            '/ckrestore': (),
+        }
+        for suffix, markers in required_classes.items():
+            matches = [item for item in tar.getmembers() if item.name.endswith(suffix)]
+            if len(matches) != 1:
+                raise SystemExit(f'Missing or duplicate binary: {suffix}')
+            binary = tar.extractfile(matches[0]).read()
+            if len(binary) < 8 or binary[:4] != b'\xca\xfe\xba\xbe':
+                raise SystemExit(f'Expected universal arm64/arm64e binary: {suffix}')
+            count = struct.unpack_from('>I', binary, 4)[0]
+            if count != 2 or len(binary) < 8 + count * 20:
+                raise SystemExit(f'Unexpected architecture table: {suffix}')
+            architectures = set()
+            for index in range(count):
+                cpu, subtype, offset, size, _ = struct.unpack_from('>IIIII', binary, 8 + index * 20)
+                architectures.add((cpu, subtype & 0xffffff))
+                if offset < 8 + count * 20 or size < 32 or offset + size > len(binary):
+                    raise SystemExit(f'Invalid Mach-O slice bounds: {suffix}')
+                payload = binary[offset:offset + size]
+                if any(marker not in payload for marker in markers):
+                    raise SystemExit(f'Missing product implementation in a slice: {suffix}')
+                if any(marker in payload for marker in (b'usePinnedSDKForIntegrationTests',
+                        b'axs_cachekeeper_installation_test_read', b'ImageCacheIntegrationTests',
+                        b'AxsCacheKeeperRegrowingWindow')):
+                    raise SystemExit(f'Test implementation leaked into binary: {suffix}')
+            if architectures != {(0x100000c, 0), (0x100000c, 2)}:
+                raise SystemExit(f'Unexpected architectures: {suffix}')
 
 required = [
     'Library/MobileSubstrate/DynamicLibraries/CacheKeeper.dylib',
@@ -56,7 +87,7 @@ for suffix in required:
     if not any(name == suffix or name.endswith('/' + suffix) for name in names):
         raise SystemExit(f'Missing package file: {suffix}')
 for name in names:
-    if any(part in {'BK', 'tmp', 'memory', '.git'} for part in pathlib.PurePosixPath(name).parts):
+    if any(part in {'BK', 'tmp', 'memory', '.git', 'tests', 'SDWebImage.framework'} for part in pathlib.PurePosixPath(name).parts):
         raise SystemExit(f'Local-only files leaked into package: {name}')
 
 checksum = hashlib.sha256(package.read_bytes()).hexdigest()

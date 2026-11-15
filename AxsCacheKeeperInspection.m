@@ -19,6 +19,7 @@
 @property(nonatomic,strong) NSMutableArray *largest;
 @property(nonatomic,strong) NSMutableArray *largestHardLinks;
 @property(nonatomic,copy) NSString *error;
+@property(nonatomic,copy) NSDictionary *readFailure;
 @property(nonatomic,strong) NSDate *started;
 // 硬链接孪生定位：主枚举只记身份（设备+inode），枚举完成后分批扫搜索根找孪生。
 @property(nonatomic,copy) NSArray<NSDictionary *> *searchRoots;
@@ -76,7 +77,12 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
     _searchRoots=[searchRoots count] ? [searchRoots copy] : @[@{@"path":root ?: @"",@"label":@"本目录"}];
     _linkFiles=[NSMutableArray new];_twinEntries=[NSMutableArray new];_twinnedKeys=[NSMutableSet new];
     int fd=axs_cachekeeper_open_directory(root);
-    if (fd<0) { _complete=YES;_failures=1;_error=[NSString stringWithFormat:@"目录无法读取：errno %d",errno];return self; }
+    if (fd<0) {
+        int code=errno;
+        _complete=YES;_failures=1;_error=[NSString stringWithFormat:@"目录无法读取：errno %d",code];
+        _readFailure=@{@"stage":@"openRoot",@"errorDomain":@"posix",@"errorCode":@(code)};
+        return self;
+    }
     close(fd);
     _rootAliases=axs_cachekeeper_directory_aliases(root);
     __weak typeof(self) weak=self;
@@ -225,13 +231,15 @@ static NSString *axs_cachekeeper_header_kind(const unsigned char *data, NSUInteg
         evidence=@"检出数据格式或数据名称特征；不代表整个目录都是必需数据，也不能直接清空";
     else if (covered && self.files && [self.types[@"媒体文件头"][@"count"] unsignedIntegerValue]==self.files && !self.hidden && !self.links)
         evidence=@"已读取的文件全部具有媒体头特征；媒体也可能是下载或用户内容，未证明可删";
-    return @{@"complete":@(self.complete),@"coverageComplete":@(covered),@"files":@(self.files),@"bytes":@(self.bytes),
+    NSMutableDictionary *report=[@{@"complete":@(self.complete),@"coverageComplete":@(covered),@"files":@(self.files),@"bytes":@(self.bytes),
         @"failures":@(self.failures),@"changed":@(self.changed),@"links":@(self.links),@"hidden":@(self.hidden),
         @"hardLinks":@(self.hardLinks),@"symlinks":@(self.symlinks),@"linkTwins":[self.twinEntries copy],@"twinBytes":@(self.twinBytes),
         @"largestHardLinks":[self.largestHardLinks copy],
         @"twinCoverageComplete":@(twinCovered),@"twinFailures":@(self.twinSkipped),
         @"twinScanTruncated":@(self.twinTruncated),@"twinDisplayTruncated":@(self.twinDisplayTruncated),@"linkFilesTruncated":@(self.linkFilesTruncated),@"twinScanned":@(self.twinScanned),
         @"types":[self.types copy],@"ages":[self.ages copy],@"largest":[self.largest copy],@"evidence":evidence,
-        @"error":self.error ?: @"",@"started":self.started,@"updated":NSDate.date};
+        @"error":self.error ?: @"",@"started":self.started,@"updated":NSDate.date} mutableCopy];
+    if (self.failures) report[@"inspectionReadFailure"]=self.readFailure ?: @{@"state":@"notRecorded"};
+    return report;
 }
 @end

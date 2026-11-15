@@ -1,5 +1,6 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#import "AxsCacheKeeperInstallationDetail.h"
 #include <math.h>
 
 static inline BOOL axs_cachekeeper_webkit_boolean(id value) {
@@ -11,20 +12,28 @@ static inline BOOL axs_cachekeeper_webkit_counter(id value) {
     return isfinite(number) && number>=0 && number<=9007199254740991.0 && floor(number)==number;
 }
 static inline NSDictionary *axs_cachekeeper_webkit_installation_check(id value) {
-    if (![value isKindOfClass:NSDictionary.class] || [value count]!=2 ||
+    if (![value isKindOfClass:NSDictionary.class] || [value count]!=(value[@"detail"] ? 3 : 2) ||
         ![value[@"state"] isKindOfClass:NSString.class] ||
         ![@[@"notRequested",@"verified",@"versionUnknown",@"failed",@"invalid"] containsObject:value[@"state"]] ||
         !axs_cachekeeper_webkit_counter(value[@"errorCode"]) || [value[@"errorCode"] unsignedIntegerValue]>7) return nil;
     if (![value[@"state"] isEqual:@"failed"] && [value[@"errorCode"] unsignedIntegerValue]!=0) return nil;
-    return @{@"state":[value[@"state"] copy],@"errorCode":[value[@"errorCode"] copy]};
+    NSMutableDictionary *result=[@{@"state":[value[@"state"] copy],@"errorCode":[value[@"errorCode"] copy]} mutableCopy];
+    if (value[@"detail"]) {
+        NSDictionary *detail=axs_cachekeeper_installation_detail_projection(value[@"detail"]);
+        if (!detail || ![value[@"state"] isEqual:@"failed"] || ![value[@"errorCode"] unsignedIntegerValue]) return nil;
+        result[@"detail"]=detail;
+    }
+    return [result copy];
 }
 // A closed projection prevents runtime identities or website content entering saved/exported state.
 static inline NSDictionary *axs_cachekeeper_webkit_projection(id value) {
     if (![value isKindOfClass:NSDictionary.class]) return nil;
+    NSDictionary *installationCheck=nil;
     NSArray *keys=@[@"schemaVersion",@"requested",@"timedOut",@"state",@"reason",@"persistentStores",@"nonPersistentStores",@"submitted",@"completed",@"pending",@"updated",@"bytesState"];
     // Optional for existing receipts; new data still obeys an exact, content-free schema.
     if (value[@"installationCheck"]) {
-        if (!axs_cachekeeper_webkit_installation_check(value[@"installationCheck"])) return nil;
+        installationCheck=axs_cachekeeper_webkit_installation_check(value[@"installationCheck"]);
+        if (!installationCheck) return nil;
         keys=[keys arrayByAddingObject:@"installationCheck"];
     }
     if ([value count]!=keys.count || ![[NSSet setWithArray:[value allKeys]] isEqual:[NSSet setWithArray:keys]]) return nil;
@@ -43,7 +52,9 @@ static inline NSDictionary *axs_cachekeeper_webkit_projection(id value) {
     if ([value[@"state"] isEqual:@"completed"] && (!completed || pending)) return nil;
     if ([@[@"submitted",@"waitingTimedOut"] containsObject:value[@"state"]] && !pending) return nil;
     if ([value[@"state"] isEqual:@"waitingTimedOut"] && ![value[@"timedOut"] boolValue]) return nil;
-    return [value copy];
+    NSMutableDictionary *result=[value mutableCopy];
+    if (installationCheck) result[@"installationCheck"]=installationCheck;
+    return [result copy];
 }
 static inline NSString *axs_cachekeeper_webkit_message(id value) {
     NSDictionary *record=axs_cachekeeper_webkit_projection(value);
@@ -56,7 +67,15 @@ static inline NSString *axs_cachekeeper_webkit_message(id value) {
         NSArray *errors=@[@"安装校验未返回具体错误",@"安装标识或包 URL 无效",@"安装目录不可读或身份已变化",
             @"安装信息或主程序文件不可读或身份已变化",@"安装信息读取不完整或超出大小上限",@"安装信息内容无效",
             @"安装版本或身份已变化",@"系统应用列表不可用"];
-        if ([check[@"state"] isEqual:@"failed"]) return [errors[[check[@"errorCode"] unsignedIntegerValue]] stringByAppendingString:@"，本轮未执行"];
+        if ([check[@"state"] isEqual:@"failed"]) {
+            NSDictionary *detail=check[@"detail"];
+            NSString *message=errors[[check[@"errorCode"] unsignedIntegerValue]];
+            if (detail) {
+                NSDictionary *targets=@{@"input":@"校验输入",@"root":@"安装目录",@"info":@"安装信息文件",@"main":@"主程序",@"snapshot":@"安装快照",@"registry":@"系统应用列表"};
+                message=[message stringByAppendingFormat:@"（%@ / %@，errno=%@）",targets[detail[@"target"]],detail[@"operation"],detail[@"errno"]];
+            }
+            return [message stringByAppendingString:@"，本轮未执行"];
+        }
     }
     if ([record[@"pending"] boolValue]) return [record[@"timedOut"] boolValue] ?
         @"系统清理回调等待超时；原请求仍在等待，未启动后续回收" :

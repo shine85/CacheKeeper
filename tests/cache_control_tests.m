@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <dirent.h>
 #import "../AxsCacheKeeperPolicy.h"
 #import "../AxsCacheKeeperFileAccess.h"
 #import "../AxsCacheKeeperSweep.h"
@@ -564,6 +565,17 @@ int main(int argc, const char *argv[]) {
             [AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads/cache/sub"] &&
             ![AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:bundle version:@"1.0" relativePath:@"Library/Downloads/drafts"] &&
             ![AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:bundle version:@"2.0" relativePath:@"Library/Downloads/cache"], @"可清范围交集：父/自身/子均命中，保留范围与版本不匹配不命中");
+        for (NSString *version in @[@"1.0",@"2.0",@""]) {
+            require([AxsCacheKeeperCleanupRules hasRetentionRangeForBundle:bundle version:version relativePath:@"Library/Downloads"] &&
+                [AxsCacheKeeperCleanupRules hasRetentionRangeForBundle:bundle version:version relativePath:@"Library/Downloads/drafts"] &&
+                [AxsCacheKeeperCleanupRules hasRetentionRangeForBundle:bundle version:version relativePath:@"Library/Downloads/drafts/unsent"] &&
+                [AxsCacheKeeperCleanupRules hasRetentionRangeForBundle:bundle version:version relativePath:@"Library/Downloads/index.json"] &&
+                ![AxsCacheKeeperCleanupRules hasRetentionRangeForBundle:bundle version:version relativePath:@"Library/Downloads/cache"] &&
+                ![AxsCacheKeeperCleanupRules hasRetentionRangeForBundle:bundle version:version relativePath:@"Library/Downloads/drafts2"],
+                @"SDK整树操作保留父/自身/子与规则依赖，升级和版本未知不撤销保留且不误伤相邻目录");
+        }
+        require([AxsCacheKeeperCleanupRules hasRetentionRangeForBundle:@"com.spotify.client" version:@"new" relativePath:@"Library/Caches/image"] &&
+            [AxsCacheKeeperCleanupRules hasRetentionRangeForBundle:bundle version:@"1.0" relativePath:@"../Library/Caches"],@"内置保留规则和无效路径不能被SDK整树操作绕过");
         [AxsCacheKeeperCleanupRules removeAllRulesForTesting];
         require([[AxsCacheKeeperCleanupRules rulesVersion] isEqualToString:versionBefore], @"清除测试规则后规则版本恢复");
         // ---- 任务 1：平台缓存主测试（Library/Caches 按用途全清，不按类型保留） ----
@@ -1380,6 +1392,43 @@ int main(int argc, const char *argv[]) {
         NSDictionary *rejected = axs_cachekeeper_restore_paths(@[cache], journal);
         require([rejected[@"failed"] unsignedIntegerValue] > 0 && !lstat(cache.fileSystemRepresentation, &info) && (info.st_mode & 0777) == 0770, @"损坏记录不能改变目录权限");
 
+        // A traversable ancestor need not be readable. Only the final directory is enumerated.
+        NSString *searchAncestor=[fixture stringByAppendingPathComponent:@"search-only-ancestor"];
+        NSString *searchLeaf=[searchAncestor stringByAppendingPathComponent:@"readable-leaf"];
+        require([fm createDirectoryAtPath:searchLeaf withIntermediateDirectories:YES attributes:nil error:nil],@"建立仅遍历祖先夹具");
+        writeFile([searchLeaf stringByAppendingPathComponent:@"payload"]);
+        require(chmod(searchAncestor.fileSystemRepresentation,0111)==0,@"祖先只授予遍历权限");
+        int legacyAccess=open(searchAncestor.fileSystemRepresentation,O_RDONLY|O_DIRECTORY);
+        int legacyError=errno;
+        int searchFD=axs_cachekeeper_open_directory(searchLeaf);
+        int searchAccessFlags=searchFD>=0 ? fcntl(searchFD,F_GETFL) : -1;
+        int searchDescriptorFlags=searchFD>=0 ? fcntl(searchFD,F_GETFD) : -1;
+        struct stat searchInfo;BOOL modeUnchanged=lstat(searchAncestor.fileSystemRepresentation,&searchInfo)==0 && (searchInfo.st_mode&0777)==0111;
+        DIR *searchDirectory=searchFD>=0 ? fdopendir(searchFD) : NULL;
+        BOOL enumerated=searchDirectory && readdir(searchDirectory)!=NULL;
+        if (searchDirectory) closedir(searchDirectory);else if (searchFD>=0) close(searchFD);
+        if (legacyAccess>=0) close(legacyAccess);
+        require(chmod(searchAncestor.fileSystemRepresentation,0700)==0,@"还原测试夹具供清理");
+        require(legacyAccess<0 && legacyError==EACCES,@"真实权限负对照：O_RDONLY错误要求祖先可枚举");
+        require(enumerated && modeUnchanged,@"O_SEARCH祖先无需改权限即可打开并枚举末级目录");
+        require(searchAccessFlags>=0 && !(searchAccessFlags&O_SEARCH) && (searchAccessFlags&O_ACCMODE)==O_RDONLY &&
+            searchDescriptorFlags>=0 && (searchDescriptorFlags&FD_CLOEXEC),@"末级fd可读而非search-only且关闭exec继承");
+        require(chmod(searchLeaf.fileSystemRepresentation,0111)==0,@"末级仅遍历夹具");
+        int unreadableLeaf=axs_cachekeeper_open_directory(searchLeaf);int unreadableLeafError=errno;
+        if (unreadableLeaf>=0) close(unreadableLeaf);
+        require(chmod(searchLeaf.fileSystemRepresentation,0700)==0,@"恢复末级权限");
+        require(unreadableLeaf<0 && unreadableLeafError==EACCES,@"末级不可读必须拒绝，不能返回不可枚举fd假成功");
+        require(chmod(searchAncestor.fileSystemRepresentation,0000)==0,@"祖先无遍历权限夹具");
+        int unsearchableAncestor=axs_cachekeeper_open_directory(searchLeaf);int unsearchableError=errno;
+        if (unsearchableAncestor>=0) close(unsearchableAncestor);
+        require(chmod(searchAncestor.fileSystemRepresentation,0700)==0,@"恢复祖先权限");
+        require(unsearchableAncestor<0 && unsearchableError==EACCES,@"O_SEARCH不能绕过祖先遍历权限");
+        int rootDirectoryFD=axs_cachekeeper_open_directory(@"/");
+        DIR *rootDirectory=rootDirectoryFD>=0 ? fdopendir(rootDirectoryFD) : NULL;
+        BOOL rootReadable=rootDirectory && readdir(rootDirectory)!=NULL;
+        if (rootDirectory) closedir(rootDirectory);else if (rootDirectoryFD>=0) close(rootDirectoryFD);
+        require(rootReadable,@"零路径组件仍返回可枚举根fd，不能把O_RDONLY=0叠加到O_SEARCH");
+
         // 路径解析回归（真机 2026-11-11：删除在「打开缓存根」以 ENOTDIR 全灭）：中间组件是符号链接时
         // 逐级打开必须跟随（与内核一致，如 /var→/private/var）；末级目标本身是链接仍须拒绝。
         NSString *linkTarget = [fixture stringByAppendingPathComponent:@"link-target"];
@@ -1504,6 +1553,37 @@ int main(int argc, const char *argv[]) {
         require([rebuildUnlock[@"failed"] unsignedIntegerValue] == 0 &&
             !lstat(rebuildFile.fileSystemRepresentation, &lockInfo) && (lockInfo.st_mode & 0777) == 0644, @"刷新记录后恢复新文件权限，不永久锁定");
 
+        AxsCacheKeeperInspection *missingInspection=[[AxsCacheKeeperInspection alloc] initWithRoot:[fixture stringByAppendingPathComponent:@"inspection-missing"]];
+        NSDictionary *missingInspectionReport=[missingInspection report];
+        require(missingInspection.complete && [missingInspectionReport[@"failures"] isEqual:@1] &&
+            ![missingInspectionReport[@"coverageComplete"] boolValue] &&
+            [missingInspectionReport[@"inspectionReadFailure"] isEqual:@{@"stage":@"openRoot",@"errorDomain":@"posix",@"errorCode":@(ENOENT)}],
+            @"真实缺失深检根保留openRoot和ENOENT，不能伪造零剩余");
+        NSString *deniedInspectionRoot=[fixture stringByAppendingPathComponent:@"inspection-read-denied"];
+        require([fm createDirectoryAtPath:deniedInspectionRoot withIntermediateDirectories:YES attributes:nil error:nil],@"创建不可枚举深检根夹具");
+        struct stat inspectionMode;require(lstat(deniedInspectionRoot.fileSystemRepresentation,&inspectionMode)==0,@"记录深检根原权限");
+        NSDictionary *deniedInspectionReport=nil;int inspectionRestored=-1;
+        require(chmod(deniedInspectionRoot.fileSystemRepresentation,0111)==0,@"深检末级根只有遍历权限");
+        @try { deniedInspectionReport=[[[AxsCacheKeeperInspection alloc] initWithRoot:deniedInspectionRoot] report]; }
+        @finally { inspectionRestored=chmod(deniedInspectionRoot.fileSystemRepresentation,inspectionMode.st_mode&07777); }
+        require(inspectionRestored==0,@"恢复深检根夹具权限后再断言");
+        require([deniedInspectionReport[@"failures"] isEqual:@1] && ![deniedInspectionReport[@"coverageComplete"] boolValue] &&
+            [deniedInspectionReport[@"inspectionReadFailure"] isEqual:@{@"stage":@"openRoot",@"errorDomain":@"posix",@"errorCode":@(EACCES)}],
+            @"真实不可枚举深检根保留openRoot和EACCES，祖先O_SEARCH不授予末级枚举权");
+        NSString *deniedInspectionFile=[deniedInspectionRoot stringByAppendingPathComponent:@"header-denied"];
+        writeFile(deniedInspectionFile);
+        require(lstat(deniedInspectionFile.fileSystemRepresentation,&inspectionMode)==0,@"记录深检文件原权限");
+        require(chmod(deniedInspectionFile.fileSystemRepresentation,0000)==0,@"制造真实文件头读取失败");
+        @try {
+            AxsCacheKeeperInspection *headerFailure=[[AxsCacheKeeperInspection alloc] initWithRoot:deniedInspectionRoot];
+            for (NSUInteger pass=0;!headerFailure.complete && pass<8;pass++) [headerFailure advance:8];
+            deniedInspectionReport=[headerFailure report];
+        } @finally { inspectionRestored=chmod(deniedInspectionFile.fileSystemRepresentation,inspectionMode.st_mode&07777); }
+        require(inspectionRestored==0 && [deniedInspectionReport[@"failures"] isEqual:@1] &&
+            ![deniedInspectionReport[@"coverageComplete"] boolValue] &&
+            [deniedInspectionReport[@"inspectionReadFailure"] isEqual:@{@"state":@"notRecorded"}],
+            @"未细分文件头错误显式notRecorded，不从残留errno伪造可信阶段");
+
         NSString *inspectionRoot=[fixture stringByAppendingPathComponent:@"inspection"];
         require([fm createDirectoryAtPath:inspectionRoot withIntermediateDirectories:YES attributes:nil error:nil], @"建立深度检测目录");
         for (NSUInteger i=0;i<600;i++) writeMedia([inspectionRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"%lu.bin",(unsigned long)i]]);
@@ -1516,6 +1596,7 @@ int main(int argc, const char *argv[]) {
         [inspection advance:32];require(!inspection.complete, @"深度检测必须可分批，不能把一批当成完成");
         for (NSUInteger pass=0;!inspection.complete && pass<100;pass++) [inspection advance:32];
         NSDictionary *profile=[inspection report];
+        require(!profile[@"inspectionReadFailure"],@"成功深检不携带其他实例的失败详情");
         require(inspection.complete && [profile[@"coverageComplete"] boolValue] && [profile[@"files"] unsignedIntegerValue]==603 &&
             [profile[@"types"][@"媒体文件头"][@"count"] unsignedIntegerValue]==600, @"全量枚举超过 512 个文件并保留类型组成");
         require([profile[@"types"][@"JSON 数据"][@"count"] unsignedIntegerValue]==1 &&

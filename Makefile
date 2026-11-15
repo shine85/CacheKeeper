@@ -24,6 +24,7 @@ CacheKeeper_CFLAGS = -fobjc-arc -IVendor -DAXS_CACHEKEEPER_PDF_SERVER=1
 CacheKeeper_FILES += AxsCacheKeeperPDFInspection.m AxsCacheKeeperPDFSession.m
 CacheKeeper_FILES += AxsCacheKeeperDependencySnapshot.m AxsCacheKeeperInstallation.m AxsCacheKeeperDiagnosticChannel.m
 CacheKeeper_FILES += AxsCacheKeeperWebKitCache.m AxsCacheKeeperWebKitObservation.m AxsCacheKeeperWebKitRuntime.xm
+CacheKeeper_FILES += AxsCacheKeeperImageCache.m AxsCacheKeeperImageCacheRuntime.m
 CacheKeeper_FRAMEWORKS = UIKit Foundation WebKit
 CacheKeeper_LIBRARIES = roothide sandy substrate
 CacheKeeper_LDFLAGS = -LVendor

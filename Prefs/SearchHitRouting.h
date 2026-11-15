@@ -8,4 +8,6 @@
 @interface AxsCacheKeeperSearchHitRouting : NSObject
 + (void)axs_cachekeeper_claim_bar:(UINavigationBar *)bar owner:(id<AxsCacheKeeperSearchHitOwner>)owner;
 + (void)axs_cachekeeper_release_bar:(UINavigationBar *)bar owner:(id<AxsCacheKeeperSearchHitOwner>)owner;
+// Layout may ignore empty overlap only while this exact instance still has our live route.
++ (BOOL)axs_cachekeeper_bar:(UINavigationBar *)bar owner:(id<AxsCacheKeeperSearchHitOwner>)owner has_empty_rect:(CGRect)rect;
 @end

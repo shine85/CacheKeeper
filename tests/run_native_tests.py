@@ -31,6 +31,8 @@ try:
     installation_baseline = output / "installation-baseline"
     installation_baseline.mkdir()
     (installation_baseline / "AxsCacheKeeperInstallation.h").write_text(installation_header, encoding="utf-8")
+    (installation_baseline / "AxsCacheKeeperInstallationDetail.h").write_bytes(
+        (root / "AxsCacheKeeperInstallationDetail.h").read_bytes())
     baseline_object = installation_baseline / "caller.o"
     subprocess.run([*installation_flags, "-I" + str(installation_baseline), "-c",
                     str(installation_caller), "-o", str(baseline_object)], check=True, timeout=60)
@@ -172,6 +174,7 @@ try:
                              "\n" + result.stdout + result.stderr)
         print("PASS: PDF lifecycle mutation caught: " + name)
     subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
+                    "-DAXS_CACHEKEEPER_INSTALLATION_TESTING=1",
                     "-I" + str(root / "tests" / "include"), "-framework", "Foundation",
                     str(root / "tests" / "cache_control_tests.m"), str(root / "Baseline.m"),
                     str(root / "Permissions.m"), str(root / "AxsCacheKeeperNetworkCache.m"),

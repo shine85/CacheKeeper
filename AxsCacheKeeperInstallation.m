@@ -9,8 +9,17 @@
 #include <limits.h>
 #include <math.h>
 
-static BOOL axs_cachekeeper_installation_error(NSError **error, NSInteger code, NSString *message) {
-    if (error) *error=[NSError errorWithDomain:@"dev.local.cachekeeper.installation" code:code userInfo:@{NSLocalizedDescriptionKey:message}];
+#if defined(AXS_CACHEKEEPER_INSTALLATION_TESTING)
+extern ssize_t axs_cachekeeper_installation_test_read(int fd, void *buffer, size_t length);
+#define axs_cachekeeper_installation_read axs_cachekeeper_installation_test_read
+#else
+#define axs_cachekeeper_installation_read read
+#endif
+
+static BOOL axs_cachekeeper_installation_error(NSError **error, NSInteger code, NSString *message,
+                                              NSString *target, NSString *operation, int number) {
+    if (error) *error=[NSError errorWithDomain:@"dev.local.cachekeeper.installation" code:code
+        userInfo:@{NSLocalizedDescriptionKey:message,@"detail":@{@"target":target,@"operation":operation,@"errno":@(number)}}];
     return NO;
 }
 static BOOL axs_cachekeeper_installation_string(id value, BOOL nonempty) {
@@ -31,13 +40,13 @@ static BOOL axs_cachekeeper_installation_same(struct stat a, struct stat b) {
 }
 static NSString *axs_cachekeeper_installation_path(NSURL *url, NSError **error) {
     if (![url isKindOfClass:NSURL.class] || !url.isFileURL || !axs_cachekeeper_installation_string(url.path,YES) || !url.path.isAbsolutePath) {
-        axs_cachekeeper_installation_error(error,1,@"系统安装包 URL 不可用");return nil;
+        axs_cachekeeper_installation_error(error,1,@"系统安装包 URL 不可用",@"input",@"url",0);return nil;
     }
     NSString *path=url.path;
     // lstat("link/") follows a directory link; remove only trailing separators before checking.
     while (path.length>1 && [path hasSuffix:@"/"]) path=[path substringToIndex:path.length-1];
     if ([path.pathComponents containsObject:@".."] || [path.pathComponents containsObject:@"."] || !axs_cachekeeper_installation_component(path.lastPathComponent)) {
-        axs_cachekeeper_installation_error(error,1,@"系统安装包路径无效");return nil;
+        axs_cachekeeper_installation_error(error,1,@"系统安装包路径无效",@"input",@"path",0);return nil;
     }
     return path;
 }
@@ -45,35 +54,69 @@ static NSString *axs_cachekeeper_installation_path(NSURL *url, NSError **error) 
 // The original path is rechecked against the open FD after every sample.
 static int axs_cachekeeper_installation_open_root(NSString *path, NSError **error) {
     struct stat before,opened;
-    if (lstat(path.fileSystemRepresentation,&before) || !S_ISDIR(before.st_mode)) {
-        axs_cachekeeper_installation_error(error,2,@"安装包目录缺失、不可读或为链接");return -1;
+    if (lstat(path.fileSystemRepresentation,&before)) {
+        int number=errno;axs_cachekeeper_installation_error(error,2,@"无法读取安装包目录属性",@"root",@"stat",number);return -1;
     }
-    int fd=open(path.fileSystemRepresentation,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
-    if (fd<0 || fstat(fd,&opened) || !S_ISDIR(opened.st_mode) || !axs_cachekeeper_installation_same(before,opened)) {
-        if (fd>=0) close(fd);
-        axs_cachekeeper_installation_error(error,2,@"安装包目录在读取时变化或无法打开");return -1;
+    if (!S_ISDIR(before.st_mode)) {
+        axs_cachekeeper_installation_error(error,2,@"安装包不是目录或为链接",@"root",@"type",0);return -1;
+    }
+    // The root FD is used only for metadata and relative child opens, never enumeration.
+    int fd=open(path.fileSystemRepresentation,O_SEARCH|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
+    if (fd<0) {
+        int number=errno;axs_cachekeeper_installation_error(error,2,@"无法打开安装包目录",@"root",@"open",number);return -1;
+    }
+    if (fstat(fd,&opened)) {
+        int number=errno;close(fd);axs_cachekeeper_installation_error(error,2,@"无法读取已打开安装目录属性",@"root",@"fstat",number);return -1;
+    }
+    if (!S_ISDIR(opened.st_mode)) {
+        close(fd);axs_cachekeeper_installation_error(error,2,@"已打开安装包不是目录",@"root",@"type",0);return -1;
+    }
+    if (!axs_cachekeeper_installation_same(before,opened)) {
+        close(fd);axs_cachekeeper_installation_error(error,2,@"安装包目录在打开时变化",@"root",@"openIdentity",0);return -1;
     }
     return fd;
 }
-static int axs_cachekeeper_installation_open_file(int root, const char *name, struct stat *identity, NSError **error) {
+static int axs_cachekeeper_installation_open_file(int root, const char *name, NSString *target, struct stat *identity, NSError **error) {
     struct stat before,opened;
-    if (fstatat(root,name,&before,AT_SYMLINK_NOFOLLOW) || !S_ISREG(before.st_mode)) {
-        axs_cachekeeper_installation_error(error,3,@"安装文件缺失、为链接或不是普通文件");return -1;
+    if (fstatat(root,name,&before,AT_SYMLINK_NOFOLLOW)) {
+        int number=errno;axs_cachekeeper_installation_error(error,3,@"无法读取安装文件属性",target,@"stat",number);return -1;
+    }
+    if (!S_ISREG(before.st_mode)) {
+        axs_cachekeeper_installation_error(error,3,@"安装文件为链接或不是普通文件",target,@"type",0);return -1;
     }
     int fd=openat(root,name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
-    if (fd<0 || fstat(fd,&opened) || !S_ISREG(opened.st_mode) || !axs_cachekeeper_installation_same(before,opened)) {
-        if (fd>=0) close(fd);
-        axs_cachekeeper_installation_error(error,3,@"安装文件在读取时变化或无法打开");return -1;
+    if (fd<0) {
+        int number=errno;axs_cachekeeper_installation_error(error,3,@"无法打开安装文件",target,@"open",number);return -1;
+    }
+    if (fstat(fd,&opened)) {
+        int number=errno;close(fd);axs_cachekeeper_installation_error(error,3,@"无法读取已打开安装文件属性",target,@"fstat",number);return -1;
+    }
+    if (!S_ISREG(opened.st_mode)) {
+        close(fd);axs_cachekeeper_installation_error(error,3,@"已打开安装文件不是普通文件",target,@"type",0);return -1;
+    }
+    if (!axs_cachekeeper_installation_same(before,opened)) {
+        close(fd);axs_cachekeeper_installation_error(error,3,@"安装文件在打开时变化",target,@"openIdentity",0);return -1;
     }
     *identity=opened;return fd;
 }
-static BOOL axs_cachekeeper_installation_check(int root, int info, int executable, NSString *path, NSString *name,
-                                              struct stat rootBefore, struct stat infoBefore, struct stat executableBefore) {
+static BOOL axs_cachekeeper_installation_recheck(int root, int fd, const char *name, NSString *path,
+    NSString *target, struct stat before, NSError **error) {
     struct stat a,b;
-    if (fstat(root,&a) || lstat(path.fileSystemRepresentation,&b) || !axs_cachekeeper_installation_same(rootBefore,a) || !axs_cachekeeper_installation_same(a,b)) return NO;
-    if (fstat(info,&a) || fstatat(root,"Info.plist",&b,AT_SYMLINK_NOFOLLOW) || !axs_cachekeeper_installation_same(infoBefore,a) || !axs_cachekeeper_installation_same(a,b)) return NO;
-    if (fstat(executable,&a) || fstatat(root,name.fileSystemRepresentation,&b,AT_SYMLINK_NOFOLLOW) || !axs_cachekeeper_installation_same(executableBefore,a) || !axs_cachekeeper_installation_same(a,b)) return NO;
+    if (fstat(fd,&a)) {
+        int number=errno;return axs_cachekeeper_installation_error(error,6,@"无法复核已打开安装身份",target,@"recheckFD",number);
+    }
+    if (path ? lstat(path.fileSystemRepresentation,&b) : fstatat(root,name,&b,AT_SYMLINK_NOFOLLOW)) {
+        int number=errno;return axs_cachekeeper_installation_error(error,6,@"无法复核当前安装路径身份",target,@"recheckPath",number);
+    }
+    if (!axs_cachekeeper_installation_same(before,a) || !axs_cachekeeper_installation_same(a,b))
+        return axs_cachekeeper_installation_error(error,6,@"安装文件在读取期间变化，等待安装稳定",target,@"recheckIdentity",0);
     return YES;
+}
+static BOOL axs_cachekeeper_installation_check(int root, int info, int executable, NSString *path, NSString *name,
+    struct stat rootBefore, struct stat infoBefore, struct stat executableBefore, NSError **error) {
+    return axs_cachekeeper_installation_recheck(root,root,NULL,path,@"root",rootBefore,error) &&
+        axs_cachekeeper_installation_recheck(root,info,"Info.plist",nil,@"info",infoBefore,error) &&
+        axs_cachekeeper_installation_recheck(root,executable,name.fileSystemRepresentation,nil,@"main",executableBefore,error);
 }
 static NSString *axs_cachekeeper_installation_fingerprint(NSArray *parts) {
     NSData *data=[NSJSONSerialization dataWithJSONObject:parts options:0 error:nil];
@@ -85,43 +128,62 @@ static NSString *axs_cachekeeper_installation_fingerprint(NSArray *parts) {
 }
 NSDictionary *axs_cachekeeper_installation_snapshot(NSURL *bundleURL, NSString *bundleIdentifier, NSString *systemShortVersion, NSError **error) {
     if (error) *error=nil;
-    if (!axs_cachekeeper_bundle_id(bundleIdentifier) || !axs_cachekeeper_installation_string(bundleIdentifier,YES) ||
-        (systemShortVersion && !axs_cachekeeper_installation_string(systemShortVersion,NO))) {
-        axs_cachekeeper_installation_error(error,1,@"系统安装标识或版本类型无效");return nil;
+    if (!axs_cachekeeper_bundle_id(bundleIdentifier) || !axs_cachekeeper_installation_string(bundleIdentifier,YES)) {
+        axs_cachekeeper_installation_error(error,1,@"系统安装标识无效",@"input",@"identifier",0);return nil;
+    }
+    if (systemShortVersion && !axs_cachekeeper_installation_string(systemShortVersion,NO)) {
+        axs_cachekeeper_installation_error(error,1,@"系统安装版本类型无效",@"input",@"version",0);return nil;
     }
     NSString *path=axs_cachekeeper_installation_path(bundleURL,error);if (!path) return nil;
     int root=axs_cachekeeper_installation_open_root(path,error);if (root<0) return nil;
     int info=-1,executable=-1;NSDictionary *result=nil;
     @try {
         struct stat rootStat,infoStat,executableStat;
-        if (fstat(root,&rootStat)) { axs_cachekeeper_installation_error(error,2,@"无法确认安装包目录身份");return nil; }
-        info=axs_cachekeeper_installation_open_file(root,"Info.plist",&infoStat,error);if (info<0) return nil;
-        if (infoStat.st_size<=0 || infoStat.st_size>1024*1024) { axs_cachekeeper_installation_error(error,4,@"安装信息为空或超过 1 MiB 读取上限");return nil; }
+        if (fstat(root,&rootStat)) {
+            int number=errno;axs_cachekeeper_installation_error(error,2,@"无法确认安装包目录身份",@"root",@"snapshotStat",number);return nil;
+        }
+        info=axs_cachekeeper_installation_open_file(root,"Info.plist",@"info",&infoStat,error);if (info<0) return nil;
+        if (infoStat.st_size<=0 || infoStat.st_size>1024*1024) {
+            axs_cachekeeper_installation_error(error,4,@"安装信息为空或超过 1 MiB 读取上限",@"info",@"size",0);return nil;
+        }
         NSMutableData *data=[NSMutableData dataWithLength:(NSUInteger)infoStat.st_size];
         size_t offset=0;NSUInteger interrupts=0;
         while (offset<data.length) {
-            ssize_t count=read(info,(unsigned char *)data.mutableBytes+offset,data.length-offset);
-            if (count<0 && errno==EINTR && ++interrupts<=4) continue;
-            if (count<=0) { axs_cachekeeper_installation_error(error,4,@"安装信息读取不完整");return nil; }
+            ssize_t count=axs_cachekeeper_installation_read(info,(unsigned char *)data.mutableBytes+offset,data.length-offset);
+            int number=count<0 ? errno : 0;
+            if (count<0 && number==EINTR && ++interrupts<=4) continue;
+            if (count<=0) { axs_cachekeeper_installation_error(error,4,@"安装信息读取不完整",@"info",@"read",number);return nil; }
             offset+=(size_t)count;
         }
         id plist=[NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:nil error:nil];
-        if (![plist isKindOfClass:NSDictionary.class]) { axs_cachekeeper_installation_error(error,5,@"安装信息不是有效字典");return nil; }
+        if (!plist) { axs_cachekeeper_installation_error(error,5,@"无法解析安装信息",@"info",@"parse",0);return nil; }
+        if (![plist isKindOfClass:NSDictionary.class]) {
+            axs_cachekeeper_installation_error(error,5,@"安装信息不是字典",@"info",@"metadataType",0);return nil;
+        }
         NSString *identifier=plist[@"CFBundleIdentifier"],*name=plist[@"CFBundleExecutable"],*build=plist[@"CFBundleVersion"],*version=plist[@"CFBundleShortVersionString"];
-        if (!axs_cachekeeper_installation_string(identifier,YES) || ![identifier isEqual:bundleIdentifier] || !axs_cachekeeper_installation_component(name) ||
-            (build && !axs_cachekeeper_installation_string(build,NO)) || (version && !axs_cachekeeper_installation_string(version,NO))) {
-            axs_cachekeeper_installation_error(error,5,@"安装信息标识、版本或可执行名称无效");return nil;
+        if (!axs_cachekeeper_installation_string(identifier,YES)) {
+            axs_cachekeeper_installation_error(error,5,@"安装信息标识无效",@"info",@"identifier",0);return nil;
+        }
+        if (![identifier isEqual:bundleIdentifier]) {
+            axs_cachekeeper_installation_error(error,5,@"安装信息标识与系统登记不符",@"info",@"identifierMismatch",0);return nil;
+        }
+        if (!axs_cachekeeper_installation_component(name)) {
+            axs_cachekeeper_installation_error(error,5,@"安装信息可执行名称无效",@"info",@"executable",0);return nil;
+        }
+        if (build && !axs_cachekeeper_installation_string(build,NO)) {
+            axs_cachekeeper_installation_error(error,5,@"安装信息构建号类型无效",@"info",@"build",0);return nil;
+        }
+        if (version && !axs_cachekeeper_installation_string(version,NO)) {
+            axs_cachekeeper_installation_error(error,5,@"安装信息版本类型无效",@"info",@"version",0);return nil;
         }
         if (version.length && systemShortVersion.length && ![version isEqual:systemShortVersion]) {
-            axs_cachekeeper_installation_error(error,6,@"系统版本与安装包版本不一致，等待安装稳定");return nil;
+            axs_cachekeeper_installation_error(error,6,@"系统版本与安装包版本不一致，等待安装稳定",@"info",@"versionMismatch",0);return nil;
         }
-        executable=axs_cachekeeper_installation_open_file(root,name.fileSystemRepresentation,&executableStat,error);if (executable<0) return nil;
-        if (!axs_cachekeeper_installation_check(root,info,executable,path,name,rootStat,infoStat,executableStat)) {
-            axs_cachekeeper_installation_error(error,6,@"安装文件在读取期间变化，等待安装稳定");return nil;
-        }
+        executable=axs_cachekeeper_installation_open_file(root,name.fileSystemRepresentation,@"main",&executableStat,error);if (executable<0) return nil;
+        if (!axs_cachekeeper_installation_check(root,info,executable,path,name,rootStat,infoStat,executableStat,error)) return nil;
         NSArray *rootIdentity=axs_cachekeeper_installation_stat(rootStat),*infoIdentity=axs_cachekeeper_installation_stat(infoStat),*executableIdentity=axs_cachekeeper_installation_stat(executableStat);
         NSString *fingerprint=axs_cachekeeper_installation_fingerprint(@[path,bundleIdentifier,version ?: @"",build ?: @"",rootIdentity,infoIdentity,executableIdentity]);
-        if (!fingerprint) { axs_cachekeeper_installation_error(error,5,@"无法生成安装身份");return nil; }
+        if (!fingerprint) { axs_cachekeeper_installation_error(error,5,@"无法生成安装身份",@"snapshot",@"fingerprint",0);return nil; }
         NSMutableDictionary *snapshot=[@{@"fingerprint":fingerprint,@"installationState":build.length && version.length ? @"verified" : @"versionUnknown",
             @"_path":path,@"_systemVersion":systemShortVersion ?: @"",@"_executable":name,@"_root":rootIdentity,@"_info":infoIdentity,@"_main":executableIdentity} mutableCopy];
         if (build.length) snapshot[@"build"]=build;
@@ -132,24 +194,34 @@ NSDictionary *axs_cachekeeper_installation_snapshot(NSURL *bundleURL, NSString *
 }
 BOOL axs_cachekeeper_validate_installation_snapshot(NSDictionary *snapshot, NSURL *currentBundleURL, NSString *currentSystemShortVersion, NSError **error) {
     if (error) *error=nil;
-    if (![snapshot isKindOfClass:NSDictionary.class] || !axs_cachekeeper_installation_component(snapshot[@"_executable"]) ||
-        (currentSystemShortVersion && !axs_cachekeeper_installation_string(currentSystemShortVersion,NO)))
-        return axs_cachekeeper_installation_error(error,1,@"安装身份不可用");
+    if (![snapshot isKindOfClass:NSDictionary.class])
+        return axs_cachekeeper_installation_error(error,1,@"安装身份不可用",@"snapshot",@"shape",0);
+    if (!axs_cachekeeper_installation_component(snapshot[@"_executable"]))
+        return axs_cachekeeper_installation_error(error,1,@"安装身份可执行名称无效",@"snapshot",@"executable",0);
+    if (currentSystemShortVersion && !axs_cachekeeper_installation_string(currentSystemShortVersion,NO))
+        return axs_cachekeeper_installation_error(error,1,@"系统安装版本类型无效",@"input",@"version",0);
     NSString *path=axs_cachekeeper_installation_path(currentBundleURL,error);if (!path) return NO;
-    if (![path isEqual:snapshot[@"_path"]] || ![(currentSystemShortVersion ?: @"") isEqual:snapshot[@"_systemVersion"]])
-        return axs_cachekeeper_installation_error(error,6,@"系统安装位置或版本已改变，旧作业已失效");
+    if (![path isEqual:snapshot[@"_path"]])
+        return axs_cachekeeper_installation_error(error,6,@"系统安装位置已改变，旧作业已失效",@"snapshot",@"path",0);
+    if (![(currentSystemShortVersion ?: @"") isEqual:snapshot[@"_systemVersion"]])
+        return axs_cachekeeper_installation_error(error,6,@"系统安装版本已改变，旧作业已失效",@"snapshot",@"version",0);
     int root=axs_cachekeeper_installation_open_root(path,error);if (root<0) return NO;
     int info=-1,executable=-1;BOOL valid=NO;
     @try {
         struct stat rootStat,infoStat,executableStat;
-        if (fstat(root,&rootStat)) return axs_cachekeeper_installation_error(error,2,@"无法复核安装目录");
-        info=axs_cachekeeper_installation_open_file(root,"Info.plist",&infoStat,error);if (info<0) return NO;
+        if (fstat(root,&rootStat)) {
+            int number=errno;return axs_cachekeeper_installation_error(error,2,@"无法复核安装目录",@"root",@"snapshotStat",number);
+        }
+        info=axs_cachekeeper_installation_open_file(root,"Info.plist",@"info",&infoStat,error);if (info<0) return NO;
         NSString *name=snapshot[@"_executable"];
-        executable=axs_cachekeeper_installation_open_file(root,name.fileSystemRepresentation,&executableStat,error);if (executable<0) return NO;
-        valid=[axs_cachekeeper_installation_stat(rootStat) isEqual:snapshot[@"_root"]] && [axs_cachekeeper_installation_stat(infoStat) isEqual:snapshot[@"_info"]] &&
-            [axs_cachekeeper_installation_stat(executableStat) isEqual:snapshot[@"_main"]] &&
-            axs_cachekeeper_installation_check(root,info,executable,path,name,rootStat,infoStat,executableStat);
-        if (!valid) axs_cachekeeper_installation_error(error,6,@"安装包、Info 或主程序身份已变化，旧作业已失效");
+        executable=axs_cachekeeper_installation_open_file(root,name.fileSystemRepresentation,@"main",&executableStat,error);if (executable<0) return NO;
+        if (![axs_cachekeeper_installation_stat(rootStat) isEqual:snapshot[@"_root"]])
+            return axs_cachekeeper_installation_error(error,6,@"安装目录身份已变化，旧作业已失效",@"root",@"snapshotIdentity",0);
+        if (![axs_cachekeeper_installation_stat(infoStat) isEqual:snapshot[@"_info"]])
+            return axs_cachekeeper_installation_error(error,6,@"安装信息身份已变化，旧作业已失效",@"info",@"snapshotIdentity",0);
+        if (![axs_cachekeeper_installation_stat(executableStat) isEqual:snapshot[@"_main"]])
+            return axs_cachekeeper_installation_error(error,6,@"主程序身份已变化，旧作业已失效",@"main",@"snapshotIdentity",0);
+        valid=axs_cachekeeper_installation_check(root,info,executable,path,name,rootStat,infoStat,executableStat,error);
     } @finally { if (executable>=0) close(executable);if (info>=0) close(info);close(root); }
     return valid;
 }
@@ -368,7 +440,7 @@ NSArray *axs_cachekeeper_installed_applications_with_container_coverage(NSMutabl
     if (![installed isKindOfClass:NSArray.class]) {
         if (installed) sourceState=@"invalid";
         if (coverage) {NSMutableDictionary *failure=axs_cachekeeper_coverage_base(@"unavailable");failure[@"sourceState"]=sourceState;*coverage=[failure copy];}
-        axs_cachekeeper_installation_error(error,7,@"系统应用列表不可用");return nil;
+        axs_cachekeeper_installation_error(error,7,@"系统应用列表不可用",@"registry",@"enumerate",0);return nil;
     }
     NSMutableDictionary *home=coverage ? axs_cachekeeper_coverage_role() : nil,*group=coverage ? axs_cachekeeper_coverage_role() : nil,
         *extension=coverage ? axs_cachekeeper_coverage_role() : nil;

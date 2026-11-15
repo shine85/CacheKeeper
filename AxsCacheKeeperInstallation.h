@@ -1,5 +1,6 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#import "AxsCacheKeeperInstallationDetail.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -8,6 +9,7 @@ extern "C" {
 // Call on a background queue, using only the system application's bundleURL.
 // Snapshots (including fingerprint and private identity fields) stay in memory; never export them.
 // Missing version/build remain absent with installationState=versionUnknown; invalid files fail closed.
+// Failures retain codes 1..7 and add userInfo.detail through the fixed, non-sensitive detail contract.
 NSDictionary *axs_cachekeeper_installation_snapshot(NSURL *bundleURL, NSString *bundleIdentifier,
                                                    NSString *systemShortVersion, NSError **error);
 // Bounded metadata-only verification; does not parse Info.plist or read executable contents.

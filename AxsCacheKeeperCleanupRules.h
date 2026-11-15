@@ -79,6 +79,9 @@ typedef NS_ENUM(NSInteger, AxsCacheKeeperCleanupBasis) {
 //（在可清范围内，或可清范围在其内）。已验证规则优先于名称启发式保留——
 // 否则 Downloads 等保留名目录下的已验证资源范围会被整片裁掉、规则永不生效。
 + (BOOL)hasCleanableRangeForBundle:(NSString *)bundle version:(NSString *)version relativePath:(NSString *)relativePath;
+// Whole-owner SDK operations cannot trim a retained child. Retention and rule dependencies
+// survive upgrades; reject any overlapping tree, including an ancestor of a retained range.
++ (BOOL)hasRetentionRangeForBundle:(NSString *)bundle version:(NSString *)version relativePath:(NSString *)relativePath;
 // 注册 APP 专属规则（生产规则由内置表注册；测试用本接口注入测试规则）。
 + (void)registerRule:(AxsCacheKeeperAppRule *)rule forBundle:(NSString *)bundle;
 // 测试专用：清除测试注册并恢复内置生产规则，保持与生产相同的初始条件。

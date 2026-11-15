@@ -74,6 +74,7 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
 @property(nonatomic) BOOL axs_cachekeeper_menuVisible;
 @property(nonatomic) BOOL axs_cachekeeper_renderPending;
 @property(nonatomic,strong) AxsCacheKeeperSearchDiagnostics *axs_cachekeeper_searchDiagnostics;
+@property(nonatomic) CGRect axs_cachekeeper_lastLayoutInputRect;
 @end
 @implementation CKSettings
 - (void)loadView {
@@ -343,6 +344,12 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
     if (CGRectIsEmpty(rect) || CGRectIsNull(rect) ||
         CGRectGetMaxX(rect)<=CGRectGetMinX(safe) || CGRectGetMinX(rect)>=CGRectGetMaxX(safe) ||
         CGRectGetMinY(rect)>CGRectGetMinY(safe)+1.0/window.screen.scale) return 0;
+    if ([self axs_cachekeeper_search_owns_bar:bar]) {
+        // Always inspect the unshifted search footprint, so avoidance cannot feed back into itself.
+        CGRect input=CGRectMake(CGRectGetMinX(safe),CGRectGetMinY(safe),CGRectGetWidth(safe),self.axs_cachekeeper_searchInput.bounds.size.height);
+        if (!CGRectIsEmpty(input) && CGRectContainsRect(root.bounds,input) &&
+            [AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:self has_empty_rect:[root convertRect:input toView:bar]]) return 0;
+    }
     return MAX(0,CGRectGetMaxY(rect)-CGRectGetMinY(safe));
 }
 - (NSArray<NSDictionary *> *)axs_cachekeeper_search_navigation_states {
@@ -354,21 +361,25 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
     return @{@"appeared":self.axs_cachekeeper_appeared ? @YES : @NO,
         @"safeTop":@(safeTop),@"searchInset":@(inset)};
 }
-- (BOOL)axs_cachekeeper_search_passes_point:(CGPoint)point fromBar:(UINavigationBar *)bar {
+- (BOOL)axs_cachekeeper_search_owns_bar:(UINavigationBar *)bar {
     if (!self.axs_cachekeeper_visible || !self.axs_cachekeeper_appeared || !self.viewIfLoaded.window ||
-        bar.window!=self.view.window || bar.prefersLargeTitles || !isfinite(point.x) || !isfinite(point.y)) return NO;
+        bar.window!=self.view.window || bar.prefersLargeTitles) return NO;
     for (UIViewController *controller=self;controller;controller=controller.parentViewController)
         if (controller.transitionCoordinator || controller.presentedViewController || controller.isBeingDismissed || controller.isMovingFromParentViewController) return NO;
     for (UIView *ancestor=self.view;ancestor;ancestor=ancestor.superview)
-        if (ancestor.hidden || ancestor.alpha<=0.01 || !ancestor.userInteractionEnabled ||
-            ![ancestor pointInside:[ancestor convertPoint:point fromView:bar] withEvent:nil]) return NO;
+        if (ancestor.hidden || ancestor.alpha<=0.01) return NO;
     BOOL claimed=NO;
     for (NSDictionary *state in [self axs_cachekeeper_search_navigation_states]) {
         if (![state[@"ownership"][@"topIsDirectChild"] boolValue]) return NO;
         if (state[@"bar"]==bar && [state[@"ownership"][@"claimActive"] boolValue] &&
             ![state[@"ownership"][@"transitioning"] boolValue]) claimed=YES;
     }
-    if (!claimed) return NO;
+    return claimed;
+}
+- (BOOL)axs_cachekeeper_search_passes_point:(CGPoint)point fromBar:(UINavigationBar *)bar {
+    if (!isfinite(point.x) || !isfinite(point.y) || ![self axs_cachekeeper_search_owns_bar:bar]) return NO;
+    for (UIView *ancestor=self.view;ancestor;ancestor=ancestor.superview)
+        if (!ancestor.userInteractionEnabled || ![ancestor pointInside:[ancestor convertPoint:point fromView:bar] withEvent:nil]) return NO;
     CGPoint rootPoint=[self.view convertPoint:point fromView:bar];
     // Query only the content subtree. A window query here would recursively re-enter this hook.
     UIView *hit=[self.view hitTest:rootPoint withEvent:nil];
@@ -432,18 +443,11 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
 - (void)axs_cachekeeper_layout_compact_navigation {
     if (!self.axs_cachekeeper_visible || !self.axs_cachekeeper_appeared || self.axs_cachekeeper_updatingTitle) return;
     [self axs_cachekeeper_update_compact_title];
-    // A compact bar can still leave its descendants with the old large-title safe area.
-    // Settle outer containers first, even when the bar itself already fits.
+    // On entry, settle stale ancestor safe areas outermost first, even if the bar already fits.
     for (NSDictionary *state in [[self axs_cachekeeper_search_navigation_states] reverseObjectEnumerator]) {
         if (![state[@"ownership"][@"claimActive"] boolValue] || [state[@"ownership"][@"transitioning"] boolValue]) continue;
-        UINavigationController *navigation=state[@"navigation"];UINavigationBar *bar=state[@"bar"];
+        UINavigationController *navigation=state[@"navigation"];
         [navigation.view setNeedsLayout];[navigation.view layoutIfNeeded];
-        // UIKit may change ownership synchronously during layout. Revalidate before forcing.
-        for (NSDictionary *current in [self axs_cachekeeper_search_navigation_states]) {
-            if (current[@"bar"]==bar && current[@"item"]==state[@"item"] &&
-                [current[@"ownership"][@"claimActive"] boolValue] && ![current[@"ownership"][@"transitioning"] boolValue] &&
-                bar.bounds.size.height>44.5) [bar sizeToFit];
-        }
     }
     [self axs_cachekeeper_update_search_top];
 }
@@ -486,6 +490,13 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     [self axs_cachekeeper_update_search_top];
+    if (self.axs_cachekeeper_visible && self.view.window) {
+        CGRect input=[self.axs_cachekeeper_searchInput convertRect:self.axs_cachekeeper_searchInput.bounds toView:self.view.window];
+        if (!CGRectEqualToRect(input,self.axs_cachekeeper_lastLayoutInputRect)) {
+            self.axs_cachekeeper_lastLayoutInputRect=input;
+            [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_sample];
+        }
+    }
 }
 - (void)viewSafeAreaInsetsDidChange {
     [super viewSafeAreaInsetsDidChange];
@@ -570,8 +581,7 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
 }
 - (void)updateBatch {
     if (!self.axs_cachekeeper_visible || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
-    // Reconcile active claims when host state changes outside this controller's layout pass.
-    [self axs_cachekeeper_layout_compact_navigation];
+    // Reconcile ownership and content, leaving the host's geometry to its own layout cycle.
     [self axs_cachekeeper_update_search_top];[self.view layoutIfNeeded];
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_sample];
     // Poll only cached source metadata each second. Installed-app metadata has a separate cadence.

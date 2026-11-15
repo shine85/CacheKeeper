@@ -185,6 +185,18 @@ static BOOL AxsCacheKeeperRuleApplies(AxsCacheKeeperAppRule *rule, NSString *ver
     return NO;
 }
 
++ (BOOL)hasRetentionRangeForBundle:(NSString *)bundle version:(NSString *)version relativePath:(NSString *)relativePath {
+    (void)version; // Upgrades revoke deletion permission, never previously confirmed retention.
+    if (!axs_cachekeeper_bundle_id(bundle) || !axs_cachekeeper_relative_path(relativePath)) return YES;
+    for (AxsCacheKeeperAppRule *rule in AxsCacheKeeperRuleRegistry()[bundle]) {
+        for (NSString *scope in [rule.retentionPaths arrayByAddingObjectsFromArray:rule.dependencyPaths]) {
+            if (!axs_cachekeeper_relative_path(scope) || AxsCacheKeeperPathUnder(relativePath,scope) ||
+                AxsCacheKeeperPathUnder(scope,relativePath)) return YES;
+        }
+    }
+    return NO;
+}
+
 + (AxsCacheKeeperCleanupDecision *)decisionForBundle:(NSString *)bundle
                                             version:(NSString *)version
                                        relativePath:(NSString *)relativePath

@@ -181,7 +181,15 @@ static void axs_cachekeeper_search_collect_bars(UIView *view,NSMutableArray *bar
             if ([state isEqual:self.lastSample]) return;
             self.lastSample=state;
         }
-        if (self.events.count==AxsCacheKeeperSearchEventLimit) { [self.events removeObjectAtIndex:0];self.truncated=YES; }
+        if (self.events.count==AxsCacheKeeperSearchEventLimit) {
+            // Layout changes must not crowd out the actual attempt to edit or leave the page.
+            NSUInteger sample=[self.events indexOfObjectPassingTest:^BOOL(id item,NSUInteger index,BOOL *stop) {
+                (void)index;(void)stop;return [item[@"event"] isEqual:@"sampled"];
+            }];
+            self.truncated=YES;
+            if (sample==NSNotFound && event==AxsCacheKeeperSearchEventSampled) return;
+            [self.events removeObjectAtIndex:sample==NSNotFound ? 0 : sample];
+        }
         [self.events addObject:[entry copy]];
     } @finally {
         self.capturing=NO;

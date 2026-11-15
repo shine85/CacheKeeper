@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import "Preferences/PSViewController.h"
 #import "../../Prefs/SearchInput.h"
 #import "../../Prefs/SearchHitRouting.h"
@@ -16,6 +17,7 @@
 - (void)axs_cachekeeper_application_active:(NSNotification *)notification;
 - (void)axs_cachekeeper_render;
 - (void)axs_cachekeeper_layout_compact_navigation;
+- (void)updateBatch;
 @end
 // The visual fixture drives the production controller with synthetic metadata, without device reads/writes.
 @interface AxsCacheKeeperVisualSettings : CKSettings
@@ -93,8 +95,64 @@
 @property(nonatomic) NSUInteger axs_cachekeeper_armed;
 @property(nonatomic) BOOL axs_cachekeeper_probing;
 @property(nonatomic,strong) NSMutableDictionary *axs_cachekeeper_samples;
+@property(nonatomic,strong) CADisplayLink *axs_cachekeeper_displayLink;
+@property(nonatomic,strong) NSTimer *axs_cachekeeper_layoutTimer;
+@property(nonatomic) CGFloat axs_cachekeeper_baselineTop;
+- (void)axs_cachekeeper_start_stability;
 @end
 @implementation AxsCacheKeeperRegrowingWindow
+- (void)axs_cachekeeper_capture_frame:(CADisplayLink *)link {
+    (void)link;
+    CKSettings *settings=self.axs_cachekeeper_settings;
+    if (!self.axs_cachekeeper_armed || ![[settings valueForKey:@"axs_cachekeeper_appeared"] boolValue]) return;
+    AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+    CGFloat top=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self].origin.y;
+    CALayer *fieldLayer=input.axs_cachekeeper_field.layer.presentationLayer;
+    CALayer *windowLayer=self.layer.presentationLayer;
+    BOOL presented=fieldLayer && windowLayer;
+    CGFloat visualTop=presented ? [fieldLayer convertRect:fieldLayer.bounds toLayer:windowLayer].origin.y : top;
+    NSString *key=[NSString stringWithFormat:@"%lu",(unsigned long)self.axs_cachekeeper_armed];
+    NSMutableDictionary *sample=[self.axs_cachekeeper_samples[key] mutableCopy] ?: [NSMutableDictionary new];
+    sample[@"renderSamples"]=@([sample[@"renderSamples"] unsignedIntegerValue]+1);
+    CGFloat minimum=sample[@"minimumTop"] ? [sample[@"minimumTop"] doubleValue] : top;
+    CGFloat maximum=sample[@"maximumTop"] ? [sample[@"maximumTop"] doubleValue] : top;
+    sample[@"minimumTop"]=@(MIN(minimum,top));
+    sample[@"maximumTop"]=@(MAX(maximum,top));
+    CGFloat visualMinimum=sample[@"minimumVisualTop"] ? [sample[@"minimumVisualTop"] doubleValue] : visualTop;
+    CGFloat visualMaximum=sample[@"maximumVisualTop"] ? [sample[@"maximumVisualTop"] doubleValue] : visualTop;
+    sample[@"minimumVisualTop"]=@(MIN(visualMinimum,visualTop));
+    sample[@"maximumVisualTop"]=@(MAX(visualMaximum,visualTop));
+    sample[@"presentationSamples"]=@([sample[@"presentationSamples"] unsignedIntegerValue]+(presented ? 1 : 0));
+    sample[@"baselineTop"]=@(self.axs_cachekeeper_baselineTop);
+    self.axs_cachekeeper_samples[key]=sample;
+}
+- (void)axs_cachekeeper_layout_tick {
+    CKSettings *settings=self.axs_cachekeeper_settings;UINavigationBar *bar=self.axs_cachekeeper_bar;
+    if (!self.axs_cachekeeper_armed || ![[settings valueForKey:@"axs_cachekeeper_appeared"] boolValue]) return;
+    NSString *key=[NSString stringWithFormat:@"%lu",(unsigned long)self.axs_cachekeeper_armed];
+    NSMutableDictionary *sample=[self.axs_cachekeeper_samples[key] mutableCopy] ?: [NSMutableDictionary new];
+    NSUInteger ticks=[sample[@"layoutTicks"] unsignedIntegerValue];
+    CGFloat height=ticks%2 ? 44 : 91;
+    CGRect frame=bar.frame;frame.size.height=height;bar.frame=frame;
+    [settings.view setNeedsLayout];[settings.view layoutIfNeeded];[settings updateBatch];
+    sample[@"layoutTicks"]=@(ticks+1);
+    sample[@"hostGeometryPreserved"]=@(fabs(bar.bounds.size.height-height)<0.5 &&
+        (!sample[@"hostGeometryPreserved"] || [sample[@"hostGeometryPreserved"] boolValue]));
+    self.axs_cachekeeper_samples[key]=sample;
+    [self axs_cachekeeper_capture_frame:nil];
+}
+- (void)axs_cachekeeper_start_stability {
+    if (!self.axs_cachekeeper_samples) self.axs_cachekeeper_samples=[NSMutableDictionary new];
+    AxsCacheKeeperSearchInput *input=[self.axs_cachekeeper_settings valueForKey:@"axs_cachekeeper_searchInput"];
+    self.axs_cachekeeper_baselineTop=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self].origin.y;
+    if (self.axs_cachekeeper_displayLink) return;
+    self.axs_cachekeeper_displayLink=[CADisplayLink displayLinkWithTarget:self selector:@selector(axs_cachekeeper_capture_frame:)];
+    [self.axs_cachekeeper_displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    __weak typeof(self) weak=self;
+    self.axs_cachekeeper_layoutTimer=[NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *tick) {
+        (void)tick;[weak axs_cachekeeper_layout_tick];
+    }];
+}
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     CKSettings *settings=self.axs_cachekeeper_settings;UINavigationBar *bar=self.axs_cachekeeper_bar;
     if (!event || event.type!=UIEventTypeTouches || !self.axs_cachekeeper_armed || self.axs_cachekeeper_probing ||
@@ -118,13 +176,15 @@
         if (!self.axs_cachekeeper_samples) self.axs_cachekeeper_samples=[NSMutableDictionary new];
         NSDictionary *previous=self.axs_cachekeeper_samples[key];
         BOOL passed=CGRectContainsPoint(barRect,point) && original==bar && actual==target && fabs(topAfter-topBefore)<0.5;
-        self.axs_cachekeeper_samples[key]=@{@"passed":@(passed && (!previous || [previous[@"passed"] boolValue])),
+        NSMutableDictionary *sample=[previous mutableCopy] ?: [NSMutableDictionary new];
+        [sample addEntriesFromDictionary:@{@"passed":@(passed && (!previous[@"passed"] || [previous[@"passed"] boolValue])),
             @"queries":@([previous[@"queries"] unsignedIntegerValue]+1),@"barHeight":@(barRect.size.height),
             @"overlap":@(CGRectContainsPoint(barRect,point)),@"originalBareBar":@(original==bar),
             @"productionHitMatchesTarget":@(actual==target),@"fieldTopBefore":@(topBefore),@"fieldTopAfter":@(topAfter),
             @"originalClass":original ? NSStringFromClass(original.class) : @"nil",
-            @"actualClass":actual ? NSStringFromClass(actual.class) : @"nil"};
-        if (!previous) NSLog(@"REGROWTH_TOUCH %@ %@",key,self.axs_cachekeeper_samples[key]);
+            @"actualClass":actual ? NSStringFromClass(actual.class) : @"nil"}];
+        self.axs_cachekeeper_samples[key]=sample;
+        if (!previous[@"passed"]) NSLog(@"REGROWTH_TOUCH %@ %@",key,self.axs_cachekeeper_samples[key]);
         return actual;
     } @finally { self.axs_cachekeeper_probing=NO; }
 }
@@ -151,6 +211,7 @@
     AxsCacheKeeperRegrowingWindow *window=(id)self.view.window;
     window.axs_cachekeeper_settings=settings;window.axs_cachekeeper_bar=self.navigationBar;
     window.axs_cachekeeper_armed=self.axs_cachekeeper_regrow_count;
+    [window axs_cachekeeper_start_stability];
 }
 @end
 @interface CKScanPage : UITableViewController

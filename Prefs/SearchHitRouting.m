@@ -1,5 +1,6 @@
 #import "SearchHitRouting.h"
 #import <objc/runtime.h>
+#include <math.h>
 
 @interface AxsCacheKeeperSearchHitOwnerBox : NSObject
 @property(nonatomic,weak) id<AxsCacheKeeperSearchHitOwner> owner;
@@ -17,6 +18,31 @@ static UIView *axs_cachekeeper_search_bar_hit(id bar,SEL selector,CGPoint point,
     AxsCacheKeeperSearchHitOwnerBox *box=objc_getAssociatedObject(bar,&axs_cachekeeper_search_hit_owner_key);
     id<AxsCacheKeeperSearchHitOwner> owner=box.owner;
     return owner && [owner axs_cachekeeper_search_passes_point:point fromBar:bar] ? nil : hit;
+}
+
+static BOOL axs_cachekeeper_search_bar_region_empty(UINavigationBar *bar,UIView *view,CGRect region,NSUInteger *remaining) {
+    if (!*remaining) return NO;
+    (*remaining)--;
+    if (view.hidden || view.alpha<=0.01) return YES;
+    CGRect rect=[view convertRect:view.bounds toView:bar];
+    if (!isfinite(rect.origin.x) || !isfinite(rect.origin.y) || !isfinite(rect.size.width) || !isfinite(rect.size.height)) return NO;
+    CGRect overlap=CGRectIntersection(region,rect);
+    if (!CGRectIsEmpty(overlap) && !CGRectIsNull(overlap)) {
+        // Controls retain their space while UIKit temporarily suppresses interaction.
+        if (view!=bar && ([view isKindOfClass:UIControl.class] || view.gestureRecognizers.count)) return NO;
+        if ([view isKindOfClass:UILabel.class] && (((UILabel *)view).text.length || ((UILabel *)view).attributedText.length)) return NO;
+        if ([view isKindOfClass:UIImageView.class] && (((UIImageView *)view).image || ((UIImageView *)view).highlightedImage)) return NO;
+        CGPoint center=CGPointMake(CGRectGetMidX(overlap),CGRectGetMidY(overlap));
+        UIView *hit=axs_cachekeeper_search_original_hit(bar,@selector(hitTest:withEvent:),center,nil);
+        if (hit && hit!=bar) return NO;
+    }
+    if (view.clipsToBounds) {
+        if (CGRectIsEmpty(overlap) || CGRectIsNull(overlap)) return YES;
+        region=overlap;
+    }
+    for (UIView *child in view.subviews)
+        if (!axs_cachekeeper_search_bar_region_empty(bar,child,region,remaining)) return NO;
+    return YES;
 }
 
 @implementation AxsCacheKeeperSearchHitRouting
@@ -44,5 +70,15 @@ static UIView *axs_cachekeeper_search_bar_hit(id bar,SEL selector,CGPoint point,
     AxsCacheKeeperSearchHitOwnerBox *box=objc_getAssociatedObject(bar,&axs_cachekeeper_search_hit_owner_key);
     if (box.owner==owner) objc_setAssociatedObject(bar,&axs_cachekeeper_search_hit_owner_key,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     // Leave the chained original IMP installed; another tweak may have installed after us.
+}
++ (BOOL)axs_cachekeeper_bar:(UINavigationBar *)bar owner:(id<AxsCacheKeeperSearchHitOwner>)owner has_empty_rect:(CGRect)rect {
+    if (!NSThread.isMainThread || !bar || !owner || !axs_cachekeeper_search_original_hit) return NO;
+    AxsCacheKeeperSearchHitOwnerBox *box=objc_getAssociatedObject(bar,&axs_cachekeeper_search_hit_owner_key);
+    if (box.owner!=owner || class_getMethodImplementation(bar.class,@selector(hitTest:withEvent:))!=(IMP)axs_cachekeeper_search_bar_hit) return NO;
+    if (!isfinite(rect.origin.x) || !isfinite(rect.origin.y) || !isfinite(rect.size.width) || !isfinite(rect.size.height) || CGRectIsEmpty(rect)) return NO;
+    CGRect overlap=CGRectIntersection(rect,bar.bounds);
+    if (CGRectIsEmpty(overlap) || CGRectIsNull(overlap)) return YES;
+    NSUInteger remaining=128;
+    return axs_cachekeeper_search_bar_region_empty(bar,bar,overlap,&remaining);
 }
 @end

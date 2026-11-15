@@ -69,6 +69,12 @@ static NSDictionary *axs_cachekeeper_webkit_read_context(BOOL access) {
         // Never persist NSError descriptions, bundle paths or version strings in runtime receipts.
         NSInteger code=[installationError.domain isEqual:@"dev.local.cachekeeper.installation"] && installationError.code>=1 && installationError.code<=7 ? installationError.code : 0;
         installationCheck=@{@"state":verified ? @"verified" : axs_cachekeeper_webkit_installation ? @"versionUnknown" : @"failed",@"errorCode":@(code)};
+        if (code && !verified && !axs_cachekeeper_webkit_installation) {
+            NSDictionary *detail=axs_cachekeeper_installation_detail_projection(installationError.userInfo[@"detail"]);
+            if (detail) {
+                NSMutableDictionary *check=[installationCheck mutableCopy];check[@"detail"]=detail;installationCheck=[check copy];
+            } else if (installationError.userInfo[@"detail"]) installationCheck=@{@"state":@"invalid",@"errorCode":@0};
+        }
         process=axs_cachekeeper_webkit_process();
     }
     // Preserve private identity across disable/re-enable so configuration changes do not fabricate a new install.

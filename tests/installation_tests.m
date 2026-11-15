@@ -2,7 +2,10 @@
 #import <dispatch/dispatch.h>
 #import <objc/runtime.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
+#include <string.h>
 #import "../AxsCacheKeeperInstallation.h"
 #import "../AxsCacheKeeperSweep.h"
 #import "../AxsCacheKeeperCleanupJob.h"
@@ -11,6 +14,7 @@
 static void aicheck(BOOL ok, NSString *message) {
     if (!ok) { fprintf(stderr,"FAIL: installation: %s\n",message.UTF8String);exit(1); }
 }
+static void aidetail(NSError *error, NSInteger code, NSString *target, NSString *operation, int number);
 static void aiput(NSString *path, NSData *data) {
     aicheck([NSFileManager.defaultManager createDirectoryAtPath:path.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil],@"创建夹具目录");
     aicheck([data writeToFile:path options:NSDataWritingAtomic error:nil],@"写入夹具");
@@ -25,6 +29,21 @@ static NSString *aibundle(NSString *fixture, NSString *name) {
     aiinfo(root,@{});aiput([root stringByAppendingPathComponent:@"Main"],[@"executable fixture" dataUsingEncoding:NSUTF8StringEncoding]);
     return root;
 }
+
+#if defined(AXS_CACHEKEEPER_INSTALLATION_TESTING)
+// Only the hard-to-reproduce read result is substituted; each call still receives a real Info FD.
+static NSUInteger aiReadFailures,aiReadCalls,aiReadLimit,aiShortReadCalls;
+static int aiReadError;
+ssize_t axs_cachekeeper_installation_test_read(int fd, void *buffer, size_t length) {
+    if (aiReadLimit) { aiShortReadCalls++;return read(fd,buffer,MIN(length,aiReadLimit)); }
+    if (!aiReadFailures) return read(fd,buffer,length);
+    struct stat attributes;
+    aicheck(fstat(fd,&attributes)==0 && S_ISREG(attributes.st_mode) && length>0,@"失败注入必须作用于真实已打开Info文件");
+    aiReadFailures--;aiReadCalls++;
+    errno=aiReadError ? aiReadError : EACCES;
+    return aiReadError ? -1 : 0;
+}
+#endif
 
 // Only the system application registry is substituted; snapshots, file access and cleanup stay real.
 @interface AxsCacheKeeperInstallationTestProxy : NSObject
@@ -168,6 +187,7 @@ static void aicoverage(NSString *root) {
     aiinstalled=(id)@42;NSError *error=nil;coverage=nil;
     aicheck(!axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,&error) && error &&
         [coverage[@"state"] isEqual:@"unavailable"] && [coverage[@"sourceState"] isEqual:@"invalid"] && !coverage[@"observedRegistrations"],@"坏系统枚举不复用旧摘要或填零");
+    aidetail(error,7,@"registry",@"enumerate",0);
     aiinstalled=nil;axs_cachekeeper_installed_applications_with_container_coverage(cache,&coverage,nil);
     aicheck([coverage[@"sourceState"] isEqual:@"unavailable"],@"系统枚举nil与坏类型分别记录");
     exported=[diagnostics reportWithApps:nil environment:@{@"containerCoverage":coverage}];
@@ -202,8 +222,214 @@ static void aicleanup(NSString *fixture, NSString *name, NSDictionary *snapshot,
     if (!allow) aicheck(job.endReason==AxsCacheKeeperCleanupEndReasonCancelled,@"失效门控明确取消作业");
 }
 
+static void aidetail(NSError *error, NSInteger code, NSString *target, NSString *operation, int number) {
+    NSDictionary *expected=@{@"target":target,@"operation":operation,@"errno":@(number)};
+    aicheck([error.domain isEqual:@"dev.local.cachekeeper.installation"] && error.code==code,
+        @"精准详情不改变原有安装错误域及错误码");
+    aicheck([error.userInfo[@"detail"] isEqual:expected],
+        [NSString stringWithFormat:@"安装失败必须保留准确阶段及即时errno: %@/%@",target,operation]);
+    aicheck([axs_cachekeeper_installation_detail_projection(error.userInfo[@"detail"]) isEqual:expected],
+        @"生产安装失败详情通过唯一严格投影");
+}
+
+static void aidetail_projection(void) {
+    NSDictionary *valid=@{@"target":@"info",@"operation":@"stat",@"errno":@(ENOENT)};
+    aicheck([axs_cachekeeper_installation_detail_projection(valid) isEqual:valid],@"固定安装详情可投影");
+    for (id invalid in @[NSNull.null,@42,@[],@{},@{@"target":@"info",@"operation":@"stat"}])
+        aicheck(!axs_cachekeeper_installation_detail_projection(invalid),@"非详情结构不能投影");
+    aicheck(!axs_cachekeeper_installation_detail_projection(nil),@"旧错误无detail仍明确缺失");
+    for (id number in @[@YES,@(-1),@0,@1.5,@((double)INT_MAX+1),@(NAN),@(INFINITY),@"2",NSNull.null]) {
+        NSMutableDictionary *invalid=[valid mutableCopy];invalid[@"errno"]=number;
+        aicheck(!axs_cachekeeper_installation_detail_projection(invalid),@"系统错误必须是正整数errno且不是BOOL");
+    }
+    for (NSDictionary *change in @[
+        @{@"target":@"private/path"},@{@"operation":@"unknown"},@{@"target":@1},@{@"operation":@[]},
+        @{@"path":@"/private/installation"},@{@"description":@"sensitive error"},
+        @{@"target":@"main",@"operation":@"parse",@"errno":@0},
+        @{@"operation":@"type",@"errno":@(EACCES)}]) {
+        NSMutableDictionary *invalid=[valid mutableCopy];[invalid addEntriesFromDictionary:change];
+        aicheck(!axs_cachekeeper_installation_detail_projection(invalid),@"未知字段、角色阶段不匹配及语义旧errno拒绝导出");
+    }
+    for (NSNumber *number in @[@0,@(EIO),@(EINTR)])
+        aicheck(axs_cachekeeper_installation_detail_projection(@{@"target":@"info",@"operation":@"read",@"errno":number})!=nil,
+            @"Info提前EOF与系统读取错误都能表达");
+    NSMutableString *target=[@"info" mutableCopy],*operation=[@"stat" mutableCopy];
+    NSMutableDictionary *source=[@{@"target":target,@"operation":operation,@"errno":@(ENOENT)} mutableCopy];
+    NSDictionary *projected=axs_cachekeeper_installation_detail_projection(source);
+    [target appendString:@"/private"];[operation appendString:@" changed"];source[@"errno"]=@(EACCES);
+    aicheck([projected isEqual:valid],@"投影固定值不受调用方可变容器污染");
+}
+
+#if defined(AXS_CACHEKEEPER_INSTALLATION_TESTING)
+static void aidetail_reads(NSString *fixture) {
+    NSString *root=aibundle(fixture,@"read-failures");NSURL *url=[NSURL fileURLWithPath:root];
+    // Losing errno, treating EOF as errno, or allowing a fifth retry all break these assertions.
+    for (NSArray *test in @[@[@(EIO),@1,@NO],@[@0,@1,@NO],@[@(EINTR),@4,@YES],@[@(EINTR),@5,@NO]]) {
+        aiReadError=[test[0] intValue];aiReadFailures=[test[1] unsignedIntegerValue];aiReadCalls=0;
+        @try {
+            NSError *error=[NSError errorWithDomain:@"old" code:99 userInfo:nil];
+            NSDictionary *snapshot=axs_cachekeeper_installation_snapshot(url,@"test.installation",@"1.0",&error);
+            if ([test[2] boolValue]) aicheck(snapshot && !error,@"四次EINTR后真实读取成功，清空旧错");
+            else { aicheck(!snapshot,@"真实Info读取失败或EOF不能创建安装身份");aidetail(error,4,@"info",@"read",aiReadError); }
+            aicheck(aiReadCalls==[test[1] unsignedIntegerValue],@"读取中断重试次数保持有界");
+        } @finally { aiReadFailures=0;aiReadCalls=0;aiReadError=0; }
+    }
+    aiReadLimit=13;aiShortReadCalls=0;
+    @try {
+        NSError *error=nil;
+        aicheck(axs_cachekeeper_installation_snapshot(url,@"test.installation",@"1.0",&error)!=nil && !error && aiShortReadCalls>1,
+            @"真实Info正数短读继续累积，不能误报EOF或截断解析");
+    } @finally { aiReadLimit=0;aiShortReadCalls=0; }
+}
+#endif
+
+static void aidetail_files(NSString *fixture) {
+    // These fail if file roles are merged, syscall errno is lost, or semantic rejection reads stale errno.
+    NSArray *cases=@[
+        @[@"missing-root",@"root",@"stat",@2,@(ENOENT)],@[@"missing-info",@"info",@"stat",@3,@(ENOENT)],
+        @[@"missing-main",@"main",@"stat",@3,@(ENOENT)],@[@"root-file",@"root",@"type",@2,@0],
+        @[@"root-link",@"root",@"type",@2,@0],@[@"info-link",@"info",@"type",@3,@0],
+        @[@"main-link",@"main",@"type",@3,@0],@[@"info-directory",@"info",@"type",@3,@0],
+        @[@"main-directory",@"main",@"type",@3,@0],@[@"info-fifo",@"info",@"type",@3,@0],
+        @[@"main-fifo",@"main",@"type",@3,@0]];
+    for (NSArray *test in cases) {
+        NSString *name=test[0],*target=test[1],*root=aibundle(fixture,[name stringByAppendingString:@"-detail"]);
+        NSString *file=[target isEqual:@"root"] ? root : [root stringByAppendingPathComponent:[target isEqual:@"info"] ? @"Info.plist" : @"Main"];
+        NSString *old=[file stringByAppendingString:@".old"];
+        aicheck([NSFileManager.defaultManager moveItemAtPath:file toPath:old error:nil],@"移走真实安装夹具");
+        if ([name hasSuffix:@"link"]) aicheck(symlink(old.fileSystemRepresentation,file.fileSystemRepresentation)==0,@"创建真实链接夹具");
+        if ([name hasSuffix:@"directory"]) aicheck(mkdir(file.fileSystemRepresentation,0700)==0,@"创建目录代替安装文件");
+        if ([name hasSuffix:@"fifo"]) aicheck(mkfifo(file.fileSystemRepresentation,0600)==0,@"创建真实管道夹具");
+        if ([name isEqual:@"root-file"]) aiput(file,[@"not a directory" dataUsingEncoding:NSUTF8StringEncoding]);
+        errno=EACCES;NSError *error=nil;
+        aicheck(!axs_cachekeeper_installation_snapshot([NSURL fileURLWithPath:root],@"test.installation",@"1.0",&error),@"无效真实安装文件拒绝建立身份");
+        aidetail(error,[test[3] integerValue],target,test[2],[test[4] intValue]);
+    }
+    NSArray *metadata=@[
+        @[@"identifier-type",@{@"CFBundleIdentifier":@7},@"identifier"],
+        @[@"identifier-mismatch",@{@"CFBundleIdentifier":@"different.app"},@"identifierMismatch"],
+        @[@"executable-type",@{@"CFBundleExecutable":@[]},@"executable"],
+        @[@"executable-parent",@{@"CFBundleExecutable":@"../Main"},@"executable"],
+        @[@"build-type",@{@"CFBundleVersion":@100},@"build"],
+        @[@"version-type",@{@"CFBundleShortVersionString":@1},@"version"]];
+    for (NSArray *test in metadata) {
+        NSString *root=aibundle(fixture,test[0]);aiinfo(root,test[1]);NSError *error=nil;errno=EACCES;
+        aicheck(!axs_cachekeeper_installation_snapshot([NSURL fileURLWithPath:root],@"test.installation",@"1.0",&error),@"坏安装字段拒绝");
+        aidetail(error,5,@"info",test[2],0);
+    }
+    NSArray *contents=@[
+        @[@"empty-info",NSData.data,@"size",@4],
+        @[@"large-info",[NSMutableData dataWithLength:1024*1024+1],@"size",@4],
+        @[@"malformed-info",[@"<?xml version=\"1.0\"?><plist><dict>" dataUsingEncoding:NSUTF8StringEncoding],@"parse",@5],
+        @[@"array-info",[NSPropertyListSerialization dataWithPropertyList:@[@1] format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil],@"metadataType",@5]];
+    for (NSArray *test in contents) {
+        NSString *root=aibundle(fixture,test[0]);aiput([root stringByAppendingPathComponent:@"Info.plist"],test[1]);NSError *error=nil;errno=EACCES;
+        aicheck(!axs_cachekeeper_installation_snapshot([NSURL fileURLWithPath:root],@"test.installation",@"1.0",&error),@"坏Info内容有界拒绝");
+        aidetail(error,[test[3] integerValue],@"info",test[2],0);
+    }
+    NSString *root=aibundle(fixture,@"snapshot-detail");NSURL *url=[NSURL fileURLWithPath:root];
+    NSError *error=[NSError errorWithDomain:@"old" code:99 userInfo:nil];
+    NSDictionary *snapshot=axs_cachekeeper_installation_snapshot(url,@"test.installation",@"1.0",&error);
+    aicheck(snapshot && !error,@"建立有效快照清空旧错");
+    error=[NSError errorWithDomain:@"old" code:99 userInfo:nil];
+    aicheck(axs_cachekeeper_validate_installation_snapshot(snapshot,url,@"1.0",&error) && !error,@"成功复核清空旧错");
+    errno=EACCES;aicheck(!axs_cachekeeper_installation_snapshot(url,@"test.installation",@"2.0",&error),@"真实系统与Info版本差拒绝");
+    aidetail(error,6,@"info",@"versionMismatch",0);
+    errno=EACCES;aicheck(!axs_cachekeeper_validate_installation_snapshot(snapshot,url,@"2.0",&error),@"快照系统版本变化拒绝");
+    aidetail(error,6,@"snapshot",@"version",0);
+    errno=EACCES;aicheck(!axs_cachekeeper_validate_installation_snapshot(snapshot,[NSURL fileURLWithPath:[root stringByAppendingString:@".moved"]],@"1.0",&error),@"快照位置变化拒绝");
+    aidetail(error,6,@"snapshot",@"path",0);
+    errno=EACCES;aicheck(!axs_cachekeeper_installation_snapshot(nil,@"test.installation",@"1.0",&error),@"缺系统URL拒绝");
+    aidetail(error,1,@"input",@"url",0);
+    errno=EACCES;aicheck(!axs_cachekeeper_installation_snapshot(url,@"bad/id",@"1.0",&error),@"坏系统标识拒绝");
+    aidetail(error,1,@"input",@"identifier",0);
+    errno=EACCES;aicheck(!axs_cachekeeper_installation_snapshot(url,@"test.installation",(id)@1,&error),@"坏系统版本类型拒绝");
+    aidetail(error,1,@"input",@"version",0);
+    errno=EACCES;aicheck(!axs_cachekeeper_validate_installation_snapshot(nil,url,@"1.0",&error),@"缺快照拒绝");
+    aidetail(error,1,@"snapshot",@"shape",0);
+    errno=EACCES;aicheck(!axs_cachekeeper_validate_installation_snapshot(@{},url,@"1.0",&error),@"快照缺可执行名拒绝");
+    aidetail(error,1,@"snapshot",@"executable",0);
+    errno=EACCES;aicheck(!axs_cachekeeper_validate_installation_snapshot(snapshot,url,(id)@1,&error),@"复核系统版本坏类型拒绝");
+    aidetail(error,1,@"input",@"version",0);
+    NSString *bounded=aibundle(fixture,@"exact-size-limit");
+    NSMutableData *xml=[[NSPropertyListSerialization dataWithPropertyList:@{@"CFBundleIdentifier":@"test.installation",@"CFBundleVersion":@"100",
+        @"CFBundleShortVersionString":@"1.0",@"CFBundleExecutable":@"Main"} format:NSPropertyListXMLFormat_v1_0 options:0 error:nil] mutableCopy];
+    NSUInteger length=xml.length;[xml setLength:1024*1024];memset((unsigned char *)xml.mutableBytes+length,' ',xml.length-length);
+    aiput([bounded stringByAppendingPathComponent:@"Info.plist"],xml);
+    aicheck(axs_cachekeeper_installation_snapshot([NSURL fileURLWithPath:bounded],@"test.installation",@"1.0",&error)!=nil && !error,
+        @"真实有效Info在1MiB边界内仍可读取，未错误收紧大小限制");
+    for (NSString *target in @[@"root",@"info",@"main"]) {
+        NSString *changed=aibundle(fixture,[target stringByAppendingString:@"-identity-detail"]);NSURL *changedURL=[NSURL fileURLWithPath:changed];
+        NSDictionary *bound=axs_cachekeeper_installation_snapshot(changedURL,@"test.installation",@"1.0",nil);
+        aicheck(bound!=nil,@"身份变化前建立真实快照");
+        if ([target isEqual:@"root"]) {
+            struct stat attributes;aicheck(lstat(changed.fileSystemRepresentation,&attributes)==0,@"读取目录模式夹具");
+            aicheck(chmod(changed.fileSystemRepresentation,(attributes.st_mode & 07777)^S_IXGRP)==0,@"更改安装目录元数据");
+        }
+        else {
+            NSString *path=[changed stringByAppendingPathComponent:[target isEqual:@"info"] ? @"Info.plist" : @"Main"];
+            aicheck([[@"different file content and length" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:path options:0 error:nil],@"原地改写被绑定的真实文件");
+        }
+        errno=EACCES;aicheck(!axs_cachekeeper_validate_installation_snapshot(bound,changedURL,@"1.0",&error),@"任何绑定文件身份变化均撤销旧快照");
+        aidetail(error,6,target,@"snapshotIdentity",0);
+    }
+}
+
+static void ai_search_only_root(NSString *fixture) {
+    NSString *root=aibundle(fixture,@"search-only-root");NSURL *url=[NSURL fileURLWithPath:root];
+    struct stat original,observed;
+    aicheck(lstat(root.fileSystemRepresentation,&original)==0,@"记录安装根夹具原权限");
+    NSError *snapshotError=nil,*validateError=nil;NSDictionary *snapshot=nil;
+    BOOL verified=NO,unchanged=NO;int legacy=-1,legacyError=0,restored=-1;
+    aicheck(chmod(root.fileSystemRepresentation,0111)==0,@"安装根只授予遍历权限");
+    @try {
+        legacy=open(root.fileSystemRepresentation,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);legacyError=errno;
+        snapshot=axs_cachekeeper_installation_snapshot(url,@"test.installation",@"1.0",&snapshotError);
+        verified=snapshot && axs_cachekeeper_validate_installation_snapshot(snapshot,url,@"1.0",&validateError);
+        unchanged=lstat(root.fileSystemRepresentation,&observed)==0 && (observed.st_mode&07777)==0111;
+    } @finally {
+        if (legacy>=0) close(legacy);
+        restored=chmod(root.fileSystemRepresentation,original.st_mode&07777);
+    }
+    aicheck(restored==0,@"恢复仅遍历安装根夹具权限");
+    aicheck(legacy<0 && legacyError==EACCES,@"真实非root负对照：旧安装根O_RDONLY错误要求枚举权限");
+    aicheck(snapshot && !snapshotError && [snapshot[@"installationState"] isEqual:@"verified"] &&
+        [snapshot[@"build"] isEqual:@"100"] && snapshot[@"_info"] && snapshot[@"_main"] &&
+        verified && !validateError && unchanged,@"0111安装根可读取Info和核验主程序，快照与复核均成功且不改权限");
+
+    for (NSString *target in @[@"root",@"info",@"main"]) {
+        NSString *deniedRoot=aibundle(fixture,[target stringByAppendingString:@"-permission-denied"]);
+        NSString *file=[target isEqual:@"root"] ? deniedRoot : [deniedRoot stringByAppendingPathComponent:[target isEqual:@"info"] ? @"Info.plist" : @"Main"];
+        struct stat rootMode,fileMode,afterRoot,afterFile;
+        aicheck(lstat(deniedRoot.fileSystemRepresentation,&rootMode)==0 && lstat(file.fileSystemRepresentation,&fileMode)==0,
+            @"记录权限负例原权限");
+        BOOL isRoot=[target isEqual:@"root"];int childRestricted=0,rootRestored=-1,childRestored=0;
+        mode_t restrictedRoot=isRoot ? 0000 : 0111;
+        NSError *error=nil;NSDictionary *denied=nil;BOOL modesUnchanged=NO;
+        aicheck(chmod(deniedRoot.fileSystemRepresentation,restrictedRoot)==0,@"限制安装根测试权限");
+        @try {
+            if (!isRoot) childRestricted=chmod(file.fileSystemRepresentation,0000);
+            if (!childRestricted) denied=axs_cachekeeper_installation_snapshot([NSURL fileURLWithPath:deniedRoot],@"test.installation",@"1.0",&error);
+            modesUnchanged=lstat(deniedRoot.fileSystemRepresentation,&afterRoot)==0 && (afterRoot.st_mode&07777)==restrictedRoot &&
+                (isRoot || (lstat(file.fileSystemRepresentation,&afterFile)==0 && (afterFile.st_mode&07777)==0000));
+        } @finally {
+            if (!isRoot) childRestored=chmod(file.fileSystemRepresentation,fileMode.st_mode&07777);
+            rootRestored=chmod(deniedRoot.fileSystemRepresentation,rootMode.st_mode&07777);
+        }
+        aicheck(childRestricted==0 && childRestored==0 && rootRestored==0,@"权限负例限制成功并恢复全部夹具权限");
+        aicheck(!denied && modesUnchanged,@"O_SEARCH不放行0000根或不可读Info/Main，拒绝时不修改权限");
+        aidetail(error,isRoot ? 2 : 3,target,@"open",EACCES);
+    }
+}
+
 void axs_cachekeeper_run_installation_tests(NSString *fixture) {
     dispatch_sync(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{ @autoreleasepool {
+        aidetail_projection();
+        ai_search_only_root([fixture stringByAppendingPathComponent:@"search-permissions"]);
+        aidetail_files([fixture stringByAppendingPathComponent:@"failure-details"]);
+#if defined(AXS_CACHEKEEPER_INSTALLATION_TESTING)
+        aidetail_reads([fixture stringByAppendingPathComponent:@"failure-details"]);
+#endif
         NSFileManager *fm=NSFileManager.defaultManager;
         NSArray *cases=@[@"unchanged",@"build",@"info-replace",@"info-inplace",@"executable-replace",@"executable-inplace",@"bundle-replace",@"bundle-link",@"url-change",@"missing-info",@"missing-executable",@"info-link",@"executable-link",@"info-fifo",@"executable-fifo"];
         for (NSString *name in cases) {

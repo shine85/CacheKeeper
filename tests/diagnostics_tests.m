@@ -139,9 +139,52 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     NSDictionary *app=report[@"apps"][0];
     NSDictionary *inspection=app[@"inspection"][@"data"][@"reports"][0];
     dxcheck([inspection[@"bytes"] intValue]==100 && ![inspection[@"coverageComplete"] boolValue] && [inspection[@"twinDisplayTruncated"] boolValue],@"保留字节和覆盖/截断状态");
+    dxcheck(!inspection[@"inspectionReadFailure"],@"旧深检回执无结构化详情时不从自由文本猜测");
+    NSDictionary *readFailure=@{@"stage":@"openRoot",@"errorDomain":@"posix",@"errorCode":@13};
+    dxwrite(folder,@"Status/test.active.inspection.plist",@{@"reports":@{@"Library/Caches":@{@"failures":@1,@"coverageComplete":@NO,
+        @"error":@"读取 private-inspection-canary",@"inspectionReadFailure":readFailure}}});
+    NSDictionary *failureExport=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"inspection"][@"data"][@"reports"][0];
+    dxcheck([failureExport[@"inspectionReadFailure"] isEqual:readFailure] && [failureExport[@"errorCategories"] containsObject:@"读取"] &&
+        [failureExport[@"failures"] isEqual:@1] && [failureExport[@"coverageComplete"] isEqual:@NO],
+        @"固定openRoot详情贯通真实报告导出并保持旧错误类别和覆盖状态");
+    NSMutableArray *badReadFailures=[NSMutableArray new];
+    for (id code in @[@YES,@0,@(-1),@1.5,@(NAN),@(INFINITY),@"13",@[]]) {
+        NSMutableDictionary *bad=[readFailure mutableCopy];bad[@"errorCode"]=code;[badReadFailures addObject:bad];
+    }
+    for (NSDictionary *change in @[@{@"stage":@"private-inspection-canary"},@{@"errorDomain":@"private-inspection-canary"},
+        @{@"path":@"private-inspection-canary"},@{@"state":@"notRecorded"},@{@"stage":@42}]) {
+        NSMutableDictionary *bad=[readFailure mutableCopy];[bad addEntriesFromDictionary:change];[badReadFailures addObject:bad];
+    }
+    [badReadFailures addObjectsFromArray:@[@42,@"private-inspection-canary",@[],@{},@{@"state":@"invalid"}]];
+    for (id bad in badReadFailures) {
+        dxwrite(folder,@"Status/test.active.inspection.plist",@{@"reports":@{@"Library/Caches":@{@"inspectionReadFailure":bad}}});
+        NSDictionary *badFailureExport=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"inspection"][@"data"][@"reports"][0];
+        NSData *badFailureJSON=[NSJSONSerialization dataWithJSONObject:badFailureExport options:0 error:nil];
+        dxcheck([badFailureExport[@"inspectionReadFailure"] isEqual:@{@"state":@"invalid"}] && badFailureJSON &&
+            ![[[NSString alloc] initWithData:badFailureJSON encoding:NSUTF8StringEncoding] containsString:@"private-inspection-canary"],
+            @"深检失败详情拒绝坏类型、BOOL、无效数值、未知阶段和字段，路径原文不泄漏");
+    }
+    dxwrite(folder,@"Status/test.active.inspection.plist",@{@"reports":@{@"Library/Caches":@{@"failures":@1,@"inspectionReadFailure":@{@"state":@"notRecorded"}}}});
+    NSDictionary *unrecordedFailure=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"inspection"][@"data"][@"reports"][0];
+    dxcheck([unrecordedFailure[@"inspectionReadFailure"] isEqual:@{@"state":@"notRecorded"}],@"未覆盖的读取阶段明确notRecorded，不冒充精确POSIX诊断");
     NSString *redacted=inspection[@"largest"][0][@"path"];
     dxcheck([redacted hasSuffix:@".pdf"] && [inspection[@"linkTwins"][0][@"source"] isEqual:redacted],@"保留扩展名及同报告路径关联");
     dxcheck([app[@"cleanup"][@"state"] isEqual:@"missing"],@"缺回执不能伪造零删除");
+    // Preserve real cleanup phases while keeping arbitrary status text out of exports.
+    for (NSString *phase in @[@"waiting",@"cleaning",@"complete",@"error"]) {
+        dxwrite(folder,@"Status/test.active.auto.plist",@{@"phase":phase,@"lastRemoved":@0,@"lastBytes":@0,@"coverageComplete":@NO});
+        NSDictionary *phaseExport=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"cleanup"][@"data"];
+        dxcheck([phaseExport[@"phase"] isEqual:phase] && [phaseExport[@"lastRemoved"] isEqual:@0] &&
+            [phaseExport[@"lastBytes"] isEqual:@0] && [phaseExport[@"coverageComplete"] isEqual:@NO],
+            @"生产清理阶段原样导出，不把 cleaning 变 unknown 或改写历史轮次和覆盖");
+    }
+    dxwrite(folder,@"Status/test.active.auto.plist",@{@"phase":@"private-phase-account-123456789"});
+    NSDictionary *unknownPhase=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"cleanup"][@"data"];
+    dxcheck([unknownPhase[@"phase"] isEqual:@"unknown"],@"清理阶段仍为封闭集合，任意文本不能进入导出");
+    dxwrite(folder,@"Status/test.active.auto.plist",@{@"phase":@42});
+    NSDictionary *invalidPhase=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"cleanup"][@"data"];
+    dxcheck([invalidPhase[@"invalidRecord"] boolValue] && [invalidPhase[@"invalidFields"] containsObject:@"phase"] &&
+        !invalidPhase[@"phase"],@"清理阶段坏类型明确标记，不伪造有效阶段");
     dxwrite(folder,@"Status/test.active.auto.plist",@{@"directories":@{@"Library/alog":@{@"appRuleID":@"douyin-alog",@"appRuleWaitingForExit":@YES,@"appRuleSummary":@"private-summary",@"removed":@0}}});
     NSDictionary *ruleExport=[session reportWithApps:@[] environment:@{}][@"apps"][0][@"cleanup"][@"data"][@"directories"][0];
     dxcheck([ruleExport[@"appRuleID"] isEqual:@"douyin-alog"] && [ruleExport[@"appRuleWaitingForExit"] boolValue] && !ruleExport[@"appRuleSummary"],@"导出保留固定规则ID和等待状态，不导出任意规则说明原文");
@@ -220,6 +263,26 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
         [webKitExport[@"data"][@"updated"] isEqual:@100] && [webKitExport[@"data"][@"bytesState"] isEqual:@"notMeasured"] &&
         !webKitExport[@"data"][@"bytes"],@"网页原生回调与原始时间完整导出且不虚构释放字节");
     dxcheck([NSJSONSerialization dataWithJSONObject:webKitReport options:0 error:nil]!=nil,@"网页回执导出将日期转换为JSON数值");
+    NSMutableDictionary *imageCache=[@{@"schemaVersion":@1,@"sdk":@"SDWebImage",@"state":@"apiCompleted",@"reason":@"none",
+        @"observed":@2,@"eligible":@1,@"restricted":@1,@"writesBlocked":@4,@"queued":@2,@"submitted":@1,
+        @"apiCompleted":@1,@"skipped":@1,@"pending":@0,@"updated":oldDate,@"bytesState":@"notMeasured"} mutableCopy];
+    dxwrite(folder,@"Status/test.active.imagecache.plist",imageCache);
+    NSDictionary *imageExport=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"imageDiskCache"];
+    dxcheck([imageExport[@"state"] isEqual:@"available"] && [imageExport[@"data"][@"updated"] isEqual:@100] &&
+        [imageExport[@"data"][@"writesBlocked"] isEqual:@4] && [imageExport[@"data"][@"apiCompleted"] isEqual:@1] &&
+        [imageExport[@"data"][@"skipped"] isEqual:@1] && !imageExport[@"data"][@"bytes"] &&
+        [NSJSONSerialization dataWithJSONObject:imageExport options:0 error:nil]!=nil,
+        @"图片缓存导出区分写入拦截、API完成与执行前取消，不虚构删除文件数和释放字节");
+    for (NSDictionary *change in @[@{@"url":@"private-image-canary"},@{@"pending":@1},@{@"writesBlocked":@YES},@{@"eligible":@3}]) {
+        NSMutableDictionary *invalidImage=[imageCache mutableCopy];[invalidImage addEntriesFromDictionary:change];
+        dxwrite(folder,@"Status/test.active.imagecache.plist",invalidImage);
+        NSDictionary *report=[session reportWithApps:@[] environment:@{}];
+        NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:nil];
+        dxcheck([dxapp(report,@"test.active")[@"imageDiskCache"][@"state"] isEqual:@"invalid"] &&
+            ![[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] containsString:@"private-image-canary"],
+            @"图片回执拒绝私有内容、计数不一致和坏类型");
+    }
+    dxwrite(folder,@"Status/test.active.imagecache.plist",imageCache);
     NSMutableDictionary *installationFailure=[webKit mutableCopy];
     installationFailure[@"state"]=@"blocked";installationFailure[@"reason"]=@"installationUnverified";
     installationFailure[@"submitted"]=@0;installationFailure[@"completed"]=@0;
@@ -227,6 +290,23 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     dxwrite(folder,@"Status/test.active.webkit.plist",installationFailure);
     NSDictionary *installationExport=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"webKitDiskCache"];
     dxcheck([installationExport[@"data"][@"installationCheck"] isEqual:installationFailure[@"installationCheck"]],@"安装预检失败代码完整进入真实诊断导出");
+    installationFailure[@"installationCheck"]=@{@"state":@"failed",@"errorCode":@3,
+        @"detail":@{@"target":@"main",@"operation":@"stat",@"errno":@2}};
+    dxwrite(folder,@"Status/test.active.webkit.plist",installationFailure);
+    installationExport=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"webKitDiskCache"];
+    dxcheck([installationExport[@"data"][@"installationCheck"] isEqual:installationFailure[@"installationCheck"]] &&
+        [NSJSONSerialization dataWithJSONObject:installationExport options:0 error:nil]!=nil,@"具体安装阶段与 errno 完整导出为 JSON，旧二字段回执仍兼容");
+    for (NSDictionary *detail in @[@{@"target":@"main",@"operation":@"stat",@"errno":@2,@"path":@"private-install-canary"},
+        @{@"target":@"main",@"operation":@"private-install-canary",@"errno":@2},
+        @{@"target":@"main",@"operation":@"openIdentity",@"errno":@2}]) {
+        installationFailure[@"installationCheck"]=@{@"state":@"failed",@"errorCode":@3,@"detail":detail};
+        dxwrite(folder,@"Status/test.active.webkit.plist",installationFailure);
+        NSDictionary *report=[session reportWithApps:@[] environment:@{}];
+        NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:nil];
+        dxcheck([dxapp(report,@"test.active")[@"webKitDiskCache"][@"state"] isEqual:@"invalid"] &&
+            ![[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] containsString:@"private-install-canary"],
+            @"安装错误拒绝私有路径、任意阶段和残留 errno，不能静默当成有效旧回执");
+    }
     dxwrite(folder,@"Status/test.active.webkit.plist",webKit);
     webKit[@"submitted"]=@2;
     dxwrite(folder,@"Status/test.active.webkit.plist",webKit);

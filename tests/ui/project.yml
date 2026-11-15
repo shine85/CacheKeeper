@@ -10,6 +10,10 @@ settings:
     CLANG_ENABLE_OBJC_ARC: YES
     GENERATE_INFOPLIST_FILE: YES
     TARGETED_DEVICE_FAMILY: "1,2"
+packages:
+  SDWebImage:
+    url: https://github.com/SDWebImage/SDWebImage.git
+    revision: 2de3a496eaf6df9a1312862adcfd54acd73c39c0
 targets:
   InputHarness:
     type: application
@@ -33,6 +37,8 @@ targets:
       - path: ../../AxsCacheKeeperDiagnosticChannel.m
       - path: ../../AxsCacheKeeperPDFSession.m
       - path: ../../AxsCacheKeeperPDFInspection.m
+    dependencies:
+      - sdk: QuartzCore.framework
     settings:
       base:
         HEADER_SEARCH_PATHS: "$(SRCROOT)/../../tests/ui/include $(SRCROOT)/../../tests/include"
@@ -76,6 +82,21 @@ targets:
     settings:
       base:
         HEADER_SEARCH_PATHS: "$(SRCROOT)/../../tests/ui/include $(SRCROOT)/../../tests/include"
+  ImageCacheIntegrationTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ../../tests/ui/ImageCacheIntegrationTests.m
+      - path: ../../AxsCacheKeeperImageCache.m
+      - path: ../../AxsCacheKeeperCleanupRules.m
+    dependencies:
+      - target: InputHarness
+      - package: SDWebImage
+        product: SDWebImage
+    settings:
+      base:
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/../../tests/ui/include $(SRCROOT)/../../tests/include"
+        GCC_PREPROCESSOR_DEFINITIONS: "$(inherited) AXS_CACHEKEEPER_IMAGE_TESTING=1"
 schemes:
   InputHarness:
     build:
@@ -85,4 +106,5 @@ schemes:
       targets:
         - SearchProbeTests
         - WebKitIntegrationTests
+        - ImageCacheIntegrationTests
         - InputUITests

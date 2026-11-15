@@ -10,6 +10,7 @@
 #import "../AxsCacheKeeperInspection.h"
 #import "../AxsCacheKeeperProbe.h"
 #import "../AxsCacheKeeperWebKitStatus.h"
+#import "../AxsCacheKeeperImageCacheStatus.h"
 #include <dlfcn.h>
 
 @interface CKScanPage : UITableViewController
@@ -253,7 +254,7 @@
 }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)table { return 4; }
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
-    if (section==0) return 6;
+    if (section==0) return 7;
     if (section==1) return MAX((NSUInteger)1,self.cacheRows.count);
     if (section==2) return self.unknownRows.count ? 1+(self.showUnknownData ? self.unknownRows.count : 0) : 0;
     return self.otherRows.count ? 1+(self.showOtherData ? self.otherRows.count : 0) : 0;
@@ -267,7 +268,7 @@
     return self.otherRows.count ? @"混合用途与共享数据" : nil;
 }
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
-    if (section==0) return @"一键开启 = 自动模式 + 网络磁盘缓存限制 + 新增缓存自动发现。网页缓存回收需单独开启。可能增加流量和重复加载，各选项可随时关闭。";
+    if (section==0) return @"一键开启 = 自动模式 + 网络磁盘缓存限制 + 新增缓存自动发现。已适配图片缓存随总开关、模式和目录选择执行；网页缓存回收需单独开启。限制磁盘缓存可能增加流量和重复加载。";
     if (section==2) return self.unknownRows.count ? @"点击目录进入只读深度检测：类型组成、文件时间与最大文件。未知不等于必需，也不等于垃圾。未知内容暂不自动清理，待专属识别规则按占用适配；已定级为日志的目录仅清理日志特征文件。每目录开关默认开启（参与内容审查）；关闭则保留该目录，不自动清理。" : nil;
     if (section==3) return self.otherRows.count ? @"这些目录可能同时包含资源、业务状态或缓存，尚未逐项确认；不自动清理。已知敏感持久化目录已隐藏。" : nil;
     NSString *message=@"检测目录只更新大小快照，不删除 APP 文件；等待期间显示值不会自行重算。首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后处理。标准缓存目录（Library/Caches、tmp）内的文件按平台缓存用途约定处理，不按类型保留（数据库、无后缀文件也清理；已确认的草稿、唯一副本、必要状态例外）；未知目录暂不自动清理，待专属识别规则按占用适配。已选目录内新增内容自动覆盖；新增标准缓存根按自动发现选项纳入，手动关闭的目录保持排除。点击目录查看实际删除和失败记录。";
@@ -371,6 +372,19 @@
         else detail=[detail stringByAppendingString:@"\n尚无执行记录；系统完成回调不代表已测得释放空间。"];
         cell.detailTextLabel.text=detail;cell.accessoryView=toggle;
         cell.selectionStyle=UITableViewCellSelectionStyleNone;return cell;
+    }
+    if (path.section==0 && path.row==6) {
+        UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+        cell.textLabel.text=@"已适配图片缓存";cell.detailTextLabel.numberOfLines=0;
+        id state=[self axs_cachekeeper_display:@"appEnabled.plist"][self.bundle];
+        NSString *detail=@"当前支持已核实的 SDWebImage 标准缓存；沿用此 APP 的目录选择和保留范围。切后台回收磁盘图片，保留内存缓存。";
+        if (!axs_cachekeeper_app_enabled(state)) detail=[detail stringByAppendingString:@"\n此 APP 总开关关闭，清理和限制均不执行。"];
+        else detail=[detail stringByAppendingString:axs_cachekeeper_wants_restriction(state) ?
+            @"\n当前模式同时限制已适配缓存写盘；关闭总开关或选择只清理模式可恢复写盘。" : @"\n只清理模式允许正常写盘，仅回收已有缓存。"];
+        NSDictionary *record=[self axs_cachekeeper_display:[NSString stringWithFormat:@"Status/%@.imagecache.plist",self.bundle]];
+        if (record.count) detail=[detail stringByAppendingFormat:@"\n上次记录（%@）：%@",axs_cachekeeper_time_string(record[@"updated"]),axs_cachekeeper_image_cache_message(record)];
+        else detail=[detail stringByAppendingString:@"\n尚无运行记录；需重新打开此 APP 并加载图片后观察，不代表已限制或清空。"];
+        cell.detailTextLabel.text=detail;cell.selectionStyle=UITableViewCellSelectionStyleNone;return cell;
     }
     if ((path.section==2 || path.section==3) && path.row==0) {
         UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];

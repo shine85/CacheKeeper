@@ -56,6 +56,16 @@
     [super viewWillDisappear:animated];
 }
 @end
+@interface AxsCacheKeeperLayoutCountedSettings : AxsCacheKeeperVisualSettings
+@property(nonatomic) NSUInteger axs_cachekeeper_layoutCallbacks;
+@property(nonatomic) NSUInteger axs_cachekeeper_safeCallbacks;
+@property(nonatomic) NSUInteger axs_cachekeeper_batchCalls;
+@end
+@implementation AxsCacheKeeperLayoutCountedSettings
+- (void)viewDidLayoutSubviews { [super viewDidLayoutSubviews];self.axs_cachekeeper_layoutCallbacks++; }
+- (void)viewSafeAreaInsetsDidChange { [super viewSafeAreaInsetsDidChange];self.axs_cachekeeper_safeCallbacks++; }
+- (void)updateBatch { [super updateBatch];self.axs_cachekeeper_batchCalls++; }
+@end
 // Hold an actual UIKit navigation transition; no top-controller or bar-item properties are replaced.
 @interface AxsCacheKeeperHeldTransition : NSObject <UIViewControllerAnimatedTransitioning,UINavigationControllerDelegate>
 @property(nonatomic,strong) id<UIViewControllerContextTransitioning> axs_cachekeeper_context;
@@ -273,7 +283,11 @@
     // In the same valid fixture, removing only the new claim binding must restore the old failure.
     [AxsCacheKeeperSearchHitRouting axs_cachekeeper_release_bar:bar owner:(id)settings];
     XCTAssertEqual([self.window hitTest:center withEvent:nil],bar,@"Negative control must reproduce the original blank-bar interception");
+    CGRect searchRect=[input convertRect:input.bounds toView:bar];
+    XCTAssertFalse([AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)settings has_empty_rect:searchRect],@"Ownership alone must not authorize layout without the installed route binding");
     [AxsCacheKeeperSearchHitRouting axs_cachekeeper_claim_bar:bar owner:(id)settings];
+    XCTAssertTrue([AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)settings has_empty_rect:searchRect]);
+    XCTAssertFalse([AxsCacheKeeperSearchHitRouting axs_cachekeeper_bar:bar owner:(id)host has_empty_rect:searchRect]);
     UIView *hit=[self.window hitTest:center withEvent:nil];
     XCTAssertTrue(hit==input.axs_cachekeeper_field || [hit isDescendantOfView:input.axs_cachekeeper_field],@"Regrown compact host must not swallow the real field's touches");
     XCTAssertEqualWithAccuracy([input convertRect:input.bounds toView:self.window].origin.y,originalTop,0.5);
@@ -630,11 +644,9 @@
     [settings updateBatch];
     XCTAssertEqual(nav.navigationBar.topItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);XCTAssertFalse(nav.navigationBar.prefersLargeTitles);
 }
-- (void)testUpdateBatchShrinksStaleExpandedHostBar {
-    // 124.1 device: the host bar re-expanded after appearance (mode still Never, frame stale
-    // at ~91pt), so the geometry clearance held ~47pt. A viewDidAppear-only force cannot catch
-    // it; the per-second batch must shrink the bar back.
-    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+- (void)testLayoutAndBatchKeepClaimedBlankRegrowthStableWithoutForcingHostGeometry {
+    // Reintroducing either forced sizeToFit or blank-bar geometry avoidance breaks this test.
+    AxsCacheKeeperLayoutCountedSettings *settings=[AxsCacheKeeperLayoutCountedSettings new];
     AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
     host.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAutomatic;
     UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:host];
@@ -648,18 +660,104 @@
     XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
     XCTAssertLessThanOrEqual(nav.navigationBar.bounds.size.height,44.5);
     CGFloat originalTop=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y;
-    // Force the stale expanded frame while the mode stays Never, exactly as on device.
-    CGRect frame=nav.navigationBar.frame;frame.size.height=91;nav.navigationBar.frame=frame;
-    XCTAssertEqualWithAccuracy(nav.navigationBar.bounds.size.height,91,0.5);
-    XCTAssertEqual(host.navigationItem.largeTitleDisplayMode,UINavigationItemLargeTitleDisplayModeNever);
-    [settings updateBatch];
-    XCTAssertLessThanOrEqual(nav.navigationBar.bounds.size.height,44.5);
-    CGRect rect=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window];
-    XCTAssertGreaterThanOrEqual(rect.origin.y,CGRectGetMaxY([nav.navigationBar convertRect:nav.navigationBar.bounds toView:self.window]));
-    XCTAssertEqualWithAccuracy(rect.origin.y,originalTop,0.5);
+    NSUInteger layouts=settings.axs_cachekeeper_layoutCallbacks,safes=settings.axs_cachekeeper_safeCallbacks;
+    NSUInteger batches=settings.axs_cachekeeper_batchCalls;
+    NSTimer *timer=[NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *tick) {
+        (void)tick;[settings updateBatch];
+    }];
+    @try {
+        for (NSUInteger cycle=0;cycle<3;cycle++) {
+            CGFloat extra=cycle==1 ? 3 : 0;
+            settings.additionalSafeAreaInsets=UIEdgeInsetsMake(extra,0,0,0);
+            [settings.view setNeedsLayout];[settings.view layoutIfNeeded];
+            CGRect frame=nav.navigationBar.frame;frame.size.height=91;nav.navigationBar.frame=frame;
+            CGFloat top=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y;
+            XCTAssertEqualWithAccuracy(top,originalTop+extra,0.5);
+            for (NSNumber *interactive in @[@YES,@NO,@YES]) {
+                nav.navigationBar.userInteractionEnabled=interactive.boolValue;
+                [settings.view setNeedsLayout];[settings.view layoutIfNeeded];
+                [settings updateBatch];
+                XCTAssertEqualWithAccuracy(nav.navigationBar.bounds.size.height,91,0.5,@"Refresh must not force the host's frame");
+                XCTAssertEqualWithAccuracy([input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y,top,0.5,@"Blank regrowth and temporary interaction suppression must not move search");
+            }
+            XCTestExpectation *elapsed=[self expectationWithDescription:@"A real one-second refresh elapsed"];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.05*NSEC_PER_SEC)),dispatch_get_main_queue(),^{[elapsed fulfill];});
+            [self waitForExpectations:@[elapsed] timeout:3];
+            CGRect rect=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window];
+            XCTAssertEqualWithAccuracy(rect.origin.y,top,0.5);
+            UIView *hit=[self.window hitTest:CGPointMake(CGRectGetMidX(rect),CGRectGetMidY(rect)) withEvent:nil];
+            XCTAssertTrue([input axs_cachekeeper_owns_enabled_hit:hit]);
+            frame=nav.navigationBar.frame;frame.size.height=44;nav.navigationBar.frame=frame;
+            [settings.view setNeedsLayout];[settings.view layoutIfNeeded];[settings updateBatch];
+            XCTAssertEqualWithAccuracy([input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y,top,0.5);
+        }
+    } @finally { [timer invalidate]; }
+    XCTAssertGreaterThan(settings.axs_cachekeeper_layoutCallbacks,layouts);
+    XCTAssertGreaterThan(settings.axs_cachekeeper_safeCallbacks,safes);
+    XCTAssertGreaterThanOrEqual(settings.axs_cachekeeper_batchCalls-batches,15u);
     XCTestExpectation *dismissed=[self expectationWithDescription:@"Nested navigation dismissed"];
     [self.owner dismissViewControllerAnimated:NO completion:^{ [dismissed fulfill]; }];
     [self waitForExpectations:@[dismissed] timeout:10];
+}
+- (void)testClaimedBarStillAvoidsRealControlsAndReturnsWhenTheyLeave {
+    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+    UINavigationController *nav=[self axs_cachekeeper_present_host:host];[settings updateBatch];
+    AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+    CGFloat top=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y;
+    UINavigationBar *bar=nav.navigationBar;
+    CGRect frame=bar.frame;frame.size.height=91;bar.frame=frame;
+    CGRect fieldRect=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:bar];
+    // An off-centre control must be found; checking only the field midpoint would miss it.
+    UILabel *title=[UILabel new];title.text=@"Visible title";title.userInteractionEnabled=NO;
+    UIImageView *icon=[[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"star"]];icon.userInteractionEnabled=NO;
+    for (UIView *content in @[[UIControl new],title,icon]) {
+        content.frame=CGRectMake(fieldRect.origin.x+7,fieldRect.origin.y+3,6,6);[bar addSubview:content];
+        for (NSNumber *interactive in @[@YES,@NO,@YES]) {
+            bar.userInteractionEnabled=interactive.boolValue;
+            [settings.view setNeedsLayout];[settings.view layoutIfNeeded];[settings updateBatch];
+            CGFloat moved=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y;
+            XCTAssertGreaterThan(moved,top+40);
+            XCTAssertGreaterThanOrEqual(moved,CGRectGetMaxY([bar convertRect:bar.bounds toView:self.window]));
+        }
+        [content removeFromSuperview];
+        for (NSUInteger pass=0;pass<3;pass++) {
+            [settings.view setNeedsLayout];[settings.view layoutIfNeeded];[settings updateBatch];
+            XCTAssertEqualWithAccuracy([input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y,top,0.5,@"Avoidance must return to the same safe baseline without oscillating");
+        }
+    }
+}
+- (void)testRealHostNavigationLayoutFollowsItsSafeAreaWithoutTickCompetition {
+    AxsCacheKeeperLayoutCountedSettings *settings=[AxsCacheKeeperLayoutCountedSettings new];
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+    UINavigationController *nav=[self axs_cachekeeper_present_host:host];[settings updateBatch];
+    [nav.view layoutIfNeeded];[settings.view layoutIfNeeded];
+    AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+    CGFloat (^safeTop)(void)=^CGFloat {
+        return [settings.view convertPoint:CGPointMake(0,CGRectGetMinY(settings.view.safeAreaLayoutGuide.layoutFrame)) toView:self.window].y;
+    };
+    CGFloat compactSafe=safeTop();
+    CGFloat compactTop=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y;
+    NSUInteger safes=settings.axs_cachekeeper_safeCallbacks;
+    // Let UIKit derive the real bar and safe-area geometry; this fixture never writes a frame.
+    host.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeAlways;
+    nav.navigationBar.prefersLargeTitles=YES;
+    [nav.view setNeedsLayout];[nav.view layoutIfNeeded];[settings.view layoutIfNeeded];[settings updateBatch];
+    CGFloat expandedSafe=safeTop();
+    XCTAssertGreaterThan(expandedSafe,compactSafe+40,@"FIXTURE INVALID: UIKit must actually grow the host safe area");
+    XCTAssertGreaterThan(settings.axs_cachekeeper_safeCallbacks,safes);
+    CGFloat expandedTop=[input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y;
+    XCTAssertGreaterThan(expandedTop,compactTop+40);
+    for (NSUInteger pass=0;pass<3;pass++) {
+        [settings updateBatch];
+        XCTAssertEqualWithAccuracy([input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y,expandedTop,0.5);
+        XCTAssertGreaterThanOrEqual(expandedTop,CGRectGetMaxY([nav.navigationBar convertRect:nav.navigationBar.bounds toView:self.window]));
+    }
+    host.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeNever;
+    nav.navigationBar.prefersLargeTitles=NO;
+    [nav.view setNeedsLayout];[nav.view layoutIfNeeded];[settings.view layoutIfNeeded];[settings updateBatch];
+    XCTAssertEqualWithAccuracy(safeTop(),compactSafe,0.5);
+    XCTAssertEqualWithAccuracy([input.axs_cachekeeper_field convertRect:input.axs_cachekeeper_field.bounds toView:self.window].origin.y,compactTop,0.5);
 }
 - (void)testSearchClearsExternalNavigationBarAndReturnsAfterCollapse {
     CKSettings *settings=[CKSettings new];
@@ -822,6 +920,45 @@
     XCTAssertEqual([(NSArray *)[self.probe axs_cachekeeper_snapshot][@"events"] count],1u);
     [self.input removeFromSuperview];[self.probe axs_cachekeeper_sample];
     XCTAssertEqual([(NSArray *)[self.probe axs_cachekeeper_snapshot][@"events"] count],1u);
+}
+- (void)testCompletedLayoutRecordsInputMovementBeforeTheNextBatchTick {
+    AxsCacheKeeperLayoutCountedSettings *settings=[AxsCacheKeeperLayoutCountedSettings new];
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+    UINavigationController *nav=[self axs_cachekeeper_present_host:host];[settings updateBatch];
+    [nav.view layoutIfNeeded];[settings.view layoutIfNeeded];
+    AxsCacheKeeperSearchDiagnostics *probe=[settings valueForKey:@"axs_cachekeeper_searchDiagnostics"];
+    [probe axs_cachekeeper_clear];[probe axs_cachekeeper_begin];
+    NSUInteger batches=settings.axs_cachekeeper_batchCalls;
+    settings.additionalSafeAreaInsets=UIEdgeInsetsMake(7,0,0,0);
+    [settings.view setNeedsLayout];[settings.view layoutIfNeeded];
+    NSArray *events=[probe axs_cachekeeper_snapshot][@"events"];
+    XCTAssertEqual(settings.axs_cachekeeper_batchCalls,batches);
+    XCTAssertEqualObjects([events lastObject][@"event"],@"sampled",@"A completed layout must be observed without waiting for updateBatch");
+    AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+    CGFloat top=[input convertRect:input.bounds toView:self.window].origin.y;
+    XCTAssertEqualWithAccuracy([[events lastObject][@"input"][@"windowRect"][@"y"] doubleValue],top,0.5);
+    NSUInteger count=events.count;
+    for (NSUInteger pass=0;pass<4;pass++) { [settings.view setNeedsLayout];[settings.view layoutIfNeeded]; }
+    XCTAssertEqual([(NSArray *)[probe axs_cachekeeper_snapshot][@"events"] count],count);
+}
+- (void)testChangingLayoutSamplesDoNotEvictInteractionEvidence {
+    [self.probe axs_cachekeeper_record:AxsCacheKeeperSearchEventRootHit];
+    [self.probe axs_cachekeeper_record:AxsCacheKeeperSearchEventShouldBegin];
+    [self.probe axs_cachekeeper_record:AxsCacheKeeperSearchEventDidBegin];
+    for (NSUInteger pass=0;pass<24;pass++) {
+        CGRect frame=self.input.frame;frame.origin.y+=1;self.input.frame=frame;
+        [self.probe axs_cachekeeper_sample];
+    }
+    NSArray *events=[self.probe axs_cachekeeper_snapshot][@"events"];
+    XCTAssertEqual(events.count,16u);
+    XCTAssertTrue([[events valueForKey:@"event"] containsObject:@"rootHit"]);
+    XCTAssertTrue([[events valueForKey:@"event"] containsObject:@"shouldBegin"]);
+    XCTAssertTrue([[events valueForKey:@"event"] containsObject:@"didBegin"]);
+    [self.probe axs_cachekeeper_clear];[self.probe axs_cachekeeper_begin];
+    for (NSUInteger pass=0;pass<16;pass++) [self.probe axs_cachekeeper_record:AxsCacheKeeperSearchEventDidBegin];
+    [self.probe axs_cachekeeper_sample];
+    XCTAssertFalse([[[self.probe axs_cachekeeper_snapshot][@"events"] valueForKey:@"event"] containsObject:@"sampled"]);
+    XCTAssertTrue([[self.probe axs_cachekeeper_snapshot][@"truncated"] boolValue]);
 }
 - (void)testRootObservationReturnsOriginalHitAndDoesNotSelfRecurse {
     UITextField *field=self.input.axs_cachekeeper_field;

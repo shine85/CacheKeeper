@@ -22,6 +22,14 @@ final class SearchRoutingUITests: XCTestCase {
             XCTAssertEqual(field.frame.minY, top, accuracy: 0.5)
         }
         func verifyTouch() throws {
+            // Wait through complete refresh cycles, while the display link records every rendered frame.
+            let ticks = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                guard let data = app.staticTexts["CacheKeeperRegrowthEvidence"].label.data(using: .utf8),
+                      let samples = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]],
+                      let count = samples[String(calls)]?["layoutTicks"] as? Int else { return false }
+                return count >= 2
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [ticks], timeout: 5), .completed)
             let json = try XCTUnwrap(app.staticTexts["CacheKeeperRegrowthEvidence"].label.data(using: .utf8))
             let samples = try XCTUnwrap(JSONSerialization.jsonObject(with: json) as? [String: Any])
             let sample = try XCTUnwrap(samples[String(calls)] as? [String: Any], "A real touch must exercise the armed overlap")
@@ -32,6 +40,13 @@ final class SearchRoutingUITests: XCTestCase {
             XCTAssertEqual(try XCTUnwrap(sample["barHeight"] as? Double), 91, accuracy: 0.5)
             XCTAssertEqual(try XCTUnwrap(sample["fieldTopBefore"] as? Double), Double(top), accuracy: 0.5)
             XCTAssertEqual(try XCTUnwrap(sample["fieldTopAfter"] as? Double), Double(top), accuracy: 0.5)
+            XCTAssertGreaterThan(try XCTUnwrap(sample["renderSamples"] as? Int), 2)
+            XCTAssertEqual(sample["hostGeometryPreserved"] as? Bool, true, "Refresh may not force the host frame")
+            XCTAssertEqual(try XCTUnwrap(sample["minimumTop"] as? Double), Double(top), accuracy: 0.5)
+            XCTAssertEqual(try XCTUnwrap(sample["maximumTop"] as? Double), Double(top), accuracy: 0.5)
+            XCTAssertGreaterThan(try XCTUnwrap(sample["presentationSamples"] as? Int), 2)
+            XCTAssertEqual(try XCTUnwrap(sample["minimumVisualTop"] as? Double), Double(top), accuracy: 0.5)
+            XCTAssertEqual(try XCTUnwrap(sample["maximumVisualTop"] as? Double), Double(top), accuracy: 0.5)
         }
         for _ in 0..<3 {
             armRegrowth()

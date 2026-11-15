@@ -149,7 +149,17 @@ int main(void) {
         wcheck([identityEngine.receipt[@"installationCheck"] isEqual:check],@"installation failure detail survives the production receipt");
         wcheck([identityEngine.receipt[@"reason"] isEqual:@"installationUnverified"],@"diagnostic details cannot bypass installation verification");
         wcheck([axs_cachekeeper_webkit_message(identityEngine.receipt) containsString:@"安装版本或身份已变化"],@"installation failure has an actionable bounded message");
+        NSDictionary *detail=@{@"target":@"main",@"operation":@"open",@"errno":@13};
+        context[@"installationCheck"]=@{@"state":@"failed",@"errorCode":@3,@"detail":detail};
+        [identityEngine updateContext:context];
+        wcheck([identityEngine.receipt[@"installationCheck"][@"detail"] isEqual:detail] &&
+            [axs_cachekeeper_webkit_message(identityEngine.receipt) containsString:@"主程序 / open，errno=13"],
+            @"bounded installation stage and errno survive production receipt and presentation");
         NSMutableDictionary *invalid=[identityEngine.receipt mutableCopy];
+        invalid[@"installationCheck"]=@{@"state":@"verified",@"errorCode":@0,@"detail":detail};
+        wcheck(!axs_cachekeeper_webkit_projection(invalid),@"verified installation cannot carry failure details");
+        invalid[@"installationCheck"]=@{@"state":@"failed",@"errorCode":@3,@"detail":@{@"target":@"main",@"operation":@"open",@"errno":@YES}};
+        wcheck(!axs_cachekeeper_webkit_projection(invalid),@"boolean errno cannot masquerade as syscall evidence");
         invalid[@"installationCheck"]=@{@"state":@"failed",@"errorCode":@YES};
         wcheck(!axs_cachekeeper_webkit_projection(invalid),@"installation error boolean is not a numeric code");
         invalid[@"installationCheck"]=@{@"state":@"failed",@"errorCode":@6,@"path":@"private-path-must-not-export"};

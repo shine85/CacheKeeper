@@ -60,13 +60,15 @@ static inline NSString *axs_cachekeeper_enumerated_path(NSString *path, NSString
     return nil;
 }
 
-// 输入为规范绝对路径；每一级都不跟随链接，避免权限操作逃出目标目录。
+// 祖先只请求遍历权限，末级返回可枚举 fd；保留系统中间别名与末级 NOFOLLOW 的既有边界。
 static inline int axs_cachekeeper_open_directory(NSString *path) {
     if (![path hasPrefix:@"/"]) { errno = EINVAL; return -1; }
-    int fd = open("/", O_RDONLY | O_DIRECTORY);
-    if (fd < 0) return -1;
     NSMutableArray<NSString *> *parts = [NSMutableArray new];
     for (NSString *part in [path componentsSeparatedByString:@"/"]) if (part.length) [parts addObject:part];
+    // O_RDONLY is zero: combining it with O_SEARCH would still yield a search-only fd.
+    // The declared iPhoneOS 16.5 SDK defines O_SEARCH; never invent its numeric value.
+    int fd = open("/", (parts.count ? O_SEARCH : O_RDONLY | O_DIRECTORY) | O_CLOEXEC);
+    if (fd < 0) return -1;
     NSUInteger index = 0;
     for (NSString *part in parts) {
         if ([part isEqual:@"."] || [part isEqual:@".."]) { close(fd); errno = EINVAL; return -1; }
@@ -74,7 +76,8 @@ static inline int axs_cachekeeper_open_directory(NSString *path) {
         // 只有末级目标目录保持 NOFOLLOW，防目标本身被换成链接。调用方均另有身份核对兜底。
         // 旧实现逐级 NOFOLLOW：中间任一组件是链接就以 ENOTDIR 失败（真机 2026-11-11 删除全灭于此）。
         BOOL last = ++index == parts.count;
-        int next = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | (last ? O_NOFOLLOW : 0));
+        int next = openat(fd, part.fileSystemRepresentation,
+            (last ? O_RDONLY | O_DIRECTORY | O_NOFOLLOW : O_SEARCH) | O_CLOEXEC);
         int error = errno;
         close(fd);
         if (next < 0) { errno = error; return -1; }

@@ -4,7 +4,9 @@
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperSearchDiagnostics.h"
 #import "AxsCacheKeeperScanDiagnostics.h"
+#import "AxsCacheKeeperInspectionStatus.h"
 #import "AxsCacheKeeperWebKitStatus.h"
+#import "AxsCacheKeeperImageCacheStatus.h"
 
 static NSDictionary *AxsCacheKeeperDiagnosticRead(NSString *folder,NSString *name) {
     NSError *error=nil;
@@ -101,6 +103,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
     if (![record isKindOfClass:NSDictionary.class]) return @{@"invalidRecord":@YES};
     NSMutableDictionary *out=[NSMutableDictionary new];
     if (record[@"scanDiagnostics"]) out[@"scanDiagnostics"]=axs_cachekeeper_scan_diagnostics_projection(record[@"scanDiagnostics"]) ?: @{@"state":@"invalid"};
+    if (record[@"inspectionReadFailure"]) out[@"inspectionReadFailure"]=axs_cachekeeper_inspection_read_failure_projection(record[@"inspectionReadFailure"]) ?: @{@"state":@"invalid"};
     NSArray *numbers=@[@"hardLinkRetained",@"hardLinkRetainedBytes",@"appRuleWaitingForExit",@"bytes",@"files",@"count",@"nlink",@"removed",@"failed",@"failures",@"changed",@"recent",@"remaining",@"remainingBytes",@"deferred",@"deferredBytes",@"unresolved",@"unresolvedBytes",@"protected",@"protectedBytes",@"retainedSubtreeCount",@"lastRemoved",@"lastBytes",@"endReason",@"links",@"hardLinks",@"symlinks",@"hidden",@"twinBytes",@"twinFailures",@"twinScanned",@"result",@"errorCode",@"complete",@"coverageComplete",@"measurementComplete",@"cancelled",@"checking",@"skipped",@"manageable",@"twinCoverageComplete",@"twinScanTruncated",@"twinDisplayTruncated",@"linkFilesTruncated",@"enabled",@"autoDiscover",@"urlCache",@"prevent",@"applied",@"total",@"completed",@"remainingCount"];
     NSMutableArray *invalid=[NSMutableArray new];
     for (NSString *key in @[@"appRuleID",@"state",@"phase",@"mode",@"kind",@"purgeClassification",@"type",@"outcome",@"path",@"source",@"twin"])
@@ -116,7 +119,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
     for (NSString *key in @[@"updated",@"started"]) if ([record[key] isKindOfClass:NSDate.class]) out[key]=@([record[key] timeIntervalSince1970]);
     for (NSString *key in @[@"path",@"source",@"twin"]) if (record[key]) out[key]=[self axs_cachekeeper_path:record[key]];
     if (axs_cachekeeper_bundle_id(record[@"bundle"])) out[@"bundle"]=record[@"bundle"];
-    NSSet *values=[NSSet setWithArray:@[@"douyin-alog",@"auto",@"clean",@"prevent",@"waiting",@"running",@"complete",@"error",@"paused",@"cache",@"log",@"data",@"mixed",@"unknown",@"scan",@"inspection",@"pending",@"submitted",@"finished",@"partial",@"stopped",@"notStarted",@"timeout",@"conflict",@"available",@"missing",@"unreadable",@"invalid",@"空文件",@"SQLite 数据库",@"二进制 plist",@"媒体文件头",@"归档或压缩文件",@"JSON 数据",@"文本头特征（用途未定）",@"未知二进制",@"数据或登录态名称特征"]];
+    NSSet *values=[NSSet setWithArray:@[@"douyin-alog",@"auto",@"clean",@"prevent",@"waiting",@"running",@"cleaning",@"complete",@"error",@"paused",@"cache",@"log",@"data",@"mixed",@"unknown",@"scan",@"inspection",@"pending",@"submitted",@"finished",@"partial",@"stopped",@"notStarted",@"timeout",@"conflict",@"available",@"missing",@"unreadable",@"invalid",@"空文件",@"SQLite 数据库",@"二进制 plist",@"媒体文件头",@"归档或压缩文件",@"JSON 数据",@"文本头特征（用途未定）",@"未知二进制",@"数据或登录态名称特征"]];
     for (NSString *key in @[@"appRuleID",@"state",@"phase",@"mode",@"kind",@"purgeClassification",@"type",@"outcome"])
         if ([record[key] isKindOfClass:NSString.class]) out[key]=[values containsObject:record[key]] ? record[key] : @"unknown";
     if ([record[@"hardLinkRetentionReason"] isEqual:@"multipleLinks"]) out[@"hardLinkRetentionReason"]=@"multipleLinks";
@@ -247,6 +250,14 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
                 app[@"webKitDiskCache"]=@{@"state":@"available",@"data":webKit};
             } else app[@"webKitDiskCache"]=@{@"state":@"invalid"};
         } else app[@"webKitDiskCache"]=[redactor axs_cachekeeper_record:webKitRead];
+        NSDictionary *imageRead=AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.imagecache.plist",bundle]);
+        if ([imageRead[@"state"] isEqual:@"available"]) {
+            NSMutableDictionary *imageCache=[axs_cachekeeper_image_cache_projection(imageRead[@"data"]) mutableCopy];
+            if (imageCache) {
+                imageCache[@"updated"]=@([imageCache[@"updated"] timeIntervalSince1970]);
+                app[@"imageDiskCache"]=@{@"state":@"available",@"data":imageCache};
+            } else app[@"imageDiskCache"]=@{@"state":@"invalid"};
+        } else app[@"imageDiskCache"]=[redactor axs_cachekeeper_record:imageRead];
         [exported addObject:app];
         if (progress) progress(exported.count,bundles.count);
     }
