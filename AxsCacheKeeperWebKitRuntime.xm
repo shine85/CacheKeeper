@@ -7,6 +7,7 @@
 #include <roothide.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+#include <string.h>
 
 static AxsCacheKeeperWebKitCache *axs_cachekeeper_webkit_engine;
 static dispatch_queue_t axs_cachekeeper_webkit_io;
@@ -37,7 +38,7 @@ static void axs_cachekeeper_webkit_flush_report(BOOL access) {
 }
 static NSString *axs_cachekeeper_webkit_process(void) {
     int pid=getpid(),mib[4]={CTL_KERN,KERN_PROC,KERN_PROC_PID,pid};
-    struct kinfo_proc info={0};size_t size=sizeof(info);
+    struct kinfo_proc info;memset(&info,0,sizeof(info));size_t size=sizeof(info);
     if (sysctl(mib,4,&info,&size,NULL,0) || size!=sizeof(info) || !info.kp_proc.p_starttime.tv_sec) return @"";
     return [NSString stringWithFormat:@"%d:%lld.%06d",pid,(long long)info.kp_proc.p_starttime.tv_sec,(int)info.kp_proc.p_starttime.tv_usec];
 }
