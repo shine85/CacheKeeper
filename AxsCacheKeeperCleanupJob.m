@@ -9,6 +9,9 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
 @property(nonatomic, readwrite) AxsCacheKeeperCleanupEndReason endReason;
 @property(nonatomic, readwrite) NSTimeInterval deleteDeadline;
 @property(nonatomic, copy) NSTimeInterval (^clock)(void);
+@property(nonatomic,copy) NSArray<AxsCacheKeeperHardLinkGroup *> *hardLinkGroups;
+@property(nonatomic) NSUInteger hardLinkCursor;
+@property(nonatomic) BOOL hardLinkBudgetLimited;
 @end
 
 @implementation AxsCacheKeeperCleanupJob
@@ -76,7 +79,7 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
 #pragma mark - 周期推进
 
 - (void)advanceCycleWithPerRootLimit:(NSUInteger)perRootLimit gate:(BOOL (^)(void))gate {
-    if (self.phase == AxsCacheKeeperCleanupPhaseFinished) return;
+    if (!perRootLimit || self.phase == AxsCacheKeeperCleanupPhaseFinished) return;
     if (self.phase == AxsCacheKeeperCleanupPhaseChecking) {
         for (AxsCacheKeeperSweep *sweep in self.sweeps) {
             if (sweep.complete) continue;
@@ -93,11 +96,48 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
         // 全部根预检完成。若无存活根（空根/受保护根/失败根在预检即完成），
         // 直接结束：不进入删除、不启动 120 秒计时。
         if (!anyLive) { [self finishWithReason:AxsCacheKeeperCleanupEndReasonCompleted]; return; }
+        self.hardLinkGroups=[AxsCacheKeeperSweep closedHardLinkGroupsForSweeps:self.sweeps];
         self.phase = AxsCacheKeeperCleanupPhaseReady;
         return; // 预检周期内不删除；下周期转入删除（每周期只做一个阶段）
     }
     if (self.phase == AxsCacheKeeperCleanupPhaseReady) {
         self.phase = AxsCacheKeeperCleanupPhaseDeleting;
+    }
+    // Reserve the complete group against the live job total. Group results update every owning
+    // sweep immediately; a later per-root loop must never budget or count these paths again.
+    if (self.hardLinkCursor<self.hardLinkGroups.count) {
+        AxsCacheKeeperHardLinkGroup *group=self.hardLinkGroups[self.hardLinkCursor];
+        if ([self deadlineHit] || self.removed>=AxsCacheKeeperCleanupRoundItemCap) {
+            [self finishWithReason:AxsCacheKeeperCleanupEndReasonLimitReached];return;
+        }
+        if (group.memberCount>AxsCacheKeeperCleanupRoundItemCap-self.removed) {
+            // Only this group cannot fit; independent ordinary candidates can still use the quota.
+            [group retainForBudget];self.hardLinkBudgetLimited=YES;self.hardLinkCursor++;return;
+        }
+        if (!gate()) {[self cancelJob];return;}
+        __block NSUInteger nextGateRemoval=self.removed;
+        [group reclaimWithShouldContinue:^BOOL {
+            return self.phase!=AxsCacheKeeperCleanupPhaseFinished && ![self deadlineHit];
+        } beforeMember:^BOOL {
+            // Group setup may traverse many parents. Resample before its first unlink, then
+            // no less often than the original per-root batch, even across different roots.
+            if (self.removed>=nextGateRemoval) {
+                if (!gate()) {[self cancelJob];return NO;}
+                nextGateRemoval=self.removed+MAX((NSUInteger)1,perRootLimit);
+            }
+            return self.phase!=AxsCacheKeeperCleanupPhaseFinished && ![self deadlineHit];
+        } willDelete:^BOOL {
+            NSTimeInterval now=self.clock();
+            if (!self.deleteDeadline) self.deleteDeadline=now+AxsCacheKeeperCleanupDeleteTimeLimit;
+            return self.phase!=AxsCacheKeeperCleanupPhaseFinished && now<self.deleteDeadline &&
+                self.removed<AxsCacheKeeperCleanupRoundItemCap;
+        }];
+        self.hardLinkCursor++;
+        if (self.phase==AxsCacheKeeperCleanupPhaseFinished) return;
+        if ([self deadlineHit] || self.removed>=AxsCacheKeeperCleanupRoundItemCap) {
+            [self finishWithReason:AxsCacheKeeperCleanupEndReasonLimitReached];return;
+        }
+        return; // At most one group per cycle; the group also samples the gate per batch.
     }
     // Deleting：逐根删除，受共享预算与期限约束。
     for (AxsCacheKeeperSweep *sweep in self.sweeps) {
@@ -134,9 +174,10 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
     }
     BOOL allComplete = YES;
     for (AxsCacheKeeperSweep *sweep in self.sweeps) if (!sweep.complete) { allComplete = NO; break; }
-    // 全部根完成：有未确认残留→Unresolved（部分完成）；否则 Completed。
+    // 全部根已推进：预算保留组→LimitReached；未确认残留→Unresolved；否则 Completed。
     // 失败/变化的范围不阻塞其他已备好的范围，但轮次只报部分完成（见 partial）。
-    if (allComplete) [self finishWithReason:self.unresolvedCount > 0 ? AxsCacheKeeperCleanupEndReasonUnresolved : AxsCacheKeeperCleanupEndReasonCompleted];
+    if (allComplete) [self finishWithReason:self.hardLinkBudgetLimited ? AxsCacheKeeperCleanupEndReasonLimitReached :
+        self.unresolvedCount > 0 ? AxsCacheKeeperCleanupEndReasonUnresolved : AxsCacheKeeperCleanupEndReasonCompleted];
 }
 
 @end

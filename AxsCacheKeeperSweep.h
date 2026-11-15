@@ -1,7 +1,19 @@
 #pragma once
 #import <Foundation/Foundation.h>
 
+// A closed group performs several unlinks, not an atomic filesystem transaction. Counts and
+// bytes describe successfully removed paths and their logical sizes, never physical space freed.
+@interface AxsCacheKeeperHardLinkGroup : NSObject
+@property(nonatomic,readonly) NSUInteger memberCount;
+// Keep every member pending for a later round and exclude it from ordinary deletion this round.
+- (void)retainForBudget;
+// beforeMember may sample the process gate; it runs before final FD/name validation.
+- (void)reclaimWithShouldContinue:(BOOL (^)(void))shouldContinue beforeMember:(BOOL (^)(void))beforeMember willDelete:(BOOL (^)(void))willDelete;
+@end
+
 @interface AxsCacheKeeperSweep : NSObject
+// Called once after every scope has completed preflight. Only platform-cache Delete paths qualify.
++ (NSArray<AxsCacheKeeperHardLinkGroup *> *)closedHardLinkGroupsForSweeps:(NSArray<AxsCacheKeeperSweep *> *)sweeps;
 // Job 将自己成功的删除广播给同轮其他范围，推进共同依赖的基线。
 @property(nonatomic,copy) void (^removalObserver)(NSString *path);
 - (void)updateDependenciesAfterRemovingPath:(NSString *)path;

@@ -10,6 +10,8 @@
 #include <unistd.h>
 #include <errno.h>
 
+void axs_cachekeeper_run_hardlink_tests(NSString *fixture);
+
 static void check(BOOL condition, NSString *message) {
     if (!condition) { fprintf(stderr,"FAIL: plan repair: %s\n",message.UTF8String); exit(1); }
 }
@@ -41,6 +43,7 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
         return [[AxsCacheKeeperSweep alloc] initWithRoot:root bundle:bundle version:@"1.0" containerPath:home state:state clock:^NSTimeInterval { return future; }];
     };
     [AxsCacheKeeperCleanupRules removeAllRulesForTesting];
+    axs_cachekeeper_run_hardlink_tests(fixture);
 
     // Keep surviving link-change payloads out of later whole-container cache sweeps.
     NSString *hardHome=makeDir(fixture,@"plan-repairs-hardlinks");

@@ -33,9 +33,6 @@ typedef NS_ENUM(uint32_t,AxsCacheKeeperChannelPathStage) {
     AxsCacheKeeperChannelPathAnchor, AxsCacheKeeperChannelPathMetadata, AxsCacheKeeperChannelPathFile,
     AxsCacheKeeperChannelPathKernel, AxsCacheKeeperChannelPathRecheck
 };
-typedef NS_ENUM(uint32_t,AxsCacheKeeperChannelPathSource) {
-    AxsCacheKeeperChannelRootFilesystemPath, AxsCacheKeeperChannelResolvedBundlePath
-};
 typedef struct {
     AxsCacheKeeperChannelStage stage;
     AxsCacheKeeperChannelDomain domain;
@@ -103,16 +100,14 @@ BOOL axs_cachekeeper_channel_token_path(audit_token_t *, char buffer[4096], AxsC
 BOOL axs_cachekeeper_channel_authenticate(const audit_token_t *, BOOL springBoard, double deadline,
                                           AxsCacheKeeperChannelFailure *);
 // These boundaries validate metadata and paths, not audit-token identity. A successful boundary
-// never substitutes for authenticate(). The mapper is the SDK rootfs adapter in production.
+// never substitutes for authenticate(). All paths remain in the native system API namespace.
 BOOL axs_cachekeeper_channel_validate_system_record(BOOL springBoard,id identifier,id type,id url,AxsCacheKeeperChannelFailure *);
 BOOL axs_cachekeeper_channel_validate_bundle_root(NSString *root,NSString *base,AxsCacheKeeperChannelFailure *);
-NSString *axs_cachekeeper_channel_resolve_path(NSString *,AxsCacheKeeperChannelPathSource,AxsCacheKeeperChannelPathStage,
-                                              NSString *(^rootfsPath)(NSString *),AxsCacheKeeperChannelFailure *);
-// Production source selection lives in these semantic entrypoints. Callers supply system
-// observations and the environment mapper; they cannot choose to skip/double-map a source.
-BOOL axs_cachekeeper_channel_system_roots(BOOL springBoard,NSURL *lsURL,NSString *(^rootfsPath)(NSString *),
-                                          NSString **root,NSString **base,AxsCacheKeeperChannelFailure *);
-NSString *axs_cachekeeper_channel_bundle_executable(NSBundle *,NSString *(^rootfsPath)(NSString *),AxsCacheKeeperChannelFailure *);
-BOOL axs_cachekeeper_channel_kernel_matches(NSString *systemPath,NSString *kernelPath,NSString *(^rootfsPath)(NSString *),AxsCacheKeeperChannelFailure *);
+NSString *axs_cachekeeper_channel_resolve_path(NSString *,AxsCacheKeeperChannelPathStage,AxsCacheKeeperChannelFailure *);
+// Production entrypoints keep LS, fixed system anchors, NSBundle and kernel observations on
+// the same native filesystem; no bootstrap path conversion participates in authentication.
+BOOL axs_cachekeeper_channel_system_roots(BOOL springBoard,NSURL *lsURL,NSString **root,NSString **base,AxsCacheKeeperChannelFailure *);
+NSString *axs_cachekeeper_channel_bundle_executable(NSBundle *,AxsCacheKeeperChannelFailure *);
+BOOL axs_cachekeeper_channel_kernel_matches(NSString *systemPath,NSString *kernelPath,AxsCacheKeeperChannelFailure *);
 NSDictionary *axs_cachekeeper_channel_result(NSString *state,AxsCacheKeeperChannelFailure,NSString *selfIdentity,
                                              NSString *peerIdentity,NSString *registration);

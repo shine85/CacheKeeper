@@ -32,6 +32,8 @@ typedef NS_ENUM(NSInteger, AxsCacheKeeperCleanupEndReason) {
 // - 2000 项为全作业共享的删除硬上限；预检不删文件，不计入上限。
 // - 门控由调用方（Scanner）按根采样：每周期每根采样一次，周期内不再重采
 //   （与旧实现逐根采样一致；逐文件采样曾把单周期拖到约 10 秒，见 #42）。
+// - 闭合硬链接组跨根统一预留剩余项数；首次 unlink 前及每批重采门控，每次 unlink 前
+//   复核取消与期限。组不是原子事务，期限/失败可留下有真实回执的部分结果。
 @interface AxsCacheKeeperCleanupJob : NSObject
 - (instancetype)initWithSweeps:(NSArray<AxsCacheKeeperSweep *> *)sweeps
                       signature:(NSString *)signature

@@ -12,9 +12,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#if TARGET_OS_IPHONE && defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-#include <roothide.h>
-#endif
 
 _Static_assert(sizeof(audit_token_t)==32,"Verified iOS 16-17 audit token ABI required");
 _Static_assert(sizeof(AxsCacheKeeperChannelMessage)<=AxsCacheKeeperChannelMessageLimit,"HELLO exceeds fixed protocol bound");
@@ -184,20 +181,12 @@ static BOOL axs_cachekeeper_channel_path_input(NSString *path,AxsCacheKeeperChan
     if (strlen(bytes)>=PATH_MAX) return axs_cachekeeper_channel_path_fail(failure,pathStage,AxsCacheKeeperChannelPOSIXError,ENAMETOOLONG,NO);
     return YES;
 }
-NSString *axs_cachekeeper_channel_resolve_path(NSString *path,AxsCacheKeeperChannelPathSource source,AxsCacheKeeperChannelPathStage pathStage,
-                                              NSString *(^rootfsPath)(NSString *),AxsCacheKeeperChannelFailure *failure) {
+NSString *axs_cachekeeper_channel_resolve_path(NSString *path,AxsCacheKeeperChannelPathStage pathStage,
+                                              AxsCacheKeeperChannelFailure *failure) {
     if (failure) *failure=(AxsCacheKeeperChannelFailure){0};
     if (!axs_cachekeeper_channel_path_input(path,pathStage,failure)) return nil;
-    if (source==AxsCacheKeeperChannelRootFilesystemPath) {
-        if (!rootfsPath) {axs_cachekeeper_channel_path_fail(failure,pathStage,AxsCacheKeeperChannelPOSIXError,ENOSYS,NO);return nil;}
-        errno=0;NSString *mapped=rootfsPath(path);int error=errno;
-        // libroothide rootfs_alloc can return an input copy on error. Never treat that as success.
-        if (error || !mapped) {axs_cachekeeper_channel_path_fail(failure,pathStage,AxsCacheKeeperChannelPOSIXError,error ?: EIO,NO);return nil;}
-        path=mapped;
-        if (!axs_cachekeeper_channel_path_input(path,pathStage,failure)) return nil;
-    } else if (source!=AxsCacheKeeperChannelResolvedBundlePath) {
-        axs_cachekeeper_channel_path_fail(failure,pathStage,AxsCacheKeeperChannelProtocolError,1,YES);return nil;
-    }
+    // LS, NSBundle and token-bound kernel observations share the native system API namespace.
+    // RootHide rootfs() produces bootstrap arguments; it is not an input adapter for realpath().
     char resolved[PATH_MAX];
     if (!realpath(path.fileSystemRepresentation,resolved)) {
         int error=errno;axs_cachekeeper_channel_path_fail(failure,pathStage,AxsCacheKeeperChannelPOSIXError,error,NO);return nil;
@@ -205,18 +194,6 @@ NSString *axs_cachekeeper_channel_resolve_path(NSString *path,AxsCacheKeeperChan
     NSString *result=[NSString stringWithUTF8String:resolved];
     if (!result) axs_cachekeeper_channel_path_fail(failure,pathStage,AxsCacheKeeperChannelProtocolError,1,YES);
     return result;
-}
-static NSString *axs_cachekeeper_channel_rootfs_path(NSString *logical) {
-#if TARGET_OS_IPHONE && defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    // Verified libroothide cb236f9, jbroot.c: rootfs is not idempotent. All inputs to this
-    // adapter originate in the root filesystem namespace, never from NSBundle's resolved URL.
-    const char *input=logical.fileSystemRepresentation;
-    errno=0;const char *mapped=rootfs_alloc(input);int error=errno;
-    NSString *result=(!error && mapped) ? [NSString stringWithUTF8String:mapped] : nil;
-    free((void *)mapped);errno=error ?: (result ? 0 : EIO);return result;
-#else
-    return logical;
-#endif
 }
 BOOL axs_cachekeeper_channel_validate_system_record(BOOL springBoard,id identifier,id type,id url,AxsCacheKeeperChannelFailure *failure) {
     if (failure) *failure=(AxsCacheKeeperChannelFailure){0};
@@ -236,27 +213,27 @@ BOOL axs_cachekeeper_channel_validate_bundle_root(NSString *root,NSString *base,
         return axs_cachekeeper_channel_path_fail(failure,AxsCacheKeeperChannelPathAnchor,AxsCacheKeeperChannelProtocolError,2,YES);
     return YES;
 }
-BOOL axs_cachekeeper_channel_system_roots(BOOL springBoard,NSURL *lsURL,NSString *(^rootfsPath)(NSString *),
-                                          NSString **root,NSString **base,AxsCacheKeeperChannelFailure *failure) {
+BOOL axs_cachekeeper_channel_system_roots(BOOL springBoard,NSURL *lsURL,NSString **root,NSString **base,
+                                          AxsCacheKeeperChannelFailure *failure) {
     *root=nil;*base=nil;
     if (![lsURL isKindOfClass:NSURL.class] || !lsURL.isFileURL)
         return axs_cachekeeper_channel_path_fail(failure,AxsCacheKeeperChannelPathLSRecord,AxsCacheKeeperChannelProtocolError,1,YES);
-    NSString *resolvedRoot=axs_cachekeeper_channel_resolve_path(lsURL.path,AxsCacheKeeperChannelRootFilesystemPath,AxsCacheKeeperChannelPathBundle,rootfsPath,failure);
+    NSString *resolvedRoot=axs_cachekeeper_channel_resolve_path(lsURL.path,AxsCacheKeeperChannelPathBundle,failure);
     if (!resolvedRoot) return NO;
     NSString *resolvedBase=axs_cachekeeper_channel_resolve_path(springBoard ? @"/System/Library/CoreServices" : @"/Applications",
-        AxsCacheKeeperChannelRootFilesystemPath,AxsCacheKeeperChannelPathAnchor,rootfsPath,failure);
+        AxsCacheKeeperChannelPathAnchor,failure);
     if (!resolvedBase) return NO;
     *root=resolvedRoot;*base=resolvedBase;return YES;
 }
-NSString *axs_cachekeeper_channel_bundle_executable(NSBundle *bundle,NSString *(^rootfsPath)(NSString *),AxsCacheKeeperChannelFailure *failure) {
+NSString *axs_cachekeeper_channel_bundle_executable(NSBundle *bundle,AxsCacheKeeperChannelFailure *failure) {
     NSURL *url=bundle.executableURL;
     if (![url isKindOfClass:NSURL.class] || !url.isFileURL) {
         axs_cachekeeper_channel_path_fail(failure,AxsCacheKeeperChannelPathMetadata,AxsCacheKeeperChannelProtocolError,3,YES);return nil;
     }
-    return axs_cachekeeper_channel_resolve_path(url.path,AxsCacheKeeperChannelResolvedBundlePath,AxsCacheKeeperChannelPathFile,rootfsPath,failure);
+    return axs_cachekeeper_channel_resolve_path(url.path,AxsCacheKeeperChannelPathFile,failure);
 }
-BOOL axs_cachekeeper_channel_kernel_matches(NSString *systemPath,NSString *kernelPath,NSString *(^rootfsPath)(NSString *),AxsCacheKeeperChannelFailure *failure) {
-    NSString *actual=axs_cachekeeper_channel_resolve_path(kernelPath,AxsCacheKeeperChannelRootFilesystemPath,AxsCacheKeeperChannelPathKernel,rootfsPath,failure);
+BOOL axs_cachekeeper_channel_kernel_matches(NSString *systemPath,NSString *kernelPath,AxsCacheKeeperChannelFailure *failure) {
+    NSString *actual=axs_cachekeeper_channel_resolve_path(kernelPath,AxsCacheKeeperChannelPathKernel,failure);
     if (!actual) return NO;
     return [actual isEqual:systemPath] || axs_cachekeeper_channel_path_fail(failure,AxsCacheKeeperChannelPathKernel,AxsCacheKeeperChannelProtocolError,2,YES);
 }
@@ -267,15 +244,14 @@ static NSString *axs_cachekeeper_channel_system_executable(BOOL springBoard,stru
     NSURL *url=axs_cachekeeper_channel_property(proxy,@"bundleURL");
     if (!axs_cachekeeper_channel_validate_system_record(springBoard,axs_cachekeeper_channel_property(proxy,@"applicationIdentifier"),
         axs_cachekeeper_channel_property(proxy,@"applicationType"),url,failure)) return nil;
-    NSString *(^map)(NSString *)=^NSString *(NSString *path) {return axs_cachekeeper_channel_rootfs_path(path);};
     NSString *root=nil,*base=nil;
-    if (!axs_cachekeeper_channel_system_roots(springBoard,url,map,&root,&base,failure)) return nil;
+    if (!axs_cachekeeper_channel_system_roots(springBoard,url,&root,&base,failure)) return nil;
     if (!axs_cachekeeper_channel_validate_bundle_root(root,base,failure)) return nil;
     NSBundle *systemBundle=[NSBundle bundleWithPath:root];NSURL *executable=systemBundle.executableURL;
     if (![systemBundle.bundleIdentifier isEqual:bundle] || ![executable isKindOfClass:NSURL.class] || !executable.isFileURL) {
         axs_cachekeeper_channel_path_fail(failure,AxsCacheKeeperChannelPathMetadata,AxsCacheKeeperChannelProtocolError,3,YES);return nil;
     }
-    NSString *path=axs_cachekeeper_channel_bundle_executable(systemBundle,map,failure);if (!path) return nil;
+    NSString *path=axs_cachekeeper_channel_bundle_executable(systemBundle,failure);if (!path) return nil;
     struct stat raw;
     if (lstat(executable.path.fileSystemRepresentation,&raw) || stat(path.fileSystemRepresentation,identity)) {
         int error=errno;axs_cachekeeper_channel_path_fail(failure,AxsCacheKeeperChannelPathFile,AxsCacheKeeperChannelPOSIXError,error,NO);return nil;
@@ -305,8 +281,7 @@ BOOL axs_cachekeeper_channel_authenticate(const audit_token_t *receivedToken,BOO
     struct stat before;NSString *systemPath=axs_cachekeeper_channel_system_executable(springBoard,&before,failure);if (!systemPath) return NO;
     if (!axs_cachekeeper_channel_budget(deadline,failure)) return NO;
     char executable[4096];if (!axs_cachekeeper_channel_token_path(&token,executable,failure)) return NO;
-    if (!axs_cachekeeper_channel_kernel_matches(systemPath,[NSString stringWithUTF8String:executable],
-        ^NSString *(NSString *path) {return axs_cachekeeper_channel_rootfs_path(path);},failure)) return NO;
+    if (!axs_cachekeeper_channel_kernel_matches(systemPath,[NSString stringWithUTF8String:executable],failure)) return NO;
     if (!axs_cachekeeper_channel_budget(deadline,failure)) return NO;
     struct stat after;
     if (stat(systemPath.fileSystemRepresentation,&after)) {

@@ -10,6 +10,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+@interface AxsCacheKeeperHardLinkMember : NSObject
+@property(nonatomic,weak) AxsCacheKeeperSweep *sweep;
+@property(nonatomic,copy) NSString *path;
+@property(nonatomic,copy) NSArray *snapshot;
+@end
+@implementation AxsCacheKeeperHardLinkMember
+@end
+
+@interface AxsCacheKeeperHardLinkGroup ()
+@property(nonatomic,copy) NSArray<AxsCacheKeeperHardLinkMember *> *members;
+@end
+
 @interface AxsCacheKeeperSweep ()
 @property(nonatomic, readwrite) BOOL complete;
 @property(nonatomic, readwrite) BOOL cancelled;
@@ -53,6 +65,8 @@
 @property(nonatomic) BOOL enumerationComplete;
 @property(nonatomic,readwrite) BOOL measurementComplete;
 @property(nonatomic,strong) NSMutableSet<NSString *> *failedCandidates;
+@property(nonatomic,strong) NSMutableSet<NSString *> *handledHardLinkCandidates;
+@property(nonatomic,strong) NSMutableSet<NSString *> *budgetRetainedCandidates;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,AxsCacheKeeperDependencySnapshot *> *dependencySnapshots;
 @property(nonatomic,strong) NSMutableArray<NSString *> *dependencyOrder;
 @property(nonatomic) NSUInteger dependencyCaptureCursor;
@@ -124,6 +138,8 @@
     _deleteCandidates = [NSMutableArray new];
     _decisionEntries = [NSMutableArray new];
     _failedCandidates = [NSMutableSet new];
+    _handledHardLinkCandidates = [NSMutableSet new];
+    _budgetRetainedCandidates = [NSMutableSet new];
     _dependencySnapshots = [NSMutableDictionary new];
     _dependencyOrder = [NSMutableArray new];
     _invalidDependencies = [NSMutableSet new];
@@ -133,19 +149,83 @@
     [self axs_cachekeeper_open_enumerator];
     return self;
 }
-- (BOOL)hasDeleteCandidates { return !self.checking && self.deleteCursor < self.deleteCandidates.count; }
-- (NSUInteger)remainingCandidates { return self.deleteCandidates.count - self.deleteCursor + self.failedCandidates.count; }
+- (BOOL)hasDeleteCandidates {
+    if (self.checking) return NO;
+    for (NSUInteger i=self.deleteCursor;i<self.deleteCandidates.count;i++)
+        if (![self.handledHardLinkCandidates containsObject:self.deleteCandidates[i]]) return YES;
+    return NO;
+}
+- (NSUInteger)remainingCandidates {
+    NSUInteger total=self.failedCandidates.count+self.budgetRetainedCandidates.count;
+    for (NSUInteger i=self.deleteCursor;i<self.deleteCandidates.count;i++)
+        if (![self.handledHardLinkCandidates containsObject:self.deleteCandidates[i]]) total++;
+    return total;
+}
 - (unsigned long long)remainingBytes {
     unsigned long long total=0;
     for (NSUInteger i=self.deleteCursor;i<self.deleteCandidates.count;i++)
-        total+=[self axs_cachekeeper_snapshot_bytes:self.deleteCandidates[i]];
+        if (![self.handledHardLinkCandidates containsObject:self.deleteCandidates[i]]) total+=[self axs_cachekeeper_snapshot_bytes:self.deleteCandidates[i]];
     for (NSString *entry in self.failedCandidates) total += [self axs_cachekeeper_snapshot_bytes:entry];
+    for (NSString *entry in self.budgetRetainedCandidates) total += [self axs_cachekeeper_snapshot_bytes:entry];
     return total;
 }
 // 延期类（任务 5）：近期与变化合并为一类——同一文件同一轮只计一类，互斥。
 - (NSUInteger)deferredCount { return self.recentCount + self.changedCount; }
 - (unsigned long long)deferredBytes { return self.recentBytes + self.changedBytes; }
 - (BOOL)coverageComplete { return self.measurementComplete && !self.failed && !self.changedCount; }
++ (NSArray<AxsCacheKeeperHardLinkGroup *> *)closedHardLinkGroupsForSweeps:(NSArray<AxsCacheKeeperSweep *> *)sweeps {
+    NSMutableDictionary<NSArray *,NSMutableDictionary<NSArray *,AxsCacheKeeperHardLinkMember *> *> *inodes=[NSMutableDictionary new];
+    NSMapTable<AxsCacheKeeperSweep *,NSSet *> *candidates=[NSMapTable strongToStrongObjectsMapTable];
+    for (AxsCacheKeeperSweep *sweep in sweeps) {
+        [candidates setObject:[NSSet setWithArray:sweep.deleteCandidates ?: @[]] forKey:sweep];
+        for (NSString *entry in sweep.deleteCandidates) {
+            NSString *parent=entry.stringByDeletingLastPathComponent;
+            NSArray *snapshot=sweep.fileSnapshots[parent][entry.lastPathComponent];
+            NSArray *directory=sweep.directorySnapshots[[sweep axs_cachekeeper_directory_key:parent]];
+            if (snapshot.count<8 || [snapshot[7] unsignedIntegerValue]<2 || directory.count<2) continue;
+            NSArray *inode=@[snapshot[1],snapshot[0]],*name=@[directory[1],directory[0],entry.lastPathComponent];
+            if (!inodes[inode]) inodes[inode]=[NSMutableDictionary new];
+            if (inodes[inode][name]) {
+                // A second root seeing the same directory entry is not another inode link.
+                [sweep.handledHardLinkCandidates addObject:entry];continue;
+            }
+            AxsCacheKeeperHardLinkMember *member=[AxsCacheKeeperHardLinkMember new];
+            member.sweep=sweep;member.path=entry;member.snapshot=snapshot;inodes[inode][name]=member;
+        }
+    }
+    NSMutableArray *groups=[NSMutableArray new];
+    for (NSDictionary *names in inodes.allValues) {
+        NSArray<AxsCacheKeeperHardLinkMember *> *members=[names.allValues sortedArrayUsingComparator:^NSComparisonResult(AxsCacheKeeperHardLinkMember *left,AxsCacheKeeperHardLinkMember *right) {
+            return [left.path compare:right.path];
+        }];
+        NSArray *snapshot=members.firstObject.snapshot;
+        BOOL closed=members.count==[snapshot[7] unsignedIntegerValue];
+        for (AxsCacheKeeperHardLinkMember *member in members) {
+            if (![member.snapshot isEqual:snapshot]) closed=NO;
+            // Every overlapping scope can veto the path, including a scope that pruned a
+            // retained subtree and therefore has no file observation for it.
+            for (AxsCacheKeeperSweep *scope in sweeps) {
+                NSString *form=[scope axs_cachekeeper_matched_root_form:member.path];
+                if (!form) continue;
+                NSString *entry=[scope.root stringByAppendingString:[member.path.stringByStandardizingPath substringFromIndex:form.length]];
+                AxsCacheKeeperCleanupDecision *decision=scope.fileDecisions[entry.stringByDeletingLastPathComponent][entry.lastPathComponent];
+                NSArray *observed=scope.fileSnapshots[entry.stringByDeletingLastPathComponent][entry.lastPathComponent];
+                if (!scope.coverageComplete || scope.cancelled || ![[candidates objectForKey:scope] containsObject:entry] ||
+                    decision.disposition!=AxsCacheKeeperCleanupDelete || decision.basis!=AxsCacheKeeperCleanupBasisPlatformCache ||
+                    decision.dependencyPaths.count || ![observed isEqual:snapshot]) closed=NO;
+            }
+        }
+        if (closed) {
+            AxsCacheKeeperHardLinkGroup *group=[AxsCacheKeeperHardLinkGroup new];group.members=members;[groups addObject:group];
+        }
+    }
+    // Small groups first makes bounded rounds deterministic and avoids an oversized group
+    // starving other groups that can be reclaimed within the shared item budget.
+    return [groups sortedArrayUsingComparator:^NSComparisonResult(AxsCacheKeeperHardLinkGroup *left,AxsCacheKeeperHardLinkGroup *right) {
+        if (left.memberCount!=right.memberCount) return left.memberCount<right.memberCount ? NSOrderedAscending : NSOrderedDescending;
+        return [left.members.firstObject.path compare:right.members.firstObject.path];
+    }];
+}
 - (NSDictionary *)directoryReport {
     NSMutableDictionary *report = [@{@"updated":NSDate.date, @"complete":@(self.complete),
         @"checking":@(self.checking), @"cancelled":@(self.cancelled), @"measurementComplete":@(self.measurementComplete),
@@ -357,11 +437,11 @@
     if (!identity) self.verifyDetail = @"目录已被替换";
     return identity;
 }
-- (BOOL)axs_cachekeeper_remove:(NSString *)entry expected:(struct stat)expected willDelete:(BOOL (^)(void))willDelete {
+- (int)axs_cachekeeper_open_parent:(NSString *)entry {
     NSString *parent = entry.stringByDeletingLastPathComponent;
     NSString *matchedForm = [self axs_cachekeeper_matched_root_form:parent];
     if (!matchedForm) {
-        [self axs_cachekeeper_failure:@"枚举路径边界" code:EINVAL path:entry detail:[NSString stringWithFormat:@"root=%@; parent=%@",self.root,parent]];return NO;
+        [self axs_cachekeeper_failure:@"枚举路径边界" code:EINVAL path:entry detail:[NSString stringWithFormat:@"root=%@; parent=%@",self.root,parent]];return -1;
     }
     // 从已核对身份的缓存根逐级打开，不能靠 realpath 后再打开绝对路径防竞态。
     int fd = axs_cachekeeper_open_directory(self.root);
@@ -375,14 +455,14 @@
             struct stat componentInfo;
             if (lstat(walk.fileSystemRepresentation, &componentInfo) || !S_ISDIR(componentInfo.st_mode)) { bad = part; break; }
         }
-        [self axs_cachekeeper_failure:@"open-root" code:openError path:entry detail:[NSString stringWithFormat:@"%@；卡在组件 %@",self.root,bad]];return NO;
+        [self axs_cachekeeper_failure:@"open-root" code:openError path:entry detail:[NSString stringWithFormat:@"%@；卡在组件 %@",self.root,bad]];return -1;
     }
     struct stat openedRoot;
     if (fstat(fd,&openedRoot)) {
-        int code=errno;close(fd);[self axs_cachekeeper_failure:@"fstat-root" code:code path:entry detail:self.root];return NO;
+        int code=errno;close(fd);[self axs_cachekeeper_failure:@"fstat-root" code:code path:entry detail:self.root];return -1;
     }
     if (openedRoot.st_dev != self.device || openedRoot.st_ino != self.inode) {
-        close(fd);[self axs_cachekeeper_failure:@"根目录身份核对" code:ESTALE path:entry detail:@""];return NO;
+        close(fd);[self axs_cachekeeper_failure:@"根目录身份核对" code:ESTALE path:entry detail:@""];return -1;
     }
     NSString *relativeParent = [parent.stringByStandardizingPath substringFromIndex:matchedForm.length];
     // 祖先链的记录键取枚举器形态：由 parent 逐级剥组件得到（root 用其自身为键）。
@@ -405,22 +485,27 @@
         NSString *verifyKey = partIndex == 0 ? self.root : ancestorKeys[partIndex - 1];
         if (![self axs_cachekeeper_verify_directory:verifyKey fd:fd]) {
             self.changedCount++; self.changedBytes += [self axs_cachekeeper_snapshot_bytes:entry];
-            close(fd); errno = EBUSY; self.error = [NSString stringWithFormat:@"预检后目录身份发生变化（%@），已跳过该文件", self.verifyDetail ?: @"原因未明"]; return NO;
+            close(fd); errno = EBUSY; self.error = [NSString stringWithFormat:@"预检后目录身份发生变化（%@），已跳过该文件", self.verifyDetail ?: @"原因未明"]; return -1;
         }
         int child = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
         int savedError = errno;
         close(fd);
-        if (child < 0) { [self axs_cachekeeper_failure:@"openat-parent" code:savedError path:entry detail:openedPath];return NO; }
+        if (child < 0) { [self axs_cachekeeper_failure:@"openat-parent" code:savedError path:entry detail:openedPath];return -1; }
         fd = child;
         openedPath=[openedPath stringByAppendingPathComponent:part];
         partIndex++;
     }
-    struct stat current;
-    struct stat parentInfo;
     if (![self axs_cachekeeper_verify_directory:parent fd:fd]) {
         self.changedCount++; self.changedBytes += [self axs_cachekeeper_snapshot_bytes:entry];
-        close(fd); errno = EBUSY; self.error = [NSString stringWithFormat:@"预检后目录身份发生变化（%@），已跳过该文件", self.verifyDetail ?: @"原因未明"]; return NO;
+        close(fd); errno = EBUSY; self.error = [NSString stringWithFormat:@"预检后目录身份发生变化（%@），已跳过该文件", self.verifyDetail ?: @"原因未明"]; return -1;
     }
+    return fd;
+}
+- (BOOL)axs_cachekeeper_remove:(NSString *)entry expected:(struct stat)expected willDelete:(BOOL (^)(void))willDelete {
+    NSString *parent=entry.stringByDeletingLastPathComponent;
+    int fd=[self axs_cachekeeper_open_parent:entry];
+    if (fd<0) return NO;
+    struct stat current;
     NSString *fileName=entry.lastPathComponent;
     const char *name = fileName.fileSystemRepresentation;
     // 文件级稳定性门（通用）：只比对目标文件自身的预检记录；未预检（预检后新增）或已变化的跳过本文件，
@@ -466,15 +551,17 @@
         } else [self axs_cachekeeper_failure:@"删除前身份/时间核对" code:ESTALE path:entry detail:@""];
     } else [self axs_cachekeeper_failure:@"打开文件身份/时间核对" code:ESTALE path:entry detail:@""];
     int savedError = errno;
-    if (removed && !fstat(fd,&parentInfo)) self.directorySnapshots[[self axs_cachekeeper_directory_key:parent]]=[self axs_cachekeeper_snapshot:parentInfo];
-    if (removed) {
-        [self.fileSnapshots[parent] removeObjectForKey:entry.lastPathComponent];
-        [self updateDependenciesAfterRemovingPath:entry];
-        if (self.removalObserver) self.removalObserver(entry);
-    }
+    if (removed) [self axs_cachekeeper_did_remove:entry parentFD:fd];
     if (file >= 0) close(file);
     close(fd); errno = savedError;
     return removed;
+}
+- (void)axs_cachekeeper_did_remove:(NSString *)entry parentFD:(int)fd {
+    NSString *parent=entry.stringByDeletingLastPathComponent;struct stat parentInfo;
+    if (!fstat(fd,&parentInfo)) self.directorySnapshots[[self axs_cachekeeper_directory_key:parent]]=[self axs_cachekeeper_snapshot:parentInfo];
+    [self.fileSnapshots[parent] removeObjectForKey:entry.lastPathComponent];
+    [self updateDependenciesAfterRemovingPath:entry];
+    if (self.removalObserver) self.removalObserver(entry);
 }
 - (NSArray<NSDictionary *> *)failureDetails { return [self.recordedFailures copy]; }
 - (void)updateDependenciesAfterRemovingPath:(NSString *)path {
@@ -580,6 +667,7 @@
             self.failed++; self.error = @"扫描期间缓存目录已改变"; self.complete = YES; return;
         }
         NSString *entry = self.deleteCandidates[self.deleteCursor++];
+        if ([self.handledHardLinkCandidates containsObject:entry]) continue;
         NSString *parent = entry.stringByDeletingLastPathComponent;
         NSString *name = entry.lastPathComponent;
         AxsCacheKeeperCleanupDecision *decision = self.fileDecisions[parent][name];
@@ -609,5 +697,160 @@
     if (self.complete || self.cancelled) return;
     if (self.checking) { [self advancePreflight:limit]; return; }
     [self advanceDeletion:limit shouldContinue:shouldContinue];
+}
+@end
+
+// An owned unlink may change only ctime and nlink. Every other identity/content/permission
+// field must remain stable; the new ctime becomes the exact baseline for the next step.
+static BOOL axs_cachekeeper_hardlink_stat_matches(struct stat current, struct stat expected, BOOL afterOwnedUnlink) {
+    return S_ISREG(current.st_mode) && current.st_dev==expected.st_dev && current.st_ino==expected.st_ino &&
+        current.st_mode==expected.st_mode && current.st_uid==expected.st_uid && current.st_gid==expected.st_gid &&
+        current.st_flags==expected.st_flags && current.st_size==expected.st_size &&
+        current.st_mtimespec.tv_sec==expected.st_mtimespec.tv_sec && current.st_mtimespec.tv_nsec==expected.st_mtimespec.tv_nsec &&
+        current.st_birthtimespec.tv_sec==expected.st_birthtimespec.tv_sec && current.st_birthtimespec.tv_nsec==expected.st_birthtimespec.tv_nsec &&
+        (afterOwnedUnlink ? current.st_nlink+1==expected.st_nlink : current.st_nlink==expected.st_nlink &&
+            current.st_ctimespec.tv_sec==expected.st_ctimespec.tv_sec && current.st_ctimespec.tv_nsec==expected.st_ctimespec.tv_nsec);
+}
+
+@implementation AxsCacheKeeperHardLinkGroup
+- (NSUInteger)memberCount {return self.members.count;}
+- (void)retainForBudget {
+    for (AxsCacheKeeperHardLinkMember *member in self.members) {
+        AxsCacheKeeperSweep *sweep=member.sweep;
+        if ([sweep.handledHardLinkCandidates containsObject:member.path]) continue;
+        [sweep.handledHardLinkCandidates addObject:member.path];
+        [sweep.budgetRetainedCandidates addObject:member.path];
+    }
+}
+- (void)axs_cachekeeper_changed_from:(NSUInteger)start reason:(NSString *)reason {
+    for (NSUInteger i=start;i<self.members.count;i++) {
+        AxsCacheKeeperHardLinkMember *member=self.members[i];AxsCacheKeeperSweep *sweep=member.sweep;
+        if ([sweep.handledHardLinkCandidates containsObject:member.path]) continue;
+        [sweep.handledHardLinkCandidates addObject:member.path];
+        sweep.changedCount++;sweep.changedBytes+=[member.snapshot[6] unsignedLongLongValue];sweep.error=reason;
+    }
+}
+- (void)axs_cachekeeper_failed_from:(NSUInteger)start member:(AxsCacheKeeperHardLinkMember *)failed code:(int)code stage:(NSString *)stage {
+    [failed.sweep axs_cachekeeper_failure:stage code:code path:failed.path detail:@"闭合硬链接组停止，剩余路径保留待重试"];
+    failed.sweep.failed++;
+    for (NSUInteger i=start;i<self.members.count;i++) {
+        AxsCacheKeeperHardLinkMember *member=self.members[i];AxsCacheKeeperSweep *sweep=member.sweep;
+        [sweep.handledHardLinkCandidates addObject:member.path];[sweep.failedCandidates addObject:member.path];
+    }
+}
+- (void)axs_cachekeeper_access_failed_from:(NSUInteger)start member:(AxsCacheKeeperHardLinkMember *)member code:(int)code stage:(NSString *)stage {
+    if (code==EBUSY || code==ESTALE || code==ENOENT || code==ELOOP || code==ENOTDIR)
+        [self axs_cachekeeper_changed_from:start reason:@"硬链接组路径或目录身份变化，剩余路径保留"];
+    else [self axs_cachekeeper_failed_from:start member:member code:code stage:stage];
+}
+- (void)reclaimWithShouldContinue:(BOOL (^)(void))shouldContinue beforeMember:(BOOL (^)(void))beforeMember willDelete:(BOOL (^)(void))willDelete {
+    if (!self.members.count || !shouldContinue()) return;
+    // Keep one FD per observed parent and one for the inode. Failure to acquire any of them
+    // retains the entire group. FD exhaustion never falls back to unchecked path deletion.
+    NSMutableDictionary<NSArray *,NSNumber *> *parents=[NSMutableDictionary new];
+    NSMapTable<AxsCacheKeeperHardLinkMember *,NSNumber *> *memberFDs=[NSMapTable strongToStrongObjectsMapTable];
+    NSMutableArray<AxsCacheKeeperHardLinkMember *> *parentRepresentatives=[NSMutableArray new];
+    int file=-1;NSUInteger cursor=0;
+    @try {
+        for (AxsCacheKeeperHardLinkMember *member in self.members) {
+            if (!shouldContinue()) return;
+            AxsCacheKeeperSweep *sweep=member.sweep;
+            if (!sweep || sweep.cancelled) return;
+            NSArray *directory=sweep.directorySnapshots[[sweep axs_cachekeeper_directory_key:member.path.stringByDeletingLastPathComponent]];
+            NSArray *key=@[directory[1],directory[0]];
+            NSNumber *saved=parents[key];
+            if (!saved) {
+                NSUInteger before=sweep.changedCount;unsigned long long changedBytesBefore=sweep.changedBytes;
+                int fd=[sweep axs_cachekeeper_open_parent:member.path];
+                if (fd<0) {
+                    int code=errno;
+                    // The shared parent helper may already have counted one changed path.
+                    if (sweep.changedCount>before) {sweep.changedCount=before;sweep.changedBytes=changedBytesBefore;}
+                    [self axs_cachekeeper_access_failed_from:0 member:member code:code stage:@"hardlink-open-parent"];
+                    return;
+                }
+                saved=@(fd);parents[key]=saved;[parentRepresentatives addObject:member];
+            }
+            [memberFDs setObject:saved forKey:member];
+            struct stat current;
+            if (fstatat(saved.intValue,member.path.lastPathComponent.fileSystemRepresentation,&current,AT_SYMLINK_NOFOLLOW)) {
+                [self axs_cachekeeper_access_failed_from:0 member:member code:errno stage:@"hardlink-stat-member"];return;
+            }
+            if (!S_ISREG(current.st_mode) || ![[sweep axs_cachekeeper_snapshot:current] isEqual:member.snapshot] ||
+                !axs_cachekeeper_old_enough(current,sweep.clock())) {
+                [self axs_cachekeeper_changed_from:0 reason:@"预检后硬链接组成员或年龄已改变，整组保留"];return;
+            }
+        }
+        AxsCacheKeeperHardLinkMember *first=self.members.firstObject;
+        file=openat([[memberFDs objectForKey:first] intValue],first.path.lastPathComponent.fileSystemRepresentation,O_RDONLY|O_NOFOLLOW|O_NONBLOCK);
+        if (file<0) {[self axs_cachekeeper_failed_from:0 member:first code:errno stage:@"hardlink-open-file"];return;}
+        struct stat expected;
+        if (fstat(file,&expected)) {[self axs_cachekeeper_failed_from:0 member:first code:errno stage:@"hardlink-stat-file"];return;}
+        if (!S_ISREG(expected.st_mode) || expected.st_nlink!=self.members.count ||
+            ![[first.sweep axs_cachekeeper_snapshot:expected] isEqual:first.snapshot]) {
+            [self axs_cachekeeper_changed_from:0 reason:@"硬链接组的打开文件身份或链接数已改变，整组保留"];return;
+        }
+        for (cursor=0;cursor<self.members.count;cursor++) {
+            @autoreleasepool {
+                if (!shouldContinue() || !beforeMember()) return;
+                AxsCacheKeeperHardLinkMember *member=self.members[cursor];AxsCacheKeeperSweep *sweep=member.sweep;
+                if (!sweep || sweep.cancelled) return;
+                // Reopen each distinct directory through the original root chain on every step:
+                // a pinned FD alone would still allow a renamed parent outside the approved root.
+                for (AxsCacheKeeperHardLinkMember *representative in parentRepresentatives) {
+                    if (!shouldContinue()) return;
+                    NSUInteger before=representative.sweep.changedCount;
+                    unsigned long long changedBytesBefore=representative.sweep.changedBytes;
+                    int fresh=[representative.sweep axs_cachekeeper_open_parent:representative.path];
+                    if (fresh<0) {
+                        int code=errno;
+                        if (representative.sweep.changedCount>before) {
+                            representative.sweep.changedCount=before;
+                            representative.sweep.changedBytes=changedBytesBefore;
+                        }
+                        [self axs_cachekeeper_access_failed_from:cursor member:representative code:code stage:@"hardlink-reopen-parent"];return;
+                    }
+                    struct stat currentParent,pinnedParent;
+                    int error=0;
+                    if (fstat(fresh,&currentParent) || fstat([[memberFDs objectForKey:representative] intValue],&pinnedParent)) error=errno;
+                    close(fresh);
+                    if (error) {[self axs_cachekeeper_failed_from:cursor member:representative code:error stage:@"hardlink-stat-parent"];return;}
+                    BOOL same=currentParent.st_dev==pinnedParent.st_dev && currentParent.st_ino==pinnedParent.st_ino;
+                    if (!same) {[self axs_cachekeeper_changed_from:cursor reason:@"硬链接组父目录已替换，剩余路径保留"];return;}
+                }
+                struct stat current;
+                if (fstat(file,&current)) {[self axs_cachekeeper_failed_from:cursor member:member code:errno stage:@"hardlink-restat-file"];return;}
+                if (!axs_cachekeeper_hardlink_stat_matches(current,expected,NO)) {
+                    [self axs_cachekeeper_changed_from:cursor reason:@"硬链接组 inode 或链接数变化，剩余路径保留"];return;
+                }
+                for (NSUInteger pending=cursor;pending<self.members.count;pending++) {
+                    if (!shouldContinue()) return;
+                    AxsCacheKeeperHardLinkMember *alias=self.members[pending];
+                    if (fstatat([[memberFDs objectForKey:alias] intValue],alias.path.lastPathComponent.fileSystemRepresentation,&current,AT_SYMLINK_NOFOLLOW)) {
+                        [self axs_cachekeeper_access_failed_from:cursor member:alias code:errno stage:@"hardlink-restat-member"];return;
+                    }
+                    if (!axs_cachekeeper_hardlink_stat_matches(current,expected,NO)) {
+                        [self axs_cachekeeper_changed_from:cursor reason:@"硬链接集合不再闭合，剩余路径保留"];return;
+                    }
+                }
+                if (!shouldContinue() || !willDelete()) return;
+                int parentFD=[[memberFDs objectForKey:member] intValue];
+                int result=sweep.unlinkFile(parentFD,member.path.lastPathComponent.fileSystemRepresentation);
+                if (result) {[self axs_cachekeeper_failed_from:cursor member:member code:errno stage:@"hardlink-unlinkat"];return;}
+                // Count the successful syscall before cancellation or any later validation can return.
+                [sweep.handledHardLinkCandidates addObject:member.path];sweep.removed++;
+                sweep.bytes+=expected.st_size>0 ? (unsigned long long)expected.st_size : 0;
+                [sweep axs_cachekeeper_did_remove:member.path parentFD:parentFD];
+                if (fstat(file,&current)) {[self axs_cachekeeper_failed_from:cursor+1 member:member code:errno stage:@"hardlink-post-unlink-stat"];return;}
+                if (!axs_cachekeeper_hardlink_stat_matches(current,expected,YES)) {
+                    [self axs_cachekeeper_changed_from:cursor+1 reason:@"本次 unlink 后的 inode 变化超出预期，剩余路径保留"];return;
+                }
+                expected=current;
+            }
+        }
+    } @finally {
+        if (file>=0) close(file);
+        for (NSNumber *fd in parents.allValues) close(fd.intValue);
+    }
 }
 @end

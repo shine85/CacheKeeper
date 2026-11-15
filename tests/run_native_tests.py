@@ -13,9 +13,13 @@ if sys.platform != "darwin" or not compiler:
 output = root / "tmp" / ("cache-tests-" + str(time.time_ns()))
 output.mkdir(parents=True)
 try:
+    subprocess.run([sys.executable, str(root / "tests" / "run_hardlink_tests.py")],
+                   check=True, timeout=60)
     subprocess.run([sys.executable, str(root / "tests" / "run_diagnostic_channel_export_red.py")],
                    check=True, timeout=60)
     subprocess.run([sys.executable, str(root / "tests" / "run_diagnostic_channel_paths_red.py")],
+                   check=True, timeout=60)
+    subprocess.run([sys.executable, str(root / "tests" / "run_diagnostic_channel_native_paths.py")],
                    check=True, timeout=60)
     # Keep the implementation in Objective-C and the caller in Objective-C++, as in Logos.
     # Run this before UIKit so missing C linkage fails in the native stage.
@@ -114,6 +118,7 @@ try:
                     str(root / "AxsCacheKeeperCleanupSchedule.m"),
                     str(root / "AxsCacheKeeperDependencySnapshot.m"),
                     str(root / "tests" / "plan_repair_tests.m"),
+                    str(root / "tests" / "hardlink_tests.m"),
                     str(root / "tests" / "review_followup_tests.m"),
                     str(root / "tests" / "diagnostics_tests.m"),
                     str(root / "tests" / "search_diagnostics_tests.m"),
