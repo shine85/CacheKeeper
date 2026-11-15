@@ -166,6 +166,17 @@ static NSDictionary *axs_cachekeeper_webkit_test_context(void) {
     // An unattached view may be suspended while simulator WebKit services cold-start.
     if (!self.axs_cachekeeper_attachedViews) self.axs_cachekeeper_attachedViews=[NSMutableArray new];
     [self.axs_cachekeeper_attachedViews addObject:view];[window.rootViewController.view addSubview:view];
+    // Run 140: the simulator's Networking process launched in 18.2s, before it could
+    // service the 15s navigation. Establish service readiness separately on this same store.
+    XCTestExpectation *network=[self expectationWithDescription:@"Owned WebKit networking store is ready"];
+    __block BOOL ready=NO;
+    NSTimeInterval started=NSProcessInfo.processInfo.systemUptime;
+    [view.configuration.websiteDataStore.httpCookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+        (void)cookies;ready=YES;[network fulfill];
+    }];
+    [self waitForExpectations:@[network] timeout:45];
+    if (!ready) return NO;
+    NSLog(@"CacheKeeper fixture WebKit service ready in %.3fs",NSProcessInfo.processInfo.systemUptime-started);
     AxsCacheKeeperWebKitFixtureNavigation *delegate=[AxsCacheKeeperWebKitFixtureNavigation new];
     delegate.finished=[self expectationWithDescription:@"Synthetic WebKit fixture loaded"];
     XCTestExpectation *finished=delegate.finished;view.navigationDelegate=delegate;
