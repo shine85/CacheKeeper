@@ -1,6 +1,10 @@
 #pragma once
 #import <Foundation/Foundation.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Call on a background queue, using only the system application's bundleURL.
 // Snapshots (including fingerprint and private identity fields) stay in memory; never export them.
 // Missing version/build remain absent with installationState=versionUnknown; invalid files fail closed.
@@ -18,3 +22,7 @@ NSArray *axs_cachekeeper_installed_applications_with_container_coverage(NSMutabl
                                                                        NSDictionary **coverage, NSError **error);
 // Fixed, count-only schema; invalid values return an explicit invalid state. Never exports raw identities.
 NSDictionary *axs_cachekeeper_container_coverage_projection(id coverage);
+
+#ifdef __cplusplus
+}
+#endif

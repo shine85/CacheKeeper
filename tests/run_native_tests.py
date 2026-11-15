@@ -13,6 +13,41 @@ if sys.platform != "darwin" or not compiler:
 output = root / "tmp" / ("cache-tests-" + str(time.time_ns()))
 output.mkdir(parents=True)
 try:
+    # Catch the Logos/Objective-C boundary before the expensive UIKit and Theos stages.
+    installation_object = output / "installation.o"
+    installation_flags = [compiler, "clang++", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra"]
+    installation_caller = root / "tests" / "installation_linkage_tests.mm"
+    subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
+                    "-I" + str(root / "tests" / "include"), "-c",
+                    str(root / "AxsCacheKeeperInstallation.m"), "-o", str(installation_object)],
+                   check=True, timeout=60)
+    # Recreate the missing-linkage header in tmp. Both translation units must compile;
+    # only the link may fail, and it must identify the two real runtime dependencies.
+    installation_header = (root / "AxsCacheKeeperInstallation.h").read_text(encoding="utf-8-sig")
+    for guard in ('#ifdef __cplusplus\nextern "C" {\n#endif\n', '#ifdef __cplusplus\n}\n#endif\n'):
+        if installation_header.count(guard) != 1:
+            raise SystemExit("FAIL: ambiguous installation linkage mutation target")
+        installation_header = installation_header.replace(guard, "")
+    installation_baseline = output / "installation-baseline"
+    installation_baseline.mkdir()
+    (installation_baseline / "AxsCacheKeeperInstallation.h").write_text(installation_header, encoding="utf-8")
+    baseline_object = installation_baseline / "caller.o"
+    subprocess.run([*installation_flags, "-I" + str(installation_baseline), "-c",
+                    str(installation_caller), "-o", str(baseline_object)], check=True, timeout=60)
+    baseline = subprocess.run([*installation_flags, "-framework", "Foundation", str(baseline_object),
+                               str(installation_object), "-o", str(installation_baseline / "linkage")],
+                              capture_output=True, text=True, timeout=60)
+    expected_symbols = ("axs_cachekeeper_installation_snapshot(", "axs_cachekeeper_validate_installation_snapshot(")
+    if baseline.returncode == 0 or "Undefined symbols" not in baseline.stderr or not all(
+            symbol in baseline.stderr for symbol in expected_symbols):
+        raise SystemExit("FAIL: missing C linkage did not reproduce the expected linker failure\n" +
+                         baseline.stdout + baseline.stderr)
+    print("PASS: installation missing-C-linkage baseline fails at both expected exports")
+    installation_linkage = output / "installation-linkage"
+    subprocess.run([*installation_flags, "-I" + str(root), "-framework", "Foundation",
+                    str(installation_caller), str(installation_object), "-o", str(installation_linkage)],
+                   check=True, timeout=60)
+    subprocess.run([str(installation_linkage)], check=True, timeout=60)
     webkit_tests = output / "webkit-cache-tests"
     subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
                     "-framework", "Foundation", "-framework", "WebKit",
