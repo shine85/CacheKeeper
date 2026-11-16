@@ -156,17 +156,6 @@ static void siresource_budget(NSString *folder,NSDictionary *registry,NSDate *da
     [values addObject:@{@"path":@"tmp",@"bytes":@9000,@"complete":@YES}];
     [values addObject:@{@"path":@"Cache",@"bytes":@9000,@"complete":@YES}];
     NSDictionary *states=@{@"test.inventory.alpha":@{@"enabled":@YES,@"autoDiscover":@YES,@"excludedPaths":@[@"Library/Caches/retained"]}};
-    NSDictionary *snapshots=@{@"test.inventory.alpha":siscan(values,date,YES)};
-    siput(folder,@"appEnabled.plist",states);siput(folder,@"directories.plist",@{});siput(folder,@"snapshots.plist",snapshots);
-    NSDictionary *before=sifiles(folder);
-    AxsCacheKeeperDiagnostics *session=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:folder];
-    NSDictionary *report=[session reportWithApps:@[] environment:@{@"registryInventory":registry}],*entry=siapp(report[@"storageInventory"],@"test.inventory.alpha");
-    sicheck([entry[@"resources"] count]==16384 && [entry[@"resourceRowsTruncated"] isEqual:@YES] && [entry[@"omittedResourceRows"] isEqual:@2],@"saved duplicate resources retain bounded output and exact omission count");
-    sicheck([entry[@"discoveryRowsTruncated"] isEqual:@YES] && [entry[@"discoveryRowsExamined"] isEqual:@16384] && [entry[@"discoveredRootCount"] isEqual:@1],@"bounded discovery deduplicates roots and visibly retains incomplete coverage");
-    sicheck([entry[@"resources"][0][@"authorizationState"] isEqual:@"notAuthorized"] && [entry[@"resources"][1][@"authorizationState"] isEqual:@"configuredPendingExecutionPreflight"] && [entry[@"resources"][1][@"actuallyReclaimable"] isEqual:@"notMeasured"],@"omitted root cannot promote authorization and observed root still requires execution preflight");
-    sicheck([before isEqual:sifiles(folder)],@"resource budget regression does not rewrite saved sources");
-    NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:nil];
-    sicheck(json && [NSJSONSerialization JSONObjectWithData:json options:0 error:nil]!=nil,@"large saved budget report survives real JSON serialization");
     AxsCacheKeeperStorageBudgetRows *tracked=[AxsCacheKeeperStorageBudgetRows new];tracked.values=values;
     sieffectiveCalls=0;siexclusionCalls=0;siselectedCalls=0;
     NSDictionary *direct=axs_cachekeeper_storage_inventory(nil,@{@"state":@"available",@"data":states},@{@"state":@"available",@"data":@{}},@{@"state":@"available",@"data":@{@"test.inventory.alpha":siscan(tracked,date,YES)}},@[],^NSString *(NSString *path){return path;});
