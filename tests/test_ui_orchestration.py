@@ -43,7 +43,7 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
         command = list(map(str, command))
         timeout = kwargs.get("timeout")
         if len(command) > 1 and command[1].endswith("run_search_editing_red.py"):
-            stage, expected_timeout = "searchRed", 900
+            stage, expected_timeout = "searchRed", 1200
         elif command[0] == "xcodegen":
             stage = "generate515" if "image-sdk-5.15.5.yml" in command[command.index("--spec") + 1] else "generate521"
             expected_timeout = 60

@@ -37,10 +37,12 @@ def main():
                "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"]
     subprocess.run(["xcodebuild", "build-for-testing", *options], check=True, timeout=600)
     result = output / "RedResults.xcresult"
+    # Xcode collects diagnostics after an expected failure; #152 finished the test
+    # in 10 seconds but exceeded 180 seconds while finalizing its result bundle.
     with (output / "red.log").open("w", encoding="utf-8") as log:
         process = subprocess.run(["xcodebuild", "test-without-building", *options,
                                   "-resultBundlePath", str(result), "-parallel-testing-enabled", "NO"],
-                                 stdout=log, stderr=subprocess.STDOUT, timeout=180)
+                                 stdout=log, stderr=subprocess.STDOUT, timeout=420)
     summary = json.loads(subprocess.check_output(
         ["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", str(result), "--format", "json"],
         text=True, timeout=60))
