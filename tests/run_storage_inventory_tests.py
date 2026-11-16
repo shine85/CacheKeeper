@@ -51,6 +51,8 @@ def run() -> int:
                      "-I" + str(ROOT / "tests/include"), "-framework", "Foundation"]
             if role == "red":
                 flags.append("-DAXS_CACHEKEEPER_STORAGE_INVENTORY_RED=1")
+            else:
+                flags.append("-DAXS_CACHEKEEPER_STORAGE_INVENTORY_TESTING=1")
             # Compilation/link errors and timeout cannot satisfy the expected behavior RED.
             subprocess.run([*flags, *map(str, sources), "-o", str(binary)], check=True, timeout=60)
             result = subprocess.run([str(binary), str(output / (role + "-fixtures"))], capture_output=True,

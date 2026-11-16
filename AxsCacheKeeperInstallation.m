@@ -739,8 +739,15 @@ NSArray *axs_cachekeeper_installed_applications_with_registry_inventory(NSMutabl
     if (error) *error=nil;
     NSNumber *sampledAt=@((unsigned long long)NSDate.date.timeIntervalSince1970);
     NSString *sourceState=nil;
+    id installed=nil;
+#if defined(AXS_CACHEKEEPER_STORAGE_INVENTORY_TESTING)
+    extern NSArray *axs_cachekeeper_storage_test_registrations(void);
+    installed=axs_cachekeeper_storage_test_registrations();
+    sourceState=@"testInjected";
+#else
     id manager=axs_cachekeeper_coverage_property(NSClassFromString(@"LSApplicationWorkspace"),@"defaultWorkspace",&sourceState);
-    id installed=manager ? axs_cachekeeper_coverage_property(manager,@"allInstalledApplications",&sourceState) : nil;
+    installed=manager ? axs_cachekeeper_coverage_property(manager,@"allInstalledApplications",&sourceState) : nil;
+#endif
     if (![installed isKindOfClass:NSArray.class]) {
         if (installed) sourceState=@"invalid";
         if (coverage) {NSMutableDictionary *failure=axs_cachekeeper_coverage_base(@"unavailable");failure[@"sourceState"]=sourceState;*coverage=[failure copy];}

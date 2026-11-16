@@ -55,14 +55,21 @@ static void sicheck(BOOL condition, NSString *message) {
 @implementation AxsCacheKeeperStorageTestProxy
 @end
 static id siregistrations;
+#if AXS_CACHEKEEPER_STORAGE_INVENTORY_RED
 @interface LSApplicationWorkspace : NSObject
 + (instancetype)defaultWorkspace;
 - (id)allInstalledApplications;
 @end
+#endif
+#if AXS_CACHEKEEPER_STORAGE_INVENTORY_TESTING
+NSArray *axs_cachekeeper_storage_test_registrations(void) { return siregistrations; }
+#endif
+#if AXS_CACHEKEEPER_STORAGE_INVENTORY_RED
 @implementation LSApplicationWorkspace
 + (instancetype)defaultWorkspace {return [self new];}
 - (id)allInstalledApplications {return siregistrations;}
 @end
+#endif
 static AxsCacheKeeperStorageTestProxy *siproxy(NSString *bundle, NSString *type, id home) {
     AxsCacheKeeperStorageTestProxy *proxy=[AxsCacheKeeperStorageTestProxy new];
     proxy.applicationIdentifier=bundle;proxy.applicationType=type;
