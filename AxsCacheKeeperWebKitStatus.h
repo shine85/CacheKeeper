@@ -14,6 +14,13 @@ static inline BOOL axs_cachekeeper_webkit_counter(id value) {
     double number=[value doubleValue];
     return isfinite(number) && number>=0 && number<=9007199254740991.0 && floor(number)==number;
 }
+#ifndef AXS_CACHEKEEPER_STATUS_IMMUTABLE_COPY_DEFINED
+#define AXS_CACHEKEEPER_STATUS_IMMUTABLE_COPY_DEFINED 1
+static inline id axs_cachekeeper_status_immutable_copy(id value) {
+    NSData *data=[NSPropertyListSerialization dataWithPropertyList:value format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+    return data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:nil] : nil;
+}
+#endif
 static inline NSDictionary *axs_cachekeeper_webkit_installation_check(id value) {
     return axs_cachekeeper_installation_check_projection(value);
 }
@@ -54,7 +61,7 @@ static inline NSDictionary *axs_cachekeeper_webkit_raw_projection(id value) {
     if ([value[@"state"] isEqual:@"waitingTimedOut"] && ![value[@"timedOut"] boolValue]) return nil;
     NSMutableDictionary *result=[value mutableCopy];
     if (installationCheck) result[@"installationCheck"]=installationCheck;
-    return [result copy];
+    return axs_cachekeeper_status_immutable_copy(result);
 }
 static inline NSDictionary *axs_cachekeeper_webkit_projection_with_aliases(id value,NSMutableDictionary *aliases) {
     NSDictionary *raw=axs_cachekeeper_webkit_raw_projection(value);if (!raw) return nil;

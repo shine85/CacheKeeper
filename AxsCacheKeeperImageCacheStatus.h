@@ -11,6 +11,13 @@ static inline BOOL axs_cachekeeper_image_counter(id value) {
     double number=[value doubleValue];
     return isfinite(number) && number>=0 && number<=9007199254740991.0 && floor(number)==number;
 }
+#ifndef AXS_CACHEKEEPER_STATUS_IMMUTABLE_COPY_DEFINED
+#define AXS_CACHEKEEPER_STATUS_IMMUTABLE_COPY_DEFINED 1
+static inline id axs_cachekeeper_status_immutable_copy(id value) {
+    NSData *data=[NSPropertyListSerialization dataWithPropertyList:value format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+    return data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:nil] : nil;
+}
+#endif
 // No cache keys, URLs, filesystem paths or installation identities cross this boundary.
 static inline NSDictionary *axs_cachekeeper_image_cache_raw_projection(id value) {
     if (![value isKindOfClass:NSDictionary.class]) return nil;
@@ -50,7 +57,7 @@ static inline NSDictionary *axs_cachekeeper_image_cache_raw_projection(id value)
         skipped>queued-submitted || pending!=queued-completed-skipped || pending>64) return nil;
     if ([value[@"state"] isEqual:@"timedOut"] && !pending) return nil;
     if ([value[@"state"] isEqual:@"apiCompleted"] && (!completed || pending)) return nil;
-    return [value copy];
+    return axs_cachekeeper_status_immutable_copy(value);
 }
 static inline NSDictionary *axs_cachekeeper_image_cache_projection_with_aliases(id value,NSMutableDictionary *aliases) {
     NSDictionary *raw=axs_cachekeeper_image_cache_raw_projection(value);if (!raw) return nil;
