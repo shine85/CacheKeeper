@@ -5,7 +5,20 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
+#include <objc/runtime.h>
+static Method axs_cachekeeper_legacy_race_method;
+static IMP axs_cachekeeper_legacy_race_replacement;
+static NSUInteger axs_cachekeeper_legacy_race_reads;
+// Only schedule a real method mutation at the last reread; never substitute bytes or a successful check.
+static IMP axs_cachekeeper_legacy_observed_imp(Method method) {
+    if (method==axs_cachekeeper_legacy_race_method && ++axs_cachekeeper_legacy_race_reads==2)
+        method_setImplementation(method,axs_cachekeeper_legacy_race_replacement);
+    return method_getImplementation(method);
+}
+#define method_getImplementation axs_cachekeeper_legacy_observed_imp
 #import "AxsCacheKeeperImageLegacySource.h"
+#undef method_getImplementation
+#import "AxsCacheKeeperImageDiscovery.h"
 
 // A test-owned byte marker in real executable memory. It is hashed, never executed.
 __asm__(".section __TEXT,__text,regular,pure_instructions\n"
@@ -65,6 +78,63 @@ static BOOL axs_cachekeeper_legacy_layout(AxsCacheKeeperImageLegacyLayout *layou
     return AxsCacheKeeperImageLegacyReadLayout(axs_cachekeeper_legacy_mapping,
         (intptr_t)(uintptr_t)axs_cachekeeper_legacy_mapping-(intptr_t)0x100000000,layout);
 }
+static void axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyCheck check,const char *stage,const char *reason,NSUInteger method,NSUInteger helper) {
+    axs_cachekeeper_legacy_require(!check.accepted && !strcmp(check.stage,stage) && !strcmp(check.reason,reason) &&
+        check.methodIndex==method && check.helperIndex==helper,"first source refusal reports its exact gate and independent index");
+    axs_cachekeeper_legacy_require(axs_cachekeeper_image_source_check_projection(@{@"schemaVersion":@1,@"accepted":@(check.accepted),
+        @"stage":[NSString stringWithUTF8String:check.stage],@"reason":[NSString stringWithUTF8String:check.reason],@"methodIndex":@(method),@"helperIndex":@(helper)})!=nil,
+        "measured first refusal survives its single strict projection");
+}
+static void axs_cachekeeper_legacy_check_cases(const AxsCacheKeeperImageLegacyLayout *layout,const void *implementation,const AxsCacheKeeperImageLegacyWindow *window) {
+    const void *slots[25];for (NSUInteger index=0;index<25;index++) slots[index]=implementation;slots[10]=NULL;
+    for (NSUInteger index=0;index<25;index++) if (index!=10) {
+        slots[index]=NULL;
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacySourceCheck((void *)(UINTPTR_MAX-16),slots),"slots","missing",index+1,0);
+        axs_cachekeeper_legacy_require(!AxsCacheKeeperImageLegacySourceMatches((void *)(UINTPTR_MAX-16),slots),"BOOL uses the same slot refusal before unreadable downstream image");
+        slots[index]=implementation;
+    }
+    slots[10]=implementation;slots[0]=NULL;
+    axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacySourceCheck(NULL,slots),"slots","unexpected",11,0);
+    slots[10]=NULL;slots[0]=implementation;
+    axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacySourceCheck(NULL,slots),"mainIdentity","missingBase",0,0);
+    axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacySourceCheck((void *)(UINTPTR_MAX-16),slots),"mainIdentity","notMainBase",0,0);
+    const void *main=_dyld_get_image_header(0);
+    for (NSUInteger index=0;index<3;index++) {
+        const char *reasons[3]={"bundle","version","build"};
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyMainIdentityCheck(main,main,index==0 ? @"wrong" : @"com.baidu.netdisk",
+            index==1 ? @"wrong" : @"13.37.5",index==2 ? @"wrong" : @"13.37.5.10"),"mainIdentity",reasons[index],0,0);
+    }
+    axs_cachekeeper_legacy_require(AxsCacheKeeperImageLegacyMainIdentityCheck(main,main,@"com.baidu.netdisk",@"13.37.5",@"13.37.5.10").accepted,"exact main identity primitive accepts only its known tuple");
+    __block NSUInteger metadataReads=0;
+    axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyMainIdentityWithProvider(NULL,main,^id(NSUInteger index) {(void)index;metadataReads++;return @"wrong";}),"mainIdentity","missingBase",0,0);
+    axs_cachekeeper_legacy_require(metadataReads==0,"missing base never executes any downstream metadata gate");
+    axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyMainIdentityWithProvider(main,main,^id(NSUInteger index) {(void)index;metadataReads++;return @"wrong";}),"mainIdentity","bundle",0,0);
+    axs_cachekeeper_legacy_require(metadataReads==1,"bundle refusal never evaluates version or build metadata");
+    for (NSUInteger index=1;index<=25;index++) if (index!=11) {
+        AxsCacheKeeperImageLegacyWindow measured=*window;measured.methodIndex=(uint32_t)index;
+        axs_cachekeeper_legacy_require(AxsCacheKeeperImageLegacyWindowCheck(layout,implementation,&measured,0).accepted,"every primary index shares the positive fingerprint primitive");
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyWindowCheck(layout,NULL,&measured,0),"mainWindow","pointer",index,0);
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyWindowCheck(layout,(const uint8_t *)implementation+1,&measured,0),"mainWindow","offset",index,0);
+        AxsCacheKeeperImageLegacyLayout clipped=*layout;clipped.sectionSize=1;
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyWindowCheck(&clipped,implementation,&measured,0),"mainWindow","section",index,0);
+        measured.sha256[0]^=1;
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyWindowCheck(layout,implementation,&measured,0),"mainWindow","digest",index,0);
+    }
+    for (NSUInteger helper=1;helper<=2;helper++) {
+        axs_cachekeeper_legacy_require(AxsCacheKeeperImageLegacyWindowCheck(layout,implementation,window,helper).accepted,"both helper indexes use the same positive window primitive");
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyWindowCheck(layout,NULL,window,helper),"helperWindow","pointer",0,helper);
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyWindowCheck(layout,(const uint8_t *)implementation+1,window,helper),"helperWindow","offset",0,helper);
+        AxsCacheKeeperImageLegacyWindow changed=*window;changed.sha256[0]^=1;
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyWindowCheck(layout,implementation,&changed,helper),"helperWindow","digest",0,helper);
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyMethodCheck(layout,Nil,"missing","v",window,helper),"helperOwner","missing",0,helper);
+    }
+    axs_cachekeeper_legacy_protect(axs_cachekeeper_legacy_page,axs_cachekeeper_legacy_page,PROT_READ);
+    for (NSUInteger index=1;index<=25;index++) if (index!=11) {
+        AxsCacheKeeperImageLegacyWindow measured=*window;measured.methodIndex=(uint32_t)index;
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyWindowCheck(layout,implementation,&measured,0),"mainWindow","protectionOrRead",index,0);
+    }
+    axs_cachekeeper_legacy_protect(axs_cachekeeper_legacy_page,axs_cachekeeper_legacy_page,PROT_READ|PROT_EXEC);
+}
 int main(void) {
     @autoreleasepool {
         axs_cachekeeper_legacy_page=(size_t)getpagesize();
@@ -115,22 +185,28 @@ int main(void) {
         axs_cachekeeper_legacy_require(!AxsCacheKeeperImageLegacySourceMatches(_dyld_get_image_header(0),methods),"unmatched real host is refused");
         axs_cachekeeper_legacy_require(!AxsCacheKeeperImageLegacyHelpersMatch(axs_cachekeeper_legacy_mapping),"helper-only gate rejects a non dyld image");
         axs_cachekeeper_legacy_require(!AxsCacheKeeperImageLegacyHelpersMatch(_dyld_get_image_header(0)),"helper-only gate retains exact host identity");
+        axs_cachekeeper_legacy_protect(axs_cachekeeper_legacy_page,axs_cachekeeper_legacy_page,PROT_READ|PROT_EXEC);
+        axs_cachekeeper_legacy_check_cases(&layout,implementation,&window);
 
         axs_cachekeeper_legacy_reset();axs_cachekeeper_legacy_header->magic=MH_CIGAM_64;
         axs_cachekeeper_legacy_require(!axs_cachekeeper_legacy_layout(&layout),"wrong magic is refused");
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyLayoutCheck(axs_cachekeeper_legacy_mapping,0,&layout),"layout","header",0,0);
         axs_cachekeeper_legacy_reset();axs_cachekeeper_legacy_header->sizeofcmds=UINT32_MAX;
         axs_cachekeeper_legacy_require(!axs_cachekeeper_legacy_layout(&layout),"oversized load commands are refused");
         axs_cachekeeper_legacy_reset();axs_cachekeeper_legacy_segment->cmdsize=sizeof(struct load_command);
         axs_cachekeeper_legacy_require(!axs_cachekeeper_legacy_layout(&layout),"truncated segment is refused");
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyLayoutCheck(axs_cachekeeper_legacy_mapping,0,&layout),"layout","segments",0,0);
         axs_cachekeeper_legacy_reset();axs_cachekeeper_legacy_header->ncmds++;
         axs_cachekeeper_legacy_require(!axs_cachekeeper_legacy_layout(&layout),"missing load command is refused");
         axs_cachekeeper_legacy_reset();axs_cachekeeper_legacy_uuid->uuid[0]^=1;
         axs_cachekeeper_legacy_require(!axs_cachekeeper_legacy_layout(&layout),"wrong UUID is refused");
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyLayoutCheck(axs_cachekeeper_legacy_mapping,0,&layout),"layout","uuid",0,0);
         axs_cachekeeper_legacy_reset();memcpy(axs_cachekeeper_legacy_uuid+1,axs_cachekeeper_legacy_uuid,sizeof(*axs_cachekeeper_legacy_uuid));
         axs_cachekeeper_legacy_header->ncmds++;axs_cachekeeper_legacy_header->sizeofcmds+=sizeof(*axs_cachekeeper_legacy_uuid);
         axs_cachekeeper_legacy_require(!axs_cachekeeper_legacy_layout(&layout),"duplicate UUID is refused");
         axs_cachekeeper_legacy_reset();axs_cachekeeper_legacy_section->flags=0;
         axs_cachekeeper_legacy_require(!axs_cachekeeper_legacy_layout(&layout),"non instruction section is refused");
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyLayoutCheck(axs_cachekeeper_legacy_mapping,0,&layout),"layout","section",0,0);
         axs_cachekeeper_legacy_reset();axs_cachekeeper_legacy_section->size=UINT64_MAX;
         axs_cachekeeper_legacy_require(!axs_cachekeeper_legacy_layout(&layout),"overflowing section is refused");
         axs_cachekeeper_legacy_reset();axs_cachekeeper_legacy_section->offset++;
@@ -150,8 +226,10 @@ int main(void) {
         axs_cachekeeper_legacy_require(!axs_cachekeeper_legacy_layout(&layout),"overlapping loaded segments are refused");
         axs_cachekeeper_legacy_reset();
         axs_cachekeeper_legacy_require(!AxsCacheKeeperImageLegacyReadLayout(axs_cachekeeper_legacy_mapping,0,&layout),"wrong image slide is refused");
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyLayoutCheck(axs_cachekeeper_legacy_mapping,0,&layout),"layout","slide",0,0);
         axs_cachekeeper_legacy_protect(0,axs_cachekeeper_legacy_page,PROT_NONE);
         axs_cachekeeper_legacy_require(!AxsCacheKeeperImageLegacyReadLayout(axs_cachekeeper_legacy_mapping,0,&layout),"unreadable header is refused without dereference");
+        axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyLayoutCheck(axs_cachekeeper_legacy_mapping,0,&layout),"layout","read",0,0);
         axs_cachekeeper_legacy_require(!AxsCacheKeeperImageLegacyReadLayout((void *)(UINTPTR_MAX-16),0,&layout),"overflowing header address is refused");
         axs_cachekeeper_legacy_require(munmap(axs_cachekeeper_legacy_mapping,3*axs_cachekeeper_legacy_page)==0,"fixture mapping closes");
 
@@ -168,6 +246,19 @@ int main(void) {
         axs_cachekeeper_legacy_require(!AxsCacheKeeperImageLegacyMethodMatches(&layout,fixture,"axs_cachekeeper_sample:","v24@0:8@16",&window),"helper ABI mismatch is refused");
         axs_cachekeeper_legacy_require(!AxsCacheKeeperImageLegacyMethodMatches(&layout,AxsCacheKeeperLegacyInheritedFixture.class,"axs_cachekeeper_sample:","@24@0:8@16",&window),"inherited helper method is refused");
         axs_cachekeeper_legacy_require(!AxsCacheKeeperImageLegacyMethodMatches(&layout,fixture,"missing:","@24@0:8@16",&window),"missing helper method is refused");
+        for (NSUInteger helper=1;helper<=2;helper++) {
+            axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyMethodCheck(&layout,object_getClass(fixture),"axs_cachekeeper_sample:","@24@0:8@16",&window,helper),"helperOwner","metaclass",0,helper);
+            axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyMethodCheck(&layout,NSObject.class,"axs_cachekeeper_sample:","@24@0:8@16",&window,helper),"helperOwner","image",0,helper);
+            axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyMethodCheck(&layout,fixture,"missing:","@24@0:8@16",&window,helper),"helperOwner","methodMissing",0,helper);
+            axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyMethodCheck(&layout,AxsCacheKeeperLegacyInheritedFixture.class,"axs_cachekeeper_sample:","@24@0:8@16",&window,helper),"helperOwner","inherited",0,helper);
+            axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyMethodCheck(&layout,fixture,"axs_cachekeeper_sample:","v24@0:8@16",&window,helper),"helperABI","encoding",0,helper);
+            char unreadableEncoding[129];memset(unreadableEncoding,'v',128);unreadableEncoding[128]='\0';
+            axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyMethodCheck(&layout,fixture,"axs_cachekeeper_sample:",unreadableEncoding,&window,helper),"helperABI","encodingRead",0,helper);
+            axs_cachekeeper_legacy_race_method=method;axs_cachekeeper_legacy_race_replacement=original;axs_cachekeeper_legacy_race_reads=0;
+            axs_cachekeeper_legacy_first(AxsCacheKeeperImageLegacyMethodCheck(&layout,fixture,"axs_cachekeeper_sample:","@24@0:8@16",&window,helper),"helperWindow","changed",0,helper);
+            axs_cachekeeper_legacy_require(axs_cachekeeper_legacy_race_reads==2 && method_getImplementation(method)==original,"helper race is a real last-reread method change");
+            axs_cachekeeper_legacy_race_method=NULL;method_setImplementation(method,(IMP)axs_cachekeeper_legacy_method_bytes);
+        }
         method_setImplementation(method,original);
         for (NSUInteger attempt=0;attempt<2;attempt++)
             axs_cachekeeper_legacy_require(!AxsCacheKeeperImageLegacyMethodMatches(&layout,fixture,"axs_cachekeeper_sample:","@24@0:8@16",&window),"later helper IMP is never relearned");

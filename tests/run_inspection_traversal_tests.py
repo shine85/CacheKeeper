@@ -1,4 +1,4 @@
-"""Run real FD inspection fixtures after the pinned old implementation fails them."""
+"""Run real FD/name fixtures with pinned old RED and current GREEN in one checkout."""
 import hashlib
 import pathlib
 import shutil
@@ -15,6 +15,8 @@ if sys.platform != "darwin" or not compiler:
 
 baseline_commit = "d823af847a17231e245211817e4caa6e3c627993"
 baseline_sha256 = "25ae565367409a780a3b8f2618c2bd20e13f6d1a55d2427a708886baaadc7890"
+name_baseline_commit = "9cb488d420e873d24f3677e2758be99fb6f8502c"
+name_baseline_sha256 = "f82cda7be4e19f1b1bbd7f8663b067fe49bd5c37d66b9d186930a64fc2e490d1"
 baseline = subprocess.run(
     ["git", "show", baseline_commit + ":AxsCacheKeeperInspection.m"],
     cwd=root, capture_output=True, check=True, timeout=60,
@@ -50,6 +52,33 @@ with tempfile.TemporaryDirectory(prefix="inspection-tests-", dir=root / "tmp") a
                              selection + "\n" + result.stdout + result.stderr)
         print("PASS: old inspection reached the expected failure: " + selection, flush=True)
 
+    name_baseline = subprocess.run(
+        ["git", "show", name_baseline_commit + ":AxsCacheKeeperInspection.m"],
+        cwd=root, capture_output=True, check=True, timeout=60,
+    ).stdout.replace(b"\r\n", b"\n")
+    if hashlib.sha256(name_baseline).hexdigest() != name_baseline_sha256:
+        raise SystemExit("FAIL: pinned raw-name baseline source hash does not match")
+    name_path = output / "AxsCacheKeeperInspection-name-baseline.m"
+    name_path.write_bytes(name_baseline)
+    name_binary = output / "inspection-name-baseline"
+    subprocess.run([*flags, '-DAXS_INSPECTION_SOURCE="' + name_path.as_posix() + '"',
+                    str(fixture_source), "-o", str(name_binary)], check=True, timeout=60)
+    print("Pinned raw-name RED: " + name_baseline_commit + " SHA256 " + name_baseline_sha256, flush=True)
+    for selection, expected in [
+        ("raw-conversion", "legal byte names remain traversable when display conversion fails"),
+        ("raw-sources", "same-display byte components retain distinct source and twin identities"),
+        ("raw-protected", "raw protected components remain unread when presentation decoding fails"),
+        ("raw-invalid", "invalid dirent handling consumes one bounded step without swallowing siblings"),
+        ("raw-cancel", "one invalid raw record leaves traversal cancellable"),
+    ]:
+        result = subprocess.run([str(name_binary), str(output / ("name-old-" + selection)), selection],
+                                capture_output=True, text=True, encoding="utf-8", timeout=60)
+        failures = [line for line in result.stderr.splitlines() if line.startswith("FAIL:")]
+        if result.returncode != 1 or failures != ["FAIL: " + expected]:
+            raise SystemExit("FAIL: raw-name baseline did not reach expected assertion: " +
+                             selection + "\n" + result.stdout + result.stderr)
+        print("PASS: pinned raw-name baseline reached expected failure: " + selection, flush=True)
+
     source = (root / "AxsCacheKeeperInspection.m").read_text(encoding="utf-8-sig")
     mutations = [
         ("source-recheck", "if (![self.walker validateSource:source])", "if (NO)", [
@@ -59,6 +88,10 @@ with tempfile.TemporaryDirectory(prefix="inspection-tests-", dir=root / "tmp") a
          "- (void)cancel {self.cancelled=YES;self.complete=YES;}", [
              ("cancel", "cancel releases primary descriptors while the inspection is still alive"),
              ("twin-cancel", "cancel releases twin and primary descriptors while the inspection is still alive"),
+         ]),
+        ("unicode-policy", "encoding:NSUTF8StringEncoding];\n    return decoded ?: @\"opaque-component\";",
+         "encoding:NSASCIIStringEncoding];\n    return decoded ?: @\"opaque-component\";", [
+             ("raw-unicode-markers", "valid Unicode marker semantics survive unavailable display conversion"),
          ]),
     ]
     for name, before, after, cases in mutations:

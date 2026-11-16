@@ -123,6 +123,19 @@ static void aicoverage(NSString *root) {
     aicheck([coverage[@"group"][@"registeredURLCount"] isEqual:@1] && [coverage[@"group"][@"associationCount"] isEqual:@2] &&
         [coverage[@"extension"][@"registeredURLCount"] isEqual:@2] && [coverage[@"extension"][@"associationCount"] isEqual:@3] &&
         [coverage[@"allRolesUniqueRegisteredURLCount"] isEqual:@3],@"共享组、同URL两扩展、跨角色同URL登记正确去重，保留归属关联");
+    NSDictionary *registry=nil;
+    NSArray *inventoryApps=axs_cachekeeper_installed_applications_with_registry_inventory(cache,&coverage,&registry,nil);
+    aicheck([inventoryApps isEqual:apps] && [registry[@"entries"] count]==2 &&
+        [registry[@"entries"][0][@"bundle"] isEqual:@"com.apple.coverage-test"] &&
+        [registry[@"entries"][0][@"displayEligible"] isEqual:@NO],@"新增同次清单保持旧展示过滤且完整保留系统登记");
+    NSDictionary *systemRelations=registry[@"entries"][0][@"relationships"],*userRelations=registry[@"entries"][1][@"relationships"];
+    aicheck([systemRelations[@"home"][@"state"] isEqual:@"notProvided"] &&
+        [systemRelations[@"group"][@"tokens"] isEqual:userRelations[@"group"][@"tokens"]] &&
+        [userRelations[@"home"][@"tokens"] isEqual:systemRelations[@"extension"][@"tokens"]] &&
+        [userRelations[@"extension"][@"tokens"] count]==1,@"home缺席保留组/扩展，跨APP角色URL关系在同次匿名token保持");
+    NSMutableDictionary *registryInjected=[registry mutableCopy];registryInjected[@"privateRawURL"]=home;
+    NSDictionary *closedRegistry=axs_cachekeeper_registry_inventory_projection(registryInjected);
+    aicheck([closedRegistry isEqual:registry] && !closedRegistry[@"privateRawURL"],@"registry投影删除未知原始数据字段");
     AxsCacheKeeperDiagnostics *diagnostics=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:root];
     NSMutableDictionary *injected=[coverage mutableCopy];injected[@"rawURL"]=home;injected[@"privateOwner"]=user.applicationIdentifier;
     NSDictionary *exported=[diagnostics reportWithApps:apps environment:@{@"containerCoverage":injected}];

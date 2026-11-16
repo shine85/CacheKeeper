@@ -88,11 +88,15 @@ static BOOL axs_cachekeeper_runtime_source_matches(const void *base,const void *
     return axs_cachekeeper_runtime_fingerprinted && AxsCacheKeeperImageLegacySlotsPresent(implementations) &&
         axs_cachekeeper_runtime_helpers_match(base);
 }
+static AxsCacheKeeperImageLegacyCheck axs_cachekeeper_runtime_source_check(const void *base,const void *implementations[25]) {
+    return axs_cachekeeper_runtime_source_matches(base,implementations) ? AxsCacheKeeperImageLegacyComplete() :
+        AxsCacheKeeperImageLegacyResult("mainIdentity","bundle",0,0);
+}
 #define AxsCacheKeeperImageLegacyHelpersMatch axs_cachekeeper_runtime_helpers_match
-#define AxsCacheKeeperImageLegacySourceMatches axs_cachekeeper_runtime_source_matches
+#define AxsCacheKeeperImageLegacySourceCheck axs_cachekeeper_runtime_source_check
 #import "AxsCacheKeeperImageCache.m"
 #undef AxsCacheKeeperImageLegacyHelpersMatch
-#undef AxsCacheKeeperImageLegacySourceMatches
+#undef AxsCacheKeeperImageLegacySourceCheck
 
 static void axs_cachekeeper_runtime_require(BOOL value,const char *message) {
     if (!value) {fprintf(stderr,"FAIL: image-runtime-source: %s\n",message);exit(1);}

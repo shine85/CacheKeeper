@@ -7,6 +7,7 @@
 #import "AxsCacheKeeperInspectionStatus.h"
 #import "AxsCacheKeeperWebKitStatus.h"
 #import "AxsCacheKeeperImageCacheStatus.h"
+#import "AxsCacheKeeperStorageInventory.h"
 
 static NSDictionary *AxsCacheKeeperDiagnosticRead(NSString *folder,NSString *name) {
     NSError *error=nil;
@@ -103,9 +104,20 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
     if (![record isKindOfClass:NSDictionary.class]) return @{@"invalidRecord":@YES};
     NSMutableDictionary *out=[NSMutableDictionary new];
     if (record[@"scanDiagnostics"]) out[@"scanDiagnostics"]=axs_cachekeeper_scan_diagnostics_projection(record[@"scanDiagnostics"]) ?: @{@"state":@"invalid"};
-    if (record[@"inspectionReadFailure"]) out[@"inspectionReadFailure"]=axs_cachekeeper_inspection_read_failure_projection(record[@"inspectionReadFailure"]) ?: @{@"state":@"invalid"};
+    for (NSString *key in @[@"inspectionReadFailure",@"mainReadFailure",@"twinReadFailure"])
+        if (record[key]) out[key]=axs_cachekeeper_inspection_read_failure_projection(record[key]) ?: @{@"state":@"invalid"};
     NSArray *numbers=@[@"hardLinkRetained",@"hardLinkRetainedBytes",@"appRuleWaitingForExit",@"bytes",@"files",@"count",@"nlink",@"removed",@"failed",@"failures",@"changed",@"recent",@"remaining",@"remainingBytes",@"deferred",@"deferredBytes",@"unresolved",@"unresolvedBytes",@"protected",@"protectedBytes",@"retainedSubtreeCount",@"lastRemoved",@"lastBytes",@"endReason",@"links",@"hardLinks",@"symlinks",@"hidden",@"twinBytes",@"twinFailures",@"twinHidden",@"twinScanned",@"result",@"errorCode",@"complete",@"coverageComplete",@"measurementComplete",@"cancelled",@"checking",@"skipped",@"manageable",@"twinCoverageComplete",@"twinScanTruncated",@"twinDisplayTruncated",@"linkFilesTruncated",@"enabled",@"autoDiscover",@"urlCache",@"prevent",@"applied",@"total",@"completed",@"remainingCount"];
     NSMutableArray *invalid=[NSMutableArray new];
+    for (NSString *key in @[@"invalidNameRecords",@"twinInvalidNameRecords",@"nameDisplayOmitted",@"twinNameDisplayOmitted"]) {
+        if (!record[key]) continue;
+        if (axs_cachekeeper_inspection_count(record[key])) out[key]=record[key];
+        else [invalid addObject:key];
+    }
+    for (NSString *key in @[@"pathOperable",@"sourceOperable",@"twinOperable"]) {
+        if (!record[key]) continue;
+        if (axs_cachekeeper_input_boolean(record[key])) out[key]=record[key];
+        else [invalid addObject:key];
+    }
     for (NSString *key in @[@"appRuleID",@"state",@"phase",@"mode",@"kind",@"purgeClassification",@"type",@"outcome",@"path",@"source",@"twin"])
         if (record[key] && ![record[key] isKindOfClass:NSString.class]) [invalid addObject:key];
     for (NSString *key in numbers) if (record[key] && ![record[key] isKindOfClass:NSNumber.class]) [invalid addObject:key];
@@ -211,7 +223,8 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
     }
     // 本轮集合在首次进度回调前固定；之后的配置变更由下一轮读取。
     NSArray *bundles=[bundleSet.allObjects sortedArrayUsingSelector:@selector(compare:)];
-    NSMutableArray *exported=[NSMutableArray new];
+    NSMutableArray *exported=[NSMutableArray new],*savedSDKApps=[NSMutableArray new];
+    NSMutableDictionary *operationAliases=[NSMutableDictionary new];
     if (progress) progress(0,bundles.count);
     for (NSString *bundle in bundles) {
         NSMutableDictionary *app=[@{@"bundle":bundle} mutableCopy];
@@ -244,7 +257,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
             app[source[0]]=[redactor axs_cachekeeper_record:AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.%@.plist",bundle,source[1]])];
         NSDictionary *webKitRead=AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.webkit.plist",bundle]);
         if ([webKitRead[@"state"] isEqual:@"available"]) {
-            NSMutableDictionary *webKit=[axs_cachekeeper_webkit_projection(webKitRead[@"data"]) mutableCopy];
+            NSMutableDictionary *webKit=[axs_cachekeeper_webkit_projection_with_aliases(webKitRead[@"data"],operationAliases) mutableCopy];
             if (webKit) {
                 webKit[@"updated"]=@([webKit[@"updated"] timeIntervalSince1970]);
                 app[@"webKitDiskCache"]=@{@"state":@"available",@"data":webKit};
@@ -252,12 +265,13 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
         } else app[@"webKitDiskCache"]=[redactor axs_cachekeeper_record:webKitRead];
         NSDictionary *imageRead=AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.imagecache.plist",bundle]);
         if ([imageRead[@"state"] isEqual:@"available"]) {
-            NSMutableDictionary *imageCache=[axs_cachekeeper_image_cache_projection(imageRead[@"data"]) mutableCopy];
+            NSMutableDictionary *imageCache=[axs_cachekeeper_image_cache_projection_with_aliases(imageRead[@"data"],operationAliases) mutableCopy];
             if (imageCache) {
                 imageCache[@"updated"]=@([imageCache[@"updated"] timeIntervalSince1970]);
                 app[@"imageDiskCache"]=@{@"state":@"available",@"data":imageCache};
             } else app[@"imageDiskCache"]=@{@"state":@"invalid"};
         } else app[@"imageDiskCache"]=[redactor axs_cachekeeper_record:imageRead];
+        [savedSDKApps addObject:@{@"bundle":bundle,@"webKitDiskCache":webKitRead,@"imageDiskCache":imageRead}];
         [exported addObject:app];
         if (progress) progress(exported.count,bundles.count);
     }
@@ -277,6 +291,8 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
     return @{@"schemaVersion":@2,@"generatedAt":@(finished),@"environment":env,@"apps":exported,
         @"diagnosticChannel":AxsCacheKeeperDiagnosticChannelProjection(environment[@"diagnosticChannel"]),
         @"containerCoverage":axs_cachekeeper_container_coverage_projection(environment[@"containerCoverage"]),
+        @"storageInventory":axs_cachekeeper_storage_inventory(environment[@"registryInventory"],states,directories,snapshots,savedSDKApps,
+            ^NSString *(NSString *path){return [redactor axs_cachekeeper_path:path];}),
         @"searchUI":axs_cachekeeper_search_diagnostics_projection(environment[@"searchUI"]),
         @"pdfLocate":[redactor axs_cachekeeper_pdf:environment[@"pdfLocate"]],
         @"sourceStates":@{@"configuration":states[@"state"],@"selection":directories[@"state"],@"snapshots":snapshots[@"state"],@"installedApplications":installedSnapshotAvailable ? @"available" : @"unavailable"},

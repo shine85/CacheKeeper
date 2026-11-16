@@ -14,6 +14,18 @@ int main(void) {
             error.code!=1 || ![error.domain isEqual:@"dev.local.cachekeeper.installation"]) {
             fprintf(stderr,"FAIL: mixed-language validation must reject a missing installation identity\n");return 1;
         }
+        error=nil;
+        snapshot=axs_cachekeeper_installation_snapshot_with_context(nil,@"test.installation.linkage",@"1",
+            AxsCacheKeeperInstallationContextHostMainBundle,&error);
+        if (snapshot || error.code!=1 || ![error.domain isEqual:@"dev.local.cachekeeper.installation"]) {
+            fprintf(stderr,"FAIL: mixed-language contextual snapshot must preserve invalid URL rejection\n");return 1;
+        }
+        error=nil;
+        if (axs_cachekeeper_validate_installation_snapshot_with_context(@{},nil,@"1",
+            AxsCacheKeeperInstallationContextHostMainBundle,&error) || error.code!=1 ||
+            ![error.domain isEqual:@"dev.local.cachekeeper.installation"]) {
+            fprintf(stderr,"FAIL: mixed-language contextual validation must preserve identity rejection\n");return 1;
+        }
         puts("PASS: Objective-C++ installation caller links real Objective-C exports and preserves identity rejection");
     }
     return 0;

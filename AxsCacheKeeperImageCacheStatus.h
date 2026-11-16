@@ -1,5 +1,6 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#import "AxsCacheKeeperOperationInfo.h"
 #import "AxsCacheKeeperInstallationCheck.h"
 #import "AxsCacheKeeperRuntimeInfo.h"
 #import "AxsCacheKeeperImageDiscovery.h"
@@ -11,7 +12,7 @@ static inline BOOL axs_cachekeeper_image_counter(id value) {
     return isfinite(number) && number>=0 && number<=9007199254740991.0 && floor(number)==number;
 }
 // No cache keys, URLs, filesystem paths or installation identities cross this boundary.
-static inline NSDictionary *axs_cachekeeper_image_cache_projection(id value) {
+static inline NSDictionary *axs_cachekeeper_image_cache_raw_projection(id value) {
     if (![value isKindOfClass:NSDictionary.class]) return nil;
     NSArray *keys=@[@"schemaVersion",@"sdk",@"state",@"reason",@"observed",@"eligible",@"restricted",@"writesBlocked",
         @"queued",@"submitted",@"apiCompleted",@"skipped",@"pending",@"updated",@"bytesState"];
@@ -26,6 +27,10 @@ static inline NSDictionary *axs_cachekeeper_image_cache_projection(id value) {
     if (value[@"discoveryCheck"]) {
         if (!axs_cachekeeper_image_discovery_projection(value[@"discoveryCheck"])) return nil;
         keys=[keys arrayByAddingObject:@"discoveryCheck"];
+    }
+    if (value[@"operationHistory"]) {
+        if (!axs_cachekeeper_operation_history_validate(value[@"operationHistory"],@"image")) return nil;
+        keys=[keys arrayByAddingObject:@"operationHistory"];
     }
     if ([value count]!=keys.count || ![[NSSet setWithArray:[value allKeys]] isEqual:[NSSet setWithArray:keys]]) return nil;
     for (NSString *key in @[@"schemaVersion",@"observed",@"eligible",@"restricted",@"writesBlocked",@"queued",@"submitted",@"apiCompleted",@"skipped",@"pending"])
@@ -47,8 +52,20 @@ static inline NSDictionary *axs_cachekeeper_image_cache_projection(id value) {
     if ([value[@"state"] isEqual:@"apiCompleted"] && (!completed || pending)) return nil;
     return [value copy];
 }
+static inline NSDictionary *axs_cachekeeper_image_cache_projection_with_aliases(id value,NSMutableDictionary *aliases) {
+    NSDictionary *raw=axs_cachekeeper_image_cache_raw_projection(value);if (!raw) return nil;
+    NSMutableDictionary *result=[raw mutableCopy];
+    if (raw[@"operationHistory"]) {
+        NSDictionary *history=axs_cachekeeper_operation_history_projection(raw[@"operationHistory"],aliases);
+        if (!history) return nil;result[@"operationHistory"]=history;
+    }
+    return [result copy];
+}
+static inline NSDictionary *axs_cachekeeper_image_cache_projection(id value) {
+    return axs_cachekeeper_image_cache_projection_with_aliases(value,[NSMutableDictionary new]);
+}
 static inline NSString *axs_cachekeeper_image_cache_message(id value) {
-    NSDictionary *record=axs_cachekeeper_image_cache_projection(value);
+    NSDictionary *record=axs_cachekeeper_image_cache_raw_projection(value);
     if (!record) return @"图片缓存回执不可用或字段无效";
     NSDictionary *discovery=record[@"discoveryCheck"];
     if ([record[@"reason"] isEqual:@"unsupportedSDK"] && discovery) {

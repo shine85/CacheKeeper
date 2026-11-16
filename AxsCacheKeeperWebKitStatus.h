@@ -1,5 +1,6 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#import "AxsCacheKeeperOperationInfo.h"
 #import "AxsCacheKeeperInstallationDetail.h"
 #import "AxsCacheKeeperInstallationCheck.h"
 #import "AxsCacheKeeperRuntimeInfo.h"
@@ -17,7 +18,7 @@ static inline NSDictionary *axs_cachekeeper_webkit_installation_check(id value) 
     return axs_cachekeeper_installation_check_projection(value);
 }
 // A closed projection prevents runtime identities or website content entering saved/exported state.
-static inline NSDictionary *axs_cachekeeper_webkit_projection(id value) {
+static inline NSDictionary *axs_cachekeeper_webkit_raw_projection(id value) {
     if (![value isKindOfClass:NSDictionary.class]) return nil;
     NSDictionary *installationCheck=nil;
     NSArray *keys=@[@"schemaVersion",@"requested",@"timedOut",@"state",@"reason",@"persistentStores",@"nonPersistentStores",@"submitted",@"completed",@"pending",@"updated",@"bytesState"];
@@ -30,6 +31,10 @@ static inline NSDictionary *axs_cachekeeper_webkit_projection(id value) {
     if (value[@"runtimeInfo"]) {
         if (!axs_cachekeeper_runtime_info_projection(value[@"runtimeInfo"])) return nil;
         keys=[keys arrayByAddingObject:@"runtimeInfo"];
+    }
+    if (value[@"operationHistory"]) {
+        if (!axs_cachekeeper_operation_history_validate(value[@"operationHistory"],@"webkit")) return nil;
+        keys=[keys arrayByAddingObject:@"operationHistory"];
     }
     if ([value count]!=keys.count || ![[NSSet setWithArray:[value allKeys]] isEqual:[NSSet setWithArray:keys]]) return nil;
     if (!axs_cachekeeper_webkit_counter(value[@"schemaVersion"]) || [value[@"schemaVersion"] unsignedIntegerValue]!=1 ||
@@ -51,8 +56,20 @@ static inline NSDictionary *axs_cachekeeper_webkit_projection(id value) {
     if (installationCheck) result[@"installationCheck"]=installationCheck;
     return [result copy];
 }
+static inline NSDictionary *axs_cachekeeper_webkit_projection_with_aliases(id value,NSMutableDictionary *aliases) {
+    NSDictionary *raw=axs_cachekeeper_webkit_raw_projection(value);if (!raw) return nil;
+    NSMutableDictionary *result=[raw mutableCopy];
+    if (raw[@"operationHistory"]) {
+        NSDictionary *history=axs_cachekeeper_operation_history_projection(raw[@"operationHistory"],aliases);
+        if (!history) return nil;result[@"operationHistory"]=history;
+    }
+    return [result copy];
+}
+static inline NSDictionary *axs_cachekeeper_webkit_projection(id value) {
+    return axs_cachekeeper_webkit_projection_with_aliases(value,[NSMutableDictionary new]);
+}
 static inline NSString *axs_cachekeeper_webkit_message(id value) {
-    NSDictionary *record=axs_cachekeeper_webkit_projection(value);
+    NSDictionary *record=axs_cachekeeper_webkit_raw_projection(value);
     if (!record) return @"网页缓存回执不可用或字段无效";
     NSString *reason=record[@"reason"],*state=record[@"state"];
     if (![record[@"pending"] boolValue] && [reason isEqual:@"installationUnverified"] && record[@"installationCheck"]) {

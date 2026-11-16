@@ -1,5 +1,6 @@
 #pragma once
 #import "AxsCacheKeeperRuntimeInfo.h"
+#import "AxsCacheKeeperOperationInfo.h"
 
 #if AXS_CACHEKEEPER_IMAGE_TESTING && !defined(AXS_CACHEKEEPER_PACKAGE_VERSION)
 // The actual integration target is never included in the packaged tweak.
@@ -14,7 +15,7 @@ static inline NSDictionary *axs_cachekeeper_runtime_info(void) {
     static dispatch_once_t once;
     dispatch_once(&once,^{
         info=@{@"schemaVersion":@1,@"packageVersion":@AXS_CACHEKEEPER_PACKAGE_VERSION,
-            @"firstObserved":@(NSDate.date.timeIntervalSince1970)};
+            @"firstObserved":axs_cachekeeper_operation_process()[@"firstObserved"]};
     });
     return info;
 }

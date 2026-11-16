@@ -9,6 +9,10 @@
 @interface SDImageCache (AxsCacheKeeperImageTestQueue)
 @property(nonatomic,strong) dispatch_queue_t ioQueue;
 @end
+// Test fixture uses the existing observer/context boundaries; no product test-only scheduler.
+@interface AxsCacheKeeperImageCache (AxsCacheKeeperImageTestObserver)
+- (void)setObserver:(void (^)(NSDictionary *))observer;
+@end
 @interface AxsCacheKeeperImageTestCustomDisk : SDDiskCache
 @end
 @implementation AxsCacheKeeperImageTestCustomDisk
@@ -68,6 +72,7 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
 @property(nonatomic,copy) NSString *home;
 @property(nonatomic,strong) NSMutableArray<SDImageCache *> *owners;
 @property(atomic) NSUInteger contextReads;
+@property(atomic,copy) void (^contextBarrier)(void);
 @end
 @implementation ImageCacheIntegrationTests
 - (void)setUp {
@@ -79,11 +84,14 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
         @"installation":@"owned-fixture-install",@"reportWritable":@YES} mutableCopy];
     self.owners=[NSMutableArray new];self.contextReads=0;__weak typeof(self) weakSelf=self;
     self.engine=[[AxsCacheKeeperImageCache alloc] initWithContextProvider:^NSDictionary *{
-        ImageCacheIntegrationTests *test=weakSelf;@synchronized(test) {test.contextReads++;return [test.context copy] ?: @{};}
+        ImageCacheIntegrationTests *test=weakSelf;
+        void (^barrier)(void)=test.contextBarrier;if (barrier) barrier();
+        @synchronized(test) {test.contextReads++;return [test.context copy] ?: @{};}
     } observer:nil];
     [self.engine usePinnedSDKForIntegrationTests];[self.engine startObserving];[self axs_cachekeeper_refresh];
 }
 - (void)tearDown {
+    self.contextBarrier=nil;[self.engine setObserver:nil];
     @synchronized(self) {self.context[@"appState"]=@{@"enabled":@NO};}
     [self.engine refreshWithCompletion:nil];
     for (SDImageCache *owner in self.owners) dispatch_sync(owner.ioQueue,^{});
@@ -372,6 +380,13 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     UIImage *image=[UIImage new];[first storeImageToMemory:image forKey:@"memory"];
     [self.engine didEnterBackgroundWithTime:YES];
     [self axs_cachekeeper_wait:^BOOL(NSDictionary *r) {return [r[@"apiCompleted"] unsignedIntegerValue]==2 && ![r[@"pending"] unsignedIntegerValue];} description:@"two real SDK clears"];
+    NSDictionary *history=self.engine.receipt[@"operationHistory"];
+    XCTAssertNotNil(axs_cachekeeper_operation_history_validate(history,@"image"));
+    NSArray *actions=[history[@"processes"] lastObject][@"actions"];
+    XCTAssertEqual(actions.count,2u);
+    XCTAssertNotEqualObjects(actions[0][@"ownerID"],actions[1][@"ownerID"]);
+    XCTAssertEqualObjects(actions[0][@"eventID"],actions[1][@"eventID"]);
+    for (NSDictionary *action in actions) XCTAssertEqualObjects(action[@"state"],@"apiCompleted");
     XCTAssertNil([first diskImageDataForKey:@"one"]);XCTAssertNil([second diskImageDataForKey:@"two"]);
     XCTAssertEqual([first imageFromMemoryCacheForKey:@"memory"],image);
     XCTAssertEqualObjects(self.engine.receipt[@"bytesState"],@"notMeasured");
@@ -379,7 +394,62 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     [first storeImageDataToDisk:payload forKey:@"again"];
     [self.engine didEnterBackgroundWithTime:YES];
     [self axs_cachekeeper_wait:^BOOL(NSDictionary *r) {return [r[@"apiCompleted"] unsignedIntegerValue]==4 && ![r[@"pending"] unsignedIntegerValue];} description:@"repeat clear after SDK root recreation"];
+    NSArray *repeated=[self.engine.receipt[@"operationHistory"][@"processes"] lastObject][@"actions"];
+    XCTAssertEqual(repeated.count,4u);
+    XCTAssertNotEqualObjects(repeated[0][@"eventID"],repeated[2][@"eventID"]);
     XCTAssertNil([first diskImageDataForKey:@"again"]);
+}
+- (void)testUnchangedImageLoadDuringBackgroundContextReadDoesNotCancelCleanup {
+    SDImageCache *owner=[self axs_cachekeeper_owner:@"discovery-background-barrier" config:nil];
+    NSData *payload=[self axs_cachekeeper_payload];[owner storeImageDataToDisk:payload forKey:@"remove"];
+    dispatch_semaphore_t entered=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0);
+    __block BOOL first=YES;
+    self.contextBarrier=^{if (first) {first=NO;dispatch_semaphore_signal(entered);dispatch_semaphore_wait(release,dispatch_time(DISPATCH_TIME_NOW,8*NSEC_PER_SEC));}};
+    [self.engine didEnterBackgroundWithTime:YES];
+    XCTAssertEqual(dispatch_semaphore_wait(entered,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),0L);
+    [self.engine requestDiscoveryRefresh];dispatch_semaphore_signal(release);
+    [self axs_cachekeeper_wait:^BOOL(NSDictionary *r){return [r[@"apiCompleted"] unsignedIntegerValue]==1 && ![r[@"pending"] unsignedIntegerValue];} description:@"unchanged discovery preserves background action"];
+    XCTAssertNil([owner diskImageDataForKey:@"remove"]);
+    NSDictionary *process=[self.engine.receipt[@"operationHistory"][@"processes"] lastObject];
+    NSArray *actions=process[@"actions"];XCTAssertEqual(actions.count,1u);
+    XCTAssertGreaterThan([actions[0][@"actionID"] unsignedIntegerValue],0u);
+    for (NSDictionary *event in process[@"events"]) if ([event[@"eventID"] isEqual:actions[0][@"eventID"]]) XCTAssertEqualObjects(event[@"trigger"],@"background");
+    XCTAssertNotEqualObjects(self.engine.receipt[@"state"],@"queued");
+}
+- (void)testImageLoadAtRefreshPublicationRetainsOriginalChildIdentity {
+    SDImageCache *owner=[self axs_cachekeeper_owner:@"discovery-action-boundary" config:nil];
+    [owner storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"remove"];
+    __weak typeof(self) weakSelf=self;__block BOOL injected=NO;
+    [self.engine setObserver:^(NSDictionary *receipt){
+        NSDictionary *event=[[[receipt[@"operationHistory"] objectForKey:@"processes"] lastObject][@"events"] lastObject];
+        if (!injected && [event[@"trigger"] isEqual:@"background"] && [event[@"refresh"] isEqual:@"applied"] && ![receipt[@"queued"] unsignedIntegerValue]) {
+            injected=YES;[weakSelf.engine requestDiscoveryRefresh];
+        }
+    }];
+    [self.engine didEnterBackgroundWithTime:YES];
+    [self axs_cachekeeper_wait:^BOOL(NSDictionary *r){return [r[@"apiCompleted"] unsignedIntegerValue]==1 && ![r[@"pending"] unsignedIntegerValue];} description:@"refresh-publication image load keeps child identity"];
+    XCTAssertTrue(injected);
+    NSArray *actions=[self.engine.receipt[@"operationHistory"][@"processes"] lastObject][@"actions"];
+    XCTAssertEqual(actions.count,1u);XCTAssertGreaterThan([actions[0][@"actionID"] unsignedIntegerValue],0u);
+    XCTAssertEqualObjects(actions[0][@"state"],@"apiCompleted");XCTAssertNotEqualObjects(self.engine.receipt[@"state"],@"queued");
+}
+- (void)testConfigurationAtFirstQueuedPublicationKeepsSkippedOriginalAction {
+    SDImageCache *owner=[self axs_cachekeeper_owner:@"configuration-action-boundary" config:nil];
+    NSData *payload=[self axs_cachekeeper_payload];[owner storeImageDataToDisk:payload forKey:@"keep"];
+    __weak typeof(self) weakSelf=self;__block BOOL injected=NO;
+    [self.engine setObserver:^(NSDictionary *receipt){
+        if (!injected && [receipt[@"queued"] unsignedIntegerValue]==1) {
+            injected=YES;ImageCacheIntegrationTests *test=weakSelf;
+            @synchronized(test) {test.context[@"appState"]=@{@"enabled":@NO};}
+            [test.engine refreshWithCompletion:nil];
+        }
+    }];
+    [self.engine didEnterBackgroundWithTime:YES];
+    [self axs_cachekeeper_wait:^BOOL(NSDictionary *r){return [r[@"skipped"] unsignedIntegerValue]==1 && ![r[@"pending"] unsignedIntegerValue];} description:@"configuration preserves bound skipped action"];
+    NSArray *actions=[self.engine.receipt[@"operationHistory"][@"processes"] lastObject][@"actions"];
+    XCTAssertTrue(injected);XCTAssertEqual(actions.count,1u);XCTAssertGreaterThan([actions[0][@"actionID"] unsignedIntegerValue],0u);
+    XCTAssertEqualObjects(actions[0][@"state"],@"skipped");XCTAssertEqualObjects(actions[0][@"reason"],@"appDisabled");
+    XCTAssertEqualObjects([owner diskImageDataForKey:@"keep"],payload);XCTAssertEqual([self.engine.receipt[@"submitted"] unsignedIntegerValue],0u);
 }
 - (void)testQueuedCleanupRechecksDisableAndDoesNotClear {
     SDImageCache *owner=[self axs_cachekeeper_owner:@"queued-disable" config:nil];NSData *payload=[self axs_cachekeeper_payload];
@@ -391,6 +461,10 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     [self axs_cachekeeper_wait:^BOOL(NSDictionary *r) {return [r[@"pending"] unsignedIntegerValue]==1;} description:@"SDK queue actually blocked"];
     [self axs_cachekeeper_state:@{@"enabled":@NO}];dispatch_semaphore_signal(release);
     [self axs_cachekeeper_wait:^BOOL(NSDictionary *r) {return [r[@"skipped"] unsignedIntegerValue]==1 && ![r[@"pending"] unsignedIntegerValue];} description:@"disabled queued action cancelled"];
+    NSDictionary *cancelled=[[self.engine.receipt[@"operationHistory"][@"processes"] lastObject][@"actions"] lastObject];
+    XCTAssertEqualObjects(cancelled[@"state"],@"skipped");
+    XCTAssertEqualObjects(cancelled[@"reason"],@"appDisabled");
+    XCTAssertEqualObjects(self.engine.receipt[@"state"],@"disabled");
     XCTAssertEqual([self.engine.receipt[@"submitted"] unsignedIntegerValue],0u);
     XCTAssertEqualObjects([owner diskImageDataForKey:@"keep"],payload);
 }
@@ -405,6 +479,9 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     @synchronized(self) {self.context[@"appState"]=@{@"enabled":@YES,@"mode":@"clean",@"excludedPaths":@[@"Library/Caches/queued-exclusion/retained"]};}
     dispatch_semaphore_signal(release);
     [self axs_cachekeeper_wait:^BOOL(NSDictionary *r) {return [r[@"skipped"] unsignedIntegerValue]==1;} description:@"latest child exclusion prevents whole-owner clear"];
+    NSDictionary *excluded=[[self.engine.receipt[@"operationHistory"][@"processes"] lastObject][@"actions"] lastObject];
+    XCTAssertEqualObjects(excluded[@"state"],@"skipped");
+    XCTAssertEqualObjects(excluded[@"reason"],@"scopeNotAuthorized");
     XCTAssertEqualObjects([owner diskImageDataForKey:@"keep"],payload);XCTAssertEqual([self.engine.receipt[@"submitted"] unsignedIntegerValue],0u);
 }
 - (void)testOnlyCleanModeAllowsWritesAndManualSelectionIsRequiredWhenDiscoveryIsOff {

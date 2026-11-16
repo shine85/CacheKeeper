@@ -35,7 +35,8 @@ def run() -> int:
             subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
                             "-DAXS_CACHEKEEPER_IMAGE_TESTING=1", "-I" + str(folder), "-I" + str(ROOT),
                             "-framework", "Foundation", str(ROOT / "tests/image_runtime_source_tests.m"),
-                            str(ROOT / "AxsCacheKeeperCleanupRules.m"), "-o", str(binary)],
+                            str(ROOT / "AxsCacheKeeperCleanupRules.m"),
+                            str(ROOT / "AxsCacheKeeperOperationInfo.m"), "-o", str(binary)],
                            cwd=ROOT, check=True, timeout=60)
             for scenario in ("fingerprint", "pinned"):
                 result = subprocess.run([str(binary), scenario], capture_output=True, text=True, encoding="utf-8", timeout=30)

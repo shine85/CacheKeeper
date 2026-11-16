@@ -2,8 +2,6 @@
 #import "AxsCacheKeeperPolicy.h"
 
 // 平台缓存规则修订：Library/Caches 与 tmp 按平台缓存用途约定清理；修订变化使旧 job 失效。
-static NSString * const AxsCacheKeeperPlatformCacheRuleID = @"platform-cache";
-static NSString * const AxsCacheKeeperPlatformCacheRuleRevision = @"2";
 static NSString * const AxsCacheKeeperUserLogRuleID = @"user-log";
 static NSString * const AxsCacheKeeperUserLogRuleRevision = @"1";
 
@@ -164,7 +162,7 @@ static BOOL AxsCacheKeeperRuleApplies(AxsCacheKeeperAppRule *rule, NSString *ver
 }
 
 + (NSString *)rulesVersion {
-    NSMutableString *version = [NSMutableString stringWithFormat:@"%@:%@", AxsCacheKeeperPlatformCacheRuleID, AxsCacheKeeperPlatformCacheRuleRevision];
+    NSMutableString *version = [NSMutableString stringWithFormat:@"%@:%@", axs_cachekeeper_platform_cache_rule_id(), axs_cachekeeper_platform_cache_rule_revision()];
     for (NSString *bundle in [AxsCacheKeeperRuleRegistry().allKeys sortedArrayUsingSelector:@selector(compare:)]) {
         for (AxsCacheKeeperAppRule *rule in AxsCacheKeeperRuleRegistry()[bundle])
             [version appendFormat:@";%@:%@:%@", bundle, rule.ruleID, rule.ruleRevision];
@@ -247,13 +245,12 @@ static BOOL AxsCacheKeeperRuleApplies(AxsCacheKeeperAppRule *rule, NSString *ver
     // 4. 平台缓存：Library/Caches 与 tmp 按平台缓存用途约定清理，不按文件类型保留。
     // SQLite/无后缀文件同样可清（格式不单独证明必须保留）；顶层 Cache/Caches/.cache
     // 等同名自建目录不获得平台约定。平台缓存不依赖“全根不存在数据库”，无规则依赖。
-    for (NSString *platformRoot in @[@"Library/Caches", @"tmp"]) {
-        if (AxsCacheKeeperPathUnder(relativePath, platformRoot))
-            return [[AxsCacheKeeperCleanupDecision alloc] initWithDisposition:AxsCacheKeeperCleanupDelete
-                basis:AxsCacheKeeperCleanupBasisPlatformCache ruleID:AxsCacheKeeperPlatformCacheRuleID
-                ruleRevision:AxsCacheKeeperPlatformCacheRuleRevision scopeRelativePath:platformRoot
-                reason:@"平台缓存用途约定" dependencyPaths:@[]];
-    }
+    NSString *platformRoot=axs_cachekeeper_platform_cache_scope(relativePath);
+    if (platformRoot)
+        return [[AxsCacheKeeperCleanupDecision alloc] initWithDisposition:AxsCacheKeeperCleanupDelete
+            basis:AxsCacheKeeperCleanupBasisPlatformCache ruleID:axs_cachekeeper_platform_cache_rule_id()
+            ruleRevision:axs_cachekeeper_platform_cache_rule_revision() scopeRelativePath:platformRoot
+            reason:@"平台缓存用途约定" dependencyPaths:@[]];
     // 6. 用户/插件日志定级：日志定级目录内的日志文件，且不命中任何保护事实
     //（数据证据、受保护路径成分、可识别媒体头）。mixed 不再自动意味着“只按 .log
     // 后缀清理全部日志”——日志也须位于已确认范围且不命中保护事实。

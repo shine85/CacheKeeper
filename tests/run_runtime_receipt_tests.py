@@ -22,7 +22,9 @@ with tempfile.TemporaryDirectory(prefix="runtime-receipts-", dir=root / "tmp") a
     for name, headers in (("baseline", baseline), ("fixed", root)):
         executable = output / name / "receipt-test" if name == "baseline" else output / "receipt-test"
         subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-framework", "Foundation",
-                        "-I" + str(headers), str(root / "tests/runtime_receipt_tests.m"), "-o", str(executable)],
+                        *( ["-DAXS_CACHEKEEPER_RECEIPT_BASELINE=1"] if name == "baseline" else []),
+                        "-I" + str(headers), str(root / "tests/runtime_receipt_tests.m"),
+                        str(root / "AxsCacheKeeperOperationInfo.m"), "-o", str(executable)],
                        check=True, timeout=60)
         result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=60)
         if name == "baseline":

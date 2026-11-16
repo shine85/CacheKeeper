@@ -8,6 +8,12 @@
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
+#include <dlfcn.h>
+#include <stdlib.h>
+#include <string.h>
+#if __has_feature(ptrauth_calls)
+#include <ptrauth.h>
+#endif
 
 #if defined(AXS_CACHEKEEPER_INSTALLATION_TESTING)
 extern ssize_t axs_cachekeeper_installation_test_read(int fd, void *buffer, size_t length);
@@ -52,27 +58,119 @@ static NSUInteger axs_cachekeeper_installation_difference(id before, id after) {
     return mask;
 }
 static BOOL axs_cachekeeper_installation_identity_error(NSError **error, NSInteger code, NSString *message,
-    NSString *target, NSString *operation, NSString *comparison, NSUInteger mask, NSDictionary *resample) {
+    NSString *target, NSString *operation, NSString *comparison, NSUInteger mask, NSDictionary *resample, NSDictionary *view) {
     NSMutableDictionary *detail=[@{@"target":target,@"operation":operation,@"errno":@0} mutableCopy];
     // Malformed private snapshots are still rejected, but cannot be presented as measured stat differences.
     if (mask && mask<=AxsCacheKeeperInstallationIdentityAllFields) {
         NSMutableDictionary *identity=[@{@"schemaVersion":@1,@"comparison":comparison,@"differenceMask":@(mask)} mutableCopy];
         if (resample) identity[@"resample"]=resample;
+        if (view) {identity[@"schemaVersion"]=@2;identity[@"viewObservation"]=view;}
         detail[@"identity"]=[identity copy];
     }
     return axs_cachekeeper_installation_error_detail(error,code,message,[detail copy]);
 }
+typedef struct {
+    int (*rootPath)(const char *,struct stat *);
+    int (*childPath)(int,const char *,struct stat *,int);
+    int (*rootOpen)(const char *,int,...);
+    int (*childOpen)(int,const char *,int,...);
+    int (*fdCall)(int,struct stat *);
+} AxsCacheKeeperInstallationCalls;
+#if defined(AXS_CACHEKEEPER_INSTALLATION_CALL_BINDING_TESTING)
+extern AxsCacheKeeperInstallationCalls axs_cachekeeper_installation_test_calls(BOOL root,AxsCacheKeeperInstallationCalls imports);
+#endif
+static const void *axs_cachekeeper_installation_call_address(const void *call) {
+#if __has_feature(ptrauth_calls)
+    return ptrauth_strip(call,ptrauth_key_function_pointer);
+#else
+    return call;
+#endif
+}
+// These authenticated, typed imports are the single callable set used by this sample and resample.
+static AxsCacheKeeperInstallationCalls axs_cachekeeper_installation_calls(BOOL root) {
+    AxsCacheKeeperInstallationCalls calls={.rootPath=lstat,.childPath=fstatat,.rootOpen=open,.childOpen=openat,.fdCall=fstat};
+#if defined(AXS_CACHEKEEPER_INSTALLATION_CALL_BINDING_TESTING)
+    calls=axs_cachekeeper_installation_test_calls(root,calls);
+#else
+    (void)root;
+#endif
+    return calls;
+}
+static const void *axs_cachekeeper_installation_path_call(AxsCacheKeeperInstallationCalls calls,BOOL root) {
+    return root ? (const void *)calls.rootPath : (const void *)calls.childPath;
+}
+static const void *axs_cachekeeper_installation_open_call(AxsCacheKeeperInstallationCalls calls,BOOL root) {
+    return root ? (const void *)calls.rootOpen : (const void *)calls.childOpen;
+}
+static NSString *axs_cachekeeper_installation_call_owner(const void *call,BOOL *resolved) {
+    Dl_info info={0};*resolved=NO;
+    if (!call || !dladdr(axs_cachekeeper_installation_call_address(call),&info) || !info.dli_fbase || !info.dli_fname) return @"unresolved";
+    *resolved=YES;const char *name=strrchr(info.dli_fname,'/');name=name ? name+1 : info.dli_fname;
+    if (!strcmp(name,"libroothide.dylib")) return @"libRootHide";
+    if (!strcmp(name,"libSystem.B.dylib") || !strcmp(name,"libSystem.dylib") ||
+        !strcmp(name,"libsystem_kernel.dylib") || !strcmp(name,"libsystem_c.dylib")) return @"libSystem";
+    return @"other";
+}
+static NSString *axs_cachekeeper_installation_context_name(AxsCacheKeeperInstallationContext context) {
+    switch (context) {
+        case AxsCacheKeeperInstallationContextHostMainBundle:return @"hostMainBundle";
+        case AxsCacheKeeperInstallationContextRegistryBundle:return @"registryBundle";
+        case AxsCacheKeeperInstallationContextTestInjected:return @"testInjected";
+        default:return @"unspecified";
+    }
+}
+static NSDictionary *axs_cachekeeper_installation_view(int fd,NSString *input,BOOL root,AxsCacheKeeperInstallationContext context,
+    AxsCacheKeeperInstallationCalls initial,NSUInteger difference) {
+    int savedErrno=errno;AxsCacheKeeperInstallationCalls final=axs_cachekeeper_installation_calls(root);
+    BOOL pathResolved=NO,openResolved=NO,fdResolved=NO;
+    const void *pathCall=axs_cachekeeper_installation_path_call(initial,root),*openCall=axs_cachekeeper_installation_open_call(initial,root);
+    const void *fdCall=(const void *)initial.fdCall;
+    NSString *pathOwner=axs_cachekeeper_installation_call_owner(pathCall,&pathResolved);
+    NSString *openOwner=axs_cachekeeper_installation_call_owner(openCall,&openResolved);
+    NSString *fdOwner=axs_cachekeeper_installation_call_owner(fdCall,&fdResolved);
+    BOOL finalPath=NO,finalOpen=NO,finalFD=NO;
+    const void *finalPathCall=axs_cachekeeper_installation_path_call(final,root),*finalOpenCall=axs_cachekeeper_installation_open_call(final,root);
+    NSString *finalPathOwner=axs_cachekeeper_installation_call_owner(finalPathCall,&finalPath);
+    NSString *finalOpenOwner=axs_cachekeeper_installation_call_owner(finalOpenCall,&finalOpen);
+    NSString *finalFDOwner=axs_cachekeeper_installation_call_owner((const void *)final.fdCall,&finalFD);
+    BOOL stable=pathResolved && openResolved && fdResolved && finalPath && finalOpen && finalFD &&
+        pathCall==finalPathCall && openCall==finalOpenCall && initial.fdCall==final.fdCall &&
+        [pathOwner isEqual:finalPathOwner] && [openOwner isEqual:finalOpenOwner] && [fdOwner isEqual:finalFDOwner];
+    char fdPath[PATH_MAX]={0},inputResolved[PATH_MAX]={0},fdResolvedPath[PATH_MAX]={0};
+    NSString *fdPathState=@"unavailable";int fdPathError=0;
+#if defined(F_GETPATH)
+    int fdPathResult=fcntl(fd,F_GETPATH,fdPath);fdPathError=fdPathResult ? errno : 0;
+    fdPathState=fdPathResult ? @"failed" : @"success";
+    if (!fdPathResult && (!memchr(fdPath,'\0',sizeof(fdPath)) || !fdPath[0])) fdPathState=@"invalidResult";
+#endif
+    const char *inputPath=input.fileSystemRepresentation;
+    BOOL inputOK=realpath(inputPath,inputResolved)!=NULL;int inputError=inputOK ? 0 : errno;
+    BOOL fdOK=NO;int fdError=0;NSString *fdState=@"notAttempted";
+    if ([fdPathState isEqual:@"success"]) {
+        fdOK=realpath(fdPath,fdResolvedPath)!=NULL;fdError=fdOK ? 0 : errno;fdState=fdOK ? @"success" : @"failed";
+    }
+    NSMutableDictionary *value=[@{@"schemaVersion":@1,@"context":axs_cachekeeper_installation_context_name(context),
+        @"pathAPI":root ? @"lstat" : @"fstatatNoFollow",@"openAPI":root ? @"openSearchNoFollow" : @"openatReadNoFollow",@"fdAPI":@"fstat",
+        @"pathCallOwner":pathOwner,@"openCallOwner":openOwner,@"fdCallOwner":fdOwner,
+        @"pathCallResolved":@(pathResolved),@"openCallResolved":@(openResolved),@"fdCallResolved":@(fdResolved),@"callOwnersStable":@(stable),
+        @"fdPathState":fdPathState,@"fdPathErrno":@(fdPathError),@"inputResolveState":inputOK ? @"success" : @"failed",@"inputResolveErrno":@(inputError),
+        @"fdResolveState":fdState,@"fdResolveErrno":@(fdError),@"sameObjectNonTimeFields":@((BOOL)((difference&127)==0))} mutableCopy];
+    if ([fdPathState isEqual:@"success"]) value[@"inputEqualsFDPath"]=@((BOOL)!strcmp(inputPath,fdPath));
+    if (inputOK && fdOK) value[@"resolvedInputEqualsResolvedFDPath"]=@((BOOL)!strcmp(inputResolved,fdResolvedPath));
+    NSDictionary *result=axs_cachekeeper_installation_view_projection(value);errno=savedErrno;return result;
+}
 static NSDictionary *axs_cachekeeper_installation_resample(int root, int fd, const char *name, NSString *path,
-    struct stat before, struct stat opened) {
+    struct stat before, struct stat opened,AxsCacheKeeperInstallationCalls calls) {
+    int savedErrno=errno;
     struct stat fdAfter,pathAfter;
-    int fdResult=fstat(fd,&fdAfter),fdError=fdResult ? errno : 0;
-    int pathResult=path ? lstat(path.fileSystemRepresentation,&pathAfter) : fstatat(root,name,&pathAfter,AT_SYMLINK_NOFOLLOW);
+    int fdResult=calls.fdCall(fd,&fdAfter),fdError=fdResult ? errno : 0;
+    int pathResult=path ? calls.rootPath(path.fileSystemRepresentation,&pathAfter) : calls.childPath(root,name,&pathAfter,AT_SYMLINK_NOFOLLOW);
     int pathError=pathResult ? errno : 0;
     NSMutableDictionary *result=[@{@"fdErrno":@(fdError),@"pathErrno":@(pathError)} mutableCopy];
     if (!fdResult) result[@"fdDifferenceMask"]=@(axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(opened),axs_cachekeeper_installation_stat(fdAfter)));
     if (!pathResult) result[@"pathDifferenceMask"]=@(axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(before),axs_cachekeeper_installation_stat(pathAfter)));
     if (!fdResult && !pathResult) result[@"pathFDDifferenceMask"]=@(axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(pathAfter),axs_cachekeeper_installation_stat(fdAfter)));
-    return [result copy];
+    NSDictionary *projection=axs_cachekeeper_installation_resample_projection(result);errno=savedErrno;return projection;
 }
 static NSString *axs_cachekeeper_installation_path(NSURL *url, NSError **error) {
     if (![url isKindOfClass:NSURL.class] || !url.isFileURL || !axs_cachekeeper_installation_string(url.path,YES) || !url.path.isAbsolutePath) {
@@ -88,20 +186,21 @@ static NSString *axs_cachekeeper_installation_path(NSURL *url, NSError **error) 
 }
 // Resolve parent aliases such as /var, while refusing a symlink at the package root itself.
 // The original path is rechecked against the open FD after every sample.
-static int axs_cachekeeper_installation_open_root(NSString *path, NSError **error) {
+static int axs_cachekeeper_installation_open_root(NSString *path, struct stat *identity,AxsCacheKeeperInstallationContext context,NSError **error) {
+    AxsCacheKeeperInstallationCalls calls=axs_cachekeeper_installation_calls(YES);
     struct stat before,opened;
-    if (lstat(path.fileSystemRepresentation,&before)) {
+    if (calls.rootPath(path.fileSystemRepresentation,&before)) {
         int number=errno;axs_cachekeeper_installation_error(error,2,@"无法读取安装包目录属性",@"root",@"stat",number);return -1;
     }
     if (!S_ISDIR(before.st_mode)) {
         axs_cachekeeper_installation_error(error,2,@"安装包不是目录或为链接",@"root",@"type",0);return -1;
     }
     // The root FD is used only for metadata and relative child opens, never enumeration.
-    int fd=open(path.fileSystemRepresentation,O_SEARCH|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
+    int fd=calls.rootOpen(path.fileSystemRepresentation,O_SEARCH|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
     if (fd<0) {
         int number=errno;axs_cachekeeper_installation_error(error,2,@"无法打开安装包目录",@"root",@"open",number);return -1;
     }
-    if (fstat(fd,&opened)) {
+    if (calls.fdCall(fd,&opened)) {
         int number=errno;close(fd);axs_cachekeeper_installation_error(error,2,@"无法读取已打开安装目录属性",@"root",@"fstat",number);return -1;
     }
     if (!S_ISDIR(opened.st_mode)) {
@@ -109,24 +208,26 @@ static int axs_cachekeeper_installation_open_root(NSString *path, NSError **erro
     }
     NSUInteger difference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(before),axs_cachekeeper_installation_stat(opened));
     if (difference) {
-        NSDictionary *resample=error ? axs_cachekeeper_installation_resample(-1,fd,NULL,path,before,opened) : nil;
-        close(fd);axs_cachekeeper_installation_identity_error(error,2,@"安装包目录在打开时变化",@"root",@"openIdentity",@"pathToFD",difference,resample);return -1;
+        NSDictionary *resample=error ? axs_cachekeeper_installation_resample(-1,fd,NULL,path,before,opened,calls) : nil;
+        NSDictionary *view=error ? axs_cachekeeper_installation_view(fd,path,YES,context,calls,difference) : nil;
+        close(fd);axs_cachekeeper_installation_identity_error(error,2,@"安装包目录在打开时变化",@"root",@"openIdentity",@"pathToFD",difference,resample,view);return -1;
     }
-    return fd;
+    *identity=opened;return fd;
 }
-static int axs_cachekeeper_installation_open_file(int root, const char *name, NSString *target, struct stat *identity, NSError **error) {
+static int axs_cachekeeper_installation_open_file(int root, const char *name, NSString *target, struct stat *identity,NSString *input,AxsCacheKeeperInstallationContext context,NSError **error) {
+    AxsCacheKeeperInstallationCalls calls=axs_cachekeeper_installation_calls(NO);
     struct stat before,opened;
-    if (fstatat(root,name,&before,AT_SYMLINK_NOFOLLOW)) {
+    if (calls.childPath(root,name,&before,AT_SYMLINK_NOFOLLOW)) {
         int number=errno;axs_cachekeeper_installation_error(error,3,@"无法读取安装文件属性",target,@"stat",number);return -1;
     }
     if (!S_ISREG(before.st_mode)) {
         axs_cachekeeper_installation_error(error,3,@"安装文件为链接或不是普通文件",target,@"type",0);return -1;
     }
-    int fd=openat(root,name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
+    int fd=calls.childOpen(root,name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
     if (fd<0) {
         int number=errno;axs_cachekeeper_installation_error(error,3,@"无法打开安装文件",target,@"open",number);return -1;
     }
-    if (fstat(fd,&opened)) {
+    if (calls.fdCall(fd,&opened)) {
         int number=errno;close(fd);axs_cachekeeper_installation_error(error,3,@"无法读取已打开安装文件属性",target,@"fstat",number);return -1;
     }
     if (!S_ISREG(opened.st_mode)) {
@@ -134,26 +235,39 @@ static int axs_cachekeeper_installation_open_file(int root, const char *name, NS
     }
     NSUInteger difference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(before),axs_cachekeeper_installation_stat(opened));
     if (difference) {
-        NSDictionary *resample=error ? axs_cachekeeper_installation_resample(root,fd,name,nil,before,opened) : nil;
-        close(fd);axs_cachekeeper_installation_identity_error(error,3,@"安装文件在打开时变化",target,@"openIdentity",@"pathToFD",difference,resample);return -1;
+        NSDictionary *resample=error ? axs_cachekeeper_installation_resample(root,fd,name,nil,before,opened,calls) : nil;
+        NSDictionary *view=error ? axs_cachekeeper_installation_view(fd,input,NO,context,calls,difference) : nil;
+        close(fd);axs_cachekeeper_installation_identity_error(error,3,@"安装文件在打开时变化",target,@"openIdentity",@"pathToFD",difference,resample,view);return -1;
     }
     *identity=opened;return fd;
 }
+// Both snapshot entrypoints retain the earliest verified FD sample; a later sample never resets it.
+static BOOL axs_cachekeeper_installation_root_sample(int root,struct stat earliest,NSString *message,NSError **error) {
+    AxsCacheKeeperInstallationCalls calls=axs_cachekeeper_installation_calls(YES);
+    struct stat current;
+    if (calls.fdCall(root,&current)) {
+        int number=errno;return axs_cachekeeper_installation_error(error,2,message,@"root",@"snapshotStat",number);
+    }
+    NSUInteger difference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(earliest),axs_cachekeeper_installation_stat(current));
+    if (difference) return axs_cachekeeper_installation_identity_error(error,6,@"安装目录在读取期间变化，等待安装稳定",@"root",@"recheckIdentity",@"referenceToFD",difference,nil,nil);
+    return YES;
+}
 static BOOL axs_cachekeeper_installation_recheck(int root, int fd, const char *name, NSString *path,
     NSString *target, struct stat before, NSError **error) {
+    AxsCacheKeeperInstallationCalls calls=axs_cachekeeper_installation_calls(path!=nil);
     struct stat a,b;
-    if (fstat(fd,&a)) {
+    if (calls.fdCall(fd,&a)) {
         int number=errno;return axs_cachekeeper_installation_error(error,6,@"无法复核已打开安装身份",target,@"recheckFD",number);
     }
-    if (path ? lstat(path.fileSystemRepresentation,&b) : fstatat(root,name,&b,AT_SYMLINK_NOFOLLOW)) {
+    if (path ? calls.rootPath(path.fileSystemRepresentation,&b) : calls.childPath(root,name,&b,AT_SYMLINK_NOFOLLOW)) {
         int number=errno;return axs_cachekeeper_installation_error(error,6,@"无法复核当前安装路径身份",target,@"recheckPath",number);
     }
     NSUInteger referenceDifference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(before),axs_cachekeeper_installation_stat(a));
     if (referenceDifference)
-        return axs_cachekeeper_installation_identity_error(error,6,@"安装文件在读取期间变化，等待安装稳定",target,@"recheckIdentity",@"referenceToFD",referenceDifference,nil);
+        return axs_cachekeeper_installation_identity_error(error,6,@"安装文件在读取期间变化，等待安装稳定",target,@"recheckIdentity",@"referenceToFD",referenceDifference,nil,nil);
     NSUInteger pathDifference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(a),axs_cachekeeper_installation_stat(b));
     if (pathDifference)
-        return axs_cachekeeper_installation_identity_error(error,6,@"安装文件在读取期间变化，等待安装稳定",target,@"recheckIdentity",@"fdToPath",pathDifference,nil);
+        return axs_cachekeeper_installation_identity_error(error,6,@"安装文件在读取期间变化，等待安装稳定",target,@"recheckIdentity",@"fdToPath",pathDifference,nil,nil);
     return YES;
 }
 static BOOL axs_cachekeeper_installation_check(int root, int info, int executable, NSString *path, NSString *name,
@@ -170,7 +284,7 @@ static NSString *axs_cachekeeper_installation_fingerprint(NSArray *parts) {
     for (NSUInteger i=0;i<sizeof(digest);i++) [result appendFormat:@"%02x",digest[i]];
     return result;
 }
-NSDictionary *axs_cachekeeper_installation_snapshot(NSURL *bundleURL, NSString *bundleIdentifier, NSString *systemShortVersion, NSError **error) {
+NSDictionary *axs_cachekeeper_installation_snapshot_with_context(NSURL *bundleURL, NSString *bundleIdentifier, NSString *systemShortVersion,AxsCacheKeeperInstallationContext context,NSError **error) {
     if (error) *error=nil;
     if (!axs_cachekeeper_bundle_id(bundleIdentifier) || !axs_cachekeeper_installation_string(bundleIdentifier,YES)) {
         axs_cachekeeper_installation_error(error,1,@"系统安装标识无效",@"input",@"identifier",0);return nil;
@@ -179,14 +293,13 @@ NSDictionary *axs_cachekeeper_installation_snapshot(NSURL *bundleURL, NSString *
         axs_cachekeeper_installation_error(error,1,@"系统安装版本类型无效",@"input",@"version",0);return nil;
     }
     NSString *path=axs_cachekeeper_installation_path(bundleURL,error);if (!path) return nil;
-    int root=axs_cachekeeper_installation_open_root(path,error);if (root<0) return nil;
+    struct stat rootStat;
+    int root=axs_cachekeeper_installation_open_root(path,&rootStat,context,error);if (root<0) return nil;
     int info=-1,executable=-1;NSDictionary *result=nil;
     @try {
-        struct stat rootStat,infoStat,executableStat;
-        if (fstat(root,&rootStat)) {
-            int number=errno;axs_cachekeeper_installation_error(error,2,@"无法确认安装包目录身份",@"root",@"snapshotStat",number);return nil;
-        }
-        info=axs_cachekeeper_installation_open_file(root,"Info.plist",@"info",&infoStat,error);if (info<0) return nil;
+        struct stat infoStat,executableStat;
+        if (!axs_cachekeeper_installation_root_sample(root,rootStat,@"无法确认安装包目录身份",error)) return nil;
+        info=axs_cachekeeper_installation_open_file(root,"Info.plist",@"info",&infoStat,[path stringByAppendingPathComponent:@"Info.plist"],context,error);if (info<0) return nil;
         if (infoStat.st_size<=0 || infoStat.st_size>1024*1024) {
             axs_cachekeeper_installation_error(error,4,@"安装信息为空或超过 1 MiB 读取上限",@"info",@"size",0);return nil;
         }
@@ -223,7 +336,7 @@ NSDictionary *axs_cachekeeper_installation_snapshot(NSURL *bundleURL, NSString *
         if (version.length && systemShortVersion.length && ![version isEqual:systemShortVersion]) {
             axs_cachekeeper_installation_error(error,6,@"系统版本与安装包版本不一致，等待安装稳定",@"info",@"versionMismatch",0);return nil;
         }
-        executable=axs_cachekeeper_installation_open_file(root,name.fileSystemRepresentation,@"main",&executableStat,error);if (executable<0) return nil;
+        executable=axs_cachekeeper_installation_open_file(root,name.fileSystemRepresentation,@"main",&executableStat,[path stringByAppendingPathComponent:name],context,error);if (executable<0) return nil;
         if (!axs_cachekeeper_installation_check(root,info,executable,path,name,rootStat,infoStat,executableStat,error)) return nil;
         NSArray *rootIdentity=axs_cachekeeper_installation_stat(rootStat),*infoIdentity=axs_cachekeeper_installation_stat(infoStat),*executableIdentity=axs_cachekeeper_installation_stat(executableStat);
         NSString *fingerprint=axs_cachekeeper_installation_fingerprint(@[path,bundleIdentifier,version ?: @"",build ?: @"",rootIdentity,infoIdentity,executableIdentity]);
@@ -236,7 +349,7 @@ NSDictionary *axs_cachekeeper_installation_snapshot(NSURL *bundleURL, NSString *
     } @finally { if (executable>=0) close(executable);if (info>=0) close(info);close(root); }
     return result;
 }
-BOOL axs_cachekeeper_validate_installation_snapshot(NSDictionary *snapshot, NSURL *currentBundleURL, NSString *currentSystemShortVersion, NSError **error) {
+BOOL axs_cachekeeper_validate_installation_snapshot_with_context(NSDictionary *snapshot, NSURL *currentBundleURL, NSString *currentSystemShortVersion,AxsCacheKeeperInstallationContext context,NSError **error) {
     if (error) *error=nil;
     if (![snapshot isKindOfClass:NSDictionary.class])
         return axs_cachekeeper_installation_error(error,1,@"安装身份不可用",@"snapshot",@"shape",0);
@@ -249,28 +362,33 @@ BOOL axs_cachekeeper_validate_installation_snapshot(NSDictionary *snapshot, NSUR
         return axs_cachekeeper_installation_error(error,6,@"系统安装位置已改变，旧作业已失效",@"snapshot",@"path",0);
     if (![(currentSystemShortVersion ?: @"") isEqual:snapshot[@"_systemVersion"]])
         return axs_cachekeeper_installation_error(error,6,@"系统安装版本已改变，旧作业已失效",@"snapshot",@"version",0);
-    int root=axs_cachekeeper_installation_open_root(path,error);if (root<0) return NO;
+    struct stat rootStat;
+    int root=axs_cachekeeper_installation_open_root(path,&rootStat,context,error);if (root<0) return NO;
     int info=-1,executable=-1;BOOL valid=NO;
     @try {
-        struct stat rootStat,infoStat,executableStat;
-        if (fstat(root,&rootStat)) {
-            int number=errno;return axs_cachekeeper_installation_error(error,2,@"无法复核安装目录",@"root",@"snapshotStat",number);
-        }
-        info=axs_cachekeeper_installation_open_file(root,"Info.plist",@"info",&infoStat,error);if (info<0) return NO;
+        struct stat infoStat,executableStat;
+        if (!axs_cachekeeper_installation_root_sample(root,rootStat,@"无法复核安装目录",error)) return NO;
+        info=axs_cachekeeper_installation_open_file(root,"Info.plist",@"info",&infoStat,[path stringByAppendingPathComponent:@"Info.plist"],context,error);if (info<0) return NO;
         NSString *name=snapshot[@"_executable"];
-        executable=axs_cachekeeper_installation_open_file(root,name.fileSystemRepresentation,@"main",&executableStat,error);if (executable<0) return NO;
+        executable=axs_cachekeeper_installation_open_file(root,name.fileSystemRepresentation,@"main",&executableStat,[path stringByAppendingPathComponent:name],context,error);if (executable<0) return NO;
         NSUInteger rootDifference=axs_cachekeeper_installation_difference(snapshot[@"_root"],axs_cachekeeper_installation_stat(rootStat));
         if (rootDifference)
-            return axs_cachekeeper_installation_identity_error(error,6,@"安装目录身份已变化，旧作业已失效",@"root",@"snapshotIdentity",@"snapshotToFD",rootDifference,nil);
+            return axs_cachekeeper_installation_identity_error(error,6,@"安装目录身份已变化，旧作业已失效",@"root",@"snapshotIdentity",@"snapshotToFD",rootDifference,nil,nil);
         NSUInteger infoDifference=axs_cachekeeper_installation_difference(snapshot[@"_info"],axs_cachekeeper_installation_stat(infoStat));
         if (infoDifference)
-            return axs_cachekeeper_installation_identity_error(error,6,@"安装信息身份已变化，旧作业已失效",@"info",@"snapshotIdentity",@"snapshotToFD",infoDifference,nil);
+            return axs_cachekeeper_installation_identity_error(error,6,@"安装信息身份已变化，旧作业已失效",@"info",@"snapshotIdentity",@"snapshotToFD",infoDifference,nil,nil);
         NSUInteger mainDifference=axs_cachekeeper_installation_difference(snapshot[@"_main"],axs_cachekeeper_installation_stat(executableStat));
         if (mainDifference)
-            return axs_cachekeeper_installation_identity_error(error,6,@"主程序身份已变化，旧作业已失效",@"main",@"snapshotIdentity",@"snapshotToFD",mainDifference,nil);
+            return axs_cachekeeper_installation_identity_error(error,6,@"主程序身份已变化，旧作业已失效",@"main",@"snapshotIdentity",@"snapshotToFD",mainDifference,nil,nil);
         valid=axs_cachekeeper_installation_check(root,info,executable,path,name,rootStat,infoStat,executableStat,error);
     } @finally { if (executable>=0) close(executable);if (info>=0) close(info);close(root); }
     return valid;
+}
+NSDictionary *axs_cachekeeper_installation_snapshot(NSURL *bundleURL,NSString *bundleIdentifier,NSString *systemShortVersion,NSError **error) {
+    return axs_cachekeeper_installation_snapshot_with_context(bundleURL,bundleIdentifier,systemShortVersion,AxsCacheKeeperInstallationContextUnspecified,error);
+}
+BOOL axs_cachekeeper_validate_installation_snapshot(NSDictionary *snapshot,NSURL *currentBundleURL,NSString *currentSystemShortVersion,NSError **error) {
+    return axs_cachekeeper_validate_installation_snapshot_with_context(snapshot,currentBundleURL,currentSystemShortVersion,AxsCacheKeeperInstallationContextUnspecified,error);
 }
 static id axs_cachekeeper_installation_property(id object, NSString *name) {
     SEL selector=NSSelectorFromString(name);
@@ -308,7 +426,8 @@ static NSArray *axs_cachekeeper_coverage_count_keys(void) {
 static NSMutableDictionary *axs_cachekeeper_coverage_role(void) {
     NSMutableDictionary *role=[NSMutableDictionary new];
     for (NSString *key in axs_cachekeeper_coverage_count_keys()) role[key]=@0;
-    role[@"_associations"]=[NSMutableDictionary new];role[@"_invalidAssociations"]=[NSMutableSet new];return role;
+    role[@"_associations"]=[NSMutableDictionary new];role[@"_invalidAssociations"]=[NSMutableSet new];
+    role[@"_ownerSources"]=[NSMutableDictionary new];role[@"_ownerObserved"]=[NSMutableDictionary new];return role;
 }
 static void axs_cachekeeper_coverage_increment(NSMutableDictionary *role, NSString *key) {
     role[key]=@([role[key] unsignedIntegerValue]+1);
@@ -333,7 +452,7 @@ static BOOL axs_cachekeeper_coverage_budget(NSMutableDictionary *role, NSUIntege
     if (*used>=16384) { axs_cachekeeper_coverage_increment(role,@"truncatedCount");return NO; }
     (*used)++;return YES;
 }
-static void axs_cachekeeper_coverage_registration(id proxy, NSString *owner, NSMutableDictionary *home,
+static void axs_cachekeeper_coverage_registration_sample(id proxy, NSString *owner, NSMutableDictionary *home,
     NSMutableDictionary *group, NSMutableDictionary *extension, NSUInteger *groupUsed, NSUInteger *extensionUsed) {
     NSString *state=nil;
     id value=axs_cachekeeper_coverage_property(proxy,@"dataContainerURL",&state);
@@ -396,6 +515,32 @@ static void axs_cachekeeper_coverage_registration(id proxy, NSString *owner, NSM
         NSString *url=axs_cachekeeper_coverage_url(dataURL);
         if (!url) { axs_cachekeeper_coverage_increment(extension,@"invalidAssociationCount");continue; }
         axs_cachekeeper_coverage_associate(extension,identity,url);
+    }
+}
+static void axs_cachekeeper_coverage_registration(id proxy, NSString *owner, NSMutableDictionary *home,
+    NSMutableDictionary *group, NSMutableDictionary *extension, NSUInteger *groupUsed, NSUInteger *extensionUsed) {
+    NSArray *roles=@[home,group,extension];NSMutableArray *before=[NSMutableArray new];
+    for (NSDictionary *role in roles) [before addObject:[role copy]];
+    axs_cachekeeper_coverage_registration_sample(proxy,owner,home,group,extension,groupUsed,extensionUsed);
+    for (NSUInteger index=0;index<roles.count;index++) {
+        NSMutableDictionary *role=roles[index];NSDictionary *old=before[index];
+        NSUInteger observed=[role[@"observedSourceCount"] unsignedIntegerValue]-[old[@"observedSourceCount"] unsignedIntegerValue],issues=0;
+        for (NSString *key in axs_cachekeeper_coverage_count_keys())
+            if (![key isEqual:@"observedSourceCount"] && !(index==0 && [key isEqual:@"notProvidedCount"]))
+                issues+=[role[key] unsignedIntegerValue]-[old[key] unsignedIntegerValue];
+        NSString *state=observed ? (issues ? @"partial" : @"available") :
+            ([role[@"invalidSourceCount"] unsignedIntegerValue]>[old[@"invalidSourceCount"] unsignedIntegerValue] ? @"invalid" :
+             [role[@"missingSelectorCount"] unsignedIntegerValue]>[old[@"missingSelectorCount"] unsignedIntegerValue] ? @"missingSelector" : @"unavailable");
+        if (index==0 && observed && !issues && [role[@"notProvidedCount"] unsignedIntegerValue]>[old[@"notProvidedCount"] unsignedIntegerValue]) state=@"notProvided";
+        NSString *previous=role[@"_ownerSources"][owner];
+        BOOL knownObserved=[role[@"_ownerObserved"][owner] boolValue] || observed>0;
+        role[@"_ownerObserved"][owner]=@(knownObserved);
+        if (previous && ![previous isEqual:state]) {
+            if (knownObserved) state=@"partial";
+            else if ([previous isEqual:@"invalid"] || [state isEqual:@"invalid"]) state=@"invalid";
+            else if ([previous isEqual:@"missingSelector"] || [state isEqual:@"missingSelector"]) state=@"missingSelector";
+        }
+        role[@"_ownerSources"][owner]=state;
     }
 }
 static NSDictionary *axs_cachekeeper_coverage_finish_role(NSMutableDictionary *role, BOOL home, NSMutableSet *allURLs) {
@@ -479,27 +624,145 @@ NSDictionary *axs_cachekeeper_container_coverage_projection(id coverage) {
     for (NSString *key in @[@"observedRegistrations",@"invalidRegistrationCount",@"truncatedRegistrationCount",@"allRolesUniqueRegisteredURLCount"]) out[key]=coverage[key];
     [out addEntriesFromDictionary:roles];return out;
 }
-NSArray *axs_cachekeeper_installed_applications_with_container_coverage(NSMutableDictionary *cache, NSDictionary **coverage, NSError **error) {
+static NSMutableDictionary *axs_cachekeeper_registry_inventory_base(NSString *state) {
+    NSMutableDictionary *out=axs_cachekeeper_coverage_base(state);
+    out[@"relationshipTokenMeaning"]=@"exactURLStringWithinInventory";
+    out[@"relationshipTokenLifetime"]=@"thisInventoryOnly";out[@"physicalIdentity"]=@"notChecked";return out;
+}
+static BOOL axs_cachekeeper_registry_token(id value) {
+    if (![value isKindOfClass:NSString.class] || ![value hasPrefix:@"resource-"]) return NO;
+    NSString *suffix=[value substringFromIndex:9];
+    return suffix.length && suffix.length<=6 && ![suffix hasPrefix:@"0"] &&
+        [suffix rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"0123456789"].invertedSet].location==NSNotFound &&
+        suffix.integerValue<=36864;
+}
+NSDictionary *axs_cachekeeper_registry_inventory_projection(id registryInventory) {
+    NSMutableDictionary *out=axs_cachekeeper_registry_inventory_base(registryInventory ? @"invalid" : @"notObserved");
+    if (![registryInventory isKindOfClass:NSDictionary.class]) return out;
+    NSDictionary *coverage=axs_cachekeeper_container_coverage_projection(registryInventory);
+    if ([@[@"invalid",@"notObserved"] containsObject:coverage[@"state"]]) return out;
+    [out addEntriesFromDictionary:coverage];
+    if (![coverage[@"sourceState"] isEqual:@"available"]) {
+        if (axs_cachekeeper_coverage_number(registryInventory[@"sourceSampledAt"])) out[@"sourceSampledAt"]=registryInventory[@"sourceSampledAt"];
+        return out;
+    }
+    if (!axs_cachekeeper_coverage_number(registryInventory[@"sourceSampledAt"]) ||
+        ![registryInventory[@"entries"] isKindOfClass:NSArray.class] || [registryInventory[@"entries"] count]>4096) return axs_cachekeeper_registry_inventory_base(@"invalid");
+    NSMutableDictionary *entries=[NSMutableDictionary new];NSMutableSet *allTokens=[NSMutableSet new];
+    NSMutableDictionary *roleTokens=[NSMutableDictionary new],*roleAssociations=[NSMutableDictionary new],*roleObserved=[NSMutableDictionary new];
+    for (NSString *name in @[@"home",@"group",@"extension"]) {roleTokens[name]=[NSMutableSet new];roleAssociations[name]=@0;roleObserved[name]=@0;}
+    NSUInteger homesNotProvided=0;
+    for (id entry in registryInventory[@"entries"]) {
+        if (![entry isKindOfClass:NSDictionary.class] || !axs_cachekeeper_bundle_id(entry[@"bundle"]) || entries[entry[@"bundle"]] ||
+            !axs_cachekeeper_input_boolean(entry[@"displayEligible"]) ||
+            ![@[@"system",@"user",@"thirdPartySystem",@"unknown"] containsObject:entry[@"sourceClassification"]] ||
+            ![entry[@"relationships"] isKindOfClass:NSDictionary.class]) return axs_cachekeeper_registry_inventory_base(@"invalid");
+        NSMutableDictionary *relations=[NSMutableDictionary new];
+        for (NSString *name in @[@"home",@"group",@"extension"]) {
+            id relation=entry[@"relationships"][name];
+            if (![relation isKindOfClass:NSDictionary.class] || ![@[@"available",@"partial",@"notProvided",@"unavailable",@"invalid",@"missingSelector"] containsObject:relation[@"state"]] ||
+                ([relation[@"state"] isEqual:@"notProvided"] && ![name isEqual:@"home"])) return axs_cachekeeper_registry_inventory_base(@"invalid");
+            NSMutableDictionary *projected=[@{@"state":relation[@"state"]} mutableCopy];
+            BOOL observed=[@[@"available",@"partial",@"notProvided"] containsObject:relation[@"state"]];
+            if (observed) {
+                if (![relation[@"tokens"] isKindOfClass:NSArray.class] || [relation[@"tokens"] count]>16384) return axs_cachekeeper_registry_inventory_base(@"invalid");
+                NSMutableSet *tokens=[NSMutableSet new];
+                for (id token in relation[@"tokens"]) {if (!axs_cachekeeper_registry_token(token) || [tokens containsObject:token]) return axs_cachekeeper_registry_inventory_base(@"invalid");[tokens addObject:token];}
+                if (([name isEqual:@"home"] && (tokens.count>1 || ([relation[@"state"] isEqual:@"available"] && tokens.count!=1))) ||
+                    ([relation[@"state"] isEqual:@"notProvided"] && tokens.count)) return axs_cachekeeper_registry_inventory_base(@"invalid");
+                projected[@"tokens"]=[tokens.allObjects sortedArrayUsingSelector:@selector(compare:)];
+                [allTokens unionSet:tokens];
+                [roleTokens[name] unionSet:tokens];
+                roleAssociations[name]=@([roleAssociations[name] unsignedIntegerValue]+tokens.count);
+                roleObserved[name]=@([roleObserved[name] unsignedIntegerValue]+1);
+                if ([name isEqual:@"home"] && [relation[@"state"] isEqual:@"notProvided"]) homesNotProvided++;
+            } else if (relation[@"tokens"]) return axs_cachekeeper_registry_inventory_base(@"invalid");
+            relations[name]=projected;
+        }
+        entries[entry[@"bundle"]]=@{@"bundle":entry[@"bundle"],@"displayEligible":entry[@"displayEligible"],@"sourceClassification":entry[@"sourceClassification"],@"relationships":relations};
+    }
+    for (NSString *name in @[@"home",@"group",@"extension"]) {
+        NSDictionary *role=coverage[name];NSUInteger associations=[roleAssociations[name] unsignedIntegerValue];
+        // Tokens deduplicate exact URLs per owner, so group/plugin association IDs can outnumber
+        // tokens. Home has exactly one association key per owner and therefore must match exactly.
+        if ([roleTokens[name] count]!=[role[@"registeredURLCount"] unsignedIntegerValue] ||
+            associations>[role[@"associationCount"] unsignedIntegerValue] ||
+            ([name isEqual:@"home"] && associations!=[role[@"associationCount"] unsignedIntegerValue]) ||
+            [roleObserved[name] unsignedIntegerValue]>[role[@"observedSourceCount"] unsignedIntegerValue])
+            return axs_cachekeeper_registry_inventory_base(@"invalid");
+    }
+    if (homesNotProvided>[coverage[@"home"][@"notProvidedCount"] unsignedIntegerValue]) return axs_cachekeeper_registry_inventory_base(@"invalid");
+    if (entries.count>[coverage[@"observedRegistrations"] unsignedIntegerValue]-[coverage[@"invalidRegistrationCount"] unsignedIntegerValue] ||
+        allTokens.count!=[coverage[@"allRolesUniqueRegisteredURLCount"] unsignedIntegerValue]) return axs_cachekeeper_registry_inventory_base(@"invalid");
+    out[@"sourceSampledAt"]=registryInventory[@"sourceSampledAt"];
+    out[@"entries"]=[entries.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b){return [a[@"bundle"] compare:b[@"bundle"]];}];
+    return [out copy];
+}
+static NSDictionary *axs_cachekeeper_registry_inventory_finish(NSDictionary *coverage,NSDictionary *registry,NSDictionary *apps,
+    NSMutableDictionary *home,NSMutableDictionary *group,NSMutableDictionary *extension,NSNumber *sampledAt) {
+    NSMutableDictionary *out=[coverage mutableCopy];out[@"sourceSampledAt"]=sampledAt;
+    NSMutableSet *urls=[NSMutableSet new];for (NSDictionary *role in @[home,group,extension]) [urls addObjectsFromArray:[role[@"_associations"] allValues]];
+    NSMutableDictionary *tokens=[NSMutableDictionary new];
+    for (NSString *url in [urls.allObjects sortedArrayUsingSelector:@selector(compare:)]) tokens[url]=[NSString stringWithFormat:@"resource-%lu",(unsigned long)tokens.count+1];
+    // Index each validated association once; rebuilding it for every registration is quadratic.
+    NSMutableDictionary *ownersByRole=[NSMutableDictionary new];
+    for (NSString *name in @[@"home",@"group",@"extension"]) {
+        NSDictionary *role=[name isEqual:@"home"] ? home : [name isEqual:@"group"] ? group : extension;
+        NSMutableDictionary *owners=[NSMutableDictionary new];
+        for (NSArray *identity in role[@"_associations"]) {
+            NSString *owner=[name isEqual:@"extension"] ? role[@"_pluginOwners"][identity.firstObject] : identity.firstObject;
+            if (!owner) continue;
+            NSMutableSet *related=owners[owner];if (!related) owners[owner]=related=[NSMutableSet new];
+            [related addObject:tokens[role[@"_associations"][identity]]];
+        }
+        ownersByRole[name]=owners;
+    }
+    NSMutableArray *entries=[NSMutableArray new];
+    for (NSString *bundle in [registry.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        NSMutableDictionary *relations=[NSMutableDictionary new];
+        for (NSString *name in @[@"home",@"group",@"extension"]) {
+            NSDictionary *role=[name isEqual:@"home"] ? home : [name isEqual:@"group"] ? group : extension;
+            NSString *state=role[@"_ownerSources"][bundle] ?: @"unavailable";
+            NSSet *related=ownersByRole[name][bundle] ?: [NSSet set];
+            // Revocation can occur after an earlier owner's sampling; neither owner keeps a false complete relation.
+            if ([role[@"invalidAssociationCount"] unsignedIntegerValue] && [@[@"available",@"notProvided"] containsObject:state]) state=@"partial";
+            NSMutableDictionary *relation=[@{@"state":state} mutableCopy];
+            if ([@[@"available",@"partial",@"notProvided"] containsObject:state]) relation[@"tokens"]=[related.allObjects sortedArrayUsingSelector:@selector(compare:)];
+            relations[name]=relation;
+        }
+        BOOL eligible=apps[bundle]!=nil;NSString *type=registry[bundle];
+        [entries addObject:@{@"bundle":bundle,@"displayEligible":@(eligible),@"sourceClassification":[type isEqual:@"System"] ? (eligible ? @"thirdPartySystem" : @"system") : [type isEqual:@"User"] ? @"user" : @"unknown",@"relationships":relations}];
+    }
+    out[@"entries"]=entries;return axs_cachekeeper_registry_inventory_projection(out);
+}
+NSArray *axs_cachekeeper_installed_applications_with_registry_inventory(NSMutableDictionary *cache, NSDictionary **coverage, NSDictionary **registryInventory, NSError **error) {
     if (error) *error=nil;
+    NSNumber *sampledAt=@((unsigned long long)NSDate.date.timeIntervalSince1970);
     NSString *sourceState=nil;
     id manager=axs_cachekeeper_coverage_property(NSClassFromString(@"LSApplicationWorkspace"),@"defaultWorkspace",&sourceState);
     id installed=manager ? axs_cachekeeper_coverage_property(manager,@"allInstalledApplications",&sourceState) : nil;
     if (![installed isKindOfClass:NSArray.class]) {
         if (installed) sourceState=@"invalid";
         if (coverage) {NSMutableDictionary *failure=axs_cachekeeper_coverage_base(@"unavailable");failure[@"sourceState"]=sourceState;*coverage=[failure copy];}
+        if (registryInventory) {NSMutableDictionary *failure=axs_cachekeeper_registry_inventory_base(@"unavailable");failure[@"sourceState"]=sourceState ?: @"unavailable";failure[@"sourceSampledAt"]=sampledAt;*registryInventory=[failure copy];}
         axs_cachekeeper_installation_error(error,7,@"系统应用列表不可用",@"registry",@"enumerate",0);return nil;
     }
-    NSMutableDictionary *home=coverage ? axs_cachekeeper_coverage_role() : nil,*group=coverage ? axs_cachekeeper_coverage_role() : nil,
-        *extension=coverage ? axs_cachekeeper_coverage_role() : nil;
+    BOOL sample=coverage || registryInventory;
+    NSMutableDictionary *home=sample ? axs_cachekeeper_coverage_role() : nil,*group=sample ? axs_cachekeeper_coverage_role() : nil,
+        *extension=sample ? axs_cachekeeper_coverage_role() : nil,*registry=[NSMutableDictionary new];
     NSUInteger registrations=0,invalidRegistrations=0,groupUsed=0,extensionUsed=0;
     NSMutableDictionary *apps=[NSMutableDictionary new],*nextCache=[NSMutableDictionary new];
     for (id proxy in installed) { @autoreleasepool {
         NSString *type=axs_cachekeeper_installation_property(proxy,@"applicationType");
         NSURL *url=axs_cachekeeper_installation_property(proxy,@"bundleURL");
         NSString *bundle=axs_cachekeeper_installation_property(proxy,@"applicationIdentifier");
-        if (coverage && registrations<4096) {
+        if (sample && registrations<4096) {
             registrations++;
-            if (axs_cachekeeper_bundle_id(bundle)) axs_cachekeeper_coverage_registration(proxy,bundle,home,group,extension,&groupUsed,&extensionUsed);
+            if (axs_cachekeeper_bundle_id(bundle)) {
+                NSString *classification=[type isKindOfClass:NSString.class] ? type : @"unknown",*previousType=registry[bundle];
+                registry[bundle]=previousType && ![previousType isEqual:classification] ? @"unknown" : classification;
+                axs_cachekeeper_coverage_registration(proxy,bundle,home,group,extension,&groupUsed,&extensionUsed);
+            }
             else invalidRegistrations++;
         }
         if (!axs_cachekeeper_bundle_id(bundle)) continue;
@@ -517,8 +780,8 @@ NSArray *axs_cachekeeper_installed_applications_with_container_coverage(NSMutabl
         NSError *installationError=nil;
         NSDictionary *snapshot=previous[@"installation"];
         // Existing packages get bounded stat checks. Only new/changed packages re-read Info.plist.
-        if (!snapshot || !axs_cachekeeper_validate_installation_snapshot(snapshot,url,systemVersion,nil))
-            snapshot=axs_cachekeeper_installation_snapshot(url,bundle,systemVersion,&installationError);
+        if (!snapshot || !axs_cachekeeper_validate_installation_snapshot_with_context(snapshot,url,systemVersion,AxsCacheKeeperInstallationContextRegistryBundle,nil))
+            snapshot=axs_cachekeeper_installation_snapshot_with_context(url,bundle,systemVersion,AxsCacheKeeperInstallationContextRegistryBundle,&installationError);
         NSDictionary *cached=previous[@"entry"];
         NSString *source=[type isEqual:@"System"] ? @"troll" : @"user";
         if (snapshot && snapshot==previous[@"installation"] && [cached[@"name"] isEqual:effectiveName] && [cached[@"source"] isEqual:source]) {
@@ -538,7 +801,7 @@ NSArray *axs_cachekeeper_installed_applications_with_container_coverage(NSMutabl
         // Failed snapshots evict the former identity; the visible APP remains with an explicit state.
         nextCache[bundle]=snapshot ? @{@"installation":snapshot,@"entry":apps[bundle]} : @{@"entry":apps[bundle]};
     }}
-    if (coverage) {
+    if (sample) {
         NSMutableSet *allURLs=[NSMutableSet new];
         NSDictionary *h=axs_cachekeeper_coverage_finish_role(home,YES,allURLs),*g=axs_cachekeeper_coverage_finish_role(group,NO,allURLs),
             *e=axs_cachekeeper_coverage_finish_role(extension,NO,allURLs);
@@ -552,10 +815,14 @@ NSArray *axs_cachekeeper_installed_applications_with_container_coverage(NSMutabl
         NSMutableDictionary *result=axs_cachekeeper_coverage_base(partial ? @"partial" : @"available");
         [result addEntriesFromDictionary:@{@"sourceState":@"available",@"observedRegistrations":@(registrations),@"invalidRegistrationCount":@(invalidRegistrations),
             @"truncatedRegistrationCount":@(truncated),@"allRolesUniqueRegisteredURLCount":@(allURLs.count),@"countsAreLowerBounds":@(partial),@"home":h,@"group":g,@"extension":e}];
-        *coverage=[result copy];
+        if (coverage) *coverage=[result copy];
+        if (registryInventory) *registryInventory=axs_cachekeeper_registry_inventory_finish(result,registry,apps,home,group,extension,sampledAt);
     }
     [cache setDictionary:nextCache];
     return [apps.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b){return [a[@"id"] compare:b[@"id"]];}];
+}
+NSArray *axs_cachekeeper_installed_applications_with_container_coverage(NSMutableDictionary *cache, NSDictionary **coverage, NSError **error) {
+    return axs_cachekeeper_installed_applications_with_registry_inventory(cache,coverage,NULL,error);
 }
 NSArray *axs_cachekeeper_installed_applications(NSMutableDictionary *cache, NSError **error) {
     return axs_cachekeeper_installed_applications_with_container_coverage(cache,NULL,error);

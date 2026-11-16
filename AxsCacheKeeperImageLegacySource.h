@@ -55,6 +55,26 @@ typedef struct {
     uint64_t sectionSize;
 } AxsCacheKeeperImageLegacyLayout;
 
+// One first-failure value; BOOL wrappers always derive from the same check.
+typedef struct {
+    BOOL accepted;
+    const char *stage,*reason;
+    NSUInteger methodIndex,helperIndex;
+} AxsCacheKeeperImageLegacyCheck;
+static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyResult(const char *stage,const char *reason,NSUInteger method,NSUInteger helper) {
+    return (AxsCacheKeeperImageLegacyCheck){!strcmp(stage,"complete"),stage,reason,method,helper};
+}
+static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyComplete(void) {
+    return AxsCacheKeeperImageLegacyResult("complete","none",0,0);
+}
+// Only for resolving/comparing addresses. Keep authenticated originals for calls and publication.
+static inline const void *AxsCacheKeeperImageLegacyCodeAddress(const void *implementation) {
+#if __has_feature(ptrauth_calls)
+    return ptrauth_strip(implementation,ptrauth_key_function_pointer);
+#else
+    return implementation;
+#endif
+}
 static inline BOOL AxsCacheKeeperImageLegacyContains(uint64_t start,uint64_t size,uint64_t address,uint64_t length) {
     return address>=start && address-start<=size && length<=size-(address-start);
 }
@@ -79,16 +99,18 @@ static inline BOOL AxsCacheKeeperImageLegacyName(const char name[16],const char 
     size_t length=strlen(expected);
     return length<16 && !memcmp(name,expected,length) && name[length]=='\0';
 }
-static inline BOOL AxsCacheKeeperImageLegacyReadLayout(const void *base,intptr_t slide,AxsCacheKeeperImageLegacyLayout *layout) {
-    if (!base || !layout) return NO;
+static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyLayoutCheck(const void *base,intptr_t slide,AxsCacheKeeperImageLegacyLayout *layout) {
+    if (!base || !layout) return AxsCacheKeeperImageLegacyResult("layout","read",0,0);
     struct mach_header_64 header;
-    if (!AxsCacheKeeperImageLegacyRead((uintptr_t)base,&header,sizeof(header),VM_PROT_READ) ||
-        header.magic!=MH_MAGIC_64 || header.cputype!=CPU_TYPE_ARM64 || header.cpusubtype!=CPU_SUBTYPE_ARM64_ALL ||
+    if (!AxsCacheKeeperImageLegacyRead((uintptr_t)base,&header,sizeof(header),VM_PROT_READ))
+        return AxsCacheKeeperImageLegacyResult("layout","read",0,0);
+    if (header.magic!=MH_MAGIC_64 || header.cputype!=CPU_TYPE_ARM64 || header.cpusubtype!=CPU_SUBTYPE_ARM64_ALL ||
         header.filetype!=MH_EXECUTE || header.reserved || !header.ncmds || header.sizeofcmds>65536 ||
-        header.ncmds>header.sizeofcmds/sizeof(struct load_command)) return NO;
+        header.ncmds>header.sizeofcmds/sizeof(struct load_command)) return AxsCacheKeeperImageLegacyResult("layout","header",0,0);
     size_t length=sizeof(header)+header.sizeofcmds;
-    uint8_t *copy=malloc(length);if (!copy) return NO;
+    uint8_t *copy=malloc(length);if (!copy) return AxsCacheKeeperImageLegacyResult("layout","read",0,0);
     BOOL valid=AxsCacheKeeperImageLegacyRead((uintptr_t)base,copy,length,VM_PROT_READ) && !memcmp(copy,&header,sizeof(header));
+    const char *failure=valid ? "commands" : "read";
     struct segment_command_64 text={0};struct section_64 section={0};
     struct {uint64_t address,size;} segments[64];NSUInteger segmentCount=0,textCount=0,sectionCount=0,uuidCount=0;
     static const unsigned char uuid[16]={0xb2,0xb9,0xd3,0x0a,0x1c,0xaf,0x31,0xb4,0x82,0xca,0xc7,0x76,0xe7,0xeb,0x2b,0xa1};
@@ -99,8 +121,9 @@ static inline BOOL AxsCacheKeeperImageLegacyReadLayout(const void *base,intptr_t
         if (command->cmdsize<sizeof(*command) || command->cmdsize%8 || command->cmdsize>length-cursor) {valid=NO;break;}
         if (command->cmd==LC_UUID) {
             if (++uuidCount!=1 || command->cmdsize!=sizeof(struct uuid_command) ||
-                memcmp(((const struct uuid_command *)command)->uuid,uuid,sizeof(uuid))) {valid=NO;break;}
+                memcmp(((const struct uuid_command *)command)->uuid,uuid,sizeof(uuid))) {failure="uuid";valid=NO;break;}
         } else if (command->cmd==LC_SEGMENT_64) {
+            failure="segments";
             if (command->cmdsize<sizeof(struct segment_command_64) || segmentCount==64) {valid=NO;break;}
             const struct segment_command_64 *segment=(const void *)command;
             if (segment->nsects!=(command->cmdsize-sizeof(*segment))/sizeof(struct section_64) ||
@@ -124,6 +147,7 @@ static inline BOOL AxsCacheKeeperImageLegacyReadLayout(const void *base,intptr_t
             for (uint32_t part=0;valid && part<segment->nsects;part++) {
                 const struct section_64 *candidate=&sections[part];
                 if (!AxsCacheKeeperImageLegacyName(candidate->sectname,"__text")) continue;
+                failure="section";
                 if (++sectionCount!=1 || !isText || !AxsCacheKeeperImageLegacyName(candidate->segname,"__TEXT") ||
                     !candidate->size || (candidate->flags&SECTION_TYPE)!=S_REGULAR ||
                     (candidate->flags&(S_ATTR_PURE_INSTRUCTIONS|S_ATTR_SOME_INSTRUCTIONS))!=(S_ATTR_PURE_INSTRUCTIONS|S_ATTR_SOME_INSTRUCTIONS) ||
@@ -134,9 +158,14 @@ static inline BOOL AxsCacheKeeperImageLegacyReadLayout(const void *base,intptr_t
             }
         }
         cursor+=command->cmdsize;
+        if (valid) failure="commands";
     }
-    valid=valid && cursor==length && textCount==1 && sectionCount==1 && uuidCount==1;
+    if (valid && cursor!=length) {failure="commands";valid=NO;}
+    if (valid && textCount!=1) {failure="segments";valid=NO;}
+    if (valid && sectionCount!=1) {failure="section";valid=NO;}
+    if (valid && uuidCount!=1) {failure="uuid";valid=NO;}
     if (valid) {
+        failure="slide";
         uint64_t address=text.vmaddr;
         if (slide>=0) {
             if ((uint64_t)slide>UINTPTR_MAX-address) valid=NO;else address+=(uint64_t)slide;
@@ -147,56 +176,96 @@ static inline BOOL AxsCacheKeeperImageLegacyReadLayout(const void *base,intptr_t
         if (valid && (address!=(uintptr_t)base || text.vmsize>UINTPTR_MAX-address)) valid=NO;
         if (valid) *layout=(AxsCacheKeeperImageLegacyLayout){(uintptr_t)base,section.addr-text.vmaddr,section.size};
     }
-    free(copy);return valid;
+    free(copy);return valid ? AxsCacheKeeperImageLegacyComplete() : AxsCacheKeeperImageLegacyResult("layout",failure,0,0);
 }
-static inline BOOL AxsCacheKeeperImageLegacyWindowMatches(const AxsCacheKeeperImageLegacyLayout *layout,const void *implementation,const AxsCacheKeeperImageLegacyWindow *window) {
-    if (!layout || !implementation || !window || !window->length || window->length>4096 || window->offset>UINTPTR_MAX-layout->base) return NO;
-#if __has_feature(ptrauth_calls)
-    implementation=ptrauth_strip(implementation,ptrauth_key_function_pointer);
-#endif
-    if ((uintptr_t)implementation!=layout->base+window->offset) return NO;
-    if (!AxsCacheKeeperImageLegacyContains(layout->sectionOffset,layout->sectionSize,window->offset,window->length)) return NO;
+static inline BOOL AxsCacheKeeperImageLegacyReadLayout(const void *base,intptr_t slide,AxsCacheKeeperImageLegacyLayout *layout) {
+    return AxsCacheKeeperImageLegacyLayoutCheck(base,slide,layout).accepted;
+}
+static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyWindowCheck(const AxsCacheKeeperImageLegacyLayout *layout,const void *implementation,const AxsCacheKeeperImageLegacyWindow *window,NSUInteger helper) {
+    const char *stage=helper ? "helperWindow" : "mainWindow";NSUInteger method=helper ? 0 : (window ? window->methodIndex : 1);
+    if (!layout || !implementation || !window || !window->length || window->length>4096 || window->offset>UINTPTR_MAX-layout->base)
+        return AxsCacheKeeperImageLegacyResult(stage,"pointer",method,helper);
+    implementation=AxsCacheKeeperImageLegacyCodeAddress(implementation);
+    if ((uintptr_t)implementation!=layout->base+window->offset) return AxsCacheKeeperImageLegacyResult(stage,"offset",method,helper);
+    if (!AxsCacheKeeperImageLegacyContains(layout->sectionOffset,layout->sectionSize,window->offset,window->length)) return AxsCacheKeeperImageLegacyResult(stage,"section",method,helper);
     unsigned char bytes[4096],digest[CC_SHA256_DIGEST_LENGTH];
     if (!AxsCacheKeeperImageLegacyRead((uintptr_t)implementation,bytes,window->length,VM_PROT_READ|VM_PROT_EXECUTE) ||
-        !CC_SHA256(bytes,(CC_LONG)window->length,digest)) return NO;
-    if (memcmp(digest,window->sha256,sizeof(digest))) return NO;
-    return YES;
+        !CC_SHA256(bytes,(CC_LONG)window->length,digest)) return AxsCacheKeeperImageLegacyResult(stage,"protectionOrRead",method,helper);
+    if (memcmp(digest,window->sha256,sizeof(digest))) return AxsCacheKeeperImageLegacyResult(stage,"digest",method,helper);
+    return AxsCacheKeeperImageLegacyComplete();
+}
+static inline BOOL AxsCacheKeeperImageLegacyWindowMatches(const AxsCacheKeeperImageLegacyLayout *layout,const void *implementation,const AxsCacheKeeperImageLegacyWindow *window) {
+    return AxsCacheKeeperImageLegacyWindowCheck(layout,implementation,window,0).accepted;
+}
+static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacySlotsCheck(const void *implementations[25]) {
+    if (!implementations) return AxsCacheKeeperImageLegacyResult("slots","missing",1,0);
+    if (implementations[10]) return AxsCacheKeeperImageLegacyResult("slots","unexpected",11,0);
+    for (NSUInteger index=0;index<25;index++) if (index!=10 && !implementations[index])
+        return AxsCacheKeeperImageLegacyResult("slots","missing",index+1,0);
+    return AxsCacheKeeperImageLegacyComplete();
 }
 static inline BOOL AxsCacheKeeperImageLegacySlotsPresent(const void *implementations[25]) {
-    if (!implementations || implementations[10]) return NO;
-    for (NSUInteger index=0;index<25;index++) if (index!=10 && !implementations[index]) return NO;
-    return YES;
+    return AxsCacheKeeperImageLegacySlotsCheck(implementations).accepted;
 }
 static inline BOOL AxsCacheKeeperImageLegacyClassFromMainImage(Class owner,const void *base) {
     if (!owner || class_isMetaClass(owner) || !base || base!=(const void *)_dyld_get_image_header(0)) return NO;
     const char *imageName=class_getImageName(owner),*mainName=_dyld_get_image_name(0);
     return imageName && mainName && !strcmp(imageName,mainName);
 }
-static inline BOOL AxsCacheKeeperImageLegacyMethodMatches(const AxsCacheKeeperImageLegacyLayout *layout,Class owner,const char *selector,const char *encoding,const AxsCacheKeeperImageLegacyWindow *window) {
-    if (!layout || !selector || !encoding || !window || !AxsCacheKeeperImageLegacyClassFromMainImage(owner,(const void *)layout->base)) return NO;
-    Class meta=object_getClass(owner);if (!meta || !class_isMetaClass(meta)) return NO;
-    SEL name=sel_registerName(selector);Method method=class_getClassMethod(owner,name);if (!method) return NO;
+static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyMethodCheck(const AxsCacheKeeperImageLegacyLayout *layout,Class owner,const char *selector,const char *encoding,const AxsCacheKeeperImageLegacyWindow *window,NSUInteger helper) {
+    if (!owner || !layout || !selector || !encoding || !window) return AxsCacheKeeperImageLegacyResult("helperOwner","missing",0,helper);
+    if (class_isMetaClass(owner)) return AxsCacheKeeperImageLegacyResult("helperOwner","metaclass",0,helper);
+    if (!AxsCacheKeeperImageLegacyClassFromMainImage(owner,(const void *)layout->base)) return AxsCacheKeeperImageLegacyResult("helperOwner","image",0,helper);
+    Class meta=object_getClass(owner);
+    if (!meta || !class_isMetaClass(meta)) return AxsCacheKeeperImageLegacyResult("helperOwner","metaclass",0,helper);
+    SEL name=sel_registerName(selector);Method method=class_getClassMethod(owner,name);
+    if (!method) return AxsCacheKeeperImageLegacyResult("helperOwner","methodMissing",0,helper);
     unsigned int count=0;Method *methods=class_copyMethodList(meta,&count);BOOL own=NO;
     for (unsigned int index=0;methods && index<count;index++) if (methods[index]==method) {own=YES;break;}
     free(methods);
-    if (!own) return NO;
+    if (!own) return AxsCacheKeeperImageLegacyResult("helperOwner","inherited",0,helper);
     size_t length=strlen(encoding);unsigned char actualEncoding[128];
     if (!length || length>=sizeof(actualEncoding) ||
-        !AxsCacheKeeperImageLegacyRead((uintptr_t)method_getTypeEncoding(method),actualEncoding,length+1,VM_PROT_READ)) return NO;
-    if (memcmp(actualEncoding,encoding,length+1)) return NO;
+        !AxsCacheKeeperImageLegacyRead((uintptr_t)method_getTypeEncoding(method),actualEncoding,length+1,VM_PROT_READ))
+        return AxsCacheKeeperImageLegacyResult("helperABI","encodingRead",0,helper);
+    if (memcmp(actualEncoding,encoding,length+1)) return AxsCacheKeeperImageLegacyResult("helperABI","encoding",0,helper);
     IMP implementation=method_getImplementation(method);
-    if (!AxsCacheKeeperImageLegacyWindowMatches(layout,(const void *)implementation,window)) return NO;
-    return class_getClassMethod(owner,name)==method && method_getImplementation(method)==implementation;
+    AxsCacheKeeperImageLegacyCheck check=AxsCacheKeeperImageLegacyWindowCheck(layout,(const void *)implementation,window,helper);
+    if (!check.accepted) return check;
+    if (class_getClassMethod(owner,name)!=method || method_getImplementation(method)!=implementation)
+        return AxsCacheKeeperImageLegacyResult("helperWindow","changed",0,helper);
+    return AxsCacheKeeperImageLegacyComplete();
+}
+static inline BOOL AxsCacheKeeperImageLegacyMethodMatches(const AxsCacheKeeperImageLegacyLayout *layout,Class owner,const char *selector,const char *encoding,const AxsCacheKeeperImageLegacyWindow *window) {
+    return AxsCacheKeeperImageLegacyMethodCheck(layout,owner,selector,encoding,window,1).accepted;
+}
+static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyMainIdentityWithProvider(const void *base,const void *main,id (^metadata)(NSUInteger)) {
+    if (!base) return AxsCacheKeeperImageLegacyResult("mainIdentity","missingBase",0,0);
+    if (base!=main) return AxsCacheKeeperImageLegacyResult("mainIdentity","notMainBase",0,0);
+    if (!metadata || ![metadata(0) isEqual:@"com.baidu.netdisk"]) return AxsCacheKeeperImageLegacyResult("mainIdentity","bundle",0,0);
+    if (![metadata(1) isEqual:@"13.37.5"]) return AxsCacheKeeperImageLegacyResult("mainIdentity","version",0,0);
+    if (![metadata(2) isEqual:@"13.37.5.10"]) return AxsCacheKeeperImageLegacyResult("mainIdentity","build",0,0);
+    return AxsCacheKeeperImageLegacyComplete();
+}
+static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyMainIdentityCheck(const void *base,const void *main,id identifier,id version,id build) {
+    return AxsCacheKeeperImageLegacyMainIdentityWithProvider(base,main,^id(NSUInteger index) {
+        return index==0 ? identifier : (index==1 ? version : build);
+    });
+}
+static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyMainLayoutCheck(const void *base,AxsCacheKeeperImageLegacyLayout *layout) {
+    const void *main=_dyld_get_image_header(0);
+    if (!base || base!=main) return AxsCacheKeeperImageLegacyMainIdentityCheck(base,main,nil,nil,nil);
+    AxsCacheKeeperImageLegacyCheck check=AxsCacheKeeperImageLegacyMainIdentityWithProvider(base,main,^id(NSUInteger index) {
+        NSBundle *bundle=NSBundle.mainBundle;
+        return index==0 ? bundle.bundleIdentifier : bundle.infoDictionary[index==1 ? @"CFBundleShortVersionString" : @"CFBundleVersion"];
+    });
+    if (!check.accepted) return check;
+    return AxsCacheKeeperImageLegacyLayoutCheck(base,_dyld_get_image_vmaddr_slide(0),layout);
 }
 static inline BOOL AxsCacheKeeperImageLegacyReadMainLayout(const void *base,AxsCacheKeeperImageLegacyLayout *layout) {
-    if (!base || base!=(const void *)_dyld_get_image_header(0)) return NO;
-    NSBundle *bundle=NSBundle.mainBundle;
-    if (![bundle.bundleIdentifier isEqual:@"com.baidu.netdisk"] ||
-        ![bundle.infoDictionary[@"CFBundleShortVersionString"] isEqual:@"13.37.5"] ||
-        ![bundle.infoDictionary[@"CFBundleVersion"] isEqual:@"13.37.5.10"]) return NO;
-    return AxsCacheKeeperImageLegacyReadLayout(base,_dyld_get_image_vmaddr_slide(0),layout);
+    return AxsCacheKeeperImageLegacyMainLayoutCheck(base,layout).accepted;
 }
-static inline BOOL AxsCacheKeeperImageLegacyHelpersForLayout(const AxsCacheKeeperImageLegacyLayout *layout) {
+static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyHelpersCheck(const AxsCacheKeeperImageLegacyLayout *layout) {
     // Provenance: docs/2026-11-16-baidu-image-contract.json. The 548-byte remove
     // window excludes the separately starting code after its observed return/error path.
     static const struct {
@@ -210,9 +279,14 @@ static inline BOOL AxsCacheKeeperImageLegacyHelpersForLayout(const AxsCacheKeepe
             {0,0xb8c3964,548,{0x6b,0xb0,0x89,0xd1,0x92,0x81,0xa7,0x8c,0x01,0x1a,0xd4,0x6d,0xc8,0xd9,0xe7,0x0f,0x72,0x30,0x2b,0x5e,0xe1,0xc0,0x30,0xda,0xd2,0x4c,0x08,0x3d,0x3c,0x0a,0x12,0xc8}}},
     };
     Class owner=NSClassFromString(@"SDFileAttributeHelper");
-    for (NSUInteger index=0;index<sizeof(helpers)/sizeof(helpers[0]);index++)
-        if (!AxsCacheKeeperImageLegacyMethodMatches(layout,owner,helpers[index].selector,helpers[index].encoding,&helpers[index].window)) return NO;
-    return YES;
+    for (NSUInteger index=0;index<sizeof(helpers)/sizeof(helpers[0]);index++) {
+        AxsCacheKeeperImageLegacyCheck check=AxsCacheKeeperImageLegacyMethodCheck(layout,owner,helpers[index].selector,helpers[index].encoding,&helpers[index].window,index+1);
+        if (!check.accepted) return check;
+    }
+    return AxsCacheKeeperImageLegacyComplete();
+}
+static inline BOOL AxsCacheKeeperImageLegacyHelpersForLayout(const AxsCacheKeeperImageLegacyLayout *layout) {
+    return AxsCacheKeeperImageLegacyHelpersCheck(layout).accepted;
 }
 // Recheck the two live helpers without rescanning the 24 saved SDK method windows.
 // Main-image identity/layout, own metaclass methods, exact ABI and fixed code remain mandatory.
@@ -222,13 +296,17 @@ static inline BOOL AxsCacheKeeperImageLegacyHelpersMatch(const void *base) {
 }
 // Pass the four saved SDK originals after hook publication, never our wrapper IMPs.
 // Callers still enforce the 24 SDK methods' class ownership and all method ABIs.
-static inline BOOL AxsCacheKeeperImageLegacySourceMatches(const void *base,const void *implementations[25]) {
-    if (!AxsCacheKeeperImageLegacySlotsPresent(implementations)) return NO;
+static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacySourceCheck(const void *base,const void *implementations[25]) {
+    AxsCacheKeeperImageLegacyCheck check=AxsCacheKeeperImageLegacySlotsCheck(implementations);if (!check.accepted) return check;
     AxsCacheKeeperImageLegacyLayout layout;
-    if (!AxsCacheKeeperImageLegacyReadMainLayout(base,&layout)) return NO;
+    check=AxsCacheKeeperImageLegacyMainLayoutCheck(base,&layout);if (!check.accepted) return check;
     for (NSUInteger index=0;index<24;index++) {
         const AxsCacheKeeperImageLegacyWindow *window=&AxsCacheKeeperImageLegacyWindows[index];
-        if (!AxsCacheKeeperImageLegacyWindowMatches(&layout,implementations[window->methodIndex-1],window)) return NO;
+        check=AxsCacheKeeperImageLegacyWindowCheck(&layout,implementations[window->methodIndex-1],window,0);
+        if (!check.accepted) return check;
     }
-    return AxsCacheKeeperImageLegacyHelpersForLayout(&layout);
+    return AxsCacheKeeperImageLegacyHelpersCheck(&layout);
+}
+static inline BOOL AxsCacheKeeperImageLegacySourceMatches(const void *base,const void *implementations[25]) {
+    return AxsCacheKeeperImageLegacySourceCheck(base,implementations).accepted;
 }

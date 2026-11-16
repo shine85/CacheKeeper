@@ -370,6 +370,8 @@
         NSDictionary *record=[self axs_cachekeeper_display:[NSString stringWithFormat:@"Status/%@.webkit.plist",self.bundle]];
         if (record.count) detail=[detail stringByAppendingFormat:@"\n上次记录（%@）：%@",axs_cachekeeper_time_string(record[@"updated"]),axs_cachekeeper_webkit_message(record)];
         else detail=[detail stringByAppendingString:@"\n尚无执行记录；系统完成回调不代表已测得释放空间。"];
+        if (axs_cachekeeper_webkit_raw_projection(record) && record[@"operationHistory"])
+            detail=[detail stringByAppendingFormat:@"\n%@",axs_cachekeeper_operation_history_summary(record[@"operationHistory"])];
         cell.detailTextLabel.text=detail;cell.accessoryView=toggle;
         cell.selectionStyle=UITableViewCellSelectionStyleNone;return cell;
     }
@@ -384,6 +386,8 @@
         NSDictionary *record=[self axs_cachekeeper_display:[NSString stringWithFormat:@"Status/%@.imagecache.plist",self.bundle]];
         if (record.count) detail=[detail stringByAppendingFormat:@"\n上次记录（%@）：%@",axs_cachekeeper_time_string(record[@"updated"]),axs_cachekeeper_image_cache_message(record)];
         else detail=[detail stringByAppendingString:@"\n尚无运行记录；需重新打开此 APP 并加载图片后观察，不代表已限制或清空。"];
+        if (axs_cachekeeper_image_cache_raw_projection(record) && record[@"operationHistory"])
+            detail=[detail stringByAppendingFormat:@"\n%@",axs_cachekeeper_operation_history_summary(record[@"operationHistory"])];
         cell.detailTextLabel.text=detail;cell.selectionStyle=UITableViewCellSelectionStyleNone;return cell;
     }
     if ((path.section==2 || path.section==3) && path.row==0) {

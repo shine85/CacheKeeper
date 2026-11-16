@@ -39,7 +39,8 @@ def run() -> int:
             subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
                             "-DAXS_CACHEKEEPER_IMAGE_TESTING=1", "-I" + str(target), "-I" + str(ROOT),
                             "-framework", "Foundation", str(ROOT / "tests/image_publication_tests.m"),
-                            str(ROOT / "AxsCacheKeeperCleanupRules.m"), "-o", str(binary)],
+                            str(ROOT / "AxsCacheKeeperCleanupRules.m"),
+                            str(ROOT / "AxsCacheKeeperOperationInfo.m"), "-o", str(binary)],
                            cwd=ROOT, check=True, timeout=60)
             for scenario in SCENARIOS:
                 result = subprocess.run([str(binary), scenario], capture_output=True, text=True,

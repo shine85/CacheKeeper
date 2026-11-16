@@ -28,6 +28,10 @@ typedef void (^AxsCacheKeeperWebKitDeadlineScheduler)(NSTimeInterval delay, void
 - (void)didEnterBackgroundWithTime:(BOOL)hasTime;
 - (void)expireBackgroundTime;
 - (void)checkTimeout;
+// Restore once before observation; malformed input is explicitly recorded as rejected.
+- (void)restoreOperationHistory:(id)history;
+- (NSUInteger)beginOperationRefreshWithTrigger:(NSString *)trigger;
+- (void)completeOperationRefresh:(NSUInteger)event applied:(BOOL)applied;
 - (NSDictionary *)receipt;
 @end
 

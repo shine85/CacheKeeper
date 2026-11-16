@@ -13,9 +13,16 @@ if sys.platform != "darwin" or not compiler:
 output = root / "tmp" / ("cache-tests-" + str(time.time_ns()))
 output.mkdir(parents=True)
 try:
+    subprocess.run([sys.executable, str(root / "tests/test_owner_snapshot.py")], check=True, timeout=60)
+    subprocess.run([sys.executable, str(root / "tests/run_storage_inventory_tests.py")], check=True, timeout=60)
     subprocess.run([sys.executable, str(root / "tests/package_version_tests.py")], check=True, timeout=60)
     subprocess.run([sys.executable, str(root / "tests/run_runtime_receipt_tests.py")], check=True, timeout=60)
-    subprocess.run([sys.executable, str(root / "tests/run_installation_identity_tests.py")], check=True, timeout=60)
+    subprocess.run([sys.executable, str(root / "tests/run_observation_export_tests.py")], check=True, timeout=60)
+    # Bounded batches include old/current builds; every native process stays <=60s.
+    subprocess.run([sys.executable, str(root / "tests/run_operation_history_tests.py")], check=True, timeout=240)
+    subprocess.run([sys.executable, str(root / "tests/run_operation_export_tests.py")], check=True, timeout=240)
+    # Three fixed/current compilations and three tests; each native process stays <=60s.
+    subprocess.run([sys.executable, str(root / "tests/run_installation_identity_tests.py")], check=True, timeout=240)
     subprocess.run([sys.executable, str(root / "tests/run_inspection_traversal_tests.py")], check=True, timeout=60)
     subprocess.run([sys.executable, str(root / "tests/run_image_publication_tests.py")], check=True, timeout=60)
     subprocess.run([sys.executable, str(root / "tests/run_image_legacy_source_tests.py")], check=True, timeout=60)
@@ -30,7 +37,7 @@ try:
                     str(root / "AxsCacheKeeperInstallation.m"), "-o", str(installation_object)],
                    check=True, timeout=60)
     # Recreate the missing-linkage header in tmp. Both translation units must compile;
-    # only the link may fail, and it must identify the two real runtime dependencies.
+    # only the link may fail, and it must identify all four real runtime dependencies.
     installation_header = (root / "AxsCacheKeeperInstallation.h").read_text(encoding="utf-8-sig")
     for guard in ('#ifdef __cplusplus\nextern "C" {\n#endif\n', '#ifdef __cplusplus\n}\n#endif\n'):
         if installation_header.count(guard) != 1:
@@ -47,21 +54,32 @@ try:
     baseline = subprocess.run([*installation_flags, "-framework", "Foundation", str(baseline_object),
                                str(installation_object), "-o", str(installation_baseline / "linkage")],
                               capture_output=True, text=True, timeout=60)
-    expected_symbols = ("axs_cachekeeper_installation_snapshot(", "axs_cachekeeper_validate_installation_snapshot(")
+    expected_symbols = ("axs_cachekeeper_installation_snapshot(", "axs_cachekeeper_validate_installation_snapshot(",
+                        "axs_cachekeeper_installation_snapshot_with_context(", "axs_cachekeeper_validate_installation_snapshot_with_context(")
     if baseline.returncode == 0 or "Undefined symbols" not in baseline.stderr or not all(
             symbol in baseline.stderr for symbol in expected_symbols):
         raise SystemExit("FAIL: missing C linkage did not reproduce the expected linker failure\n" +
                          baseline.stdout + baseline.stderr)
-    print("PASS: installation missing-C-linkage baseline fails at both expected exports")
+    print("PASS: installation missing-C-linkage baseline fails at all four expected exports")
     installation_linkage = output / "installation-linkage"
     subprocess.run([*installation_flags, "-I" + str(root), "-framework", "Foundation",
                     str(installation_caller), str(installation_object), "-o", str(installation_linkage)],
                    check=True, timeout=60)
     subprocess.run([str(installation_linkage)], check=True, timeout=60)
+    operation_object = output / "operation-info.o"
+    operation_linkage = output / "operation-linkage"
+    subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-c",
+                    str(root / "AxsCacheKeeperOperationInfo.m"), "-o", str(operation_object)],
+                   check=True, timeout=60)
+    subprocess.run([compiler, "clang++", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-I" + str(root),
+                    "-framework", "Foundation", str(root / "tests/operation_linkage_tests.mm"),
+                    str(operation_object), "-o", str(operation_linkage)], check=True, timeout=60)
+    subprocess.run([str(operation_linkage)], check=True, timeout=60)
     webkit_tests = output / "webkit-cache-tests"
     subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
                     "-framework", "Foundation", "-framework", "WebKit",
                     str(root / "AxsCacheKeeperWebKitCache.m"),
+                    str(root / "AxsCacheKeeperOperationInfo.m"),
                     str(root / "tests" / "webkit_cache_tests.m"), "-o", str(webkit_tests)],
                    check=True, timeout=60)
     subprocess.run([str(webkit_tests)], check=True, timeout=60)
@@ -85,12 +103,15 @@ try:
         executable = output / ("webkit-" + name)
         subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-I" + str(root),
                         "-framework", "Foundation", "-framework", "WebKit", str(source),
+                        str(root / "AxsCacheKeeperOperationInfo.m"),
                         str(root / "tests" / "webkit_cache_tests.m"), "-o", str(executable)],
                        check=True, timeout=60)
         result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=60)
         if result.returncode == 0 or expected not in result.stderr:
             raise SystemExit("FAIL: WebKit mutation did not hit its behavioral assertion: " + name + "\n" + result.stdout + result.stderr)
         print("PASS: WebKit behavior mutation caught: " + name)
+    subprocess.run([sys.executable, str(root / "tests" / "run_inspection_export_tests.py")],
+                   check=True, timeout=60)
     subprocess.run([sys.executable, str(root / "tests" / "run_scan_diagnostics_tests.py")],
                    check=True, timeout=60)
     subprocess.run([sys.executable, str(root / "tests" / "run_hardlink_tests.py")],
@@ -211,6 +232,8 @@ try:
                     str(root / "tests" / "diagnostic_channel_export_tests.m"),
                     str(root / "tests" / "presentation_tests.m"),
                     str(root / "AxsCacheKeeperDiagnostics.m"),
+                    str(root / "AxsCacheKeeperStorageInventory.m"),
+                    str(root / "AxsCacheKeeperOperationInfo.m"),
                     str(root / "AxsCacheKeeperAppList.m"),
                     str(root / "AxsCacheKeeperInstallation.m"),
                     str(root / "AxsCacheKeeperDiagnosticChannel.m"),

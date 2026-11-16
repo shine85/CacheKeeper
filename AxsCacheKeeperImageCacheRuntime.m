@@ -13,7 +13,7 @@ static AxsCacheKeeperImageCache *axs_cachekeeper_image_engine;
 static NSObject *axs_cachekeeper_image_context_lock;
 static BOOL axs_cachekeeper_image_access;
 static NSDictionary *axs_cachekeeper_image_installation;
-static NSDictionary *axs_cachekeeper_image_pending_report;
+static NSMutableDictionary *axs_cachekeeper_image_pending_report;
 static BOOL axs_cachekeeper_image_report_writable=YES;
 static UIBackgroundTaskIdentifier axs_cachekeeper_image_background;
 static BOOL axs_cachekeeper_image_had_pending;
@@ -24,11 +24,7 @@ static void AxsCacheKeeperImageFlushReport(void) {
     if (!axs_cachekeeper_image_pending_report) return;
     NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
     NSString *path=[[AxsCacheKeeperImageFolder() stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[bundle stringByAppendingString:@".imagecache.plist"]];
-    NSError *error=nil;
-    axs_cachekeeper_image_report_writable=axs_cachekeeper_image_access &&
-        [axs_cachekeeper_image_pending_report writeToURL:[NSURL fileURLWithPath:path] error:&error];
-    if (axs_cachekeeper_image_report_writable) axs_cachekeeper_image_pending_report=nil;
-    else NSLog(@"[CacheKeeper] 图片缓存回执保存失败（code=%ld），等待下次刷新",(long)error.code);
+    axs_cachekeeper_operation_save(nil,path,axs_cachekeeper_image_access,&axs_cachekeeper_image_pending_report,&axs_cachekeeper_image_report_writable);
 }
 static NSDictionary *AxsCacheKeeperImageContext(void) {
     @synchronized(axs_cachekeeper_image_context_lock) {
@@ -43,9 +39,9 @@ static NSDictionary *AxsCacheKeeperImageContext(void) {
         NSError *installationError=nil;
         BOOL installationRequested=valid && axs_cachekeeper_app_enabled(state);
         if (installationRequested) {
-            if (!axs_cachekeeper_image_installation || !axs_cachekeeper_validate_installation_snapshot(axs_cachekeeper_image_installation,NSBundle.mainBundle.bundleURL,version,&installationError)) {
+            if (!axs_cachekeeper_image_installation || !axs_cachekeeper_validate_installation_snapshot_with_context(axs_cachekeeper_image_installation,NSBundle.mainBundle.bundleURL,version,AxsCacheKeeperInstallationContextHostMainBundle,&installationError)) {
                 installationError=nil;
-                axs_cachekeeper_image_installation=axs_cachekeeper_installation_snapshot(NSBundle.mainBundle.bundleURL,bundle,version,&installationError);
+                axs_cachekeeper_image_installation=axs_cachekeeper_installation_snapshot_with_context(NSBundle.mainBundle.bundleURL,bundle,version,AxsCacheKeeperInstallationContextHostMainBundle,&installationError);
             }
             if ([axs_cachekeeper_image_installation[@"installationState"] isEqual:@"verified"])
                 installation=axs_cachekeeper_image_installation[@"fingerprint"] ?: @"";
@@ -77,12 +73,14 @@ void axs_cachekeeper_configure_image_cache(BOOL containerEligible,BOOL configura
         // UIKit exports this value; initialize it before any observer can finish a task.
         axs_cachekeeper_image_background=UIBackgroundTaskInvalid;
         axs_cachekeeper_image_context_lock=[NSObject new];
+        axs_cachekeeper_image_access=configurationAccess;
         axs_cachekeeper_image_engine=[[AxsCacheKeeperImageCache alloc] initWithContextProvider:^NSDictionary *{return AxsCacheKeeperImageContext();}
             observer:^(NSDictionary *receipt) {
                 @synchronized(axs_cachekeeper_image_context_lock) {
                     NSMutableDictionary *record=[receipt mutableCopy];record[@"runtimeInfo"]=axs_cachekeeper_runtime_info();
-                    axs_cachekeeper_image_pending_report=axs_cachekeeper_image_cache_projection(record);
-                    AxsCacheKeeperImageFlushReport();
+                    NSDictionary *valid=axs_cachekeeper_image_cache_raw_projection(record);
+                    if (valid) {axs_cachekeeper_image_pending_report=[valid mutableCopy];AxsCacheKeeperImageFlushReport();}
+                    else {axs_cachekeeper_image_report_writable=NO;NSLog(@"[CacheKeeper] 图片操作回执字段无效，保留待写历史");}
                 }
                 dispatch_async(dispatch_get_main_queue(),^{
                     if ([receipt[@"pending"] unsignedIntegerValue]) axs_cachekeeper_image_had_pending=YES;
@@ -90,6 +88,8 @@ void axs_cachekeeper_configure_image_cache(BOOL containerEligible,BOOL configura
                         AxsCacheKeeperImageEndBackground();
                 });
             }];
+        NSString *receiptPath=[[AxsCacheKeeperImageFolder() stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[NSBundle.mainBundle.bundleIdentifier stringByAppendingString:@".imagecache.plist"]];
+        [axs_cachekeeper_image_engine loadOperationHistoryFromPath:receiptPath];
         [axs_cachekeeper_image_engine startObserving];
         _dyld_register_func_for_add_image(AxsCacheKeeperImageDidLoad);
         dispatch_async(dispatch_get_main_queue(),^{

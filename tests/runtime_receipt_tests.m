@@ -45,6 +45,79 @@ int main(void) { @autoreleasepool {
         NSMutableDictionary *bad=[discovery mutableCopy];[bad addEntriesFromDictionary:change];image[@"discoveryCheck"]=bad;
         ckcheck(!axs_cachekeeper_image_cache_projection(image),@"invalid SDK diagnosis is rejected");
     }
+#if !defined(AXS_CACHEKEEPER_RECEIPT_BASELINE)
+    NSDictionary *sourceCheck=@{@"schemaVersion":@1,@"accepted":@NO,@"stage":@"slots",@"reason":@"missing",@"methodIndex":@25,@"helperIndex":@0};
+    NSDictionary *relation=@{@"schemaVersion":@1,@"classPresentMask":@15,@"classNameKnownMask":@15,@"classNameEqualsMainMask":@0,
+        @"classResolvedMask":@0,@"classLoadedMainMask":@0,@"classUUIDMatchesMainMask":@0,@"initializerUsesSavedOriginal":@NO,
+        @"initializerResolved":@YES,@"initializerBaseIsMain":@YES,@"initializerUUIDMatchesMain":@YES,
+        @"originalResolvedMask":@0,@"originalBaseIsMainMask":@0,@"originalUUIDMatchesMainMask":@0,
+        @"helperResolvedMask":@0,@"helperBaseIsMainMask":@0,@"helperUUIDMatchesMainMask":@0,
+        @"mainUUIDResolved":@YES,@"mainUUIDMatchesContract":@YES,@"mainLayoutChecked":@NO};
+    NSMutableDictionary *current=[@{@"schemaVersion":@2,@"stage":@"source",@"classMask":@15,@"imageKind":@"other",@"source":@"rejected",
+        @"methodIndex":@0,@"failure":@"unknownSource",@"sourceCheck":sourceCheck,@"loadedRelation":relation} mutableCopy];
+    image[@"discoveryCheck"]=current;
+    ckcheck([axs_cachekeeper_image_cache_projection(image)[@"discoveryCheck"] isEqual:current],@"first failure and unresolved class identity remain distinct in new receipt");
+    for (NSDictionary *change in @[@{@"accepted":@YES},@{@"accepted":@0},@{@"stage":@"complete"},@{@"reason":@"private"},
+        @{@"methodIndex":@11},@{@"methodIndex":@26},@{@"helperIndex":@1},@{@"private":@1}]) {
+        NSMutableDictionary *bad=[sourceCheck mutableCopy];[bad addEntriesFromDictionary:change];current[@"sourceCheck"]=bad;
+        ckcheck(!axs_cachekeeper_image_cache_projection(image),@"new source schema refuses contradictory acceptance, stage, reason and indexes");
+    }
+    current[@"sourceCheck"]=sourceCheck;
+    for (NSDictionary *change in @[@{@"classLoadedMainMask":@1},@{@"classUUIDMatchesMainMask":@1},@{@"classNameEqualsMainMask":@16},
+        @{@"originalBaseIsMainMask":@1},@{@"helperUUIDMatchesMainMask":@1},@{@"initializerUsesSavedOriginal":@YES},
+        @{@"mainUUIDResolved":@NO},@{@"initializerResolved":@NO},@{@"mainLayoutChecked":@1},@{@"privateAddress":@1}]) {
+        NSMutableDictionary *bad=[relation mutableCopy];[bad addEntriesFromDictionary:change];current[@"loadedRelation"]=bad;
+        ckcheck(!axs_cachekeeper_image_cache_projection(image),@"loaded relationships require actual resolution and forbid private extra keys");
+    }
+    current[@"loadedRelation"]=relation;
+    // Equal bits are all zero here: incomplete main UUID alone must invalidate each resolved relation.
+    NSMutableDictionary *unresolvedMain=[relation mutableCopy];unresolvedMain[@"mainUUIDResolved"]=@NO;
+    unresolvedMain[@"mainUUIDMatchesContract"]=@NO;unresolvedMain[@"initializerResolved"]=@NO;
+    unresolvedMain[@"initializerBaseIsMain"]=@NO;unresolvedMain[@"initializerUUIDMatchesMain"]=@NO;
+    ckcheck(axs_cachekeeper_image_loaded_relation_projection(unresolvedMain)!=nil,@"fully unresolved main relation remains representable without guessed equality");
+    for (NSDictionary *change in @[@{@"initializerResolved":@YES},@{@"originalResolvedMask":@1},@{@"helperResolvedMask":@1},@{@"classResolvedMask":@1}]) {
+        NSMutableDictionary *bad=[unresolvedMain mutableCopy];[bad addEntriesFromDictionary:change];
+        ckcheck(!axs_cachekeeper_image_loaded_relation_projection(bad),@"main UUID unresolved forbids complete dependent resolutions even when every equality bit is zero");
+    }
+    NSDictionary *acceptedSource=@{@"schemaVersion":@1,@"accepted":@YES,@"stage":@"complete",@"reason":@"none",@"methodIndex":@0,@"helperIndex":@0};
+    NSArray *early=@[
+        @{@"stage":@"notChecked",@"classMask":@0,@"imageKind":@"unknown",@"source":@"unknown",@"failure":@"none",@"methodIndex":@0},
+        @{@"stage":@"classes",@"classMask":@1,@"imageKind":@"other",@"source":@"unknown",@"failure":@"missingClass",@"methodIndex":@0},
+        @{@"stage":@"image",@"classMask":@15,@"imageKind":@"other",@"source":@"unknown",@"failure":@"missingImage",@"methodIndex":@0}];
+    for (NSDictionary *outer in early) for (NSDictionary *checkValue in @[sourceCheck,acceptedSource]) {
+        NSMutableDictionary *bad=[outer mutableCopy],*observed=[relation mutableCopy];
+        observed[@"classPresentMask"]=outer[@"classMask"];observed[@"classNameKnownMask"]=outer[@"classMask"];
+        observed[@"mainLayoutChecked"]=checkValue[@"accepted"];
+        bad[@"schemaVersion"]=@2;bad[@"sourceCheck"]=checkValue;bad[@"loadedRelation"]=observed;
+        ckcheck(!axs_cachekeeper_image_discovery_projection(bad),@"early outer stages cannot attach a legacy check they never executed");
+    }
+    for (NSString *modern in @[@"frameworkVersion",@"imageUUID"]) for (NSDictionary *checkValue in @[sourceCheck,acceptedSource]) {
+        NSMutableDictionary *bad=[current mutableCopy],*observed=[relation mutableCopy];
+        bad[@"stage"]=@"complete";bad[@"source"]=modern;bad[@"failure"]=@"none";
+        observed[@"mainLayoutChecked"]=checkValue[@"accepted"];bad[@"sourceCheck"]=checkValue;bad[@"loadedRelation"]=observed;
+        ckcheck(!axs_cachekeeper_image_discovery_projection(bad),@"modern source branches cannot claim any legacy source check");
+        [bad removeObjectForKey:@"sourceCheck"];observed[@"mainLayoutChecked"]=@NO;
+        ckcheck(axs_cachekeeper_image_discovery_projection(bad)!=nil,@"modern successful discovery without legacy source check remains readable");
+    }
+    NSMutableDictionary *pinned=[current mutableCopy];pinned[@"stage"]=@"complete";pinned[@"source"]=@"testPinned";pinned[@"failure"]=@"none";
+    ckcheck(axs_cachekeeper_image_discovery_projection(pinned)!=nil,@"explicit pinned fixture can override a measured legacy refusal");
+    NSMutableDictionary *pinnedRelation=[relation mutableCopy];pinnedRelation[@"mainLayoutChecked"]=@YES;
+    pinned[@"sourceCheck"]=acceptedSource;pinned[@"loadedRelation"]=pinnedRelation;
+    ckcheck(!axs_cachekeeper_image_discovery_projection(pinned),@"accepted legacy check cannot be relabeled as pinned refusal override");
+    [pinned removeObjectForKey:@"sourceCheck"];pinnedRelation[@"mainLayoutChecked"]=@NO;
+    ckcheck(!axs_cachekeeper_image_discovery_projection(pinned),@"current pinned result cannot omit its measured source refusal");
+    NSMutableDictionary *changed=[current mutableCopy];changed[@"stage"]=@"method";changed[@"source"]=@"imageFingerprint";changed[@"failure"]=@"methodsChanged";
+    ckcheck(axs_cachekeeper_image_discovery_projection(changed)!=nil,@"prior fixed source invalidation retains its current legacy refusal");
+    [changed removeObjectForKey:@"sourceCheck"];
+    ckcheck(!axs_cachekeeper_image_discovery_projection(changed),@"fixed source invalidation still requires the actual attempted legacy result");
+    NSMutableDictionary *mutableCheck=[sourceCheck mutableCopy],*mutableRelation=[relation mutableCopy];
+    current[@"sourceCheck"]=mutableCheck;current[@"loadedRelation"]=mutableRelation;
+    NSDictionary *projected=axs_cachekeeper_image_cache_projection(image);
+    mutableCheck[@"methodIndex"]=@1;mutableRelation[@"classResolvedMask"]=@15;
+    ckcheck([projected[@"discoveryCheck"][@"sourceCheck"] isEqual:sourceCheck] && [projected[@"discoveryCheck"][@"loadedRelation"] isEqual:relation],@"new nested observations remain immutable after caller mutation");
+    [current removeObjectForKey:@"sourceCheck"];
+    ckcheck(!axs_cachekeeper_image_cache_projection(image),@"current unknownSource never omits its actual source failure");
+#endif
     puts("PASS: runtime provenance and installation receipt boundaries");
     return 0;
 } }

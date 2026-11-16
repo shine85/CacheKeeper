@@ -15,6 +15,8 @@ static void (^itBeforeRead)(void);
 static void (^itAfterRead)(void);
 static BOOL itFailReads, itShortReads, itFailEnumeration;
 static NSUInteger itReads;
+static NSMutableArray<NSData *> *itInjectedNames;
+static NSUInteger itDirectoryReads;
 static int it_openat(int fd,const char *name,int flags,...) {
     void (^hook)(const char *)=[itBeforeOpen copy];
     if (hook && !(flags&O_DIRECTORY) && !(flags&O_SEARCH)) hook(name);
@@ -33,7 +35,15 @@ static ssize_t it_pread(int fd,void *buffer,size_t length,off_t offset) {
     return count;
 }
 static struct dirent *it_readdir(DIR *stream) {
+    itDirectoryReads++;
     if (itFailEnumeration) {errno=EIO;return NULL;}
+    if (itInjectedNames.count) {
+        static struct dirent entry;memset(&entry,0,sizeof(entry));
+        NSData *name=itInjectedNames[0];[itInjectedNames removeObjectAtIndex:0];
+        entry.d_reclen=sizeof(entry);entry.d_namlen=(uint16_t)name.length;
+        memcpy(entry.d_name,name.bytes,MIN(name.length,sizeof(entry.d_name)));
+        return &entry;
+    }
     return readdir(stream);
 }
 #define openat it_openat
@@ -342,12 +352,196 @@ static void ittwincancellation(NSString *fixture) {
     } }
     itcheck(itfds()<=before,@"cancelled twin traversals release every descriptor");
 }
+
+// Breakage caught: re-encoding a presentation string for any descendant or
+// retained source lookup fails real openat/fstatat even though its raw name exists.
+static IMP itOriginalNameConversion;
+static BOOL itOmitNames,itCollapseNames;
+static NSString *itNameConversion(id manager,SEL selector,const char *name,NSUInteger length) {
+    if (itCollapseNames) return @"same-display";
+    if (itOmitNames) return nil;
+    return ((NSString *(*)(id,SEL,const char *,NSUInteger))itOriginalNameConversion)(manager,selector,name,length);
+}
+static NSDictionary *itWithOmittedNames(AxsCacheKeeperInspection *inspection) {
+    Method method=class_getInstanceMethod(NSFileManager.class,@selector(stringWithFileSystemRepresentation:length:));
+    itOriginalNameConversion=method_setImplementation(method,(IMP)itNameConversion);itOmitNames=YES;
+    @try {return itfinish(inspection,1);}
+    @finally {itOmitNames=NO;method_setImplementation(method,itOriginalNameConversion);}
+}
+static void itrawconversion(NSString *fixture) {
+    NSString *root=itdir(fixture,@"raw-conversion"),*parent=itdir(root,@"raw-parent");
+    itput(parent,@"raw-payload",itdata());
+    NSDictionary *report=itWithOmittedNames([[AxsCacheKeeperInspection alloc] initWithRoot:root searchRoots:@[]]);
+    itcheck([report[@"files"] isEqual:@1] && [report[@"failures"] isEqual:@0] && [report[@"coverageComplete"] boolValue],
+        @"legal byte names remain traversable when display conversion fails");
+    itcheck([report[@"nameDisplayOmitted"] isEqual:@2] && !report[@"inspectionReadFailure"] &&
+        ![report[@"largest"][0][@"pathOperable"] boolValue],@"omitted names are explicit non-operable display gaps without read failures");
+}
+static void itrawsources(NSString *fixture) {
+    NSString *root=itdir(fixture,@"raw-sources"),*parent=itdir(root,@"raw-parent"),*search=itdir(fixture,@"raw-search");
+    NSString *first=itput(parent,@"first",itdata()),*second=[parent stringByAppendingPathComponent:@"second"];
+    itcheck(link(first.fileSystemRepresentation,second.fileSystemRepresentation)==0 &&
+        link(first.fileSystemRepresentation,[[search stringByAppendingPathComponent:@"twin-a"] fileSystemRepresentation])==0 &&
+        link(first.fileSystemRepresentation,[[search stringByAppendingPathComponent:@"twin-b"] fileSystemRepresentation])==0,@"create same-display raw source and twin names");
+    NSDictionary *report=nil;itCollapseNames=YES;
+    @try {report=itWithOmittedNames([[AxsCacheKeeperInspection alloc] initWithRoot:root searchRoots:@[@{@"path":root,@"label":@"self"},@{@"path":search,@"label":@"search"}]]);}
+    @finally {itCollapseNames=NO;}
+    itcheck([report[@"hardLinks"] isEqual:@2] && [report[@"twinFailures"] isEqual:@0] &&
+        [report[@"linkTwins"] count]==6 && [report[@"coverageComplete"] boolValue],
+        @"same-display byte components retain distinct source and twin identities");
+    itcheck([report[@"twinNameDisplayOmitted"] unsignedIntegerValue]>0 && ![report[@"twinCoverageComplete"] boolValue] &&
+        ![report[@"twinDisplayTruncated"] boolValue],@"name omissions do not masquerade as result budgets or full twin coverage");
+    NSData *encoded=[NSPropertyListSerialization dataWithPropertyList:report format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
+    NSString *xml=[[NSString alloc] initWithData:encoded encoding:NSUTF8StringEncoding];
+    itcheck(encoded && ![xml containsString:@"<data>"] && ![xml containsString:@"rawComponents"] &&
+        ![xml containsString:@"raw-parent"] && ![xml containsString:@"twin-a"],@"raw byte components never leave the private inspection state");
+}
+static void itrawprotected(NSString *fixture) {
+    NSString *root=itdir(fixture,@"raw-protected");itput(root,@"visible",itdata());
+    for (NSString *name in @[@"Documents",@"Downloads",@"Inbox"]) itput(itdir(root,name),@"private",itdata());
+    itput(itdir(itdir(root,@"Library"),@"Preferences"),@"private",itdata());
+    itReads=0;NSDictionary *report=itWithOmittedNames([[AxsCacheKeeperInspection alloc] initWithRoot:root searchRoots:@[]]);
+    itcheck([report[@"files"] isEqual:@1] && [report[@"hidden"] isEqual:@4] && itReads==1,
+        @"raw protected components remain unread when presentation decoding fails");
+}
+static void itrawinvalid(NSString *fixture) {
+    NSString *root=itdir(fixture,@"raw-invalid");itput(root,@"sibling",itdata());
+    // POSIX cannot create slash/NUL/oversized components. These are explicitly
+    // dirent-boundary injections, not claims about APFS enumeration behavior.
+    NSMutableData *oversized=[NSMutableData dataWithLength:1100];memset(oversized.mutableBytes,'x',oversized.length);
+    itInjectedNames=[NSMutableArray arrayWithArray:@[
+        [NSData dataWithBytes:"slash/name" length:10],
+        [NSData dataWithBytes:"nul\0tail" length:8],oversized]];
+    AxsCacheKeeperInspection *inspection=[[AxsCacheKeeperInspection alloc] initWithRoot:root searchRoots:@[]];
+    NSUInteger start=itDirectoryReads;[inspection advance:1];
+    itcheck(!inspection.complete && itDirectoryReads-start==1,@"invalid dirent handling consumes one bounded step without swallowing siblings");
+    NSDictionary *report=itfinish(inspection,1);itInjectedNames=nil;
+    itcheck([report[@"files"] isEqual:@1] && [report[@"failures"] isEqual:@3] && [report[@"invalidNameRecords"] isEqual:@3],
+        @"invalid raw records are counted individually while safe siblings finish");
+    itfailure(report,@"entryName",@"posix",EINVAL);
+}
+static void itrawunicode(NSString *fixture) {
+    NSString *root=itdir(fixture,@"raw-unicode");int fd=open(root.fileSystemRepresentation,O_RDONLY|O_DIRECTORY);
+    itcheck(fd>=0,@"open POSIX name fixture root");NSUInteger created=0;
+    const char *names[]={"composed-\xc3\xa9","decomposed-e\xcc\x81","invalid-\xff"};
+    for (NSUInteger n=0;n<3;n++) {
+        int file=openat(fd,names[n],O_WRONLY|O_CREAT|O_EXCL,0600);
+        if (file<0 && (errno==EINVAL || errno==EILSEQ || errno==ENAMETOOLONG)) {
+            printf("UNSUPPORTED: actual filesystem rejected POSIX name case %lu with errno %d; no APFS claim\n",(unsigned long)n,errno);continue;
+        }
+        itcheck(file>=0,@"create genuine POSIX filename fixture");
+        itcheck(write(file,"fixture",7)==7 && close(file)==0,@"write POSIX filename fixture");created++;
+    }
+    char maxName[256];memset(maxName,'x',255);maxName[255]=0;
+    int maximum=openat(fd,maxName,O_WRONLY|O_CREAT|O_EXCL,0600);
+    if (maximum>=0) {itcheck(close(maximum)==0,@"close maximal name fixture");created++;}
+    else if (errno==ENAMETOOLONG || errno==EINVAL) printf("UNSUPPORTED: filesystem rejected 255-byte component with errno %d\n",errno);
+    else itcheck(NO,@"create maximal actual filename fixture");
+    itcheck(close(fd)==0,@"close POSIX fixture root");
+    NSDictionary *report=itfinish([[AxsCacheKeeperInspection alloc] initWithRoot:root searchRoots:@[]],1);
+    itcheck([report[@"files"] unsignedIntegerValue]==created && [report[@"failures"] isEqual:@0] && [report[@"coverageComplete"] boolValue],
+        @"real POSIX Unicode and filesystem-supported byte names remain readable");
+    // Canonically equivalent spellings may be aliases on APFS. Record the real
+    // filesystem outcome rather than fabricating two distinct directory entries.
+    NSString *canonical=itdir(fixture,@"raw-canonical");fd=open(canonical.fileSystemRepresentation,O_RDONLY|O_DIRECTORY);
+    itcheck(fd>=0,@"open canonical-equivalence fixture");
+    int composed=openat(fd,"\xc3\xa9",O_WRONLY|O_CREAT|O_EXCL,0600);
+    itcheck(composed>=0 && close(composed)==0,@"create composed canonical name");
+    int decomposed=openat(fd,"e\xcc\x81",O_WRONLY|O_CREAT|O_EXCL,0600);NSUInteger canonicalCount=1;
+    if (decomposed>=0) {itcheck(close(decomposed)==0,@"close decomposed canonical name");canonicalCount=2;}
+    else {
+        itcheck(errno==EEXIST,@"canonical alias rejection must be identifiable");
+        printf("UNSUPPORTED: filesystem aliases composed and decomposed names; distinct canonical byte twins use controlled display conversion\n");
+    }
+    itcheck(close(fd)==0,@"close canonical-equivalence fixture");
+    report=itfinish([[AxsCacheKeeperInspection alloc] initWithRoot:canonical searchRoots:@[]],1);
+    itcheck([report[@"files"] unsignedIntegerValue]==canonicalCount && [report[@"failures"] isEqual:@0],@"canonical filesystem name aliases do not break raw traversal");
+}
+static void itrawcancel(NSString *fixture) {
+    NSString *root=itdir(fixture,@"raw-cancel");itput(root,@"sibling",itdata());NSUInteger before=itfds();
+    itInjectedNames=[NSMutableArray new];
+    for (NSUInteger n=0;n<100;n++) [itInjectedNames addObject:[NSData dataWithBytes:"bad/name" length:8]];
+    AxsCacheKeeperInspection *inspection=[[AxsCacheKeeperInspection alloc] initWithRoot:root];[inspection advance:1];
+    itcheck(!inspection.complete,@"one invalid raw record leaves traversal cancellable");[inspection cancel];NSUInteger calls=itDirectoryReads;
+    [inspection advance:1000];itInjectedNames=nil;
+    itcheck(itfds()==before && itDirectoryReads==calls && [inspection.report[@"cancelled"] boolValue],@"cancel after invalid raw records closes descriptors and performs zero further steps");
+}
+static void itrawtwininvalid(NSString *fixture) {
+    NSString *source=itdir(fixture,@"raw-twin-invalid-source"),*search=itdir(fixture,@"raw-twin-invalid-search");
+    NSString *path=itput(source,@"source",itdata());
+    itcheck(link(path.fileSystemRepresentation,[[search stringByAppendingPathComponent:@"twin"] fileSystemRepresentation])==0,@"create twin after invalid record");
+    AxsCacheKeeperInspection *inspection=[[AxsCacheKeeperInspection alloc] initWithRoot:source searchRoots:@[@{@"path":search,@"label":@"search"}]];
+    [inspection advance:1];[inspection advance:1];
+    itInjectedNames=[NSMutableArray arrayWithObject:[NSData dataWithBytes:"bad/name" length:8]];
+    NSDictionary *report=itfinish(inspection,1);itInjectedNames=nil;
+    itcheck([report[@"coverageComplete"] boolValue] && [report[@"twinFailures"] isEqual:@1] &&
+        [report[@"twinInvalidNameRecords"] isEqual:@1] && [report[@"linkTwins"] count]==1 &&
+        ![report[@"twinCoverageComplete"] boolValue] && !report[@"mainReadFailure"] &&
+        [report[@"twinReadFailure"] isEqual:@{@"stage":@"entryName",@"errorDomain":@"posix",@"errorCode":@(EINVAL)}],
+        @"invalid twin records preserve main coverage and continue safe twin siblings");
+}
+static void itrawboundary(NSString *fixture) {
+    NSString *root=itdir(fixture,@"raw-boundary");itput(root,@"sibling",itdata());
+    itInjectedNames=[NSMutableArray arrayWithObject:[NSData dataWithBytes:"opaque-\xff" length:8]];
+    NSDictionary *report=itWithOmittedNames([[AxsCacheKeeperInspection alloc] initWithRoot:root searchRoots:@[]]);itInjectedNames=nil;
+    itcheck([report[@"files"] isEqual:@1] && [report[@"invalidNameRecords"] isEqual:@0] && [report[@"nameDisplayOmitted"] isEqual:@2],
+        @"well-formed opaque dirent bytes reach safe lookup without encoding rejection");
+    itfailure(report,@"entryStat",@"posix",ENOENT);
+    printf("PASS: opaque bytes are a dirent-boundary injection; no actual APFS filename claim\n");
+}
+static void itrawsourcechange(NSString *fixture) {
+    NSString *root=itdir(fixture,@"raw-source-change"),*parent=itdir(root,@"parent"),*search=itdir(fixture,@"raw-source-change-search");
+    NSString *path=itput(parent,@"source",itdata());
+    itcheck(link(path.fileSystemRepresentation,[[search stringByAppendingPathComponent:@"twin"] fileSystemRepresentation])==0,@"create raw source change fixture");
+    AxsCacheKeeperInspection *inspection=[[AxsCacheKeeperInspection alloc] initWithRoot:root searchRoots:@[@{@"path":search,@"label":@"search"}]];
+    Method method=class_getInstanceMethod(NSFileManager.class,@selector(stringWithFileSystemRepresentation:length:));
+    itOriginalNameConversion=method_setImplementation(method,(IMP)itNameConversion);itOmitNames=YES;
+    NSDictionary *report=nil;
+    @try {
+        for (NSUInteger n=0;n<3;n++) [inspection advance:1];
+        itput(parent,@"source",[@"changed source" dataUsingEncoding:NSUTF8StringEncoding]);
+        report=itfinish(inspection,1);
+    } @finally {itOmitNames=NO;method_setImplementation(method,itOriginalNameConversion);}
+    itcheck([report[@"changed"] unsignedIntegerValue]>0 && ![report[@"coverageComplete"] boolValue] &&
+        [report[@"linkTwins"] count]==0,@"raw source recheck rejects changed content even when names share placeholders");
+    itfailure(report,@"fileRecheck",@"identity",0);
+}
+static void itrawbudgets(NSString *fixture) {
+    NSString *source=itdir(fixture,@"raw-budget-source"),*search=itdir(fixture,@"raw-budget-search");
+    NSString *path=itput(source,@"source",itdata());
+    for (NSUInteger n=0;n<4;n++) itcheck(link(path.fileSystemRepresentation,[[search stringByAppendingPathComponent:[NSString stringWithFormat:@"twin-%lu",(unsigned long)n]] fileSystemRepresentation])==0,@"create display-budget twin");
+    NSDictionary *report=itfinish([[AxsCacheKeeperInspection alloc] initWithRoot:source searchRoots:@[@{@"path":search,@"label":@"search"}]],1);
+    itcheck([report[@"linkTwins"] count]==3 && [report[@"twinDisplayTruncated"] boolValue] &&
+        ![report[@"twinScanTruncated"] boolValue] && ![report[@"linkFilesTruncated"] boolValue] &&
+        ![report[@"twinCoverageComplete"] boolValue],@"per-source display budget stays distinct from traversal and source evidence limits");
+    source=itdir(fixture,@"raw-evidence-source");search=itdir(fixture,@"raw-evidence-search");
+    for (NSUInteger n=0;n<101;n++) {
+        NSString *name=[NSString stringWithFormat:@"source-%lu",(unsigned long)n];path=itput(source,name,itdata());
+        itcheck(link(path.fileSystemRepresentation,[[search stringByAppendingPathComponent:name] fileSystemRepresentation])==0,@"create source-evidence budget fixture");
+    }
+    report=itfinish([[AxsCacheKeeperInspection alloc] initWithRoot:source searchRoots:@[@{@"path":search,@"label":@"search"}]],1);
+    itcheck([report[@"hardLinks"] isEqual:@101] && [report[@"linkFilesTruncated"] boolValue] &&
+        [report[@"linkTwins"] count]==50 && [report[@"twinDisplayTruncated"] boolValue] &&
+        ![report[@"twinScanTruncated"] boolValue] && [report[@"coverageComplete"] boolValue] &&
+        ![report[@"twinCoverageComplete"] boolValue],@"100-source evidence and 50-total display limits remain explicit after byte traversal");
+}
+static void itrawunicodemarkers(NSString *fixture) {
+    // Breakage caught: treating every non-ASCII component as opaque loses the
+    // established session substring/.db suffix semantics on real Unicode names.
+    NSString *root=itdir(fixture,@"raw-unicode-markers");
+    itput(root,@"session-é",itdata());itput(root,@"cache-é.db",itdata());
+    NSDictionary *report=itWithOmittedNames([[AxsCacheKeeperInspection alloc] initWithRoot:root searchRoots:@[]]);
+    itcheck([report[@"files"] isEqual:@2] && [report[@"types"][@"数据或登录态名称特征"][@"count"] isEqual:@2],
+        @"valid Unicode marker semantics survive unavailable display conversion");
+    itcheck([report[@"coverageComplete"] boolValue] && [report[@"nameDisplayOmitted"] isEqual:@2] &&
+        [report[@"evidence"] hasPrefix:@"检出数据格式或数据名称特征"],@"Unicode marker evidence stays independent of display usability");
+}
 int main(int argc,const char *argv[]) { @autoreleasepool {
     itcheck(argc>=2,@"fixture directory argument required");NSString *fixture=[NSString stringWithUTF8String:argv[1]];
     itcheck(![NSFileManager.defaultManager fileExistsAtPath:fixture],@"fixture directory must be fresh");itdir(fixture,@"");
     NSString *selection=argc>2 ? [NSString stringWithUTF8String:argv[2]] : @"all";
-    NSArray *names=@[@"mapping",@"headers",@"root-replacement",@"ancestor-replacement",@"file-open-replacement",@"file-read-replacement",@"hidden-links",@"twins",@"twin-replacement",@"source-changes",@"read-errors",@"limits",@"cancel",@"twin-cancel"];
-    void (*cases[])(NSString *)={itmapping,itheaders,itrootreplacement,itancestorreplacement,itfileopenreplacement,itfilereadreplacement,ithiddenlinks,ittwins,ittwinreplacement,itsourcechanges,itreaderrors,itlimits,itcancellation,ittwincancellation};
+    NSArray *names=@[@"mapping",@"headers",@"root-replacement",@"ancestor-replacement",@"file-open-replacement",@"file-read-replacement",@"hidden-links",@"twins",@"twin-replacement",@"source-changes",@"read-errors",@"limits",@"cancel",@"twin-cancel",@"raw-conversion",@"raw-sources",@"raw-protected",@"raw-invalid",@"raw-unicode",@"raw-cancel",@"raw-twin-invalid",@"raw-boundary",@"raw-source-change",@"raw-budgets",@"raw-unicode-markers"];
+    void (*cases[])(NSString *)={itmapping,itheaders,itrootreplacement,itancestorreplacement,itfileopenreplacement,itfilereadreplacement,ithiddenlinks,ittwins,ittwinreplacement,itsourcechanges,itreaderrors,itlimits,itcancellation,ittwincancellation,itrawconversion,itrawsources,itrawprotected,itrawinvalid,itrawunicode,itrawcancel,itrawtwininvalid,itrawboundary,itrawsourcechange,itrawbudgets,itrawunicodemarkers};
     itcheck([selection isEqual:@"all"] || [names containsObject:selection],@"unknown inspection test selection");
     for (NSUInteger n=0;n<names.count;n++) if ([selection isEqual:@"all"] || [selection isEqual:names[n]]) {
         cases[n](fixture);printf("PASS: inspection %s\n",[names[n] UTF8String]);

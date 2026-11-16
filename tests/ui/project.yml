@@ -32,6 +32,8 @@ targets:
       - path: ../../Prefs/SearchHitRouting.m
       - path: ../../Prefs/DiagnosticsPage.m
       - path: ../../AxsCacheKeeperDiagnostics.m
+      - path: ../../AxsCacheKeeperStorageInventory.m
+      - path: ../../AxsCacheKeeperOperationInfo.m
       - path: ../../AxsCacheKeeperAppList.m
       - path: ../../AxsCacheKeeperInstallation.m
       - path: ../../AxsCacheKeeperDiagnosticChannel.m
@@ -61,6 +63,7 @@ targets:
     sources:
       - path: ../../tests/ui/SearchProbeTests.m
       - path: ../../tests/ui/WebKitProbeTests.m
+      - path: ../../AxsCacheKeeperOperationInfo.m
       - path: ../../AxsCacheKeeperWebKitCache.m
       - path: ../../AxsCacheKeeperWebKitObservation.m
     dependencies:
@@ -74,6 +77,7 @@ targets:
     platform: iOS
     sources:
       - path: ../../tests/ui/WebKitIntegrationTests.m
+      - path: ../../AxsCacheKeeperOperationInfo.m
       - path: ../../AxsCacheKeeperWebKitCache.m
       - path: ../../AxsCacheKeeperWebKitObservation.m
     dependencies:
@@ -87,6 +91,7 @@ targets:
     platform: iOS
     sources:
       - path: ../../tests/ui/ImageCacheIntegrationTests.m
+      - path: ../../AxsCacheKeeperOperationInfo.m
       - path: ../../AxsCacheKeeperImageCache.m
       - path: ../../AxsCacheKeeperImageCacheRuntime.m
       - path: ../../AxsCacheKeeperCleanupRules.m

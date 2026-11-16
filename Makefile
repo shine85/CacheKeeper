@@ -12,6 +12,8 @@ endif
 BUNDLE_NAME = CacheKeeperPrefs
 CacheKeeperPrefs_FILES = Prefs/Settings.m Prefs/SearchInput.m Prefs/ScanPage.m Prefs/InspectionPage.m Prefs/DiagnosticsPage.m AxsCacheKeeperDiagnostics.m AxsCacheKeeperAppList.m AxsCacheKeeperInstallation.m AxsCacheKeeperDiagnosticChannel.m
 CacheKeeperPrefs_FILES += Prefs/SearchDiagnostics.m
+CacheKeeperPrefs_FILES += AxsCacheKeeperStorageInventory.m
+CacheKeeperPrefs_FILES += AxsCacheKeeperOperationInfo.m
 CacheKeeperPrefs_FILES += Prefs/SearchHitRouting.m
 CacheKeeperPrefs_FILES += AxsCacheKeeperPDFSession.m AxsCacheKeeperPDFInspection.m
 CacheKeeperPrefs_INSTALL_PATH = /Library/PreferenceBundles
@@ -30,6 +32,7 @@ CacheKeeper_FILES += AxsCacheKeeperPDFInspection.m AxsCacheKeeperPDFSession.m
 CacheKeeper_FILES += AxsCacheKeeperDependencySnapshot.m AxsCacheKeeperInstallation.m AxsCacheKeeperDiagnosticChannel.m
 CacheKeeper_FILES += AxsCacheKeeperWebKitCache.m AxsCacheKeeperWebKitObservation.m AxsCacheKeeperWebKitRuntime.xm
 CacheKeeper_FILES += AxsCacheKeeperImageCache.m AxsCacheKeeperImageCacheRuntime.m
+CacheKeeper_FILES += AxsCacheKeeperOperationInfo.m
 CacheKeeper_FRAMEWORKS = UIKit Foundation WebKit
 CacheKeeper_LIBRARIES = roothide sandy substrate
 CacheKeeper_LDFLAGS = -LVendor

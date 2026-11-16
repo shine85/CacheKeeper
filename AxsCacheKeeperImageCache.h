@@ -16,6 +16,9 @@ typedef NSDictionary * (^AxsCacheKeeperImageContextProvider)(void);
 - (void)didBecomeActive;
 - (void)didEnterBackgroundWithTime:(BOOL)hasTime;
 - (void)expireBackgroundTime;
+// Restore once before observation; malformed input is explicitly recorded as rejected.
+- (void)restoreOperationHistory:(id)history;
+- (void)loadOperationHistoryFromPath:(NSString *)path;
 - (NSDictionary *)receipt;
 #if AXS_CACHEKEEPER_IMAGE_TESTING
 // The integration target links the actual SDK at the fixed source revision. No fake SDK class.

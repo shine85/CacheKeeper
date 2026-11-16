@@ -3,6 +3,12 @@
 #include <limits.h>
 #include <math.h>
 
+static inline BOOL axs_cachekeeper_inspection_count(id value) {
+    if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID()) return NO;
+    double number=[value doubleValue];
+    return isfinite(number) && number>=0 && number<=9007199254740991.0 && floor(number)==number;
+}
+
 // Finite operation/domain pairs only. Identity changes, limits and short reads
 // have no errno; legacy notRecorded is retained without guessing from text.
 static inline NSDictionary *axs_cachekeeper_inspection_read_failure_projection(id value) {

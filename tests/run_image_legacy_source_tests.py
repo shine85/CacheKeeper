@@ -8,18 +8,18 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = "AxsCacheKeeperImageLegacySource.h"
 MUTATIONS = (
-    ("digest", "if (memcmp(digest,window->sha256,sizeof(digest))) return NO;",
-     "if (0) return NO;", "byte mutation is refused"),
-    ("section", "if (!AxsCacheKeeperImageLegacyContains(layout->sectionOffset,layout->sectionSize,window->offset,window->length)) return NO;",
-     "if (0) return NO;", "section crossing is refused"),
-    ("slot", "if (!implementations || implementations[10]) return NO;",
-     "if (!implementations) return NO;", "unexpected eleventh method is refused"),
+    ("digest", 'if (memcmp(digest,window->sha256,sizeof(digest))) return AxsCacheKeeperImageLegacyResult(stage,"digest",method,helper);',
+     "if (0) return AxsCacheKeeperImageLegacyComplete();", "byte mutation is refused"),
+    ("section", 'if (!AxsCacheKeeperImageLegacyContains(layout->sectionOffset,layout->sectionSize,window->offset,window->length)) return AxsCacheKeeperImageLegacyResult(stage,"section",method,helper);',
+     "if (0) return AxsCacheKeeperImageLegacyComplete();", "section crossing is refused"),
+    ("slot", 'if (implementations[10]) return AxsCacheKeeperImageLegacyResult("slots","unexpected",11,0);',
+     "if (0) return AxsCacheKeeperImageLegacyComplete();", "unexpected eleventh method is refused"),
     ("class-source", "return imageName && mainName && !strcmp(imageName,mainName);",
      "return imageName && mainName;", "foreign class source is refused"),
-    ("helper-abi", "if (memcmp(actualEncoding,encoding,length+1)) return NO;",
-     "if (0) return NO;", "helper ABI mismatch is refused"),
-    ("helper-own", "if (!own) return NO;",
-     "if (0) return NO;", "inherited helper method is refused"),
+    ("helper-abi", 'if (memcmp(actualEncoding,encoding,length+1)) return AxsCacheKeeperImageLegacyResult("helperABI","encoding",0,helper);',
+     "if (0) return AxsCacheKeeperImageLegacyComplete();", "helper ABI mismatch is refused"),
+    ("helper-own", 'if (!own) return AxsCacheKeeperImageLegacyResult("helperOwner","inherited",0,helper);',
+     "if (0) return AxsCacheKeeperImageLegacyComplete();", "inherited helper method is refused"),
 )
 
 

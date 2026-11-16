@@ -80,7 +80,7 @@ static NSString *AxsCacheKeeperImageMethodFailure(Class cls, const AxsCacheKeepe
     for (NSUInteger i=0;i<spec->argumentCount;i++)
         if (strcmp([signature getArgumentTypeAtIndex:i+2],spec->arguments[i])) return @"argumentType";
     Dl_info info={0};IMP implementation=method_getImplementation(method);
-    if (!dladdr((const void *)implementation,&info) || info.dli_fbase!=image) return @"methodImage";
+    if (!dladdr(AxsCacheKeeperImageLegacyCodeAddress((const void *)implementation),&info) || info.dli_fbase!=image) return @"methodImage";
     [methods addObject:@{@"class":cls,@"selector":NSStringFromSelector(sel),@"implementation":[NSValue valueWithPointer:(const void *)implementation]}];
     return nil;
 }
@@ -128,6 +128,84 @@ static BOOL AxsCacheKeeperImageKnownUUID(const void *base) {
     }
     return NO;
 }
+static NSDictionary *AxsCacheKeeperImageSourceCheckValue(AxsCacheKeeperImageLegacyCheck check) {
+    return axs_cachekeeper_image_source_check_projection(@{@"schemaVersion":@1,@"accepted":@(check.accepted),
+        @"stage":[NSString stringWithUTF8String:check.stage],@"reason":[NSString stringWithUTF8String:check.reason],@"methodIndex":@(check.methodIndex),@"helperIndex":@(check.helperIndex)});
+}
+// Bounded metadata observation only. No image path, pointer, UUID or code leaves this function.
+static BOOL AxsCacheKeeperImageReadObservedUUID(const void *base,unsigned char uuid[16]) {
+    struct mach_header_64 header;
+    if (!AxsCacheKeeperImageLegacyRead((uintptr_t)base,&header,sizeof(header),VM_PROT_READ) ||
+        header.magic!=MH_MAGIC_64 || header.sizeofcmds>65536 || !header.ncmds || header.ncmds>header.sizeofcmds/sizeof(struct load_command)) return NO;
+    size_t length=sizeof(header)+header.sizeofcmds;unsigned char *copy=malloc(length);if (!copy) return NO;
+    BOOL valid=AxsCacheKeeperImageLegacyRead((uintptr_t)base,copy,length,VM_PROT_READ) && !memcmp(copy,&header,sizeof(header));
+    size_t cursor=sizeof(header);NSUInteger found=0;
+    for (uint32_t index=0;valid && index<header.ncmds;index++) {
+        if (cursor>length || length-cursor<sizeof(struct load_command)) {valid=NO;break;}
+        struct load_command *command=(void *)(copy+cursor);
+        if (command->cmdsize<sizeof(*command) || command->cmdsize>length-cursor || command->cmdsize%8) {valid=NO;break;}
+        if (command->cmd==LC_UUID) {
+            if (command->cmdsize!=sizeof(struct uuid_command) || ++found!=1) {valid=NO;break;}
+            memcpy(uuid,((struct uuid_command *)command)->uuid,16);
+        }
+        cursor+=command->cmdsize;
+    }
+    free(copy);return valid && cursor==length && found==1;
+}
+static BOOL AxsCacheKeeperImageObservedIMP(const void *implementation,const void *main,const unsigned char mainUUID[16],BOOL mainResolved,BOOL *isMain,BOOL *sameUUID) {
+    *isMain=NO;*sameUUID=NO;Dl_info info={0};
+    if (!implementation || !dladdr(AxsCacheKeeperImageLegacyCodeAddress(implementation),&info) || !info.dli_fbase) return NO;
+    unsigned char uuid[16];
+    // resolved covers the whole base/UUID relation, rather than presenting a failed UUID read as unequal.
+    if (!mainResolved || !AxsCacheKeeperImageReadObservedUUID(info.dli_fbase,uuid)) return NO;
+    *isMain=info.dli_fbase==main;*sameUUID=!memcmp(mainUUID,uuid,16);
+    return YES;
+}
+static NSDictionary *AxsCacheKeeperImageLoadedRelation(Class __unsafe_unretained classes[4]) {
+    const void *main=_dyld_get_image_header(0);const char *mainName=_dyld_get_image_name(0);
+    unsigned char mainUUID[16];BOOL mainResolved=AxsCacheKeeperImageReadObservedUUID(main,mainUUID);
+    static const unsigned char contractUUID[16]={0xb2,0xb9,0xd3,0x0a,0x1c,0xaf,0x31,0xb4,0x82,0xca,0xc7,0x76,0xe7,0xeb,0x2b,0xa1};
+    NSUInteger present=0,known=0,names=0;
+    Class helper=NSClassFromString(@"SDFileAttributeHelper");
+    for (NSUInteger index=0;index<5;index++) {
+        Class owner=index<4 ? classes[index] : helper;if (!owner) continue;present|=1U<<index;
+        const char *name=class_getImageName(owner);if (name && mainName) {known|=1U<<index;if (!strcmp(name,mainName)) names|=1U<<index;}
+    }
+    // Public runtime image names do not authenticate the loaded class metadata (including PAC).
+    // No class address stripping or guessed runtime layout: unresolved is separate from unequal.
+    NSMutableDictionary *value=[@{@"schemaVersion":@1,@"classPresentMask":@(present),@"classNameKnownMask":@(known),@"classNameEqualsMainMask":@(names),
+        @"classResolvedMask":@0,@"classLoadedMainMask":@0,@"classUUIDMatchesMainMask":@0,
+        @"mainUUIDResolved":@(mainResolved),@"mainUUIDMatchesContract":@((BOOL)(mainResolved && !memcmp(mainUUID,contractUUID,16))),@"mainLayoutChecked":@NO} mutableCopy];
+    Method initializer=classes[0] ? class_getInstanceMethod(classes[0],sel_registerName(AxsCacheKeeperImageMethodSpecs[0].selector)) : NULL;
+    BOOL saved=classes[0] && classes[0]==axs_cachekeeper_image_class && axs_cachekeeper_image_init_original;
+    const void *initial=saved ? (const void *)axs_cachekeeper_image_init_original : (initializer ? (const void *)method_getImplementation(initializer) : NULL);
+    BOOL isMain=NO,sameUUID=NO;
+    value[@"initializerUsesSavedOriginal"]=@(saved);value[@"initializerResolved"]=@(AxsCacheKeeperImageObservedIMP(initial,main,mainUUID,mainResolved,&isMain,&sameUUID));
+    value[@"initializerBaseIsMain"]=@(isMain);value[@"initializerUUIDMatchesMain"]=@(sameUUID);
+    const void *originals[4]={(const void *)axs_cachekeeper_image_init_original,(const void *)axs_cachekeeper_image_remove_original,
+        (const void *)axs_cachekeeper_image_data_original,(const void *)axs_cachekeeper_image_extended_original};
+    NSUInteger resolved=0,bases=0,uuids=0;
+    for (NSUInteger index=0;index<4;index++) {
+        if (!index && saved) {
+            if ([value[@"initializerResolved"] boolValue]) resolved|=1;
+            if ([value[@"initializerBaseIsMain"] boolValue]) bases|=1;
+            if ([value[@"initializerUUIDMatchesMain"] boolValue]) uuids|=1;
+            continue;
+        }
+        if (AxsCacheKeeperImageObservedIMP(originals[index],main,mainUUID,mainResolved,&isMain,&sameUUID)) resolved|=1U<<index;
+        if (isMain) bases|=1U<<index;if (sameUUID) uuids|=1U<<index;
+    }
+    value[@"originalResolvedMask"]=@(resolved);value[@"originalBaseIsMainMask"]=@(bases);value[@"originalUUIDMatchesMainMask"]=@(uuids);
+    resolved=0;bases=0;uuids=0;
+    const char *selectors[2]={"setExtendedAttribute:value:atPath:traverseLink:overwrite:error:","removeExtendedAttribute:atPath:traverseLink:error:"};
+    for (NSUInteger index=0;index<2;index++) {
+        Method method=helper ? class_getClassMethod(helper,sel_registerName(selectors[index])) : NULL;
+        if (AxsCacheKeeperImageObservedIMP(method ? (const void *)method_getImplementation(method) : NULL,main,mainUUID,mainResolved,&isMain,&sameUUID)) resolved|=1U<<index;
+        if (isMain) bases|=1U<<index;if (sameUUID) uuids|=1U<<index;
+    }
+    value[@"helperResolvedMask"]=@(resolved);value[@"helperBaseIsMainMask"]=@(bases);value[@"helperUUIDMatchesMainMask"]=@(uuids);
+    return axs_cachekeeper_image_loaded_relation_projection(value);
+}
 static NSDictionary *AxsCacheKeeperImageDiscoveryCheck(NSUInteger mask, NSString *kind, NSString *source, NSString *stage, NSString *failure, NSUInteger methodIndex) {
     return @{@"schemaVersion":@1,@"classMask":@(mask),@"imageKind":kind,@"source":source,
         @"stage":stage,@"failure":failure,@"methodIndex":@(methodIndex)};
@@ -139,7 +217,7 @@ static BOOL AxsCacheKeeperImageSourceInfo(Class image, Dl_info *info) {
     if (!initializer) return NO;
     IMP implementation=image==axs_cachekeeper_image_class && axs_cachekeeper_image_init_original ?
         (IMP)axs_cachekeeper_image_init_original : method_getImplementation(initializer);
-    return dladdr((const void *)implementation,info) && info->dli_fbase;
+    return dladdr(AxsCacheKeeperImageLegacyCodeAddress((const void *)implementation),info) && info->dli_fbase;
 }
 static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pinnedTestContract, Class __unsafe_unretained classes[4], NSMutableArray **validatedMethods, AxsCacheKeeperImageContract *validatedContract, const void **validatedLegacyBase) {
     if (validatedMethods) *validatedMethods=nil;
@@ -147,6 +225,19 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
     if (validatedLegacyBase) *validatedLegacyBase=NULL;
     classes[0]=NSClassFromString(@"SDImageCache");classes[1]=NSClassFromString(@"SDDiskCache");
     classes[2]=NSClassFromString(@"SDImageCacheConfig");classes[3]=NSClassFromString(@"SDMemoryCache");
+    __block NSDictionary *sourceCheck=nil;
+    NSDictionary *loadedRelation=AxsCacheKeeperImageLoadedRelation(classes);
+    NSDictionary *(^finish)(NSUInteger,NSString *,NSString *,NSString *,NSString *,NSUInteger)=^NSDictionary *(NSUInteger mask,NSString *kind,NSString *source,NSString *stage,NSString *failure,NSUInteger index) {
+        NSMutableDictionary *check=[AxsCacheKeeperImageDiscoveryCheck(mask,kind,source,stage,failure,index) mutableCopy];
+        check[@"schemaVersion"]=@2;check[@"loadedRelation"]=loadedRelation;
+        if (sourceCheck) {
+            check[@"sourceCheck"]=sourceCheck;
+            if ([@[@"layout",@"mainWindow",@"helperOwner",@"helperABI",@"helperWindow",@"complete"] containsObject:sourceCheck[@"stage"]]) {
+                NSMutableDictionary *relation=[loadedRelation mutableCopy];relation[@"mainLayoutChecked"]=@YES;check[@"loadedRelation"]=[relation copy];
+            }
+        }
+        return axs_cachekeeper_image_discovery_projection(check);
+    };
     NSUInteger mask=0;for (NSUInteger i=0;i<4;i++) if (classes[i]) mask|=1u<<i;
     Class image=classes[0];const char *imageName=image ? class_getImageName(image) : NULL;
     NSString *kind=@"unknown";NSBundle *bundle=image ? [NSBundle bundleForClass:image] : nil;
@@ -155,16 +246,16 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
         kind=mainImage && !strcmp(imageName,mainImage) ? @"main" :
             ([bundle.bundlePath.pathExtension isEqual:@"framework"] ? @"framework" : @"other");
     }
-    if (mask!=15) return AxsCacheKeeperImageDiscoveryCheck(mask,kind,@"unknown",@"classes",@"missingClass",0);
+    if (mask!=15) return finish(mask,kind,@"unknown",@"classes",@"missingClass",0);
     for (NSUInteger i=0;i<4;i++) if (!class_getImageName(classes[i]))
-        return AxsCacheKeeperImageDiscoveryCheck(mask,kind,@"unknown",@"image",@"missingImage",0);
+        return finish(mask,kind,@"unknown",@"image",@"missingImage",0);
     for (NSUInteger i=1;i<4;i++) if (strcmp(imageName,class_getImageName(classes[i])))
-        return AxsCacheKeeperImageDiscoveryCheck(mask,kind,@"unknown",@"image",@"mixedImages",0);
+        return finish(mask,kind,@"unknown",@"image",@"mixedImages",0);
     if (!class_getInstanceMethod(image,sel_registerName(AxsCacheKeeperImageMethodSpecs[0].selector)))
-        return AxsCacheKeeperImageDiscoveryCheck(mask,kind,@"unknown",@"image",@"missingInitializer",0);
+        return finish(mask,kind,@"unknown",@"image",@"missingInitializer",0);
     Dl_info info={0};
     if (!AxsCacheKeeperImageSourceInfo(image,&info))
-        return AxsCacheKeeperImageDiscoveryCheck(mask,kind,@"unknown",@"image",@"imageLookup",0);
+        return finish(mask,kind,@"unknown",@"image",@"imageLookup",0);
     NSString *version=bundle.infoDictionary[@"CFBundleShortVersionString"],*source=@"rejected";
     AxsCacheKeeperImageContract contract=AxsCacheKeeperImageContractUnknown;
     const void *sourceImplementations[AxsCacheKeeperImageMethodCount]={NULL};
@@ -184,7 +275,9 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
             sourceImplementations[23]=(const void *)axs_cachekeeper_image_data_original;
             sourceImplementations[24]=(const void *)axs_cachekeeper_image_extended_original;
         }
-        if (AxsCacheKeeperImageLegacySourceMatches(info.dli_fbase,sourceImplementations)) {
+        AxsCacheKeeperImageLegacyCheck result=AxsCacheKeeperImageLegacySourceCheck(info.dli_fbase,sourceImplementations);
+        sourceCheck=AxsCacheKeeperImageSourceCheckValue(result);
+        if (result.accepted) {
             source=@"imageFingerprint";contract=AxsCacheKeeperImageContractFixedSerialLegacy;
         }
     }
@@ -198,15 +291,15 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
 #endif
     if ([source isEqual:@"rejected"]) {
         if (axs_cachekeeper_image_legacy_base==info.dli_fbase && !AxsCacheKeeperImageLegacyHelpersMatch(info.dli_fbase))
-            return AxsCacheKeeperImageDiscoveryCheck(mask,kind,@"imageFingerprint",@"method",@"methodsChanged",0);
-        return AxsCacheKeeperImageDiscoveryCheck(mask,kind,source,@"source",@"unknownSource",0);
+            return finish(mask,kind,@"imageFingerprint",@"method",@"methodsChanged",0);
+        return finish(mask,kind,source,@"source",@"unknownSource",0);
     }
     if (axs_cachekeeper_image_init_original) {
         NSUInteger changedIndex=0;
         if (contract!=axs_cachekeeper_image_contract || image!=axs_cachekeeper_image_class || classes[1]!=axs_cachekeeper_disk_class ||
             classes[2]!=axs_cachekeeper_image_config_class || classes[3]!=axs_cachekeeper_memory_class ||
             !AxsCacheKeeperImageMethodsUnchangedAtIndex(&changedIndex))
-            return AxsCacheKeeperImageDiscoveryCheck(mask,kind,source,@"method",@"methodsChanged",changedIndex);
+            return finish(mask,kind,source,@"method",@"methodsChanged",changedIndex);
     } else {
         NSMutableArray *methods=[NSMutableArray new];
         for (NSUInteger index=0;index<AxsCacheKeeperImageMethodCount;index++) {
@@ -216,22 +309,22 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
             // not present with a nil value. Its initializer's serial queue is fingerprinted.
             if (contract==AxsCacheKeeperImageContractFixedSerialLegacy && index==10) {
                 if (class_getInstanceMethod(cls,sel_registerName(spec->selector)))
-                    return AxsCacheKeeperImageDiscoveryCheck(mask,kind,source,@"method",@"unexpectedMethod",index+1);
+                    return finish(mask,kind,source,@"method",@"unexpectedMethod",index+1);
                 [methods addObject:@{@"class":cls,@"selector":NSStringFromSelector(sel_registerName(spec->selector)),@"absent":@YES}];continue;
             }
             NSString *failure=AxsCacheKeeperImageMethodFailure(cls,spec,info.dli_fbase,methods);
-            if (failure) return AxsCacheKeeperImageDiscoveryCheck(mask,kind,source,@"method",failure,index+1);
+            if (failure) return finish(mask,kind,source,@"method",failure,index+1);
             // Bind the ABI record to the exact IMP that passed the fingerprint gate;
             // do not learn a same-image swizzle between the two checks.
             if ([source isEqual:@"imageFingerprint"] &&
                 [methods.lastObject[@"implementation"] pointerValue]!=sourceImplementations[index])
-                return AxsCacheKeeperImageDiscoveryCheck(mask,kind,source,@"method",@"methodsChanged",index+1);
+                return finish(mask,kind,source,@"method",@"methodsChanged",index+1);
         }
         if (validatedMethods) *validatedMethods=methods;
     }
     if (validatedContract) *validatedContract=contract;
     if (validatedLegacyBase && [source isEqual:@"imageFingerprint"]) *validatedLegacyBase=info.dli_fbase;
-    return AxsCacheKeeperImageDiscoveryCheck(mask,kind,source,@"complete",@"none",0);
+    return finish(mask,kind,source,@"complete",@"none",0);
 }
 
 @interface AxsCacheKeeperImageBinding : NSObject
@@ -256,6 +349,7 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
 @property(nonatomic) BOOL eligible;
 @property(atomic) BOOL pending;
 @property(nonatomic) NSUInteger flight;
+@property(nonatomic) NSUInteger operationOwner,operationAction,operationEvent;
 @property(nonatomic) NSTimeInterval flightDeadline;
 @property(atomic) BOOL pluginRemoving;
 @property(nonatomic) NSUInteger blockedWrites;
@@ -272,6 +366,9 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
 @property(atomic,copy) NSDictionary *context;
 @property(nonatomic,copy) NSDictionary *lastReceipt;
 @property(nonatomic) NSUInteger generation;
+@property(nonatomic,strong) NSMutableDictionary *operationHistory;
+@property(nonatomic) NSUInteger operationEvent,operationOwner,installationGeneration;
+@property(nonatomic,copy) NSString *operationInstallation;
 @property(nonatomic) BOOL foreground;
 @property(nonatomic) BOOL hasTime;
 @property(atomic) BOOL supported;
@@ -489,6 +586,7 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
 - (instancetype)initWithContextProvider:(AxsCacheKeeperImageContextProvider)provider observer:(void (^)(NSDictionary *))observer {
     if ((self=[super init])) {
         _provider=[provider copy];_bindings=[NSMutableArray new];
+        _operationHistory=axs_cachekeeper_operation_history_create(@"image",nil);
         _work=dispatch_queue_create("dev.local.cachekeeper.images",DISPATCH_QUEUE_SERIAL);
         _state=@"notObserved";_reason=@"none";_foreground=YES;
         _discoveryCheck=AxsCacheKeeperImageDiscoveryCheck(0,@"unknown",@"unknown",@"notChecked",@"none",0);
@@ -568,19 +666,50 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
         self.supported=[self.discoveryCheck[@"stage"] isEqual:@"complete"];
     }
 }
+- (void)restoreOperationHistory:(id)history {
+    // Called before observation starts; the component queue orders later refreshes.
+    @synchronized(self) {axs_cachekeeper_operation_restore(self.operationHistory,history);}
+    [self axs_cachekeeper_publish];
+}
+- (void)loadOperationHistoryFromPath:(NSString *)path {
+    dispatch_async(self.work,^{[self restoreOperationHistory:axs_cachekeeper_operation_load(path,@"image")];});
+}
+// Event creation and child registration belong to work. Public triggers capture the
+// generation immediately, but cannot finish an event while its worker registers children.
+- (NSDictionary *)axs_cachekeeper_operation_context {
+    @synchronized(self) {return @{@"configuration":@(self.generation),@"installation":@(self.installationGeneration)};}
+}
+- (NSUInteger)axs_cachekeeper_begin_event:(NSString *)trigger context:(NSDictionary *)context current:(BOOL)current {
+    // Refresh status is independent from cancellation policy. Every real context/discovery
+    // refresh is requested; only configuration refreshes supersede an unfinished event.
+    BOOL supersede=[trigger isEqual:@"configuration"];
+    NSUInteger event=axs_cachekeeper_operation_begin_with_policy(self.operationHistory,trigger,[context[@"configuration"] unsignedIntegerValue],[context[@"installation"] unsignedIntegerValue],YES,supersede);
+    if (current) self.operationEvent=event;
+    return event;
+}
+- (void)axs_cachekeeper_schedule_refresh:(NSString *)trigger {
+    NSDictionary *context=[self axs_cachekeeper_operation_context];
+    dispatch_async(self.work,^{
+        NSUInteger event=[self axs_cachekeeper_begin_event:trigger context:context current:YES];
+        [self axs_cachekeeper_refresh_event:event];axs_cachekeeper_operation_finish(self.operationHistory,event);[self axs_cachekeeper_publish];
+    });
+}
 - (void)requestDiscoveryRefresh {
     @synchronized(self) {
         if (self.discoveryRefreshPending) return;
         self.discoveryRefreshPending=YES;
     }
+    NSDictionary *context=[self axs_cachekeeper_operation_context];
     dispatch_async(self.work,^{
         @synchronized(self) {self.discoveryRefreshPending=NO;}
         NSDictionary *before=self.discoveryCheck;
         [self startObserving];
-        if ([before isEqual:self.discoveryCheck]) return;
-        // Loader noise needs no installation or filesystem read. A changed contract revokes
-        // queued authorization before refreshing policy and publishing the new diagnosis.
-        [self axs_cachekeeper_cancel];[self axs_cachekeeper_refresh];
+        BOOL changed=![before isEqual:self.discoveryCheck];
+        NSUInteger event=[self axs_cachekeeper_begin_event:@"imageLoad" context:context current:changed];
+        if (!changed) {axs_cachekeeper_operation_refresh(self.operationHistory,event,@"applied");axs_cachekeeper_operation_finish(self.operationHistory,event);[self axs_cachekeeper_publish];return;}
+        // Unchanged loader observations are separate receipts, not cancellation authority.
+        // A changed contract retains the existing synchronous generation revocation.
+        [self axs_cachekeeper_cancel];[self axs_cachekeeper_refresh_event:event];axs_cachekeeper_operation_finish(self.operationHistory,event);[self axs_cachekeeper_publish];
     });
 }
 - (NSArray<AxsCacheKeeperImageBinding *> *)axs_cachekeeper_bindings {
@@ -615,7 +744,7 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
             // instances for this process instead of pretending that discovery is complete.
             self.capacityExceeded=YES;self.generation++;
             for (AxsCacheKeeperImageBinding *item in self.bindings) {item.invalidated=YES;item.restricted=NO;}
-            dispatch_async(self.work,^{[self axs_cachekeeper_refresh];});return;
+            [self axs_cachekeeper_schedule_refresh:@"imageLoad"];return;
         }
         // Registry changes share the same final commit generation as configuration changes.
         // An older refresh snapshot must not re-enable a gate after a new owner appears.
@@ -623,11 +752,12 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
         // Revoke conflicting gates immediately, before another SDK queue can write or clear.
         for (AxsCacheKeeperImageBinding *other in self.bindings)
             if ((other.owner || other.pending) && AxsCacheKeeperImageOverlaps(binding.relative,other.relative)) other.restricted=NO;
+        binding.operationOwner=++self.operationOwner;
         [self.bindings addObject:binding];
     }
     // A custom backend never receives a binding; its original methods remain untouched.
     if (object_getClass(disk)==axs_cachekeeper_disk_class) objc_setAssociatedObject(disk,AxsCacheKeeperImageBindingKey,binding,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    dispatch_async(self.work,^{[self axs_cachekeeper_refresh];});
+    [self axs_cachekeeper_schedule_refresh:@"imageLoad"];
 }
 - (void)axs_cachekeeper_observeCreatedRoot:(AxsCacheKeeperImageBinding *)binding {
     // 5.15.5 creates the root on first SDK write. Recheck each unbound owner at most once;
@@ -639,13 +769,14 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
         if (!binding || binding.initialReason || binding.identity || binding.invalidated || binding.rootRefreshAttempted) return;
         binding.rootRefreshAttempted=YES;
     }
-    dispatch_async(self.work,^{[self axs_cachekeeper_refresh];});
+    [self axs_cachekeeper_schedule_refresh:@"imageLoad"];
 }
-- (void)axs_cachekeeper_refresh {
+- (void)axs_cachekeeper_refresh_event:(NSUInteger)event {
     NSUInteger generation;@synchronized(self) {generation=self.generation;}
     NSDictionary *context=self.provider ? self.provider() : @{};
-    @synchronized(self) {if (generation!=self.generation) return;}
+    @synchronized(self) {if (generation!=self.generation) {axs_cachekeeper_operation_refresh(self.operationHistory,event,@"obsolete");return;}}
     self.context=context;
+    @synchronized(self) {if (![self.operationInstallation isEqual:context[@"installation"]]) {self.operationInstallation=context[@"installation"];self.installationGeneration++;}}
     NSArray *bindings=[self axs_cachekeeper_bindings];
     for (AxsCacheKeeperImageBinding *binding in bindings) {
         binding.restricted=NO;binding.eligible=NO;
@@ -664,7 +795,8 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
             @synchronized(self) {if (generation==self.generation) binding.restricted=axs_cachekeeper_wants_restriction(context[@"appState"]);}
         }
     }
-    @synchronized(self) {if (generation!=self.generation) return;}
+    @synchronized(self) {if (generation!=self.generation) {axs_cachekeeper_operation_refresh(self.operationHistory,event,@"obsolete");return;}}
+    axs_cachekeeper_operation_refresh(self.operationHistory,event,@"applied");
     self.reason=@"none";self.state=@"ready";
     if (![context[@"valid"] boolValue]) {self.reason=@"configurationInvalid";self.state=@"blocked";}
     else if (!axs_cachekeeper_app_enabled(context[@"appState"])) {self.reason=@"appDisabled";self.state=@"disabled";}
@@ -676,15 +808,19 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
         if (!eligible) {self.state=@"blocked";self.reason=((AxsCacheKeeperImageBinding *)bindings.firstObject).reason;}
         else if (restricted) self.state=@"restricting";
     }
+    axs_cachekeeper_operation_event_reason(self.operationHistory,event,self.reason);
     [self axs_cachekeeper_publish];
 }
 - (void)refreshWithCompletion:(void (^)(void))completion {
     [self axs_cachekeeper_cancel];
-    dispatch_async(self.work,^{[self startObserving];[self axs_cachekeeper_refresh];if (completion) completion();});
+    NSDictionary *context=[self axs_cachekeeper_operation_context];
+    dispatch_async(self.work,^{NSUInteger event=[self axs_cachekeeper_begin_event:@"configuration" context:context current:YES];[self startObserving];[self axs_cachekeeper_refresh_event:event];axs_cachekeeper_operation_finish(self.operationHistory,event);[self axs_cachekeeper_publish];if (completion) completion();});
 }
 - (void)didBecomeActive {
     @synchronized(self) {self.foreground=YES;self.hasTime=NO;}
-    [self refreshWithCompletion:nil];
+    [self axs_cachekeeper_cancel];
+    NSDictionary *context=[self axs_cachekeeper_operation_context];
+    dispatch_async(self.work,^{NSUInteger event=[self axs_cachekeeper_begin_event:@"foreground" context:context current:YES];[self startObserving];[self axs_cachekeeper_refresh_event:event];axs_cachekeeper_operation_finish(self.operationHistory,event);[self axs_cachekeeper_publish];});
 }
 - (void)expireBackgroundTime {
     @synchronized(self) {self.hasTime=NO;self.generation++;}
@@ -692,25 +828,39 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
 }
 - (void)didEnterBackgroundWithTime:(BOOL)hasTime {
     @synchronized(self) {self.foreground=NO;self.hasTime=hasTime;}
+    NSDictionary *context=[self axs_cachekeeper_operation_context];
     dispatch_async(self.work,^{
-        [self axs_cachekeeper_refresh];
+        NSUInteger event=[self axs_cachekeeper_begin_event:@"background" context:context current:YES];
+        [self axs_cachekeeper_refresh_event:event];
         for (AxsCacheKeeperImageBinding *binding in [self axs_cachekeeper_bindings]) {
             if (binding.pending) {self.reason=@"inFlight";continue;}
             if (!binding.eligible) continue;
             NSUInteger generation;BOOL allowed;
             @synchronized(self) {generation=self.generation;allowed=self.hasTime && !self.foreground;}
             if (!allowed) {self.reason=@"noBackgroundTime";continue;}
+            // Only this serial worker can create/finish events. Bind the child before
+            // publishing pending state; reentrant observers can only enqueue later events.
+            NSUInteger action=axs_cachekeeper_operation_action(self.operationHistory,event,binding.operationOwner);
+            NSAssert(action!=0,@"Image worker must register a child before submitting SDK work");
+            if (!action) {self.reason=@"reportWriteFailed";self.state=@"blocked";[self axs_cachekeeper_publish];continue;}
+            binding.operationEvent=event;binding.operationAction=action;
             binding.pending=YES;NSUInteger flight=++binding.flight;binding.flightDeadline=NSProcessInfo.processInfo.systemUptime+15;
             @synchronized(self) {self.queued++;}self.state=@"queued";[self axs_cachekeeper_publish];
-            dispatch_async(binding.queue,^{[self axs_cachekeeper_execute:binding generation:generation];});
+            dispatch_async(binding.queue,^{[self axs_cachekeeper_execute:binding generation:generation event:event action:action];});
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,15*NSEC_PER_SEC),self.work,^{
-                if (binding.pending && binding.flight==flight) {self.state=@"timedOut";self.reason=@"inFlight";[self axs_cachekeeper_publish];}
+                if (binding.pending && binding.flight==flight) {
+                    axs_cachekeeper_operation_timeout(self.operationHistory,action);
+                    @synchronized(self) {if (event==self.operationEvent) {self.state=@"timedOut";self.reason=@"inFlight";}}
+                    [self axs_cachekeeper_publish];
+                }
             });
         }
+        axs_cachekeeper_operation_event_reason(self.operationHistory,event,self.reason);
+        axs_cachekeeper_operation_finish(self.operationHistory,event);
         [self axs_cachekeeper_publish];
     });
 }
-- (void)axs_cachekeeper_execute:(AxsCacheKeeperImageBinding *)binding generation:(NSUInteger)generation {
+- (void)axs_cachekeeper_execute:(AxsCacheKeeperImageBinding *)binding generation:(NSUInteger)generation event:(NSUInteger)event action:(NSUInteger)action {
     // This block runs on the actual SDK queue. Configuration and the installation snapshot are
     // checked here, not only before dispatch; no second asynchronous SDK clear is submitted.
     __attribute__((objc_precise_lifetime)) id owner=binding.owner;
@@ -732,7 +882,7 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
         if (!reason && !self.hasTime) reason=@"noBackgroundTime";
         // This is the synchronous API commit boundary. A later configuration change cannot
         // cancel a removeAllData already executing; the unfinished flight remains recorded.
-        if (!reason) {self.submitted++;submitted=YES;}
+        if (!reason) {self.submitted++;submitted=YES;axs_cachekeeper_operation_transition(self.operationHistory,action,@"submitted",NO);}
     }
     if (submitted) {
         binding.pluginRemoving=YES;
@@ -742,13 +892,14 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
     (void)owner;if (fd>=0) close(fd);
     dispatch_async(self.work,^{
         binding.pending=NO;
+        axs_cachekeeper_operation_transition_reason(self.operationHistory,action,submitted ? @"apiCompleted" : @"skipped",reason ?: @"none",NO);
         @synchronized(self) {
             if (submitted) {
                 self.completed++;
                 if (binding.invalidated) {binding.restricted=NO;binding.eligible=NO;}
             }
             else self.skipped++;
-            if (generation==self.generation) {
+            if (generation==self.generation && event==self.operationEvent) {
                 self.reason=reason ?: @"none";
                 if (self.queued==self.completed+self.skipped) self.state=submitted ? @"apiCompleted" : @"blocked";
             }
@@ -779,9 +930,11 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
             record[@"installationCheck"]=axs_cachekeeper_installation_check_projection(self.context[@"installationCheck"]) ?: @{@"state":@"invalid",@"errorCode":@0};
             receipt=record;
         }
+        NSMutableDictionary *withHistory=[receipt mutableCopy];withHistory[@"operationHistory"]=axs_cachekeeper_operation_snapshot(self.operationHistory);receipt=[withHistory copy];
         self.lastReceipt=receipt;
+        // Publish under the snapshot lock so an older callback cannot replace newer cumulative history.
+        if (self.observer) self.observer(receipt);
     }
-    if (self.observer) self.observer(receipt);
 }
 - (NSDictionary *)receipt { @synchronized(self) {return self.lastReceipt;} }
 @end

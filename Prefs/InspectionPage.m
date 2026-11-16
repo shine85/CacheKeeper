@@ -1,4 +1,5 @@
 #import "InspectionPage.h"
+#import "../AxsCacheKeeperInspectionStatus.h"
 #import "DiagnosticsPage.h"
 #import "../AxsCacheKeeperPolicy.h"
 #import "../AxsCacheKeeperRecords.h"
@@ -149,7 +150,19 @@
     [text appendFormat:@"%@\n%@\n\n",axs_cachekeeper_presentation_inspection(report),report[@"evidence"] ?: @""];
     if (!complete && !cancelled && -[report[@"updated"] timeIntervalSinceNow]>30) [text appendString:@"进度超过 30 秒未更新；可以停止后重检，当前不能判定已完成。\n"];
     NSString *linkDetail=report[@"hardLinks"] ? [NSString stringWithFormat:@"跳过链接 %@ 项（硬链接 %@ 项、符号链接 %@ 项）",report[@"links"] ?: @0,report[@"hardLinks"] ?: @0,report[@"symlinks"] ?: @0] : [NSString stringWithFormat:@"跳过链接 %@ 项",report[@"links"] ?: @0];
-    [text appendFormat:@"读取失败 %@ 项；扫描中变化 %@ 项；%@、敏感目录 %@ 项。\n%@\n",report[@"failures"] ?: @0,report[@"changed"] ?: @0,linkDetail,report[@"hidden"] ?: @0,report[@"error"] ?: @""];
+    [text appendFormat:@"主读取失败 %@ 项；扫描中变化 %@ 项；%@、敏感目录 %@ 项。\n%@\n",report[@"failures"] ?: @0,report[@"changed"] ?: @0,linkDetail,report[@"hidden"] ?: @0,report[@"error"] ?: @""];
+    if (report[@"invalidNameRecords"])
+        [text appendFormat:@"主遍历无效名称记录 %@ 项。\n",report[@"invalidNameRecords"]];
+    if (report[@"twinInvalidNameRecords"])
+        [text appendFormat:@"孪生无效名称记录 %@ 项。\n",report[@"twinInvalidNameRecords"]];
+    if (report[@"nameDisplayOmitted"]) [text appendFormat:@"主遍历名称未展示 %@ 项。\n",report[@"nameDisplayOmitted"]];
+    if (report[@"twinNameDisplayOmitted"]) [text appendFormat:@"孪生名称未展示 %@ 项。\n",report[@"twinNameDisplayOmitted"]];
+    for (NSString *key in @[@"mainReadFailure",@"twinReadFailure"]) {
+        NSDictionary *failure=axs_cachekeeper_inspection_read_failure_projection(report[key]);
+        if (failure[@"stage"]) [text appendFormat:@"%@首个失败：%@ / %@ / %@。\n",[key isEqual:@"mainReadFailure"] ? @"主读取" : @"孪生枚举",failure[@"stage"],failure[@"errorDomain"],failure[@"errorCode"]];
+    }
+    if ([report[@"nameDisplayOmitted"] unsignedIntegerValue] || [report[@"twinNameDisplayOmitted"] unsignedIntegerValue])
+        [text appendString:@"名称未展示的条目仍按原始名称读取；占位文字不能用于定位文件。\n"];
     NSArray *twins=report[@"linkTwins"];
     // 孪生搜索状态（任务 7）：主扫描与孪生搜索的完整性分开报告；0 匹配时同样展示
     // 搜索失败与截断，不让"未找到"看起来像"已确认无孪生"。三类截断分别标明：

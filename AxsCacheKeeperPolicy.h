@@ -61,6 +61,15 @@ static inline BOOL axs_cachekeeper_data_marker(NSString *name) {
 static inline NSArray<NSString *> *axs_cachekeeper_cache_roots(void) {
     return @[@"Library/Caches", @"tmp", @"Caches", @"Cache", @"cache", @".cache"];
 }
+// Platform purpose is narrower than directory discovery; it never grants execution authorization.
+static inline NSString *axs_cachekeeper_platform_cache_scope(NSString *path) {
+    if (!axs_cachekeeper_relative_path(path)) return nil;
+    for (NSString *root in @[@"Library/Caches",@"tmp"])
+        if ([path isEqual:root] || [path hasPrefix:[root stringByAppendingString:@"/"]]) return root;
+    return nil;
+}
+static inline NSString *axs_cachekeeper_platform_cache_rule_id(void) {return @"platform-cache";}
+static inline NSString *axs_cachekeeper_platform_cache_rule_revision(void) {return @"2";}
 // 扫描可展示所有一级数据目录；允许删除的根只来自这里，不能由目录名字含 cache 推断。
 static inline BOOL axs_cachekeeper_cache_path(NSString *path) {
     if (axs_cachekeeper_protected_path(path)) return NO;

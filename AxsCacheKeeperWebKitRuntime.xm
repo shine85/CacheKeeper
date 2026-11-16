@@ -22,26 +22,21 @@ static NSUInteger axs_cachekeeper_webkit_lifecycle;
 static UIBackgroundTaskIdentifier axs_cachekeeper_webkit_background=UIBackgroundTaskInvalid;
 // The following fields belong only to the serial IO queue.
 static NSDictionary *axs_cachekeeper_webkit_installation;
-static NSDictionary *axs_cachekeeper_webkit_pending_report;
+static NSMutableDictionary *axs_cachekeeper_webkit_pending_report;
 static BOOL axs_cachekeeper_webkit_report_writable=YES;
+static BOOL axs_cachekeeper_webkit_history_loaded;
 
 static NSString *axs_cachekeeper_webkit_folder(void) {
     return jbroot(@"/var/mobile/Library/CacheKeeper");
 }
 static void axs_cachekeeper_webkit_flush_report(BOOL access) {
-    if (!axs_cachekeeper_webkit_pending_report) return;
+    if (!axs_cachekeeper_webkit_history_loaded || !axs_cachekeeper_webkit_pending_report) return;
     NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
     NSString *path=[[axs_cachekeeper_webkit_folder() stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[bundle stringByAppendingString:@".webkit.plist"]];
-    NSError *error=nil;
-    axs_cachekeeper_webkit_report_writable=access && [axs_cachekeeper_webkit_pending_report writeToURL:[NSURL fileURLWithPath:path] error:&error];
-    if (axs_cachekeeper_webkit_report_writable) axs_cachekeeper_webkit_pending_report=nil;
-    else NSLog(@"[CacheKeeper] 网页缓存回执保存失败，保留最新结果等待重试（code=%ld）",(long)error.code);
+    axs_cachekeeper_operation_save(nil,path,access,&axs_cachekeeper_webkit_pending_report,&axs_cachekeeper_webkit_report_writable);
 }
 static NSString *axs_cachekeeper_webkit_process(void) {
-    int pid=getpid(),mib[4]={CTL_KERN,KERN_PROC,KERN_PROC_PID,pid};
-    struct kinfo_proc info;memset(&info,0,sizeof(info));size_t size=sizeof(info);
-    if (sysctl(mib,4,&info,&size,NULL,0) || size!=sizeof(info) || !info.kp_proc.p_starttime.tv_sec) return @"";
-    return [NSString stringWithFormat:@"%d:%lld.%06d",pid,(long long)info.kp_proc.p_starttime.tv_sec,(int)info.kp_proc.p_starttime.tv_usec];
+    return axs_cachekeeper_operation_process()[@"processID"];
 }
 static NSDictionary *axs_cachekeeper_webkit_read_context(BOOL access) {
     axs_cachekeeper_webkit_flush_report(access);
@@ -60,9 +55,9 @@ static NSDictionary *axs_cachekeeper_webkit_read_context(BOOL access) {
         NSURL *bundleURL=NSBundle.mainBundle.bundleURL;
         NSString *version=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
         NSError *installationError=nil;
-        if (!axs_cachekeeper_webkit_installation || !axs_cachekeeper_validate_installation_snapshot(axs_cachekeeper_webkit_installation,bundleURL,version,&installationError)) {
+        if (!axs_cachekeeper_webkit_installation || !axs_cachekeeper_validate_installation_snapshot_with_context(axs_cachekeeper_webkit_installation,bundleURL,version,AxsCacheKeeperInstallationContextHostMainBundle,&installationError)) {
             installationError=nil;
-            axs_cachekeeper_webkit_installation=axs_cachekeeper_installation_snapshot(bundleURL,NSBundle.mainBundle.bundleIdentifier,version,&installationError);
+            axs_cachekeeper_webkit_installation=axs_cachekeeper_installation_snapshot_with_context(bundleURL,NSBundle.mainBundle.bundleIdentifier,version,AxsCacheKeeperInstallationContextHostMainBundle,&installationError);
         }
         BOOL verified=[axs_cachekeeper_webkit_installation[@"installationState"] isEqual:@"verified"];
         if (verified)
@@ -107,13 +102,16 @@ static void axs_cachekeeper_webkit_record_view(WKWebView *view) {
 %end
 %end
 
-static void axs_cachekeeper_webkit_refresh(void (^completion)(void)) {
+static void axs_cachekeeper_webkit_refresh(NSString *trigger,void (^completion)(void)) {
+    NSUInteger event=[axs_cachekeeper_webkit_engine beginOperationRefreshWithTrigger:trigger];
     BOOL access=axs_cachekeeper_webkit_access;
     NSUInteger generation=axs_cachekeeper_webkit_observation.generation;
     dispatch_async(axs_cachekeeper_webkit_io,^{
         NSDictionary *context=axs_cachekeeper_webkit_read_context(access);
         dispatch_async(dispatch_get_main_queue(),^{
-            if ([axs_cachekeeper_webkit_observation applyContext:context forGeneration:generation] && completion) completion();
+            BOOL applied=[axs_cachekeeper_webkit_observation applyContext:context forGeneration:generation];
+            [axs_cachekeeper_webkit_engine completeOperationRefresh:event applied:applied];
+            if (applied && completion) completion();
         });
     });
 }
@@ -132,7 +130,7 @@ static void axs_cachekeeper_webkit_enter_background(void) {
             [axs_cachekeeper_webkit_engine expireBackgroundTime];axs_cachekeeper_webkit_end_background();
         }];
     }
-    axs_cachekeeper_webkit_refresh(^{
+    axs_cachekeeper_webkit_refresh(@"background",^{
         if (lifecycle!=axs_cachekeeper_webkit_lifecycle) return;
         axs_cachekeeper_webkit_launch_pending=NO;
         [axs_cachekeeper_webkit_engine didEnterBackgroundWithTime:axs_cachekeeper_webkit_has_time()];
@@ -158,8 +156,11 @@ void axs_cachekeeper_configure_webkit(BOOL containerEligible, BOOL configuration
             } clock:^{return NSProcessInfo.processInfo.systemUptime;} observer:^(NSDictionary *receipt) {
                 BOOL access=axs_cachekeeper_webkit_access;
                 NSMutableDictionary *record=[receipt mutableCopy];record[@"runtimeInfo"]=axs_cachekeeper_runtime_info();
-                NSDictionary *projected=axs_cachekeeper_webkit_projection(record);
-                dispatch_async(axs_cachekeeper_webkit_io,^{axs_cachekeeper_webkit_pending_report=projected;axs_cachekeeper_webkit_flush_report(access);});
+                NSDictionary *projected=axs_cachekeeper_webkit_raw_projection(record);
+                dispatch_async(axs_cachekeeper_webkit_io,^{
+                    if (projected) {axs_cachekeeper_webkit_pending_report=[projected mutableCopy];axs_cachekeeper_webkit_flush_report(access);}
+                    else {axs_cachekeeper_webkit_report_writable=NO;NSLog(@"[CacheKeeper] 网页操作回执字段无效，保留待写历史");}
+                });
                 // Defer until a synchronous completion has had a chance to queue the next store.
                 dispatch_async(dispatch_get_main_queue(),^{
                     NSDictionary *current=axs_cachekeeper_webkit_engine.receipt;
@@ -167,13 +168,22 @@ void axs_cachekeeper_configure_webkit(BOOL containerEligible, BOOL configuration
                         axs_cachekeeper_webkit_end_background();
                 });
             }];
+            dispatch_async(axs_cachekeeper_webkit_io,^{
+                NSString *receiptPath=[[axs_cachekeeper_webkit_folder() stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[NSBundle.mainBundle.bundleIdentifier stringByAppendingString:@".webkit.plist"]];
+                id previousHistory=axs_cachekeeper_operation_load(receiptPath,@"webkit");
+                dispatch_async(dispatch_get_main_queue(),^{
+                    [axs_cachekeeper_webkit_engine restoreOperationHistory:previousHistory];
+                    BOOL access=axs_cachekeeper_webkit_access;
+                    dispatch_async(axs_cachekeeper_webkit_io,^{axs_cachekeeper_webkit_history_loaded=YES;axs_cachekeeper_webkit_flush_report(access);});
+                });
+            });
             axs_cachekeeper_webkit_observation=[[AxsCacheKeeperWebKitObservation alloc] initWithCache:axs_cachekeeper_webkit_engine];
             // The constructor installs creation capture synchronously; UIKit lifecycle setup waits.
             dispatch_async(dispatch_get_main_queue(),^{
             [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
                 (void)note;++axs_cachekeeper_webkit_lifecycle;axs_cachekeeper_webkit_launch_pending=NO;
                 axs_cachekeeper_webkit_foreground_seen=YES;axs_cachekeeper_webkit_background_seen=NO;
-                [axs_cachekeeper_webkit_engine didBecomeActive];axs_cachekeeper_webkit_end_background();axs_cachekeeper_webkit_refresh(nil);
+                [axs_cachekeeper_webkit_engine didBecomeActive];axs_cachekeeper_webkit_end_background();axs_cachekeeper_webkit_refresh(@"foreground",nil);
             }];
             [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
                 (void)note;axs_cachekeeper_webkit_enter_background();
@@ -190,7 +200,7 @@ void axs_cachekeeper_configure_webkit(BOOL containerEligible, BOOL configuration
             axs_cachekeeper_webkit_hooks=YES;
             %init(AxsCacheKeeperWebKitObservation);
         }
-        axs_cachekeeper_webkit_refresh(nil);
+        axs_cachekeeper_webkit_refresh(@"configuration",nil);
     };
     if (NSThread.isMainThread) configure();else dispatch_async(dispatch_get_main_queue(),configure);
 }

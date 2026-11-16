@@ -149,9 +149,10 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
         collectionEnvironment[@"diagnosticChannel"]=axs_cachekeeper_diagnostic_channel_hello();
         // Reuse unchanged package metadata, but obtain current membership on every collection.
         NSError *installationError=nil;
-        NSDictionary *containerCoverage=nil;
-        NSArray *apps=axs_cachekeeper_installed_applications_with_container_coverage(installationCache,&containerCoverage,&installationError);
+        NSDictionary *containerCoverage=nil,*registryInventory=nil;
+        NSArray *apps=axs_cachekeeper_installed_applications_with_registry_inventory(installationCache,&containerCoverage,&registryInventory,&installationError);
         collectionEnvironment[@"containerCoverage"]=containerCoverage;
+        collectionEnvironment[@"registryInventory"]=registryInventory;
         if (installationError) apps=nil;
         AxsCacheKeeperDiagnostics *session=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:jbroot(@"/var/mobile/Library/CacheKeeper")];
         NSDictionary *report=[session reportWithApps:apps environment:collectionEnvironment progress:^(NSUInteger completed,NSUInteger total) {
@@ -167,7 +168,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
         dispatch_async(dispatch_get_main_queue(),^{
             AxsCacheKeeperDiagnosticsPage *page=weak;if (!page || page.generation!=generation) return;
             page.collecting=NO;page.reportData=data;
-            page.status=data ? [NSString stringWithFormat:@"已汇总 %lu/%lu 个 APP。报告仅在内存，点击“导出报告”保存。",(unsigned long)page.completed,(unsigned long)page.total] : @"报告生成失败，尚未保存；可以重新采集。";
+            page.status=data ? [NSString stringWithFormat:@"已汇总 %lu/%lu 个展示或配置 APP；全机清单含 %lu 项，仅汇总元数据与已有记录。点击“导出报告”保存。",(unsigned long)page.completed,(unsigned long)page.total,(unsigned long)[report[@"storageInventory"][@"entries"] count]] : @"报告生成失败，尚未保存；可以重新采集。";
             if (data && (![@[@"available",@"missing"] containsObject:report[@"sourceStates"][@"configuration"]] || ![@[@"available",@"missing"] containsObject:report[@"sourceStates"][@"selection"]] || ![report[@"sourceStates"][@"installedApplications"] isEqual:@"available"]))
                 page.status=@"报告已在内存生成，但安装列表或部分配置不可用；可导出查看来源状态。";
             [page axs_cachekeeper_refresh];

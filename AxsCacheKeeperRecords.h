@@ -1,6 +1,7 @@
 #pragma once
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperScanDiagnostics.h"
+#import "AxsCacheKeeperInspectionStatus.h"
 
 // Validate fields consumed by history and report readers before subscripting or messaging them.
 // Unknown fields are preserved for forward compatibility; malformed known fields reject the file.
@@ -8,6 +9,12 @@ static inline BOOL axs_cachekeeper_record_valid(id value, NSUInteger depth) {
     if (depth>8 || ![value isKindOfClass:NSDictionary.class]) return NO;
     NSDictionary *record=value;
     if (record[@"scanDiagnostics"] && !axs_cachekeeper_scan_diagnostics_projection(record[@"scanDiagnostics"])) return NO;
+    for (NSString *key in @[@"inspectionReadFailure",@"mainReadFailure",@"twinReadFailure"])
+        if (record[key] && !axs_cachekeeper_inspection_read_failure_projection(record[key])) return NO;
+    for (NSString *key in @[@"invalidNameRecords",@"twinInvalidNameRecords",@"nameDisplayOmitted",@"twinNameDisplayOmitted"])
+        if (record[key] && !axs_cachekeeper_inspection_count(record[key])) return NO;
+    for (NSString *key in @[@"pathOperable",@"sourceOperable",@"twinOperable"])
+        if (record[key] && !axs_cachekeeper_input_boolean(record[key])) return NO;
     for (NSString *key in @[@"token",@"bundle",@"path",@"source",@"twin",@"home",@"error",@"message",@"evidence",
         @"type",@"reason",@"stage",@"detail",@"mode",@"phase",@"purgeClassification",@"purgeEvidence",@"appRuleSummary"])
         if (record[key] && ![record[key] isKindOfClass:NSString.class]) return NO;
