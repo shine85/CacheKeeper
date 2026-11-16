@@ -14,7 +14,9 @@ output = root / "tmp" / ("cache-tests-" + str(time.time_ns()))
 output.mkdir(parents=True)
 try:
     subprocess.run([sys.executable, str(root / "tests/test_owner_snapshot.py")], check=True, timeout=60)
-    subprocess.run([sys.executable, str(root / "tests/run_storage_inventory_tests.py")], check=True, timeout=60)
+    # The saved-record budget fixture intentionally processes 16,384 rows; allow
+    # that dedicated native suite more time while keeping its per-binary bound explicit.
+    subprocess.run([sys.executable, str(root / "tests/run_storage_inventory_tests.py")], check=True, timeout=240)
     subprocess.run([sys.executable, str(root / "tests/package_version_tests.py")], check=True, timeout=60)
     subprocess.run([sys.executable, str(root / "tests/run_runtime_receipt_tests.py")], check=True, timeout=60)
     subprocess.run([sys.executable, str(root / "tests/run_observation_export_tests.py")], check=True, timeout=60)

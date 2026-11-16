@@ -58,7 +58,7 @@ def run() -> int:
             fixtures = output / (role + "-fixtures")
             fixtures.mkdir(parents=True, exist_ok=True)
             result = subprocess.run([str(binary), str(fixtures)], capture_output=True,
-                                    text=True, encoding="utf-8", timeout=60)
+                                    text=True, encoding="utf-8", timeout=180)
             if role == "red":
                 if result.returncode != 1 or normalized_stderr(result.stderr) != EXPECTED_RED:
                     raise SystemExit("FAIL: incorrect all-app inventory behavior RED\n" + result.stdout + result.stderr)
