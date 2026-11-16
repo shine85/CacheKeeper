@@ -36,7 +36,10 @@ int main(int argc,char **argv) { @autoreleasepool {
     oecheck([out[@"discoveryCheck"] isEqual:discovery],@"first source failure and unresolved loaded relationship survive actual export");
     for (NSString *key in @[@"imageDiskCache",@"webKitDiskCache"]) {
         oecheck([app[key][@"data"][@"installationCheck"] isEqual:installation(identity)],@"same closed installation view evidence survives both component exports");
-        oecheck([app[key][@"data"][@"updated"] isEqual:@1794800000.25],@"saved observation timestamp is not refreshed by export");
+        id exportedUpdated=app[key][@"data"][@"updated"];
+        if (![exportedUpdated isEqual:@1794800000.25])
+            fprintf(stderr,"INFO: %@ exported updated=%@ class=%s\n",key,exportedUpdated,NSStringFromClass([exportedUpdated class]).UTF8String);
+        oecheck([exportedUpdated isEqual:@1794800000.25],@"saved observation timestamp is not refreshed by export");
     }
     for (NSString *key in @[@"sourceCheck",@"loadedRelation"]) {
         NSMutableDictionary *bad=[discovery[key] mutableCopy];bad[@"rawPath"]=@"observation-private-canary";
