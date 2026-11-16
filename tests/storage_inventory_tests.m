@@ -110,7 +110,9 @@ static NSDictionary *siscan(NSArray *rows, NSDate *date,BOOL complete) {
 }
 static void siput(NSString *folder,NSString *name,id value) {
     NSString *path=[folder stringByAppendingPathComponent:name];NSError *error=nil;
-    sicheck([value writeToFile:path options:NSDataWritingAtomic error:&error],
+    NSData *data=[NSPropertyListSerialization dataWithPropertyList:value format:NSPropertyListBinaryFormat_v1_0 options:0 error:&error];
+    BOOL saved=data && [data writeToFile:path options:NSDataWritingAtomic error:&error];
+    sicheck(saved,
         [NSString stringWithFormat:@"write saved plist fixture %@ (%@/%ld)",name,error.domain,(long)error.code]);
 }
 #if !AXS_CACHEKEEPER_STORAGE_INVENTORY_RED
