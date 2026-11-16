@@ -39,6 +39,8 @@ def verify_sdk_revision(expected):
         raise ValueError(f"SDWebImage build did not resolve required source {expected}")
     print("Verified SDWebImage source:", expected, flush=True)
 
+subprocess.run([sys.executable, str(ROOT / "tests/run_search_editing_red.py"), device], check=True, timeout=900)
+
 # Run 116 spent most of the combined deadline compiling; execution gets its own
 # unchanged 600-second budget, against exactly the products built above.
 subprocess.run(["xcodebuild", "build-for-testing", *build_options], check=True, timeout=600)

@@ -110,12 +110,21 @@
     if (textField==self.axs_cachekeeper_field) [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventShouldBegin];
     return textField==self.axs_cachekeeper_field;
 }
+- (void)axs_cachekeeper_set_editing:(BOOL)editing {
+    // Publish visibility and its local stack geometry together. A visible arranged view
+    // with its old zero-width frame must not be mistaken for navigation-bar obstruction.
+    [UIView performWithoutAnimation:^{
+        self.axs_cachekeeper_cancel_button.hidden=!editing;
+        [self setNeedsLayout];
+        [self layoutIfNeeded];
+    }];
+}
 - (void)textFieldDidBeginEditing:(UITextField *)textField {
-    (void)textField;self.axs_cachekeeper_cancel_button.hidden=NO;
+    (void)textField;[self axs_cachekeeper_set_editing:YES];
     [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventDidBegin];
 }
 - (void)textFieldDidEndEditing:(UITextField *)textField {
-    (void)textField;self.axs_cachekeeper_cancel_button.hidden=YES;
+    (void)textField;[self axs_cachekeeper_set_editing:NO];
     [self.axs_cachekeeper_diagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventDidEnd];
 }
 - (BOOL)textFieldShouldReturn:(UITextField *)textField { [textField resignFirstResponder];return YES; }

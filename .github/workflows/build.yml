@@ -61,6 +61,7 @@ jobs:
       - name: UIKit 点按与键盘回归
         run: |
           brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          python3 tests/test_ui_orchestration.py
           python3 tests/run_ui_tests.py
 
       - name: 保存 UIKit 回归结果
@@ -69,6 +70,9 @@ jobs:
         with:
           name: UIKit-input-results
           path: |
+            tmp/search-editing-red/RedResults.xcresult
+            tmp/search-editing-red/red-summary.json
+            tmp/search-editing-red/red.log
             tmp/input-ui-tests/Results.xcresult
             tmp/input-ui-tests/Screenshots
             tmp/input-ui-tests/WebKitResults.xcresult

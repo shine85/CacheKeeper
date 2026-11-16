@@ -326,6 +326,32 @@
         [self waitForExpectations:@[dismissed] timeout:10];
     }
 }
+- (void)testEditingVisibilityPublishesSettledControlGeometryBeforeParentLayout {
+    AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
+    AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
+    UINavigationController *nav=[self axs_cachekeeper_present_host:host];
+    AxsCacheKeeperSearchInput *input=[settings valueForKey:@"axs_cachekeeper_searchInput"];
+    UINavigationBar *bar=nav.navigationBar;
+    CGRect frame=bar.frame;frame.size.height=91;bar.frame=frame;
+    [settings updateBatch];
+    CGFloat top=[input convertRect:input.bounds toView:self.window].origin.y;
+    CGFloat idleWidth=input.axs_cachekeeper_field.bounds.size.width;
+    // Exercise the synchronous delegate boundary before any run-loop/keyboard wait can
+    // conceal the hidden arranged view's stale zero-width frame.
+    id<UITextFieldDelegate> delegate=input.axs_cachekeeper_field.delegate;
+    for (NSUInteger cycle=0;cycle<3;cycle++) {
+        [delegate textFieldDidBeginEditing:input.axs_cachekeeper_field];
+        XCTAssertEqual([input axs_cachekeeper_visible_control_rects].count,2u,@"SEARCH_EDITING_GEOMETRY: visible controls must already have valid frames");
+        XCTAssertLessThan(input.axs_cachekeeper_field.bounds.size.width,idleWidth,@"SEARCH_EDITING_GEOMETRY: field must already leave room for cancel");
+        [settings updateBatch];
+        XCTAssertEqualWithAccuracy([input convertRect:input.bounds toView:self.window].origin.y,top,0.5,@"SEARCH_EDITING_GEOMETRY: focus changes must not move search vertically");
+        [delegate textFieldDidEndEditing:input.axs_cachekeeper_field];
+        XCTAssertEqual([input axs_cachekeeper_visible_control_rects].count,1u,@"SEARCH_EDITING_GEOMETRY: hidden cancel must leave the control set");
+        XCTAssertEqualWithAccuracy(input.axs_cachekeeper_field.bounds.size.width,idleWidth,0.5,@"SEARCH_EDITING_GEOMETRY: ending editing must restore field width synchronously");
+        [settings updateBatch];
+        XCTAssertEqualWithAccuracy([input convertRect:input.bounds toView:self.window].origin.y,top,0.5,@"SEARCH_EDITING_GEOMETRY: focus changes must not move search vertically");
+    }
+}
 - (void)testClaimedCompactBarRegrowthDoesNotCoverEditableSearchControls {
     AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
     AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
