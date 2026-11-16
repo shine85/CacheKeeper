@@ -135,7 +135,8 @@ static void AxsCacheKeeperOperationTrim(NSMutableDictionary *history) {
 }
 NSMutableDictionary *axs_cachekeeper_operation_history_create(NSString *component,id previous) {
     NSDictionary *valid=previous ? axs_cachekeeper_operation_history_validate(previous,component) : nil;
-    NSMutableDictionary *raw=[@{@"schemaVersion":@1,@"component":component,@"historyTruncated":@NO,@"historyRejected":@(previous && !valid),@"processes":[NSMutableArray new]} mutableCopy];
+    // Logical expressions have type int in Objective-C; the persisted schema requires CFBoolean.
+    NSMutableDictionary *raw=[@{@"schemaVersion":@1,@"component":component,@"historyTruncated":@NO,@"historyRejected":@((BOOL)(previous && !valid)),@"processes":[NSMutableArray new]} mutableCopy];
     NSDictionary *identity=axs_cachekeeper_operation_process();NSMutableArray *processes=raw[@"processes"];
     if (valid) {
         raw[@"historyTruncated"]=valid[@"historyTruncated"];raw[@"historyRejected"]=valid[@"historyRejected"];
@@ -163,8 +164,8 @@ void axs_cachekeeper_operation_restore(NSMutableDictionary *history,id previous)
         if (!previous) return;
         NSMutableDictionary *restored=axs_cachekeeper_operation_history_create(history[@"raw"][@"component"],previous);
         NSMutableDictionary *raw=history[@"raw"],*loaded=restored[@"raw"];
-        raw[@"historyRejected"]=@([raw[@"historyRejected"] boolValue] || [loaded[@"historyRejected"] boolValue]);
-        raw[@"historyTruncated"]=@([raw[@"historyTruncated"] boolValue] || [loaded[@"historyTruncated"] boolValue]);
+        raw[@"historyRejected"]=@((BOOL)([raw[@"historyRejected"] boolValue] || [loaded[@"historyRejected"] boolValue]));
+        raw[@"historyTruncated"]=@((BOOL)([raw[@"historyTruncated"] boolValue] || [loaded[@"historyTruncated"] boolValue]));
         NSMutableArray *processes=raw[@"processes"];
         if ([loaded[@"processes"] count]==2 && processes.count==1) [processes insertObject:loaded[@"processes"][0] atIndex:0];
         else if ([loaded[@"processes"] count]==1 && [loaded[@"processes"][0][@"events"] count]) {
@@ -257,7 +258,7 @@ void axs_cachekeeper_operation_transition_reason(NSMutableDictionary *history,NS
             BOOL allowed=([old isEqual:@"queued"] && [@[@"queued",@"submitted",@"skipped",@"failed"] containsObject:state]) ||
                 ([old isEqual:@"submitted"] && [@[@"submitted",@"apiCompleted",@"failed"] containsObject:state]);
             if (!allowed) return;
-            action[@"state"]=state;action[@"reason"]=reason;action[@"timedOut"]=@([action[@"timedOut"] boolValue] || timedOut);
+            action[@"state"]=state;action[@"reason"]=reason;action[@"timedOut"]=@((BOOL)([action[@"timedOut"] boolValue] || timedOut));
             NSMutableDictionary *event=AxsCacheKeeperOperationEvent(history,[action[@"eventID"] unsignedIntegerValue]);
             if (![reason isEqual:@"none"] && ![event[@"refresh"] isEqual:@"obsolete"]) event[@"reason"]=reason;
             NSNumber *now=@(MAX([event[@"updated"] doubleValue],NSDate.date.timeIntervalSince1970));action[@"updated"]=now;event[@"updated"]=now;

@@ -257,5 +257,3 @@ def cache_control(output, compiler):
                     str(root / "AxsCacheKeeperDiagnosticChannel.m"),
                     "-o", str(output / "cache-tests")], check=True, timeout=60)
     run_command([str(output / "cache-tests"), str(output / "fixtures")], check=True, timeout=60)
-
-

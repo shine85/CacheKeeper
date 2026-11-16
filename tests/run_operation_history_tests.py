@@ -14,6 +14,32 @@ out = root / "tmp" / ("operation-history-" + str(time.time_ns()))
 out.mkdir(parents=True)
 flags = [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-I" + str(root),
          "-framework", "Foundation", "-framework", "WebKit"]
+# Run each faulty writer independently: a valid constructor alone must not hide
+# integer boxing introduced later by restoration or asynchronous transitions.
+pinned_schema = out / "pinned165-operation-info.m"
+pinned_schema.write_bytes(subprocess.run(
+    ["git", "show", "14be6e3b81106e7977627b162262ee6acd75626f:AxsCacheKeeperOperationInfo.m"],
+    check=True, capture_output=True, timeout=30).stdout)
+schema_red = {
+    "create": "new history rejection flag is a boolean",
+    "transition": "timeout flag is a boolean",
+    "restore-rejected": "restored rejection flag is a boolean",
+    "restore-truncated": "restored truncation flag is a boolean",
+}
+for label, source in (("pinned165", pinned_schema), ("current", root / "AxsCacheKeeperOperationInfo.m")):
+    exe = out / (label + "-schema")
+    subprocess.run([*flags, str(source), str(root / "tests/operation_schema_tests.m"), "-o", str(exe)],
+                   check=True, timeout=60)
+    for scenario, message in schema_red.items():
+        result = subprocess.run([str(exe), scenario], capture_output=True, text=True, timeout=30)
+        if label == "pinned165":
+            if result.returncode != 1 or result.stderr.strip() != "FAIL: operation-schema: " + message or result.stdout.strip():
+                raise SystemExit("FAIL: pinned165 did not hit exact schema RED\n" + result.stdout + result.stderr)
+            print("PASS: pinned165 reproduces boolean schema regression: " + scenario)
+        elif result.returncode or result.stderr.strip() or result.stdout.strip() != "PASS: operation-schema " + scenario:
+            raise SystemExit("FAIL: current schema regression\n" + result.stdout + result.stderr)
+        else:
+            print(result.stdout, end="")
 pinned = out / "pinned154.m"
 pinned.write_bytes(subprocess.run(["git", "show", "9cb488d420e873d24f3677e2758be99fb6f8502c:AxsCacheKeeperWebKitCache.m"],
                                  check=True, capture_output=True, timeout=30).stdout)

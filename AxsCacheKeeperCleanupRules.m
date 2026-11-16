@@ -245,7 +245,14 @@ static BOOL AxsCacheKeeperRuleApplies(AxsCacheKeeperAppRule *rule, NSString *ver
     // 4. 平台缓存：Library/Caches 与 tmp 按平台缓存用途约定清理，不按文件类型保留。
     // SQLite/无后缀文件同样可清（格式不单独证明必须保留）；顶层 Cache/Caches/.cache
     // 等同名自建目录不获得平台约定。平台缓存不依赖“全根不存在数据库”，无规则依赖。
-    NSString *platformRoot=axs_cachekeeper_platform_cache_scope(relativePath);
+    // This decision is for an enumerated regular file. Validate its containing
+    // directory, not the POSIX leaf name: a literal backslash is not a separator.
+    NSString *leaf=relativePath.lastPathComponent;
+    unichar zero=0;
+    BOOL leafValid=leaf.length && ![leaf isEqual:@"."] && ![leaf isEqual:@".."] &&
+        [leaf rangeOfString:[NSString stringWithCharacters:&zero length:1]].location==NSNotFound &&
+        ![relativePath hasSuffix:@"/"];
+    NSString *platformRoot=leafValid ? axs_cachekeeper_platform_cache_scope(parent) : nil;
     if (platformRoot)
         return [[AxsCacheKeeperCleanupDecision alloc] initWithDisposition:AxsCacheKeeperCleanupDelete
             basis:AxsCacheKeeperCleanupBasisPlatformCache ruleID:axs_cachekeeper_platform_cache_rule_id()

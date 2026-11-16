@@ -3,6 +3,10 @@
 #include <limits.h>
 #include <math.h>
 
+static inline BOOL axs_cachekeeper_inspection_boolean(id value) {
+    return [value isKindOfClass:NSNumber.class] && CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID();
+}
+
 static inline BOOL axs_cachekeeper_inspection_count(id value) {
     if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID()) return NO;
     double number=[value doubleValue];

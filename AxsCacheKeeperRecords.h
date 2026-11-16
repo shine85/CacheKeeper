@@ -14,7 +14,7 @@ static inline BOOL axs_cachekeeper_record_valid(id value, NSUInteger depth) {
     for (NSString *key in @[@"invalidNameRecords",@"twinInvalidNameRecords",@"nameDisplayOmitted",@"twinNameDisplayOmitted"])
         if (record[key] && !axs_cachekeeper_inspection_count(record[key])) return NO;
     for (NSString *key in @[@"pathOperable",@"sourceOperable",@"twinOperable"])
-        if (record[key] && !axs_cachekeeper_input_boolean(record[key])) return NO;
+        if (record[key] && !axs_cachekeeper_inspection_boolean(record[key])) return NO;
     for (NSString *key in @[@"token",@"bundle",@"path",@"source",@"twin",@"home",@"error",@"message",@"evidence",
         @"type",@"reason",@"stage",@"detail",@"mode",@"phase",@"purgeClassification",@"purgeEvidence",@"appRuleSummary"])
         if (record[key] && ![record[key] isKindOfClass:NSString.class]) return NO;

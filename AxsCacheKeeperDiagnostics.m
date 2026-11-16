@@ -115,7 +115,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
     }
     for (NSString *key in @[@"pathOperable",@"sourceOperable",@"twinOperable"]) {
         if (!record[key]) continue;
-        if (axs_cachekeeper_input_boolean(record[key])) out[key]=record[key];
+        if (axs_cachekeeper_inspection_boolean(record[key])) out[key]=record[key];
         else [invalid addObject:key];
     }
     for (NSString *key in @[@"appRuleID",@"state",@"phase",@"mode",@"kind",@"purgeClassification",@"type",@"outcome",@"path",@"source",@"twin"])

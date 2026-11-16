@@ -110,7 +110,7 @@ class NativeOrchestrationTests(unittest.TestCase):
         timed_out_script.write_text(
             "import subprocess, sys\n"
             "subprocess.run([sys.executable, '-c', "
-            "'import sys, time; print(\\\"captured stdout\\\", flush=True); print(\\\"captured stderr\\\", file=sys.stderr, flush=True); time.sleep(2)'" 
+            "'import sys, time; print(\\\"captured stdout\\\", flush=True); print(\\\"captured stderr\\\", file=sys.stderr, flush=True); time.sleep(2)'"
             "], capture_output=True, timeout=0.5)\n",
             encoding="utf-8")
         driver = self.work / "run-group-timeout.py"

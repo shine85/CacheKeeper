@@ -89,8 +89,13 @@ with tempfile.TemporaryDirectory(prefix="inspection-tests-", dir=root / "tmp") a
              ("cancel", "cancel releases primary descriptors while the inspection is still alive"),
              ("twin-cancel", "cancel releases twin and primary descriptors while the inspection is still alive"),
          ]),
+        # Model the actual broken policy explicitly. Selecting another NSString
+        # encoding alone does not guarantee that non-ASCII names become opaque.
         ("unicode-policy", "encoding:NSUTF8StringEncoding];\n    return decoded ?: @\"opaque-component\";",
-         "encoding:NSASCIIStringEncoding];\n    return decoded ?: @\"opaque-component\";", [
+         "encoding:NSUTF8StringEncoding];\n"
+         "    const unsigned char *bytes=component.bytes;\n"
+         "    for (NSUInteger i=0;i+1<component.length;i++) if (bytes[i]>=0x80) return @\"opaque-component\";\n"
+         "    return decoded ?: @\"opaque-component\";", [
              ("raw-unicode-markers", "valid Unicode marker semantics survive unavailable display conversion"),
          ]),
     ]

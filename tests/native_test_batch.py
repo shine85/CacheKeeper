@@ -138,4 +138,3 @@ def summary_exit_code(summary: dict) -> int:
     if summary["failed"]:
         return 1
     return 2 if summary["status"] == "UNAVAILABLE" else 0
-

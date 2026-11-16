@@ -1472,6 +1472,12 @@ int main(int argc, const char *argv[]) {
         require(backslashSweep.complete && backslashSweep.failed == 0 && backslashSweep.removed == 2 &&
             ![fm fileExistsAtPath:backslashFile] && ![fm fileExistsAtPath:plainFile],
             [NSString stringWithFormat:@"反斜杠文件名不终结整根清理（complete=%d removed=%lu failed=%lu）",backslashSweep.complete,(unsigned long)backslashSweep.removed,(unsigned long)backslashSweep.failed]);
+        for (NSString *invalid in @[@"Library/Caches/../outside",@"Library/Caches/a/../../outside",
+            @"/Library/Caches/leaf",@"Library/CachesExtra/leaf",@"Library/Caches/..",@"Library/Caches/folder/",
+            @"Library/Caches/Drafts/a\\b.txt"])
+            require([AxsCacheKeeperCleanupRules decisionForBundle:@"test.scope" version:@"1" relativePath:invalid
+                state:@{} evidence:@{@"readComplete":@YES}].disposition!=AxsCacheKeeperCleanupDelete,
+                @"POSIX 文件名修复不放宽越界路径、相邻根或保留目录");
 
         NSString *lockRoot = [fixture stringByAppendingPathComponent:@"lock-root"];
         NSString *lockSub = [lockRoot stringByAppendingPathComponent:@"sub"];

@@ -51,6 +51,14 @@ int main(int argc, char **argv) { @autoreleasepool {
         }
     }
     ckcheck(axs_cachekeeper_record_valid(@{@"reports":@{@"Library/Caches":@{@"files":@1}}},0),@"legacy UI records need not invent new counters");
+    for (NSString *key in @[@"pathOperable",@"sourceOperable",@"twinOperable"]) {
+        for (NSNumber *bad in @[@0,@1]) {
+            NSDictionary *envelope=@{@"reports":@{@"Library/Caches":@{@"largest":@[@{key:bad}]}}};
+            ckcheck([envelope writeToFile:path atomically:YES],@"bad UI operability fixture write");
+            NSError *error=nil;
+            ckcheck(!axs_cachekeeper_read_records(path,&error) && error!=nil,@"UI reader rejects integer operability flags after saved roundtrip");
+        }
+    }
     puts("PASS: inspection export separation, finite fields, privacy and saved-record roundtrip");
     return 0;
 }}
