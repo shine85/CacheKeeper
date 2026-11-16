@@ -50,7 +50,7 @@ def run() -> int:
             test = target / "tests" / "installation_identity_tests.m"
             test.write_bytes((ROOT / "tests" / "installation_identity_tests.m").read_bytes())
             binary = target / "identity-tests"
-            flags = [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-I" + str(ROOT), "-framework", "Foundation"]
+            flags = [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-I" + str(ROOT), "-framework", "Foundation"]
             if role == "red":
                 flags.append("-DAXS_CACHEKEEPER_INSTALLATION_IDENTITY_RED=1")
             elif role == "pinned1541-red":

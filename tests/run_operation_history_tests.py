@@ -12,7 +12,7 @@ if sys.platform != "darwin" or not compiler:
     raise SystemExit(2)
 out = root / "tmp" / ("operation-history-" + str(time.time_ns()))
 out.mkdir(parents=True)
-flags = [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-I" + str(root),
+flags = [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-I" + str(root),
          "-framework", "Foundation", "-framework", "WebKit"]
 pinned = out / "pinned154.m"
 pinned.write_bytes(subprocess.run(["git", "show", "9cb488d420e873d24f3677e2758be99fb6f8502c:AxsCacheKeeperWebKitCache.m"],

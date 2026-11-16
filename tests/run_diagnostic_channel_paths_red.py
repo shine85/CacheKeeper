@@ -32,7 +32,7 @@ int main(void) { @autoreleasepool {
 } return 0; }
 ''', encoding="utf-8")
     binary = target / "red-test"
-    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-framework", "Foundation",
+    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-framework", "Foundation",
                     str(target / "main.m"), str(target / "AxsCacheKeeperDiagnostics.m"),
                     "-o", str(binary)], check=True, timeout=60)
     result = subprocess.run([str(binary)], capture_output=True, text=True, encoding="utf-8", timeout=60)

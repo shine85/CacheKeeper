@@ -8,6 +8,7 @@ settings:
     CODE_SIGNING_ALLOWED: YES
     CODE_SIGN_IDENTITY: "-"
     CLANG_ENABLE_OBJC_ARC: YES
+    WARNING_CFLAGS: "$(inherited) -Werror=format"
     GENERATE_INFOPLIST_FILE: YES
     TARGETED_DEVICE_FAMILY: "1,2"
 packages:

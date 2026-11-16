@@ -17,7 +17,7 @@ with tempfile.TemporaryDirectory(prefix="observation-export-", dir=ROOT / "tmp")
     sources = ["tests/observation_export_tests.m", "AxsCacheKeeperDiagnostics.m",
                "AxsCacheKeeperStorageInventory.m", "AxsCacheKeeperOperationInfo.m",
                "AxsCacheKeeperInstallation.m", "AxsCacheKeeperPDFInspection.m"]
-    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-I" + str(ROOT),
+    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-I" + str(ROOT),
                     "-I" + str(ROOT / "tests/include"), "-framework", "Foundation",
                     *[str(ROOT / source) for source in sources], "-o", str(binary)], check=True, timeout=60)
     subprocess.run([str(binary), str(output / "fixture")], check=True, timeout=60)

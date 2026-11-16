@@ -55,21 +55,17 @@ static void sicheck(BOOL condition, NSString *message) {
 @implementation AxsCacheKeeperStorageTestProxy
 @end
 static id siregistrations;
-#if AXS_CACHEKEEPER_STORAGE_INVENTORY_RED
-@interface LSApplicationWorkspace : NSObject
+@interface AxsCacheKeeperStorageTestWorkspace : NSObject
 + (instancetype)defaultWorkspace;
 - (id)allInstalledApplications;
 @end
-#endif
-#if AXS_CACHEKEEPER_STORAGE_INVENTORY_TESTING
-NSArray *axs_cachekeeper_storage_test_registrations(void) { return siregistrations; }
-#endif
-#if AXS_CACHEKEEPER_STORAGE_INVENTORY_RED
-@implementation LSApplicationWorkspace
+@implementation AxsCacheKeeperStorageTestWorkspace
 + (instancetype)defaultWorkspace {return [self new];}
 - (id)allInstalledApplications {return siregistrations;}
 @end
-#endif
+Class axs_cachekeeper_storage_test_class_lookup(NSString *name) {
+    return [name isEqual:@"LSApplicationWorkspace"] ? AxsCacheKeeperStorageTestWorkspace.class : NSClassFromString(name);
+}
 static AxsCacheKeeperStorageTestProxy *siproxy(NSString *bundle, NSString *type, id home) {
     AxsCacheKeeperStorageTestProxy *proxy=[AxsCacheKeeperStorageTestProxy new];
     proxy.applicationIdentifier=bundle;proxy.applicationType=type;
@@ -97,6 +93,12 @@ static NSDictionary *sirow(NSDictionary *entry,NSString *path) {
     for (NSDictionary *row in entry[@"resources"]) if ([row[@"path"] isEqual:path]) return row;
     return nil;
 }
+#if !AXS_CACHEKEEPER_STORAGE_INVENTORY_RED
+static void sitiming(const char *phase, NSTimeInterval started) {
+    fprintf(stdout,"TIMING: storage inventory %s %.3f seconds\n",phase,NSProcessInfo.processInfo.systemUptime-started);
+    fflush(stdout);
+}
+#endif
 static NSDictionary *sifiles(NSString *folder) {
     NSMutableDictionary *files=[NSMutableDictionary new];
     for (NSString *path in [NSFileManager.defaultManager subpathsAtPath:folder]) {
@@ -149,6 +151,7 @@ static void sirole_contract(NSDictionary *registry) {
     sicheck([axs_cachekeeper_registry_inventory_projection(second)[@"state"] isEqual:@"invalid"],@"moving an existing global token into another role cannot falsify role URL count");
 }
 static void siresource_budget(NSString *folder,NSDictionary *registry,NSDate *date) {
+    NSTimeInterval started=NSProcessInfo.processInfo.systemUptime;
     NSMutableArray *values=[NSMutableArray new];
     // Included tmp descendant cannot auto-discover tmp; the sole exact tmp root is omitted.
     [values addObject:@{@"path":@"tmp/ordinary",@"bytes":@20,@"complete":@YES}];
@@ -156,11 +159,24 @@ static void siresource_budget(NSString *folder,NSDictionary *registry,NSDate *da
     [values addObject:@{@"path":@"tmp",@"bytes":@9000,@"complete":@YES}];
     [values addObject:@{@"path":@"Cache",@"bytes":@9000,@"complete":@YES}];
     NSDictionary *states=@{@"test.inventory.alpha":@{@"enabled":@YES,@"autoDiscover":@YES,@"excludedPaths":@[@"Library/Caches/retained"]}};
+    NSDictionary *snapshots=@{@"test.inventory.alpha":siscan(values,date,YES)};
+    siput(folder,@"appEnabled.plist",states);siput(folder,@"directories.plist",@{});siput(folder,@"snapshots.plist",snapshots);
+    NSDictionary *before=sifiles(folder);
+    AxsCacheKeeperDiagnostics *session=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:folder];
+    NSDictionary *report=[session reportWithApps:@[] environment:@{@"registryInventory":registry}],*entry=siapp(report[@"storageInventory"],@"test.inventory.alpha");
+    sicheck([entry[@"resources"] count]==16384 && [entry[@"resourceRowsTruncated"] isEqual:@YES] && [entry[@"omittedResourceRows"] isEqual:@2],@"saved duplicate resources retain bounded output and exact omission count");
+    sicheck([entry[@"discoveryRowsTruncated"] isEqual:@YES] && [entry[@"discoveryRowsExamined"] isEqual:@16384] && [entry[@"discoveredRootCount"] isEqual:@1],@"bounded discovery deduplicates roots and visibly retains incomplete coverage");
+    sicheck([entry[@"resources"][0][@"authorizationState"] isEqual:@"notAuthorized"] && [entry[@"resources"][1][@"authorizationState"] isEqual:@"configuredPendingExecutionPreflight"] && [entry[@"resources"][1][@"actuallyReclaimable"] isEqual:@"notMeasured"],@"omitted root cannot promote authorization and observed root still requires execution preflight");
+    sicheck([before isEqual:sifiles(folder)],@"resource budget regression does not rewrite saved sources");
+    NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:nil];
+    sicheck(json && [NSJSONSerialization JSONObjectWithData:json options:0 error:nil]!=nil,@"large saved budget report survives real JSON serialization");
+    sitiming("saved budget and JSON",started);started=NSProcessInfo.processInfo.systemUptime;
     AxsCacheKeeperStorageBudgetRows *tracked=[AxsCacheKeeperStorageBudgetRows new];tracked.values=values;
     sieffectiveCalls=0;siexclusionCalls=0;siselectedCalls=0;
     NSDictionary *direct=axs_cachekeeper_storage_inventory(nil,@{@"state":@"available",@"data":states},@{@"state":@"available",@"data":@{}},@{@"state":@"available",@"data":@{@"test.inventory.alpha":siscan(tracked,date,YES)}},@[],^NSString *(NSString *path){return path;});
     sicheck(tracked.highestRead==16383 && tracked.reads<=32768 && sieffectiveCalls==1 && siexclusionCalls==1 && siselectedCalls==1,@"resource budget bounds actual row access and policy computation once per app");
     sicheck([siapp(direct,@"test.inventory.alpha")[@"discoveredRootCount"] isEqual:@1] && [siapp(direct,@"test.inventory.alpha")[@"resources"][0][@"authorizationState"] isEqual:@"notAuthorized"],@"only examined roots can contribute effective paths");
+    sitiming("direct budget",started);
 }
 #endif
 int main(int argc,const char *argv[]) { @autoreleasepool {
@@ -273,11 +289,24 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
     AxsCacheKeeperStorageTestProxy *duplicate=siproxy(beta.applicationIdentifier,@"User",nil);duplicate.groupContainerURLs=nil;duplicate.plugInKitPlugins=nil;
     siregistrations=@[duplicate,beta];siprovider(cache,&registry);
     sicheck([registry[@"entries"][0][@"relationships"][@"group"][@"state"] isEqual:@"invalid"] && !registry[@"entries"][0][@"relationships"][@"group"][@"tokens"],@"duplicate nil/invalid sources cannot become a sampled empty relation");
+    AxsCacheKeeperStorageTestProxy *pairA=siproxy(@"test.inventory.pair",@"User",nil),*pairB=siproxy(@"test.inventory.pair.part",@"User",nil);
+    NSURL *otherURL=[NSURL URLWithString:@"file:///private/var/private-other-url-canary"];
+    pairA.groupContainerURLs=@{@"part.asset":shared};pairB.groupContainerURLs=@{@"asset":otherURL};
+    siregistrations=@[pairA,pairB];siprovider(cache,&registry);
+    sicheck([registry[@"group"][@"associationCount"] isEqual:@2] && [registry[@"group"][@"registeredURLCount"] isEqual:@2],
+        @"owner and group components cannot collide when their dot-concatenated names match");
+    AxsCacheKeeperStorageTestProxy *conflict=siproxy(pairA.applicationIdentifier,@"User",nil);
+    conflict.groupContainerURLs=@{@"part.asset":otherURL};siregistrations=@[pairA,conflict,pairA];siprovider(cache,&registry);
+    sicheck([registry[@"group"][@"associationCount"] isEqual:@0] && [registry[@"group"][@"invalidAssociationCount"] isEqual:@1],
+        @"conflicting same-owner group is revoked and cannot be restored by a repeated earlier sample");
+    NSTimeInterval registrationStarted=NSProcessInfo.processInfo.systemUptime;
     NSMutableArray *many=[NSMutableArray new];for (NSUInteger i=0;i<4097;i++) [many addObject:beta];siregistrations=many;siprovider(cache,&registry);
     sicheck([registry[@"observedRegistrations"] isEqual:@4096] && [registry[@"truncatedRegistrationCount"] isEqual:@1] && [registry[@"state"] isEqual:@"partial"],@"registration budget exposes lower-bound coverage");
+    sitiming("4097 registrations",registrationStarted);registrationStarted=NSProcessInfo.processInfo.systemUptime;
     NSMutableDictionary *groups=[NSMutableDictionary new];for (NSUInteger i=0;i<16385;i++) groups[[NSString stringWithFormat:@"test.group.%lu",(unsigned long)i]]=shared;
     beta.groupContainerURLs=groups;beta.plugInKitPlugins=@[];siregistrations=@[beta];siprovider(cache,&registry);
     sicheck([registry[@"entries"][0][@"relationships"][@"group"][@"state"] isEqual:@"partial"] && [registry[@"group"][@"truncatedCount"] unsignedIntegerValue]>0,@"role budget remains explicit even when URL tokens deduplicate");
+    sitiming("16385 group associations",registrationStarted);
     beta.applicationIdentifier=@"../private-invalid-id-canary";siregistrations=@[beta];siprovider(cache,&registry);
     sicheck([registry[@"invalidRegistrationCount"] isEqual:@1] && [registry[@"entries"] count]==0,@"invalid registry identities excluded explicitly");
     siregistrations=nil;siprovider(cache,&registry);

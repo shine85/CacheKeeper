@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix="inspection-export-", dir=ROOT / "tmp") 
     print("Pinned inspection export RED SHA256:", hashlib.sha256(baseline).hexdigest())
     for name, source in [("old", old), ("current", ROOT / "AxsCacheKeeperDiagnostics.m")]:
         binary = output / name
-        subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-I" + str(ROOT),
+        subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-I" + str(ROOT),
                         "-I" + str(ROOT / "tests/include"), "-framework", "Foundation",
                         str(ROOT / "tests/inspection_export_tests.m"), str(source),
                         str(ROOT / "AxsCacheKeeperOperationInfo.m"),

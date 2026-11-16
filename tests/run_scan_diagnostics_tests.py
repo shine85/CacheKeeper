@@ -32,7 +32,7 @@ def main() -> int:
         ]
         # Link current production implementations. A compiler/linker failure is never a passing RED.
         subprocess.run(
-            [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
+            [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format",
              "-DAXS_CACHEKEEPER_SCAN_TESTING=1",
              "-I" + str(root / "tests" / "include"), "-framework", "Foundation",
              *map(str, sources), "-o", str(binary)],

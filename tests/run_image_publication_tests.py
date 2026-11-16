@@ -36,7 +36,7 @@ def run() -> int:
             digest = hashlib.sha256((target / "AxsCacheKeeperImageCache.m").read_bytes()).hexdigest()
             print(f"INFO: image-publication {role} source SHA256 {digest}", flush=True)
             binary = target / "publication-tests"
-            subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
+            subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format",
                             "-DAXS_CACHEKEEPER_IMAGE_TESTING=1", "-I" + str(target), "-I" + str(ROOT),
                             "-framework", "Foundation", str(ROOT / "tests/image_publication_tests.m"),
                             str(ROOT / "AxsCacheKeeperCleanupRules.m"),

@@ -100,7 +100,7 @@ with tempfile.TemporaryDirectory(prefix="channel-native-paths-", dir=root / "tmp
         (target / "main.m").write_text(test_source, encoding="utf-8")
         binary = target / "native-paths"
         flags = ["-DAXS_CACHEKEEPER_NATIVE_PATH_BASELINE=1"] if legacy else []
-        subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
+        subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format",
                         "-I" + str(root / "tests" / "include"), "-framework", "Foundation", *flags,
                         str(target / "main.m"), str(target / "AxsCacheKeeperDiagnosticChannel.m"),
                         "-o", str(binary)], check=True, timeout=60)

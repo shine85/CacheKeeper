@@ -15,7 +15,7 @@ with tempfile.TemporaryDirectory(prefix="presentation-red-", dir=root / "tmp") a
         '#import <Foundation/Foundation.h>\nextern void axs_cachekeeper_run_presentation_tests(void);\n'
         'int main(void) { @autoreleasepool { axs_cachekeeper_run_presentation_tests(); } return 0; }\n')
     binary = target / "red-test"
-    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-framework", "Foundation",
+    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-Wall", "-Wextra", "-Werror=format", "-framework", "Foundation",
                     str(target / "main.m"), str(target / "tests/presentation_tests.m"),
                     "-o", str(binary)], check=True, timeout=60)
     result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)

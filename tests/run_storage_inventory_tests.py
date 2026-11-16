@@ -15,14 +15,6 @@ HASHES = {
 EXPECTED_RED = "FAIL: storage inventory: all registrations and configured-only entries survive saved report export"
 
 
-def normalized_stderr(text: str) -> str:
-    # macOS may warn that the Foundation test substitute shares the private
-    # LSApplicationWorkspace class name with CoreServices. It is runtime noise;
-    # the exact exit code and behavioral assertion remain strict below.
-    lines = [line for line in text.splitlines() if "Class LSApplicationWorkspace is implemented in both" not in line]
-    return "\n".join(lines).strip()
-
-
 def run() -> int:
     compiler = shutil.which("xcrun")
     if sys.platform != "darwin" or not compiler:
@@ -41,28 +33,40 @@ def run() -> int:
                         raise SystemExit("FAIL: all-app inventory old source hash mismatch: " + name)
                     path = output / name
                     path.write_bytes(data)
-                    sources.append(path)
+                    if name != "AxsCacheKeeperInstallation.m":
+                        sources.append(path)
+                    else:
+                        installation_source = path
             else:
                 # Test translation unit imports the production storage .m to instrument only
                 # inline policy call boundaries. Never link that same implementation twice.
-                sources += [ROOT / name for name in HASHES]
+                sources.append(ROOT / "AxsCacheKeeperDiagnostics.m")
+                installation_source = ROOT / "AxsCacheKeeperInstallation.m"
+            # Only the system-class lookup boundary is substituted, identically
+            # for pinned RED and current GREEN. The included source stays intact.
+            wrapper = output / (role + "-installation.m")
+            wrapper.write_text(
+                '#import <Foundation/Foundation.h>\n'
+                'extern Class axs_cachekeeper_storage_test_class_lookup(NSString *name);\n'
+                '#define NSClassFromString axs_cachekeeper_storage_test_class_lookup\n'
+                '#import "' + installation_source.as_posix() + '"\n'
+                '#undef NSClassFromString\n', encoding="utf-8")
+            sources.append(wrapper)
             binary = output / role
-            flags = [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-I" + str(ROOT),
+            flags = [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-I" + str(ROOT),
                      "-I" + str(ROOT / "tests/include"), "-framework", "Foundation"]
             if role == "red":
                 flags.append("-DAXS_CACHEKEEPER_STORAGE_INVENTORY_RED=1")
-            else:
-                flags.append("-DAXS_CACHEKEEPER_STORAGE_INVENTORY_TESTING=1")
             # Compilation/link errors and timeout cannot satisfy the expected behavior RED.
             subprocess.run([*flags, *map(str, sources), "-o", str(binary)], check=True, timeout=60)
             fixtures = output / (role + "-fixtures")
             fixtures.mkdir(parents=True, exist_ok=True)
             result = subprocess.run([str(binary), str(fixtures)], capture_output=True,
-                                    text=True, encoding="utf-8", timeout=180)
+                                    text=True, encoding="utf-8", timeout=60)
             if role == "red":
-                if result.returncode != 1 or normalized_stderr(result.stderr) != EXPECTED_RED:
+                if result.returncode != 1 or result.stderr.strip() != EXPECTED_RED or result.stdout.strip():
                     raise SystemExit("FAIL: incorrect all-app inventory behavior RED\n" + result.stdout + result.stderr)
-                print("PASS: exact old-source all-app inventory RED:", result.stderr.strip())
+                print("PASS: exact old-source all-app inventory RED:", result.stderr.strip(), flush=True)
             else:
                 if result.returncode:
                     raise SystemExit("FAIL: all-app inventory GREEN\n" + result.stdout + result.stderr)

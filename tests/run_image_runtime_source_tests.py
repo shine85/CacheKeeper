@@ -32,7 +32,7 @@ def run() -> int:
             (folder / "AxsCacheKeeperImageCache.m").write_text(candidate, encoding="utf-8")
             print(f"INFO: image-runtime-source {role} SHA256 {hashlib.sha256(candidate.encode()).hexdigest()}", flush=True)
             binary = folder / "runtime-source-tests"
-            subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
+            subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format",
                             "-DAXS_CACHEKEEPER_IMAGE_TESTING=1", "-I" + str(folder), "-I" + str(ROOT),
                             "-framework", "Foundation", str(ROOT / "tests/image_runtime_source_tests.m"),
                             str(ROOT / "AxsCacheKeeperCleanupRules.m"),

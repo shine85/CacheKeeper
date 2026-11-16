@@ -39,7 +39,7 @@ def run() -> int:
                 raise SystemExit(f"FAIL: {role} mutation does not identify one production gate")
             (folder / HEADER).write_text(source.replace(old, new, 1) if old else source, encoding="utf-8")
             binary = folder / "source-tests"
-            subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
+            subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format",
                             "-I" + str(folder), "-I" + str(ROOT), "-framework", "Foundation",
                             str(ROOT / "tests/image_legacy_source_tests.m"), "-o", str(binary)],
                            cwd=ROOT, check=True, timeout=60)

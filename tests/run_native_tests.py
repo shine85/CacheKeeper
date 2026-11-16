@@ -1,246 +1,121 @@
-"""在 macOS 编译运行真实 Foundation/POSIX 回归，所有产物放入项目 tmp。"""
+"""Run every independent native group, retain logs, then return an aggregate exit code."""
+from __future__ import annotations
+
+import argparse
 import pathlib
+import runpy
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import traceback
 
-root = pathlib.Path(__file__).resolve().parents[1]
-compiler = shutil.which("xcrun")
-if sys.platform != "darwin" or not compiler:
-    print("UNAVAILABLE: native regression tests require macOS and xcrun; no tests ran.")
-    raise SystemExit(2)
-output = root / "tmp" / ("cache-tests-" + str(time.time_ns()))
-output.mkdir(parents=True)
-try:
-    subprocess.run([sys.executable, str(root / "tests/test_owner_snapshot.py")], check=True, timeout=60)
-    # The saved-record budget fixture intentionally processes 16,384 rows; allow
-    # that dedicated native suite more time while keeping its per-binary bound explicit.
-    subprocess.run([sys.executable, str(root / "tests/run_storage_inventory_tests.py")], check=True, timeout=240)
-    subprocess.run([sys.executable, str(root / "tests/package_version_tests.py")], check=True, timeout=60)
-    subprocess.run([sys.executable, str(root / "tests/run_runtime_receipt_tests.py")], check=True, timeout=60)
-    subprocess.run([sys.executable, str(root / "tests/run_observation_export_tests.py")], check=True, timeout=60)
-    # Bounded batches include old/current builds; every native process stays <=60s.
-    subprocess.run([sys.executable, str(root / "tests/run_operation_history_tests.py")], check=True, timeout=240)
-    subprocess.run([sys.executable, str(root / "tests/run_operation_export_tests.py")], check=True, timeout=240)
-    # Three fixed/current compilations and three tests; each native process stays <=60s.
-    subprocess.run([sys.executable, str(root / "tests/run_installation_identity_tests.py")], check=True, timeout=240)
-    subprocess.run([sys.executable, str(root / "tests/run_inspection_traversal_tests.py")], check=True, timeout=60)
-    subprocess.run([sys.executable, str(root / "tests/run_image_publication_tests.py")], check=True, timeout=60)
-    subprocess.run([sys.executable, str(root / "tests/run_image_legacy_source_tests.py")], check=True, timeout=60)
-    # Two compilations and four isolated processes; each test process stays bounded at 30 s.
-    subprocess.run([sys.executable, str(root / "tests/run_image_runtime_source_tests.py")], check=True, timeout=120)
-    # Catch the Logos/Objective-C boundary before the expensive UIKit and Theos stages.
-    installation_object = output / "installation.o"
-    installation_flags = [compiler, "clang++", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra"]
-    installation_caller = root / "tests" / "installation_linkage_tests.mm"
-    subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
-                    "-I" + str(root / "tests" / "include"), "-c",
-                    str(root / "AxsCacheKeeperInstallation.m"), "-o", str(installation_object)],
-                   check=True, timeout=60)
-    # Recreate the missing-linkage header in tmp. Both translation units must compile;
-    # only the link may fail, and it must identify all four real runtime dependencies.
-    installation_header = (root / "AxsCacheKeeperInstallation.h").read_text(encoding="utf-8-sig")
-    for guard in ('#ifdef __cplusplus\nextern "C" {\n#endif\n', '#ifdef __cplusplus\n}\n#endif\n'):
-        if installation_header.count(guard) != 1:
-            raise SystemExit("FAIL: ambiguous installation linkage mutation target")
-        installation_header = installation_header.replace(guard, "")
-    installation_baseline = output / "installation-baseline"
-    installation_baseline.mkdir()
-    (installation_baseline / "AxsCacheKeeperInstallation.h").write_text(installation_header, encoding="utf-8")
-    (installation_baseline / "AxsCacheKeeperInstallationDetail.h").write_bytes(
-        (root / "AxsCacheKeeperInstallationDetail.h").read_bytes())
-    baseline_object = installation_baseline / "caller.o"
-    subprocess.run([*installation_flags, "-I" + str(installation_baseline), "-c",
-                    str(installation_caller), "-o", str(baseline_object)], check=True, timeout=60)
-    baseline = subprocess.run([*installation_flags, "-framework", "Foundation", str(baseline_object),
-                               str(installation_object), "-o", str(installation_baseline / "linkage")],
-                              capture_output=True, text=True, timeout=60)
-    expected_symbols = ("axs_cachekeeper_installation_snapshot(", "axs_cachekeeper_validate_installation_snapshot(",
-                        "axs_cachekeeper_installation_snapshot_with_context(", "axs_cachekeeper_validate_installation_snapshot_with_context(")
-    if baseline.returncode == 0 or "Undefined symbols" not in baseline.stderr or not all(
-            symbol in baseline.stderr for symbol in expected_symbols):
-        raise SystemExit("FAIL: missing C linkage did not reproduce the expected linker failure\n" +
-                         baseline.stdout + baseline.stderr)
-    print("PASS: installation missing-C-linkage baseline fails at all four expected exports")
-    installation_linkage = output / "installation-linkage"
-    subprocess.run([*installation_flags, "-I" + str(root), "-framework", "Foundation",
-                    str(installation_caller), str(installation_object), "-o", str(installation_linkage)],
-                   check=True, timeout=60)
-    subprocess.run([str(installation_linkage)], check=True, timeout=60)
-    operation_object = output / "operation-info.o"
-    operation_linkage = output / "operation-linkage"
-    subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-c",
-                    str(root / "AxsCacheKeeperOperationInfo.m"), "-o", str(operation_object)],
-                   check=True, timeout=60)
-    subprocess.run([compiler, "clang++", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-I" + str(root),
-                    "-framework", "Foundation", str(root / "tests/operation_linkage_tests.mm"),
-                    str(operation_object), "-o", str(operation_linkage)], check=True, timeout=60)
-    subprocess.run([str(operation_linkage)], check=True, timeout=60)
-    webkit_tests = output / "webkit-cache-tests"
-    subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
-                    "-framework", "Foundation", "-framework", "WebKit",
-                    str(root / "AxsCacheKeeperWebKitCache.m"),
-                    str(root / "AxsCacheKeeperOperationInfo.m"),
-                    str(root / "tests" / "webkit_cache_tests.m"), "-o", str(webkit_tests)],
-                   check=True, timeout=60)
-    subprocess.run([str(webkit_tests)], check=True, timeout=60)
-    webkit_source = (root / "AxsCacheKeeperWebKitCache.m").read_text(encoding="utf-8-sig")
-    webkit_mutations = [
-        ("exclusion", [("if ([context[@\"excludedPaths\"] count]) return @\"exclusionUnrepresentable\";", "")],
-         "any exclusion blocks broad API"),
-        ("in-flight", [("if (_flight) { _reason=@\"inFlight\";", "if (NO) { _reason=@\"inFlight\";"),
-                        ("if (_flight || _preparing ||", "if (_preparing ||"),
-                        ("if (reason || self->_flight) return;", "if (reason) return;")],
-         "production receipt obeys closed schema"),
-    ]
-    for name, replacements, expected in webkit_mutations:
-        mutated = webkit_source
-        for before, after in replacements:
-            if mutated.count(before) != 1:
-                raise SystemExit("FAIL: ambiguous WebKit mutation target: " + name)
-            mutated = mutated.replace(before, after)
-        source = output / ("webkit-" + name + ".m")
-        source.write_text(mutated, encoding="utf-8")
-        executable = output / ("webkit-" + name)
-        subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-I" + str(root),
-                        "-framework", "Foundation", "-framework", "WebKit", str(source),
-                        str(root / "AxsCacheKeeperOperationInfo.m"),
-                        str(root / "tests" / "webkit_cache_tests.m"), "-o", str(executable)],
-                       check=True, timeout=60)
-        result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=60)
-        if result.returncode == 0 or expected not in result.stderr:
-            raise SystemExit("FAIL: WebKit mutation did not hit its behavioral assertion: " + name + "\n" + result.stdout + result.stderr)
-        print("PASS: WebKit behavior mutation caught: " + name)
-    subprocess.run([sys.executable, str(root / "tests" / "run_inspection_export_tests.py")],
-                   check=True, timeout=60)
-    subprocess.run([sys.executable, str(root / "tests" / "run_scan_diagnostics_tests.py")],
-                   check=True, timeout=60)
-    subprocess.run([sys.executable, str(root / "tests" / "run_hardlink_tests.py")],
-                   check=True, timeout=60)
-    subprocess.run([sys.executable, str(root / "tests" / "run_diagnostic_channel_export_red.py")],
-                   check=True, timeout=60)
-    subprocess.run([sys.executable, str(root / "tests" / "run_diagnostic_channel_paths_red.py")],
-                   check=True, timeout=60)
-    subprocess.run([sys.executable, str(root / "tests" / "run_diagnostic_channel_native_paths.py")],
-                   check=True, timeout=60)
-    # Keep the implementation in Objective-C and the caller in Objective-C++, as in Logos.
-    # Run this before UIKit so missing C linkage fails in the native stage.
-    channel_object = output / "diagnostic-channel.o"
-    channel_linkage = output / "diagnostic-channel-linkage"
-    subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
-                    "-I" + str(root / "tests" / "include"), "-c",
-                    str(root / "AxsCacheKeeperDiagnosticChannel.m"), "-o", str(channel_object)],
-                   check=True, timeout=60)
-    subprocess.run([compiler, "clang++", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
-                    "-framework", "Foundation", str(root / "tests" / "diagnostic_channel_linkage_tests.mm"),
-                    str(channel_object), "-o", str(channel_linkage)], check=True, timeout=60)
-    subprocess.run([str(channel_linkage)], check=True, timeout=60)
-    pdf_objects = []
-    for name in ("AxsCacheKeeperPDFInspection", "AxsCacheKeeperPDFSession"):
-        object_path = output / (name + ".o")
-        subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
-                        "-I" + str(root / "tests" / "include"), "-c", str(root / (name + ".m")),
-                        "-o", str(object_path)], check=True, timeout=60)
-        pdf_objects.append(str(object_path))
-    pdf_linkage = output / "pdf-session-linkage"
-    subprocess.run([compiler, "clang++", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
-                    "-framework", "Foundation", str(root / "tests" / "pdf_session_linkage_tests.mm"),
-                    str(channel_object), *pdf_objects, "-o", str(pdf_linkage)], check=True, timeout=60)
-    subprocess.run([str(pdf_linkage)], check=True, timeout=60)
-    # Both binaries can be loaded into Preferences by the existing UIKit filter. Their Objective-C
-    # class definitions must remain disjoint; shared C helpers do not register runtime classes.
-    role_classes = {}
-    for role in ("CLIENT", "SERVER"):
-        classes = set()
-        for name in ("AxsCacheKeeperPDFInspection", "AxsCacheKeeperPDFSession"):
-            object_path = output / (name + "-" + role + ".o")
-            subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
-                            "-DAXS_CACHEKEEPER_PDF_" + role + "=1", "-I" + str(root / "tests" / "include"),
-                            "-c", str(root / (name + ".m")), "-o", str(object_path)], check=True, timeout=60)
-            symbols = subprocess.check_output([compiler, "nm", "-gU", str(object_path)], text=True, timeout=60)
-            classes.update(line.split()[-1] for line in symbols.splitlines() if "_OBJC_CLASS_$_AxsCacheKeeperPDF" in line)
-        role_classes[role] = classes
-    if role_classes["CLIENT"] & role_classes["SERVER"] or not all(role_classes.values()):
-        raise SystemExit("FAIL: PDF client/server Objective-C runtime class definitions overlap or are missing")
-    print("PASS: PDF client/server runtime classes are disjoint")
-    # Import the one production implementation into the standalone test translation unit.
-    # Do not link PDFSession.o again: fixtures subclass only external dependency boundaries.
-    lifecycle = output / "pdf-lifecycle"
-    lifecycle_flags = [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
-                       "-I" + str(root / "tests" / "include"), "-I" + str(root),
-                       "-framework", "Foundation"]
-    lifecycle_objects = [str(channel_object), pdf_objects[0]]
-    subprocess.run([*lifecycle_flags, str(root / "tests" / "pdf_lifecycle_tests.m"),
-                    *lifecycle_objects, "-o", str(lifecycle)], check=True, timeout=60)
-    subprocess.run([str(lifecycle), str(output / "pdf-lifecycle-fixtures")], check=True, timeout=60)
-    # Each mutation must compile and fail the specific behavioral assertion, never just fail
-    # compilation or time out. Only isolated tmp copies change; the product stays untouched.
-    session_source = (root / "AxsCacheKeeperPDFSession.m").read_text(encoding="utf-8-sig")
-    lifecycle_source = (root / "tests" / "pdf_lifecycle_tests.m").read_text(encoding="utf-8-sig")
-    mutations = [
-        ("draining", "if (task || self.draining)", "if (task)",
-         "second probe during draining must return busy before read returns"),
-        ("publish", "if (self.task!=task || atomic_load(&task->cancelled)) return;\n"
-         "        if ([task.binding expired:[self axs_cachekeeper_now]]) {[self axs_cachekeeper_invalidate:task];return;}", "",
-         "late publish must not change retired or replacement task"),
-        ("client-main", "if (!atomic_load(&self->_cancelled) && self->_update)", "if (self->_update)",
-         "cancelled client suppresses already queued main update"),
-    ]
-    for name, before, after, expected in mutations:
-        if session_source.count(before) != 1:
-            raise SystemExit("FAIL: ambiguous PDF lifecycle mutation target: " + name)
-        mutated_session = output / ("pdf-session-" + name + ".m")
-        mutated_session.write_text(session_source.replace(before, after), encoding="utf-8")
-        mutated_test = output / ("pdf-lifecycle-" + name + ".m")
-        mutated_test.write_text(lifecycle_source.replace('#import "../AxsCacheKeeperPDFSession.m"',
-                                '#import "' + mutated_session.as_posix() + '"'), encoding="utf-8")
-        executable = output / ("pdf-lifecycle-" + name)
-        subprocess.run([*lifecycle_flags, str(mutated_test), *lifecycle_objects, "-o", str(executable)],
-                       check=True, timeout=60)
-        result = subprocess.run([str(executable), str(output / ("fixtures-" + name)), name],
-                                capture_output=True, text=True, timeout=60)
-        if result.returncode == 0 or expected not in result.stderr:
-            raise SystemExit("FAIL: PDF mutation did not hit its behavioral assertion: " + name +
-                             "\n" + result.stdout + result.stderr)
-        print("PASS: PDF lifecycle mutation caught: " + name)
-    subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
-                    "-DAXS_CACHEKEEPER_INSTALLATION_TESTING=1",
-                    "-I" + str(root / "tests" / "include"), "-framework", "Foundation",
-                    str(root / "tests" / "cache_control_tests.m"), str(root / "Baseline.m"),
-                    str(root / "Permissions.m"), str(root / "AxsCacheKeeperNetworkCache.m"),
-                    str(root / "AxsCacheKeeperDirectories.m"),
-                    str(root / "AxsCacheKeeperInspection.m"),
-                    str(root / "AxsCacheKeeperPDFInspection.m"),
-                    str(root / "AxsCacheKeeperPDFSession.m"),
-                    str(root / "tests" / "pdf_inspection_tests.m"),
-                    str(root / "tests" / "pdf_session_tests.m"),
-                    str(root / "AxsCacheKeeperProcessObservation.m"),
-                    str(root / "AxsCacheKeeperCleanupJob.m"),
-                    str(root / "AxsCacheKeeperCleanupRules.m"),
-                    str(root / "AxsCacheKeeperReceipts.m"),
-                    str(root / "AxsCacheKeeperCleanupSchedule.m"),
-                    str(root / "AxsCacheKeeperDependencySnapshot.m"),
-                    str(root / "tests" / "plan_repair_tests.m"),
-                    str(root / "tests" / "hardlink_tests.m"),
-                    str(root / "tests" / "review_followup_tests.m"),
-                    str(root / "tests" / "diagnostics_tests.m"),
-                    str(root / "tests" / "search_diagnostics_tests.m"),
-                    str(root / "tests" / "app_list_tests.m"),
-                    str(root / "tests" / "app_retention_tests.m"),
-                    str(root / "tests" / "installation_tests.m"),
-                    str(root / "tests" / "network_cache_tests.m"),
-                    str(root / "tests" / "diagnostic_channel_tests.m"),
-                    str(root / "tests" / "diagnostic_channel_export_tests.m"),
-                    str(root / "tests" / "presentation_tests.m"),
-                    str(root / "AxsCacheKeeperDiagnostics.m"),
-                    str(root / "AxsCacheKeeperStorageInventory.m"),
-                    str(root / "AxsCacheKeeperOperationInfo.m"),
-                    str(root / "AxsCacheKeeperAppList.m"),
-                    str(root / "AxsCacheKeeperInstallation.m"),
-                    str(root / "AxsCacheKeeperDiagnosticChannel.m"),
-                    "-o", str(output / "cache-tests")], check=True, timeout=60)
-    subprocess.run([str(output / "cache-tests"), str(output / "fixtures")], check=True, timeout=60)
-finally:
-    if output.resolve().parent == (root / "tmp").resolve():
-        shutil.rmtree(output)
+from native_test_batch import Suite, run_suites, summary_exit_code
+import run_native_core
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+# Wrapper budgets include several compile and test processes. Individual native
+# commands retain their <=60 second timeout in their actual test runners.
+SCRIPT_GROUPS = (
+    ("presentation-red", "run_presentation_red.py", 180),
+    ("configuration-red", "run_configuration_red.py", 240),
+    ("diagnostics-red", "run_diagnostics_red.py", 180),
+    ("network-initialization-red", "run_network_initialization_red.py", 180),
+    ("owner-snapshot", "test_owner_snapshot.py", 60),
+    ("storage-inventory", "run_storage_inventory_tests.py", 300),
+    ("package-version", "package_version_tests.py", 60),
+    ("runtime-receipt", "run_runtime_receipt_tests.py", 360),
+    ("observation-export", "run_observation_export_tests.py", 180),
+    ("operation-history", "run_operation_history_tests.py", 300),
+    ("operation-export", "run_operation_export_tests.py", 300),
+    ("installation-identity", "run_installation_identity_tests.py", 420),
+    ("inspection-traversal", "run_inspection_traversal_tests.py", 180),
+    ("image-publication", "run_image_publication_tests.py", 180),
+    ("image-legacy-source", "run_image_legacy_source_tests.py", 180),
+    ("image-runtime-source", "run_image_runtime_source_tests.py", 240),
+    ("inspection-export", "run_inspection_export_tests.py", 180),
+    ("scan-diagnostics", "run_scan_diagnostics_tests.py", 180),
+    ("hardlink", "run_hardlink_tests.py", 180),
+    ("diagnostic-channel-export-red", "run_diagnostic_channel_export_red.py", 180),
+    ("diagnostic-channel-paths-red", "run_diagnostic_channel_paths_red.py", 180),
+    ("diagnostic-channel-native-paths", "run_diagnostic_channel_native_paths.py", 180),
+)
+CORE_GROUPS = (
+    ("installation-linkage", run_native_core.installation_linkage, 360),
+    ("operation-linkage", run_native_core.operation_linkage, 240),
+    ("webkit", run_native_core.webkit, 420),
+    ("diagnostic-linkage", run_native_core.diagnostic_linkage, 240),
+    ("pdf-linkage", run_native_core.pdf_linkage, 360),
+    ("pdf-runtime-classes", run_native_core.pdf_runtime_classes, 540),
+    ("pdf-lifecycle", run_native_core.pdf_lifecycle, 660),
+    ("cache-control", run_native_core.cache_control, 180),
+)
+
+
+def _timeout_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _report_timeout(group: str, error: subprocess.TimeoutExpired) -> None:
+    captured_stdout = _timeout_text(getattr(error, "stdout", None))
+    captured_stderr = _timeout_text(getattr(error, "stderr", None))
+    if captured_stdout:
+        print(f"NATIVE_TIMEOUT_STDOUT: {captured_stdout}", flush=True)
+    if captured_stderr:
+        print(f"NATIVE_TIMEOUT_STDERR: {captured_stderr}", file=sys.stderr, flush=True)
+    traceback.print_exc()
+    print(f"NATIVE_TIMEOUT: {group}: command exceeded {error.timeout}s", flush=True)
+
+
+def run_group(name: str) -> int:
+    compiler = shutil.which("xcrun")
+    if name not in {"owner-snapshot", "package-version"} and (sys.platform != "darwin" or not compiler):
+        print("UNAVAILABLE: native regression tests require macOS and xcrun; no tests ran.")
+        return 2
+    for group, script, _ in SCRIPT_GROUPS:
+        if group == name:
+            # Preserve unittest/script argv semantics while keeping the timeout
+            # boundary visible to the parent batch without patching subprocess.
+            sys.argv = [str(ROOT / "tests" / script)]
+            runpy.run_path(sys.argv[0], run_name="__main__")
+            return 0
+    for group, function, _ in CORE_GROUPS:
+        if group == name:
+            with tempfile.TemporaryDirectory(prefix="native-" + name + "-", dir=ROOT / "tmp") as directory:
+                function(pathlib.Path(directory), compiler)
+            return 0
+    raise ValueError("unknown group: " + name)
+
+
+def main(argv=None) -> int:
+    # Windows redirected consoles may use a legacy code page; logs remain UTF-8.
+    sys.stdout.reconfigure(errors="replace")
+    sys.stderr.reconfigure(errors="replace")
+    parser = argparse.ArgumentParser(description=__doc__)
+    names = [name for name, _, _ in (*SCRIPT_GROUPS, *CORE_GROUPS)]
+    parser.add_argument("--group", choices=names, help="execute one isolated group (used by the batch)")
+    parser.add_argument("--output", type=pathlib.Path, default=None, help="directory for suite logs and summary.json")
+    args = parser.parse_args(argv)
+    (ROOT / "tmp").mkdir(exist_ok=True)
+    if args.group:
+        try:
+            return run_group(args.group)
+        except subprocess.TimeoutExpired as error:
+            _report_timeout(args.group, error)
+            return 124
+    output = args.output or ROOT / "tmp" / ("native-results-" + str(time.time_ns()))
+    suites = [Suite(name, [sys.executable, "-u", str(pathlib.Path(__file__).resolve()), "--group", name], timeout,
+                    environment={"PYTHONIOENCODING": "utf-8"})
+              for name, _, timeout in (*SCRIPT_GROUPS, *CORE_GROUPS)]
+    summary = run_suites(suites, output, ROOT)
+    print("Native suite report: " + str(output / "summary.json"))
+    return summary_exit_code(summary)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

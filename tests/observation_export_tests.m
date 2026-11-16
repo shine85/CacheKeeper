@@ -18,12 +18,21 @@ int main(int argc,char **argv) { @autoreleasepool {
     NSDictionary *view=oejson(@"{\"schemaVersion\":1,\"context\":\"hostMainBundle\",\"pathAPI\":\"lstat\",\"openAPI\":\"openSearchNoFollow\",\"fdAPI\":\"fstat\",\"pathCallOwner\":\"libSystem\",\"openCallOwner\":\"libSystem\",\"fdCallOwner\":\"libSystem\",\"pathCallResolved\":true,\"openCallResolved\":true,\"fdCallResolved\":true,\"callOwnersStable\":true,\"fdPathState\":\"success\",\"fdPathErrno\":0,\"inputResolveState\":\"success\",\"inputResolveErrno\":0,\"fdResolveState\":\"success\",\"fdResolveErrno\":0,\"inputEqualsFDPath\":true,\"resolvedInputEqualsResolvedFDPath\":true,\"sameObjectNonTimeFields\":true}");
     NSDictionary *identity=@{@"schemaVersion":@2,@"comparison":@"pathToFD",@"differenceMask":@1920,@"resample":@{@"fdErrno":@0,@"pathErrno":@0,@"fdDifferenceMask":@0,@"pathDifferenceMask":@0,@"pathFDDifferenceMask":@1920},@"viewObservation":view};
     NSDictionary *(^installation)(NSDictionary *)=^NSDictionary *(NSDictionary *item){return @{@"state":@"failed",@"errorCode":@2,@"detail":@{@"target":@"root",@"operation":@"openIdentity",@"errno":@0,@"identity":item}};};
-    NSDate *time=[NSDate dateWithTimeIntervalSince1970:1794800000.25];
+    // XML property lists preserve dates at whole-second precision; keep the
+    // fixture aligned with the persisted representation under test.
+    NSDate *time=[NSDate dateWithTimeIntervalSince1970:1794800000];
     NSMutableDictionary *image=[@{@"schemaVersion":@1,@"sdk":@"SDWebImage",@"state":@"unsupported",@"reason":@"unsupportedSDK",@"observed":@0,@"eligible":@0,@"restricted":@0,@"writesBlocked":@0,@"queued":@0,@"submitted":@0,@"apiCompleted":@0,@"skipped":@0,@"pending":@0,@"updated":time,@"bytesState":@"notMeasured",@"discoveryCheck":discovery,@"installationCheck":installation(identity)} mutableCopy];
     NSMutableDictionary *web=[@{@"schemaVersion":@1,@"requested":@YES,@"timedOut":@NO,@"state":@"blocked",@"reason":@"installationUnverified",@"persistentStores":@0,@"nonPersistentStores":@0,@"submitted":@0,@"completed":@0,@"pending":@0,@"updated":time,@"bytesState":@"notMeasured",@"installationCheck":installation(identity)} mutableCopy];
     AxsCacheKeeperDiagnostics *session=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:folder];
+    __block BOOL binaryFixture=NO;
     NSDictionary *(^read)(void)=^NSDictionary *{
-        oecheck([image writeToFile:imagePath atomically:YES] && [web writeToFile:webPath atomically:YES],@"write actual saved receipts");
+        if (binaryFixture) {
+            for (NSString *path in @[imagePath,webPath]) {
+                NSDictionary *record=[path isEqual:imagePath] ? image : web;
+                NSData *serialized=[NSPropertyListSerialization dataWithPropertyList:record format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+                oecheck(serialized && [serialized writeToFile:path options:NSDataWritingAtomic error:nil],@"write current binary saved receipt");
+            }
+        } else oecheck([image writeToFile:imagePath atomically:YES] && [web writeToFile:webPath atomically:YES],@"write legacy XML saved receipts");
         NSData *beforeImage=[NSData dataWithContentsOfFile:imagePath],*beforeWeb=[NSData dataWithContentsOfFile:webPath];
         NSDictionary *report=[session reportWithApps:@[@{@"id":@"test.observation"}] environment:@{}];
         NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:nil];
@@ -36,11 +45,13 @@ int main(int argc,char **argv) { @autoreleasepool {
     oecheck([out[@"discoveryCheck"] isEqual:discovery],@"first source failure and unresolved loaded relationship survive actual export");
     for (NSString *key in @[@"imageDiskCache",@"webKitDiskCache"]) {
         oecheck([app[key][@"data"][@"installationCheck"] isEqual:installation(identity)],@"same closed installation view evidence survives both component exports");
-        id exportedUpdated=app[key][@"data"][@"updated"];
-        if (![exportedUpdated isEqual:@1794800000.25])
-            fprintf(stderr,"INFO: %@ exported updated=%@ class=%s\n",key,exportedUpdated,NSStringFromClass([exportedUpdated class]).UTF8String);
-        oecheck([exportedUpdated isEqual:@1794800000.25],@"saved observation timestamp is not refreshed by export");
+        oecheck([app[key][@"data"][@"updated"] isEqual:@1794800000],@"saved observation timestamp is not refreshed by export");
     }
+    binaryFixture=YES;
+    image[@"updated"]=[NSDate dateWithTimeIntervalSince1970:1794800000.25];web[@"updated"]=image[@"updated"];
+    app=read();
+    for (NSString *key in @[@"imageDiskCache",@"webKitDiskCache"])
+        oecheck([app[key][@"data"][@"updated"] isEqual:@1794800000.25],@"current binary receipt preserves fractional time through export");
     for (NSString *key in @[@"sourceCheck",@"loadedRelation"]) {
         NSMutableDictionary *bad=[discovery[key] mutableCopy];bad[@"rawPath"]=@"observation-private-canary";
         NSMutableDictionary *changed=[discovery mutableCopy];changed[key]=bad;image[@"discoveryCheck"]=changed;

@@ -437,7 +437,12 @@ static BOOL axs_cachekeeper_coverage_source(NSMutableDictionary *role, NSString 
     axs_cachekeeper_coverage_increment(role,[state isEqual:@"missingSelector"] ? @"missingSelectorCount" :
         [state isEqual:@"invalid"] ? @"invalidSourceCount" : @"notProvidedCount");return NO;
 }
-static void axs_cachekeeper_coverage_associate(NSMutableDictionary *role, NSArray *identity, NSString *url) {
+// Validated bundle/group identifiers exclude ':', so this pair encoding is
+// unambiguous. NSArray hashes only its count and makes large role tables collide.
+static NSString *axs_cachekeeper_coverage_pair(NSString *owner, NSString *identifier) {
+    return [NSString stringWithFormat:@"%@:%@",owner,identifier];
+}
+static void axs_cachekeeper_coverage_associate(NSMutableDictionary *role, NSString *identity, NSString *url) {
     NSMutableDictionary *associations=role[@"_associations"];NSMutableSet *invalid=role[@"_invalidAssociations"];
     if ([invalid containsObject:identity]) return;
     NSString *previous=associations[identity];
@@ -461,7 +466,7 @@ static void axs_cachekeeper_coverage_registration_sample(id proxy, NSString *own
         axs_cachekeeper_coverage_increment(home,@"observedSourceCount");axs_cachekeeper_coverage_increment(home,@"notProvidedCount");
     } else if (axs_cachekeeper_coverage_source(home,state)) {
         NSString *url=axs_cachekeeper_coverage_url(value);
-        if (url) { axs_cachekeeper_coverage_increment(home,@"observedSourceCount");axs_cachekeeper_coverage_associate(home,@[owner,@"home"],url); }
+        if (url) { axs_cachekeeper_coverage_increment(home,@"observedSourceCount");axs_cachekeeper_coverage_associate(home,axs_cachekeeper_coverage_pair(owner,@"home"),url); }
         else axs_cachekeeper_coverage_increment(home,@"invalidSourceCount");
     }
     value=axs_cachekeeper_coverage_property(proxy,@"groupContainerURLs",&state);
@@ -473,7 +478,7 @@ static void axs_cachekeeper_coverage_registration_sample(id proxy, NSString *own
                 if (!axs_cachekeeper_coverage_budget(group,groupUsed)) break;
                 NSString *url=axs_cachekeeper_coverage_url(value[identifier]);
                 if (!axs_cachekeeper_bundle_id(identifier) || !url) axs_cachekeeper_coverage_increment(group,@"invalidAssociationCount");
-                else axs_cachekeeper_coverage_associate(group,@[owner,identifier],url);
+                else axs_cachekeeper_coverage_associate(group,axs_cachekeeper_coverage_pair(owner,identifier),url);
             }
         }
     }
@@ -499,7 +504,7 @@ static void axs_cachekeeper_coverage_registration_sample(id proxy, NSString *own
         }
         if (![containingOwner isEqual:owner]) { axs_cachekeeper_coverage_increment(extension,@"ownerMismatchCount");continue; }
         // Plugin identity spans owners; a contradictory observation revokes the ID for this sample.
-        NSArray *identity=@[identifier];
+        NSString *identity=identifier;
         NSMutableSet *invalid=extension[@"_invalidAssociations"];
         if ([invalid containsObject:identity]) continue;
         NSMutableDictionary *owners=extension[@"_pluginOwners"];
@@ -709,8 +714,9 @@ static NSDictionary *axs_cachekeeper_registry_inventory_finish(NSDictionary *cov
     for (NSString *name in @[@"home",@"group",@"extension"]) {
         NSDictionary *role=[name isEqual:@"home"] ? home : [name isEqual:@"group"] ? group : extension;
         NSMutableDictionary *owners=[NSMutableDictionary new];
-        for (NSArray *identity in role[@"_associations"]) {
-            NSString *owner=[name isEqual:@"extension"] ? role[@"_pluginOwners"][identity.firstObject] : identity.firstObject;
+        for (NSString *identity in role[@"_associations"]) {
+            NSString *owner=[name isEqual:@"extension"] ? role[@"_pluginOwners"][identity] :
+                [identity substringToIndex:[identity rangeOfString:@":"].location];
             if (!owner) continue;
             NSMutableSet *related=owners[owner];if (!related) owners[owner]=related=[NSMutableSet new];
             [related addObject:tokens[role[@"_associations"][identity]]];
@@ -739,15 +745,8 @@ NSArray *axs_cachekeeper_installed_applications_with_registry_inventory(NSMutabl
     if (error) *error=nil;
     NSNumber *sampledAt=@((unsigned long long)NSDate.date.timeIntervalSince1970);
     NSString *sourceState=nil;
-    id installed=nil;
-#if defined(AXS_CACHEKEEPER_STORAGE_INVENTORY_TESTING)
-    extern NSArray *axs_cachekeeper_storage_test_registrations(void);
-    installed=axs_cachekeeper_storage_test_registrations();
-    sourceState=@"testInjected";
-#else
     id manager=axs_cachekeeper_coverage_property(NSClassFromString(@"LSApplicationWorkspace"),@"defaultWorkspace",&sourceState);
-    installed=manager ? axs_cachekeeper_coverage_property(manager,@"allInstalledApplications",&sourceState) : nil;
-#endif
+    id installed=manager ? axs_cachekeeper_coverage_property(manager,@"allInstalledApplications",&sourceState) : nil;
     if (![installed isKindOfClass:NSArray.class]) {
         if (installed) sourceState=@"invalid";
         if (coverage) {NSMutableDictionary *failure=axs_cachekeeper_coverage_base(@"unavailable");failure[@"sourceState"]=sourceState;*coverage=[failure copy];}

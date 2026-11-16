@@ -21,7 +21,7 @@ with tempfile.TemporaryDirectory(prefix="diagnostics-red-", dir=root / "tmp") as
         'axs_cachekeeper_run_diagnostics_tests([NSString stringWithUTF8String:argv[1]]); } return 0; }\n',
         encoding="utf-8")
     binary = target / "red-test"
-    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-framework", "Foundation",
+    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-framework", "Foundation",
                     str(target / "main.m"), str(target / "AxsCacheKeeperDiagnostics.m"),
                     str(target / "tests/diagnostics_tests.m"), "-o", str(binary)],
                    check=True, timeout=60)

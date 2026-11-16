@@ -53,7 +53,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
         job_path = output / (name + "-job.m")
         job_path.write_text(job, encoding="utf-8")
         binary = output / name
-        subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
+        subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format",
                         "-I" + str(root), "-I" + str(root / "tests" / "include"),
                         "-framework", "Foundation", str(main), str(root / "tests" / "hardlink_tests.m"),
                         str(baseline_path), str(job_path), str(root / "AxsCacheKeeperCleanupRules.m"),

@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory(prefix="inspection-tests-", dir=root / "tmp") a
     baseline_path = output / "AxsCacheKeeperInspection-baseline.m"
     baseline_path.write_bytes(baseline)
     fixture_source = root / "tests" / "inspection_traversal_tests.m"
-    flags = [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
+    flags = [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format",
              "-I" + str(root), "-I" + str(root / "tests" / "include"),
              "-framework", "Foundation"]
     old_binary = output / "inspection-baseline"

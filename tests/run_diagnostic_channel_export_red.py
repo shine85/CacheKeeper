@@ -25,7 +25,7 @@ with tempfile.TemporaryDirectory(prefix="channel-export-red-", dir=root / "tmp")
         'int main(void) { @autoreleasepool { axs_cachekeeper_run_diagnostic_channel_export_tests(); } return 0; }\n',
         encoding="utf-8")
     binary = target / "red-test"
-    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-framework", "Foundation",
+    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-framework", "Foundation",
                     str(target / "main.m"), str(target / "AxsCacheKeeperDiagnostics.m"),
                     str(target / name), "-o", str(binary)], check=True, timeout=60)
     result = subprocess.run([str(binary)], capture_output=True, text=True, encoding="utf-8", timeout=60)
