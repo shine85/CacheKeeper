@@ -55,7 +55,9 @@ def run() -> int:
                 flags.append("-DAXS_CACHEKEEPER_STORAGE_INVENTORY_TESTING=1")
             # Compilation/link errors and timeout cannot satisfy the expected behavior RED.
             subprocess.run([*flags, *map(str, sources), "-o", str(binary)], check=True, timeout=60)
-            result = subprocess.run([str(binary), str(output / (role + "-fixtures"))], capture_output=True,
+            fixtures = output / (role + "-fixtures")
+            fixtures.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run([str(binary), str(fixtures)], capture_output=True,
                                     text=True, encoding="utf-8", timeout=60)
             if role == "red":
                 if result.returncode != 1 or normalized_stderr(result.stderr) != EXPECTED_RED:
