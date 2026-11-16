@@ -109,7 +109,9 @@ static NSDictionary *siscan(NSArray *rows, NSDate *date,BOOL complete) {
     return @{@"rows":rows,@"updated":date,@"complete":@(complete),@"home":@"private-home-canary",@"token":@"private-token-canary",@"groups":@{@"private-group-canary":@"private-group-path-canary"}};
 }
 static void siput(NSString *folder,NSString *name,id value) {
-    sicheck([value writeToFile:[folder stringByAppendingPathComponent:name] atomically:YES],@"write saved plist fixture");
+    NSString *path=[folder stringByAppendingPathComponent:name];NSError *error=nil;
+    sicheck([value writeToFile:path options:NSDataWritingAtomic error:&error],
+        [NSString stringWithFormat:@"write saved plist fixture %@ (%@/%ld)",name,error.domain,(long)error.code]);
 }
 #if !AXS_CACHEKEEPER_STORAGE_INVENTORY_RED
 static NSMutableDictionary *simutable(id value) {
