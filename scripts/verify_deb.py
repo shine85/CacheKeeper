@@ -67,7 +67,16 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
                 payload = binary[offset:offset + size]
                 if any(marker not in payload for marker in markers):
                     raise SystemExit(f'Missing product implementation in a slice: {suffix}')
+                if suffix == '/CacheKeeper.dylib':
+                    runtime_markers = (version.encode('ascii') + b'\0', b'runtimeInfo\0',
+                                       b'packageVersion\0', b'firstObserved\0')
+                    if any(marker not in payload for marker in runtime_markers):
+                        raise SystemExit(f'Missing actual package version or runtime receipt fields in slice {index}: {suffix}')
                 if any(marker in payload for marker in (b'usePinnedSDKForIntegrationTests',
+                        b'usePinnedLegacySDKForIntegrationTests', b'ImageCacheLegacyIntegrationTests',
+                        b'ImageCacheLegacyAbsentAPITests', b'AxsCacheKeeperRuntimeSourceHelper', b'AxsCacheKeeperLegacyMethodFixture',
+                        b'instanceDiagnosticsForIntegrationTests', b'discoveryDiagnosticsForIntegrationTests',
+                        b'methodDiagnosticsForIntegrationTests',
                         b'axs_cachekeeper_installation_test_read', b'ImageCacheIntegrationTests',
                         b'AxsCacheKeeperRegrowingWindow')):
                     raise SystemExit(f'Test implementation leaked into binary: {suffix}')
@@ -95,4 +104,4 @@ checksum = hashlib.sha256(package.read_bytes()).hexdigest()
 control = subprocess.check_output(['dpkg-deb', '-I', str(package)], text=True)
 listing = subprocess.check_output(['dpkg-deb', '-c', str(package)], text=True)
 (folder / 'package-contents.txt').write_text(control + '\n' + listing, encoding='utf-8')
-print(f'PASS: {package.name}; identity, author, maintainer, architecture, {len(required)} required files, local artifact exclusion')
+print(f'PASS: {package.name}; identity, author, maintainer, architecture, runtime version in both tweak slices, {len(required)} required files, local artifact exclusion')

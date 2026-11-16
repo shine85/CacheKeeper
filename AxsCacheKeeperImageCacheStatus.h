@@ -1,5 +1,8 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#import "AxsCacheKeeperInstallationCheck.h"
+#import "AxsCacheKeeperRuntimeInfo.h"
+#import "AxsCacheKeeperImageDiscovery.h"
 #include <math.h>
 
 static inline BOOL axs_cachekeeper_image_counter(id value) {
@@ -12,6 +15,18 @@ static inline NSDictionary *axs_cachekeeper_image_cache_projection(id value) {
     if (![value isKindOfClass:NSDictionary.class]) return nil;
     NSArray *keys=@[@"schemaVersion",@"sdk",@"state",@"reason",@"observed",@"eligible",@"restricted",@"writesBlocked",
         @"queued",@"submitted",@"apiCompleted",@"skipped",@"pending",@"updated",@"bytesState"];
+    if (value[@"installationCheck"]) {
+        if (!axs_cachekeeper_installation_check_projection(value[@"installationCheck"])) return nil;
+        keys=[keys arrayByAddingObject:@"installationCheck"];
+    }
+    if (value[@"runtimeInfo"]) {
+        if (!axs_cachekeeper_runtime_info_projection(value[@"runtimeInfo"])) return nil;
+        keys=[keys arrayByAddingObject:@"runtimeInfo"];
+    }
+    if (value[@"discoveryCheck"]) {
+        if (!axs_cachekeeper_image_discovery_projection(value[@"discoveryCheck"])) return nil;
+        keys=[keys arrayByAddingObject:@"discoveryCheck"];
+    }
     if ([value count]!=keys.count || ![[NSSet setWithArray:[value allKeys]] isEqual:[NSSet setWithArray:keys]]) return nil;
     for (NSString *key in @[@"schemaVersion",@"observed",@"eligible",@"restricted",@"writesBlocked",@"queued",@"submitted",@"apiCompleted",@"skipped",@"pending"])
         if (!axs_cachekeeper_image_counter(value[key])) return nil;
@@ -35,6 +50,13 @@ static inline NSDictionary *axs_cachekeeper_image_cache_projection(id value) {
 static inline NSString *axs_cachekeeper_image_cache_message(id value) {
     NSDictionary *record=axs_cachekeeper_image_cache_projection(value);
     if (!record) return @"图片缓存回执不可用或字段无效";
+    NSDictionary *discovery=record[@"discoveryCheck"];
+    if ([record[@"reason"] isEqual:@"unsupportedSDK"] && discovery) {
+        if ([discovery[@"stage"] isEqual:@"classes"])
+            return [discovery[@"classMask"] unsignedIntegerValue] ? @"图片缓存组件尚不完整，未启用适配" : @"此进程尚未发现 SDWebImage 图片缓存";
+        if ([discovery[@"stage"] isEqual:@"source"]) return @"已发现图片缓存组件，当前实现尚未核验";
+        if ([@[@"image",@"method"] containsObject:discovery[@"stage"]]) return @"图片缓存接口或来源与已核验契约不符，保持原行为";
+    }
     NSDictionary *messages=@{@"appDisabled":@"此 APP 未开启，图片缓存保持原行为",
         @"configurationInvalid":@"配置不可读或字段无效，未限制或清理图片缓存",
         @"installationUnverified":@"安装身份尚未核实，本轮未执行",

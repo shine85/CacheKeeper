@@ -65,6 +65,39 @@ def run_step(name, command, timeout):
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
         record_failure(name, error)
 
+
+def run_sdk_variant(version, revision, target, cases):
+    stage = f"SDWebImage {version} preparation"
+    try:
+        spec = (ROOT / "tests/ui/project.yml").read_text(encoding="utf-8-sig")
+        current_revision = "2de3a496eaf6df9a1312862adcfd54acd73c39c0"
+        if spec.count(current_revision) != 1:
+            raise ValueError("ambiguous SDWebImage dependency revision")
+        spec = spec.replace(current_revision, revision)
+        if target != "ImageCacheIntegrationTests":
+            # Replace the target, its one source file and the scheme entry together.
+            if spec.count("ImageCacheIntegrationTests") != 3:
+                raise ValueError("ambiguous image integration target")
+            spec = spec.replace("ImageCacheIntegrationTests", target)
+        compatibility_spec = output / f"image-sdk-{version}.yml"
+        compatibility_spec.write_text(spec, encoding="utf-8")
+        stage = f"SDWebImage {version} generation"
+        subprocess.run(["xcodegen", "generate", "--spec", str(compatibility_spec),
+                        "--project", str(output), "--project-root", str(output)], check=True, timeout=60)
+        stage = f"SDWebImage {version} build"
+        subprocess.run(["xcodebuild", "build-for-testing", *build_options,
+                        "-only-testing:" + target], check=True, timeout=600)
+        stage = f"SDWebImage {version} revision"
+        verify_sdk_revision(revision)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError) as error:
+        record_failure(stage, error)
+        return
+    for label, selection, result in cases:
+        run_step(label, ["xcodebuild", "test-without-building", *build_options,
+                         "-only-testing:" + selection, "-resultBundlePath", str(output / result),
+                         "-parallel-testing-enabled", "NO"], timeout=420)
+
+
 try:
     # The real WebKit session runs in a fresh host, isolated from the forty-view capacity probe.
     # Once the shared build is verified, independent suites all run before failure is reported.
@@ -81,36 +114,23 @@ try:
                              "-skip-testing:ImageCacheIntegrationTests",
                              "-resultBundlePath", str(output / "Results.xcresult"),
                              "-parallel-testing-enabled", "NO"], timeout=900)
-    # The adapter admits both verified SDK versions. Rebuild the same behavior tests against
-    # the second actual dependency, with an independent result bundle; never relabel 5.21.7.
-    legacy_stage = "SDWebImage 5.15.5 preparation"
-    try:
-        spec = (ROOT / "tests/ui/project.yml").read_text(encoding="utf-8-sig")
-        current_revision = "2de3a496eaf6df9a1312862adcfd54acd73c39c0"
-        legacy_revision = "fb50c1d20f24db5322b2f8f379de3618f75fe08e"
-        if spec.count(current_revision) != 1:
-            raise ValueError("ambiguous SDWebImage dependency revision")
-        compatibility_spec = output / "image-sdk-5.15.5.yml"
-        compatibility_spec.write_text(spec.replace(current_revision, legacy_revision), encoding="utf-8")
-        legacy_stage = "SDWebImage 5.15.5 generation"
-        subprocess.run(["xcodegen", "generate", "--spec", str(compatibility_spec),
-                        "--project", str(output), "--project-root", str(output)], check=True, timeout=60)
-        legacy_stage = "SDWebImage 5.15.5 build"
-        subprocess.run(["xcodebuild", "build-for-testing", *build_options,
-                        "-only-testing:ImageCacheIntegrationTests"], check=True, timeout=600)
-        legacy_stage = "SDWebImage 5.15.5 revision"
-        verify_sdk_revision(legacy_revision)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError) as error:
-        record_failure(legacy_stage, error)
-    else:
-        run_step("SDWebImage 5.15.5", ["xcodebuild", "test-without-building", *build_options,
-                                     "-only-testing:ImageCacheIntegrationTests",
-                                     "-resultBundlePath", str(output / "ImageCache515Results.xcresult"),
-                                     "-parallel-testing-enabled", "NO"], timeout=420)
+    run_sdk_variant("5.15.5", "fb50c1d20f24db5322b2f8f379de3618f75fe08e", "ImageCacheIntegrationTests",
+                    [("SDWebImage 5.15.5", "ImageCacheIntegrationTests", "ImageCache515Results.xcresult")])
+    # The old SDK has a different API. Its own source and target are built against its exact
+    # revision. The irreversible added-method test gets a separate test process.
+    run_step("SDWebImage 5.10.4 admission baseline",
+             [sys.executable, str(ROOT / "tests/run_image_legacy_red.py"), device], timeout=1200)
+    run_sdk_variant("5.10.4", "a6b6e44eadf0d39250c10a7cc0e3b91d0bdb0e94", "ImageCacheLegacyIntegrationTests",
+                    [("SDWebImage 5.10.4", "ImageCacheLegacyIntegrationTests/ImageCacheLegacyIntegrationTests",
+                      "ImageCache510Results.xcresult"),
+                     ("SDWebImage 5.10.4 absent API", "ImageCacheLegacyIntegrationTests/ImageCacheLegacyAbsentAPITests",
+                      "ImageCache510AbsentResults.xcresult")])
 finally:
     for result, screenshots in [("WebKitResults.xcresult", "WebKitScreenshots"),
                                 ("ImageCacheResults.xcresult", "ImageCacheScreenshots"),
                                 ("ImageCache515Results.xcresult", "ImageCache515Screenshots"),
+                                ("ImageCache510Results.xcresult", "ImageCache510Screenshots"),
+                                ("ImageCache510AbsentResults.xcresult", "ImageCache510AbsentScreenshots"),
                                 ("Results.xcresult", "Screenshots")]:
         if (output / result).exists():
             run_step(f"attachments {result}", ["xcrun", "xcresulttool", "export", "attachments",

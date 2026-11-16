@@ -35,6 +35,33 @@
 }
 @end
 
+@interface AxsCacheKeeperImageTestWrongReturn : NSObject
+- (NSUInteger)fileManager;
+@end
+@implementation AxsCacheKeeperImageTestWrongReturn
+- (NSUInteger)fileManager { return 0; }
+@end
+@interface AxsCacheKeeperImageTestWrongCount : NSObject
+@end
+@implementation AxsCacheKeeperImageTestWrongCount
+@end
+@interface AxsCacheKeeperImageTestWrongArgument : NSObject
+@end
+@implementation AxsCacheKeeperImageTestWrongArgument
+@end
+@interface AxsCacheKeeperImageTestForeignMethod : NSObject
+- (id)fileManager;
+@end
+@implementation AxsCacheKeeperImageTestForeignMethod
+- (id)fileManager { return nil; }
+@end
+static id AxsCacheKeeperImageTestMetadataOnlyMethod(id object, SEL selector, id value) {
+    (void)object;(void)selector;(void)value;return nil;
+}
+static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
+    (void)object;(void)selector;return nil;
+}
+
 @interface ImageCacheIntegrationTests : XCTestCase
 @property(nonatomic,strong) AxsCacheKeeperImageCache *engine;
 @property(nonatomic,strong) NSMutableDictionary *context;
@@ -105,6 +132,111 @@
     XCTAssertNotNil(axs_cachekeeper_image_cache_projection(self.engine.receipt));
 }
 - (NSData *)axs_cachekeeper_payload {return [@"owned image-cache fixture" dataUsingEncoding:NSUTF8StringEncoding];}
+- (void)testDiscoveryReceiptContainsCompleteContractWithoutOwnerClaims {
+    NSDictionary *check=self.engine.receipt[@"discoveryCheck"];
+    XCTAssertNotNil(axs_cachekeeper_image_discovery_projection(check));
+    XCTAssertEqualObjects(check[@"stage"],@"complete");
+    XCTAssertEqualObjects(check[@"classMask"],@15);
+    XCTAssertEqualObjects(check[@"methodIndex"],@0);
+    XCTAssertEqualObjects(check[@"failure"],@"none");
+    XCTAssertEqualObjects(self.engine.receipt[@"state"],@"notObserved");
+    XCTAssertEqualObjects(self.engine.receipt[@"observed"],@0);
+    XCTAssertEqual(AxsCacheKeeperImageMethodCount,25);
+}
+- (void)testUnpinnedStaticSDKIsRejectedByProductionSourceProbe {
+    AxsCacheKeeperImageCache *probe=[[AxsCacheKeeperImageCache alloc] initWithContextProvider:nil observer:nil];
+    SEL selector=@selector(initWithNamespace:diskCacheDirectory:config:);
+    IMP before=class_getMethodImplementation(SDImageCache.class,selector);
+    NSDictionary *check=[probe discoveryDiagnosticsForIntegrationTests];
+    XCTAssertNotNil(axs_cachekeeper_image_discovery_projection(check));
+    XCTAssertEqualObjects(check[@"classMask"],@15);
+    XCTAssertEqualObjects(check[@"stage"],@"source");
+    XCTAssertEqualObjects(check[@"source"],@"rejected");
+    XCTAssertEqualObjects(check[@"failure"],@"unknownSource");
+    XCTAssertEqualObjects(check[@"methodIndex"],@0);
+    XCTAssertEqual(class_getMethodImplementation(SDImageCache.class,selector),before);
+}
+- (void)testMethodProbeDistinguishesMissingInheritedAndReturnTypes {
+    XCTAssertEqualObjects([self.engine methodDiagnosticsForIntegrationTests:9 ownerClass:SDDiskCache.class][@"failure"],@"none");
+    XCTAssertEqualObjects([self.engine methodDiagnosticsForIntegrationTests:9 ownerClass:NSObject.class][@"failure"],@"missingMethod");
+    XCTAssertEqualObjects([self.engine methodDiagnosticsForIntegrationTests:9 ownerClass:AxsCacheKeeperImageTestCustomDisk.class][@"failure"],@"inheritedMethod");
+    XCTAssertEqualObjects([self.engine methodDiagnosticsForIntegrationTests:9 ownerClass:AxsCacheKeeperImageTestWrongReturn.class][@"failure"],@"returnType");
+}
+- (void)testMethodProbeDistinguishesArgumentCountTypeAndForeignImplementation {
+    SEL copySelector=@selector(copyWithZone:);
+    XCTAssertTrue(class_addMethod(AxsCacheKeeperImageTestWrongCount.class,copySelector,(IMP)AxsCacheKeeperImageTestMetadataOnlyMethod,"@16@0:8"));
+    XCTAssertTrue(class_addMethod(AxsCacheKeeperImageTestWrongArgument.class,copySelector,(IMP)AxsCacheKeeperImageTestMetadataOnlyMethod,"@24@0:8@16"));
+    XCTAssertEqualObjects([self.engine methodDiagnosticsForIntegrationTests:14 ownerClass:AxsCacheKeeperImageTestWrongCount.class][@"failure"],@"argumentCount");
+    XCTAssertEqualObjects([self.engine methodDiagnosticsForIntegrationTests:14 ownerClass:AxsCacheKeeperImageTestWrongArgument.class][@"failure"],@"argumentType");
+    Method method=class_getInstanceMethod(AxsCacheKeeperImageTestForeignMethod.class,@selector(fileManager));
+    IMP original=method_setImplementation(method,class_getMethodImplementation(NSObject.class,@selector(description)));
+    @try {
+        XCTAssertEqualObjects([self.engine methodDiagnosticsForIntegrationTests:9 ownerClass:AxsCacheKeeperImageTestForeignMethod.class][@"failure"],@"methodImage");
+    } @finally { method_setImplementation(method,original); }
+}
+- (void)testDiscoveryChangesPublishWithoutLifecycleAndRecoverWhenMethodRestored {
+    Method method=class_getInstanceMethod(SDDiskCache.class,@selector(fileManager));
+    IMP original=method_setImplementation(method,(IMP)AxsCacheKeeperImageTestChangedGetter);
+    @try {
+        [self.engine requestDiscoveryRefresh];
+        [self axs_cachekeeper_wait:^BOOL(NSDictionary *receipt) {
+            return [receipt[@"discoveryCheck"][@"failure"] isEqual:@"methodsChanged"];
+        } description:@"runtime method change published without lifecycle"];
+        NSDictionary *check=self.engine.receipt[@"discoveryCheck"];
+        XCTAssertNotNil(axs_cachekeeper_image_discovery_projection(check));
+        XCTAssertEqualObjects(check[@"stage"],@"method");
+        XCTAssertEqualObjects(check[@"methodIndex"],@9);
+        XCTAssertEqualObjects(self.engine.receipt[@"state"],@"unsupported");
+    } @finally {
+        method_setImplementation(method,original);
+        [self.engine requestDiscoveryRefresh];
+        [self axs_cachekeeper_wait:^BOOL(NSDictionary *receipt) {
+            return [receipt[@"discoveryCheck"][@"stage"] isEqual:@"complete"];
+        } description:@"restored method is rediscovered"];
+    }
+    XCTAssertEqualObjects(self.engine.receipt[@"state"],@"notObserved");
+}
+- (void)testRepeatedUnchangedDiscoveryDoesNotReadInstallationAgain {
+    NSUInteger before=self.contextReads;
+    for (NSUInteger i=0;i<64;i++) [self.engine requestDiscoveryRefresh];
+    // This final explicit refresh is the queue barrier and accounts for one provider read.
+    [self axs_cachekeeper_refresh];
+    XCTAssertEqual(self.contextReads,before+1);
+    XCTAssertEqualObjects(self.engine.receipt[@"discoveryCheck"][@"stage"],@"complete");
+}
+- (void)testDiscoveryMethodChangeRevokesRestrictionUntilOriginalReturns {
+    SDImageCache *owner=[self axs_cachekeeper_owner:@"discovery-restoration" config:nil];
+    [self axs_cachekeeper_state:@{@"enabled":@YES,@"mode":@"auto"}];
+    XCTAssertEqual([self.engine.receipt[@"restricted"] unsignedIntegerValue],1u);
+    Method method=class_getInstanceMethod(SDDiskCache.class,@selector(fileManager));
+    IMP original=method_getImplementation(method);
+    // The foreign IMP preserves the SDK getter's behavior. Any write suppression here is
+    // therefore the adapter's gate, not a broken test implementation of the SDK backend.
+    IMP replacement=imp_implementationWithBlock(^id(id receiver) {
+        return ((id (*)(id,SEL))original)(receiver,@selector(fileManager));
+    });
+    XCTAssertNotEqual(replacement,(IMP)NULL);if (!replacement) return;
+    method_setImplementation(method,replacement);
+    @try {
+        [self.engine requestDiscoveryRefresh];
+        [self axs_cachekeeper_wait:^BOOL(NSDictionary *receipt) {
+            return [receipt[@"discoveryCheck"][@"failure"] isEqual:@"methodsChanged"];
+        } description:@"changed SDK contract revokes the observed owner's gate"];
+        XCTAssertEqual([self.engine.receipt[@"restricted"] unsignedIntegerValue],0u);
+        XCTAssertEqual([self.engine.receipt[@"eligible"] unsignedIntegerValue],0u);
+        [owner storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"allowed-while-changed"];
+        XCTAssertNotNil([owner diskImageDataForKey:@"allowed-while-changed"]);
+    } @finally {
+        method_setImplementation(method,original);XCTAssertTrue(imp_removeBlock(replacement));
+        [self.engine requestDiscoveryRefresh];
+        [self axs_cachekeeper_wait:^BOOL(NSDictionary *receipt) {
+            return [receipt[@"discoveryCheck"][@"stage"] isEqual:@"complete"] && [receipt[@"restricted"] unsignedIntegerValue]==1;
+        } description:@"restored SDK contract rechecks the owner and resumes restriction"];
+    }
+    [owner storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"blocked-after-restoration"];
+    XCTAssertNil([owner diskImageDataForKey:@"blocked-after-restoration"]);
+    XCTAssertNotNil([owner diskImageDataForKey:@"allowed-while-changed"]);
+}
 - (void)testStandardMemoryKVOConfigurationIsAdmittedButCustomConfigurationIsNot {
     SDImageCache *standard=[self axs_cachekeeper_owner:@"standard-kvo" config:nil];
     XCTAssertNotEqual(object_getClass(standard.config),SDImageCacheConfig.class);

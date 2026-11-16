@@ -1,0 +1,299 @@
+{
+  "schemaVersion": 1,
+  "collectedOn": "2026-11-16",
+  "target": {
+    "bundle": "com.baidu.netdisk",
+    "version": "13.37.5",
+    "build": "13.37.5.10",
+    "mainUUID": "b2b9d30a1caf31b482cac776e7eb2ba1",
+    "fileSize": 446666416,
+    "headerRange": {
+      "offset": 0,
+      "length": 20480,
+      "sha256": "c19b28a08c2b7c9f06d7ead6f280880c782ddf3248ff78e45d11b7812d68fae2"
+    }
+  },
+  "missingContractSlot": {
+    "index": 11,
+    "className": "SDImageCacheConfig",
+    "selector": "ioQueueAttributes"
+  },
+  "methods": [
+    {
+      "contractIndex": 1,
+      "className": "SDImageCache",
+      "classMethod": false,
+      "selector": "initWithNamespace:diskCacheDirectory:config:",
+      "typeEncoding": "@40@0:8@16@24@32",
+      "imageRelativeOffset": "0xb8c5544",
+      "captureLength": 660,
+      "sha256": "d83332cc15ec9bf4a6fdeb5bcaf9d96a764ca44dfe6a6bf8ed591574db63b0dc"
+    },
+    {
+      "contractIndex": 2,
+      "className": "SDImageCache",
+      "classMethod": false,
+      "selector": "diskCache",
+      "typeEncoding": "@16@0:8",
+      "imageRelativeOffset": "0xb8c8624",
+      "captureLength": 8,
+      "sha256": "bd237e5d99f6462770946dd64c9d5273577f92aeb78154ba485fef49e0d73851"
+    },
+    {
+      "contractIndex": 3,
+      "className": "SDImageCache",
+      "classMethod": false,
+      "selector": "diskCachePath",
+      "typeEncoding": "@16@0:8",
+      "imageRelativeOffset": "0xb8c8638",
+      "captureLength": 12,
+      "sha256": "41609ce6efd7af4c37254dc6f52a8e3c167ed5acd7030577fccaa0d1b9173ece"
+    },
+    {
+      "contractIndex": 4,
+      "className": "SDImageCache",
+      "classMethod": false,
+      "selector": "config",
+      "typeEncoding": "@16@0:8",
+      "imageRelativeOffset": "0xb8c85fc",
+      "captureLength": 12,
+      "sha256": "a3b7d1d777404e1c47905e91e9cc2765f39956b68a6cc63ed5ea08c1ed0bcfbe"
+    },
+    {
+      "contractIndex": 5,
+      "className": "SDImageCache",
+      "classMethod": false,
+      "selector": "ioQueue",
+      "typeEncoding": "@16@0:8",
+      "imageRelativeOffset": "0xb8c8660",
+      "captureLength": 8,
+      "sha256": "6b819324b4a3bc2d390c83c7fe02ea41a1f57ae5d4f2a9b0c9256341a5b8d37f"
+    },
+    {
+      "contractIndex": 6,
+      "className": "SDImageCache",
+      "classMethod": false,
+      "selector": "memoryCache",
+      "typeEncoding": "@16@0:8",
+      "imageRelativeOffset": "0xb8c8610",
+      "captureLength": 8,
+      "sha256": "dfb556a413c8bda5332942d0202e8d5f1e52f45158aec3676294cf11ad5909cb"
+    },
+    {
+      "contractIndex": 7,
+      "className": "SDDiskCache",
+      "classMethod": false,
+      "selector": "diskCachePath",
+      "typeEncoding": "@16@0:8",
+      "imageRelativeOffset": "0xb8c27d4",
+      "captureLength": 12,
+      "sha256": "53b8ca4a5e73dac311ee167a7c2ce885b1b2f466c6b9b490b71ae4edf196ea5e"
+    },
+    {
+      "contractIndex": 8,
+      "className": "SDDiskCache",
+      "classMethod": false,
+      "selector": "config",
+      "typeEncoding": "@16@0:8",
+      "imageRelativeOffset": "0xb8c27cc",
+      "captureLength": 8,
+      "sha256": "19647f57f48e23c8730ecfc85bdce80bf67ce4eae56e82f97661432fa2018025"
+    },
+    {
+      "contractIndex": 9,
+      "className": "SDDiskCache",
+      "classMethod": false,
+      "selector": "fileManager",
+      "typeEncoding": "@16@0:8",
+      "imageRelativeOffset": "0xb8c27e8",
+      "captureLength": 8,
+      "sha256": "bd237e5d99f6462770946dd64c9d5273577f92aeb78154ba485fef49e0d73851"
+    },
+    {
+      "contractIndex": 10,
+      "className": "SDImageCacheConfig",
+      "classMethod": false,
+      "selector": "fileManager",
+      "typeEncoding": "@16@0:8",
+      "imageRelativeOffset": "0xb8c9020",
+      "captureLength": 8,
+      "sha256": "62c64bd585db7a91917843362bb75aa8dd20b002bce4874891b0b3ec8fd242b9"
+    },
+    {
+      "contractIndex": 12,
+      "className": "SDImageCacheConfig",
+      "classMethod": false,
+      "selector": "diskCacheClass",
+      "typeEncoding": "#16@0:8",
+      "imageRelativeOffset": "0xb8c9044",
+      "captureLength": 8,
+      "sha256": "d598436bff3a9dd6f386d52e9d196b4b622d920d9df2d4b374773cddd2c4c4b8"
+    },
+    {
+      "contractIndex": 13,
+      "className": "SDImageCacheConfig",
+      "classMethod": false,
+      "selector": "memoryCacheClass",
+      "typeEncoding": "#16@0:8",
+      "imageRelativeOffset": "0xb8c9034",
+      "captureLength": 8,
+      "sha256": "989bb1a041c93e09fa2954014eaba1a46b19128664c6bbb210694e0989f09532"
+    },
+    {
+      "contractIndex": 14,
+      "className": "SDImageCacheConfig",
+      "classMethod": false,
+      "selector": "copyWithZone:",
+      "typeEncoding": "@24@0:8^{_NSZone=}16",
+      "imageRelativeOffset": "0xb8c8d10",
+      "captureLength": 608,
+      "sha256": "c9db28f33ca9fdbc6ffa4f7cf7aaae9aeff71c1db22e591700522eb394d8d8bd"
+    },
+    {
+      "contractIndex": 15,
+      "className": "SDImageCacheConfig",
+      "classMethod": true,
+      "selector": "defaultCacheConfig",
+      "typeEncoding": "@16@0:8",
+      "imageRelativeOffset": "0xb8c8bfc",
+      "captureLength": 116,
+      "sha256": "e769b71dcb7b51c2373e10270fea6f7e0ae7142fc8f945f1804a454810a7d9ee"
+    },
+    {
+      "contractIndex": 16,
+      "className": "SDMemoryCache",
+      "classMethod": false,
+      "selector": "config",
+      "typeEncoding": "@16@0:8",
+      "imageRelativeOffset": "0xb8d54b8",
+      "captureLength": 16,
+      "sha256": "460c87504d2ce54c46f2dd93f7e976483e18a27a77f7d7dd6668c93b7a0a6cce"
+    },
+    {
+      "contractIndex": 17,
+      "className": "SDMemoryCache",
+      "classMethod": false,
+      "selector": "initWithConfig:",
+      "typeEncoding": "@24@0:8@16",
+      "imageRelativeOffset": "0xb8d4b3c",
+      "captureLength": 144,
+      "sha256": "b5cfb337ceeb66213dfe4e06848b2619c60f25ec7cf88884fc63512f5cfc9180"
+    },
+    {
+      "contractIndex": 18,
+      "className": "SDMemoryCache",
+      "classMethod": false,
+      "selector": "commonInit",
+      "typeEncoding": "v16@0:8",
+      "imageRelativeOffset": "0xb8d4bcc",
+      "captureLength": 460,
+      "sha256": "f4d856f39de912c9daf1d3ba9f0473b0eccd60280912dfe55ee70eedb9a3abca"
+    },
+    {
+      "contractIndex": 19,
+      "className": "SDDiskCache",
+      "classMethod": false,
+      "selector": "initWithCachePath:config:",
+      "typeEncoding": "@32@0:8@16@24",
+      "imageRelativeOffset": "0xb8c0c14",
+      "captureLength": 180,
+      "sha256": "436928c5145b515cba35a965a549cb7acf19e553d1a174596f656c8d9e3d0061"
+    },
+    {
+      "contractIndex": 20,
+      "className": "SDDiskCache",
+      "classMethod": false,
+      "selector": "commonInit",
+      "typeEncoding": "v16@0:8",
+      "imageRelativeOffset": "0xb8c0cc8",
+      "captureLength": 240,
+      "sha256": "9eaa49ebeeccc6950e68237fe4e537f282ab35dfc73e0f03d5286a65b309330b"
+    },
+    {
+      "contractIndex": 21,
+      "className": "SDDiskCache",
+      "classMethod": false,
+      "selector": "removeAllData",
+      "typeEncoding": "v16@0:8",
+      "imageRelativeOffset": "0xb8c13d0",
+      "captureLength": 236,
+      "sha256": "42d5e7baddc5302667b9fbb00c3a21dfb52372dfb86e971c3d463e3ccfb18d60"
+    },
+    {
+      "contractIndex": 22,
+      "className": "SDDiskCache",
+      "classMethod": false,
+      "selector": "cachePathForKey:",
+      "typeEncoding": "@24@0:8@16",
+      "imageRelativeOffset": "0xb8c1dbc",
+      "captureLength": 136,
+      "sha256": "dffd3ac6455b168913d79f7fd29e50970dfd46b4ddc39b1963df6a75bc00dd81"
+    },
+    {
+      "contractIndex": 23,
+      "className": "SDDiskCache",
+      "classMethod": false,
+      "selector": "cachePathForKey:inPath:",
+      "typeEncoding": "@32@0:8@16@24",
+      "imageRelativeOffset": "0xb8c214c",
+      "captureLength": 764,
+      "sha256": "5cc88ba2b04b32480c07da0e87d33384a12cedbe1e1db555ddba39d369701ba6"
+    },
+    {
+      "contractIndex": 24,
+      "className": "SDDiskCache",
+      "classMethod": false,
+      "selector": "setData:forKey:",
+      "typeEncoding": "v32@0:8@16@24",
+      "imageRelativeOffset": "0xb8c0fe8",
+      "captureLength": 592,
+      "sha256": "08b31021433a9bce9cd91554880d00d6208375156a6d2bff5b7e3c9e2c777082"
+    },
+    {
+      "contractIndex": 25,
+      "className": "SDDiskCache",
+      "classMethod": false,
+      "selector": "setExtendedData:forKey:",
+      "typeEncoding": "v32@0:8@16@24",
+      "imageRelativeOffset": "0xb8c12a8",
+      "captureLength": 184,
+      "sha256": "dbd16c652e4d63356bf381f82783483bcfb8368dabb99cf25aed6ba074a4c8b4"
+    },
+    {
+      "className": "SDFileAttributeHelper",
+      "classMethod": true,
+      "selector": "setExtendedAttribute:value:atPath:traverseLink:overwrite:error:",
+      "typeEncoding": "B56@0:8@16@24@32B40B44^@48",
+      "imageRelativeOffset": "0xb8c3640",
+      "captureLength": 804,
+      "sha256": "72a2c4acac456454750c4e761181ff10dd3b0a1282e9094e13df042ca8c8a362"
+    },
+    {
+      "className": "SDFileAttributeHelper",
+      "classMethod": true,
+      "selector": "removeExtendedAttribute:atPath:traverseLink:error:",
+      "typeEncoding": "B44@0:8@16@24B32^@36",
+      "imageRelativeOffset": "0xb8c3964",
+      "captureLength": 548,
+      "sha256": "6bb089d19281a78c011ad46dc8d9e70f72302b5ee1c030dad24c083d3c0a12c8"
+    }
+  ],
+  "upstreamBehaviorFixture": {
+    "repository": "https://github.com/SDWebImage/SDWebImage",
+    "revision": "a6b6e44eadf0d39250c10a7cc0e3b91d0bdb0e94",
+    "tag": "5.10.4"
+  },
+  "verifiedStaticSemantics": [
+    "Fixed serial queue and copied configuration",
+    "Standard backend and cache path contract",
+    "Helper declarations resolve through Mach-O imports to libSystem setxattr and removexattr",
+    "Caller passes error=NULL and ignores helper success; method completion is not resource success"
+  ],
+  "limitations": [
+    "The host SDK release version is unknown; 5.10.4 is only the pinned upstream test fixture",
+    "Byte windows are not globally proven complete function extents",
+    "Live dyld binding, actual owner admission and device resource operations are unverified",
+    "Deeper stack-guard mismatch handling is an unexpanded abnormal boundary",
+    "No raw binary fragments, device addresses, container paths or application data are included"
+  ]
+}

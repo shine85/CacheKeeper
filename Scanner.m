@@ -204,6 +204,7 @@ void CKInspectRequests(void) {
             @autoreleasepool {
                 NSDictionary *current=axs_cachekeeper_read_input(file,NULL);
                 BOOL cancelled=![current[@"token"] isEqual:token] || [current[@"cancel"] boolValue];
+                if (cancelled) [inspection cancel];
                 if (!cancelled) [inspection advance:256];
                 BOOL done=!inspection || inspection.complete || cancelled;
                 NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;

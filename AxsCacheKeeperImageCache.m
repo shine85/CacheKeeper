@@ -1,4 +1,5 @@
 #import "AxsCacheKeeperImageCache.h"
+#import "AxsCacheKeeperImageLegacySource.h"
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperCleanupRules.h"
 #import <objc/runtime.h>
@@ -18,32 +19,98 @@ static IMP axs_cachekeeper_image_data_original,axs_cachekeeper_image_extended_or
 static IMP axs_cachekeeper_image_remove_original;
 static Class axs_cachekeeper_image_class,axs_cachekeeper_disk_class,axs_cachekeeper_image_config_class,axs_cachekeeper_memory_class;
 static NSArray<NSDictionary *> *axs_cachekeeper_image_methods;
+static NSUInteger axs_cachekeeper_image_installation_failure_index;
+static AxsCacheKeeperImageContract axs_cachekeeper_image_contract;
+// Non-NULL only for the production fingerprint source captured at hook publication.
+static const void *axs_cachekeeper_image_legacy_base;
 
 static id AxsCacheKeeperImageGet(id object, const char *name) {
     return ((id (*)(id,SEL))objc_msgSend)(object,sel_registerName(name));
 }
-static BOOL AxsCacheKeeperImageMethod(Class cls, const char *selector, const char *result, NSArray<NSString *> *arguments, const void *image, NSMutableArray *methods) {
-    SEL sel=sel_registerName(selector);Method method=class_getInstanceMethod(cls,sel);
-    if (!method) return NO;
+typedef struct {
+    NSUInteger ownerIndex;
+    BOOL classMethod;
+    const char *selector;
+    const char *result;
+    NSUInteger argumentCount;
+    const char *arguments[3];
+} AxsCacheKeeperImageMethodSpec;
+// The receipt's methodIndex is one-based in this stable contract order.
+static const AxsCacheKeeperImageMethodSpec AxsCacheKeeperImageMethodSpecs[AxsCacheKeeperImageMethodCount]={
+    {0,NO,"initWithNamespace:diskCacheDirectory:config:","@",3,{"@","@","@"}},
+    {0,NO,"diskCache","@",0,{NULL,NULL,NULL}},
+    {0,NO,"diskCachePath","@",0,{NULL,NULL,NULL}},
+    {0,NO,"config","@",0,{NULL,NULL,NULL}},
+    {0,NO,"ioQueue","@",0,{NULL,NULL,NULL}},
+    {0,NO,"memoryCache","@",0,{NULL,NULL,NULL}},
+    {1,NO,"diskCachePath","@",0,{NULL,NULL,NULL}},
+    {1,NO,"config","@",0,{NULL,NULL,NULL}},
+    {1,NO,"fileManager","@",0,{NULL,NULL,NULL}},
+    {2,NO,"fileManager","@",0,{NULL,NULL,NULL}},
+    {2,NO,"ioQueueAttributes","@",0,{NULL,NULL,NULL}},
+    {2,NO,"diskCacheClass","#",0,{NULL,NULL,NULL}},
+    {2,NO,"memoryCacheClass","#",0,{NULL,NULL,NULL}},
+    {2,NO,"copyWithZone:","@",1,{@encode(NSZone *),NULL,NULL}},
+    {2,YES,"defaultCacheConfig","@",0,{NULL,NULL,NULL}},
+    {3,NO,"config","@",0,{NULL,NULL,NULL}},
+    {3,NO,"initWithConfig:","@",1,{"@",NULL,NULL}},
+    {3,NO,"commonInit","v",0,{NULL,NULL,NULL}},
+    {1,NO,"initWithCachePath:config:","@",2,{"@","@",NULL}},
+    {1,NO,"commonInit","v",0,{NULL,NULL,NULL}},
+    {1,NO,"removeAllData","v",0,{NULL,NULL,NULL}},
+    {1,NO,"cachePathForKey:","@",1,{"@",NULL,NULL}},
+    {1,NO,"cachePathForKey:inPath:","@",2,{"@","@",NULL}},
+    {1,NO,"setData:forKey:","v",2,{"@","@",NULL}},
+    {1,NO,"setExtendedData:forKey:","v",2,{"@","@",NULL}},
+};
+static NSString *AxsCacheKeeperImageMethodFailure(Class cls, const AxsCacheKeeperImageMethodSpec *spec, const void *image, NSMutableArray *methods) {
+    SEL sel=sel_registerName(spec->selector);Method method=class_getInstanceMethod(cls,sel);
+    if (!method) return @"missingMethod";
     // All admitted selectors are implemented by the exact SDK class, never an inherited method.
     unsigned count=0;Method *list=class_copyMethodList(cls,&count);BOOL own=NO;
     for (unsigned i=0;i<count;i++) if (method_getName(list[i])==sel) {own=YES;break;}
-    free(list);if (!own) return NO;
-    NSMethodSignature *signature=[NSMethodSignature signatureWithObjCTypes:method_getTypeEncoding(method)];
-    if (!signature || strcmp(signature.methodReturnType,result) || signature.numberOfArguments!=arguments.count+2) return NO;
-    for (NSUInteger i=0;i<arguments.count;i++) if (strcmp([signature getArgumentTypeAtIndex:i+2],arguments[i].UTF8String)) return NO;
+    free(list);if (!own) return @"inheritedMethod";
+    const char *encoding=method_getTypeEncoding(method);NSMethodSignature *signature=nil;
+    if (!encoding) return @"signature";
+    @try {signature=[NSMethodSignature signatureWithObjCTypes:encoding];}
+    @catch (NSException *exception) {(void)exception;return @"signature";}
+    if (!signature) return @"signature";
+    if (strcmp(signature.methodReturnType,spec->result)) return @"returnType";
+    if (signature.numberOfArguments!=spec->argumentCount+2) return @"argumentCount";
+    for (NSUInteger i=0;i<spec->argumentCount;i++)
+        if (strcmp([signature getArgumentTypeAtIndex:i+2],spec->arguments[i])) return @"argumentType";
     Dl_info info={0};IMP implementation=method_getImplementation(method);
-    if (!dladdr((const void *)implementation,&info) || info.dli_fbase!=image) return NO;
+    if (!dladdr((const void *)implementation,&info) || info.dli_fbase!=image) return @"methodImage";
     [methods addObject:@{@"class":cls,@"selector":NSStringFromSelector(sel),@"implementation":[NSValue valueWithPointer:(const void *)implementation]}];
-    return YES;
+    return nil;
+}
+static BOOL AxsCacheKeeperImageMethodsUnchangedAtIndex(NSUInteger *changedIndex) {
+    if (changedIndex) *changedIndex=0;
+    NSArray *methods;NSUInteger installationFailure;const void *legacyBase;
+    @synchronized(AxsCacheKeeperImageCache.class) {
+        methods=axs_cachekeeper_image_methods;installationFailure=axs_cachekeeper_image_installation_failure_index;
+        legacyBase=axs_cachekeeper_image_legacy_base;
+    }
+    // Restoring a wrapper cannot repair an unverified original already captured in its chain.
+    if (installationFailure) {if (changedIndex) *changedIndex=installationFailure;return NO;}
+    if (legacyBase && !AxsCacheKeeperImageLegacyHelpersMatch(legacyBase)) return NO;
+    for (NSUInteger index=0;index<methods.count;index++) {
+        NSDictionary *entry=methods[index];
+        if ([entry[@"absent"] boolValue]) {
+            if (class_getInstanceMethod(entry[@"class"],NSSelectorFromString(entry[@"selector"]))) {
+                if (changedIndex) *changedIndex=index+1;return NO;
+            }
+            continue;
+        }
+        IMP actual=class_getMethodImplementation(entry[@"class"],NSSelectorFromString(entry[@"selector"]));
+        if ((const void *)actual!=[entry[@"implementation"] pointerValue]) {
+            if (changedIndex) *changedIndex=index+1;return NO;
+        }
+    }
+    return methods.count==AxsCacheKeeperImageMethodCount;
 }
 static BOOL AxsCacheKeeperImageMethodsUnchanged(void) {
-    NSArray *methods;@synchronized(AxsCacheKeeperImageCache.class) {methods=axs_cachekeeper_image_methods;}
-    for (NSDictionary *entry in methods) {
-        IMP actual=class_getMethodImplementation(entry[@"class"],NSSelectorFromString(entry[@"selector"]));
-        if ((const void *)actual!=[entry[@"implementation"] pointerValue]) return NO;
-    }
-    return methods.count>0;
+    return AxsCacheKeeperImageMethodsUnchangedAtIndex(NULL);
 }
 static BOOL AxsCacheKeeperImageKnownUUID(const void *base) {
     const struct mach_header_64 *header=base;
@@ -61,6 +128,111 @@ static BOOL AxsCacheKeeperImageKnownUUID(const void *base) {
     }
     return NO;
 }
+static NSDictionary *AxsCacheKeeperImageDiscoveryCheck(NSUInteger mask, NSString *kind, NSString *source, NSString *stage, NSString *failure, NSUInteger methodIndex) {
+    return @{@"schemaVersion":@1,@"classMask":@(mask),@"imageKind":kind,@"source":source,
+        @"stage":stage,@"failure":failure,@"methodIndex":@(methodIndex)};
+}
+// Call under the SDK registry lock. The initializer hook belongs to this plugin; its saved
+// original identifies the SDK image even after hooks are installed or subsequently changed.
+static BOOL AxsCacheKeeperImageSourceInfo(Class image, Dl_info *info) {
+    Method initializer=class_getInstanceMethod(image,sel_registerName(AxsCacheKeeperImageMethodSpecs[0].selector));
+    if (!initializer) return NO;
+    IMP implementation=image==axs_cachekeeper_image_class && axs_cachekeeper_image_init_original ?
+        (IMP)axs_cachekeeper_image_init_original : method_getImplementation(initializer);
+    return dladdr((const void *)implementation,info) && info->dli_fbase;
+}
+static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pinnedTestContract, Class __unsafe_unretained classes[4], NSMutableArray **validatedMethods, AxsCacheKeeperImageContract *validatedContract, const void **validatedLegacyBase) {
+    if (validatedMethods) *validatedMethods=nil;
+    if (validatedContract) *validatedContract=AxsCacheKeeperImageContractUnknown;
+    if (validatedLegacyBase) *validatedLegacyBase=NULL;
+    classes[0]=NSClassFromString(@"SDImageCache");classes[1]=NSClassFromString(@"SDDiskCache");
+    classes[2]=NSClassFromString(@"SDImageCacheConfig");classes[3]=NSClassFromString(@"SDMemoryCache");
+    NSUInteger mask=0;for (NSUInteger i=0;i<4;i++) if (classes[i]) mask|=1u<<i;
+    Class image=classes[0];const char *imageName=image ? class_getImageName(image) : NULL;
+    NSString *kind=@"unknown";NSBundle *bundle=image ? [NSBundle bundleForClass:image] : nil;
+    if (imageName) {
+        const char *mainImage=_dyld_get_image_name(0);
+        kind=mainImage && !strcmp(imageName,mainImage) ? @"main" :
+            ([bundle.bundlePath.pathExtension isEqual:@"framework"] ? @"framework" : @"other");
+    }
+    if (mask!=15) return AxsCacheKeeperImageDiscoveryCheck(mask,kind,@"unknown",@"classes",@"missingClass",0);
+    for (NSUInteger i=0;i<4;i++) if (!class_getImageName(classes[i]))
+        return AxsCacheKeeperImageDiscoveryCheck(mask,kind,@"unknown",@"image",@"missingImage",0);
+    for (NSUInteger i=1;i<4;i++) if (strcmp(imageName,class_getImageName(classes[i])))
+        return AxsCacheKeeperImageDiscoveryCheck(mask,kind,@"unknown",@"image",@"mixedImages",0);
+    if (!class_getInstanceMethod(image,sel_registerName(AxsCacheKeeperImageMethodSpecs[0].selector)))
+        return AxsCacheKeeperImageDiscoveryCheck(mask,kind,@"unknown",@"image",@"missingInitializer",0);
+    Dl_info info={0};
+    if (!AxsCacheKeeperImageSourceInfo(image,&info))
+        return AxsCacheKeeperImageDiscoveryCheck(mask,kind,@"unknown",@"image",@"imageLookup",0);
+    NSString *version=bundle.infoDictionary[@"CFBundleShortVersionString"],*source=@"rejected";
+    AxsCacheKeeperImageContract contract=AxsCacheKeeperImageContractUnknown;
+    const void *sourceImplementations[AxsCacheKeeperImageMethodCount]={NULL};
+    BOOL framework=[bundle.bundlePath.pathExtension isEqual:@"framework"] && [bundle.bundlePath.lastPathComponent isEqual:@"SDWebImage.framework"];
+    if (framework && [@[@"5.15.5",@"5.21.7"] containsObject:version]) {source=@"frameworkVersion";contract=AxsCacheKeeperImageContractModern;}
+    else if (AxsCacheKeeperImageKnownUUID(info.dli_fbase)) {source=@"imageUUID";contract=AxsCacheKeeperImageContractModern;}
+    else {
+        for (NSUInteger index=0;index<AxsCacheKeeperImageMethodCount;index++) {
+            const AxsCacheKeeperImageMethodSpec *spec=&AxsCacheKeeperImageMethodSpecs[index];
+            Class cls=classes[spec->ownerIndex];if (spec->classMethod) cls=object_getClass(cls);
+            Method method=class_getInstanceMethod(cls,sel_registerName(spec->selector));
+            if (method) sourceImplementations[index]=(const void *)method_getImplementation(method);
+        }
+        if (image==axs_cachekeeper_image_class && axs_cachekeeper_image_init_original) {
+            sourceImplementations[0]=(const void *)axs_cachekeeper_image_init_original;
+            sourceImplementations[20]=(const void *)axs_cachekeeper_image_remove_original;
+            sourceImplementations[23]=(const void *)axs_cachekeeper_image_data_original;
+            sourceImplementations[24]=(const void *)axs_cachekeeper_image_extended_original;
+        }
+        if (AxsCacheKeeperImageLegacySourceMatches(info.dli_fbase,sourceImplementations)) {
+            source=@"imageFingerprint";contract=AxsCacheKeeperImageContractFixedSerialLegacy;
+        }
+    }
+#if AXS_CACHEKEEPER_IMAGE_TESTING
+    if (contract==AxsCacheKeeperImageContractUnknown &&
+        (pinnedTestContract==AxsCacheKeeperImageContractModern || pinnedTestContract==AxsCacheKeeperImageContractFixedSerialLegacy)) {
+        source=@"testPinned";contract=pinnedTestContract;
+    }
+#else
+    (void)pinnedTestContract;
+#endif
+    if ([source isEqual:@"rejected"]) {
+        if (axs_cachekeeper_image_legacy_base==info.dli_fbase && !AxsCacheKeeperImageLegacyHelpersMatch(info.dli_fbase))
+            return AxsCacheKeeperImageDiscoveryCheck(mask,kind,@"imageFingerprint",@"method",@"methodsChanged",0);
+        return AxsCacheKeeperImageDiscoveryCheck(mask,kind,source,@"source",@"unknownSource",0);
+    }
+    if (axs_cachekeeper_image_init_original) {
+        NSUInteger changedIndex=0;
+        if (contract!=axs_cachekeeper_image_contract || image!=axs_cachekeeper_image_class || classes[1]!=axs_cachekeeper_disk_class ||
+            classes[2]!=axs_cachekeeper_image_config_class || classes[3]!=axs_cachekeeper_memory_class ||
+            !AxsCacheKeeperImageMethodsUnchangedAtIndex(&changedIndex))
+            return AxsCacheKeeperImageDiscoveryCheck(mask,kind,source,@"method",@"methodsChanged",changedIndex);
+    } else {
+        NSMutableArray *methods=[NSMutableArray new];
+        for (NSUInteger index=0;index<AxsCacheKeeperImageMethodCount;index++) {
+            const AxsCacheKeeperImageMethodSpec *spec=&AxsCacheKeeperImageMethodSpecs[index];
+            Class cls=classes[spec->ownerIndex];if (spec->classMethod) cls=object_getClass(cls);
+            // Slot 11 stays in the contract: this source requires the API to be absent,
+            // not present with a nil value. Its initializer's serial queue is fingerprinted.
+            if (contract==AxsCacheKeeperImageContractFixedSerialLegacy && index==10) {
+                if (class_getInstanceMethod(cls,sel_registerName(spec->selector)))
+                    return AxsCacheKeeperImageDiscoveryCheck(mask,kind,source,@"method",@"unexpectedMethod",index+1);
+                [methods addObject:@{@"class":cls,@"selector":NSStringFromSelector(sel_registerName(spec->selector)),@"absent":@YES}];continue;
+            }
+            NSString *failure=AxsCacheKeeperImageMethodFailure(cls,spec,info.dli_fbase,methods);
+            if (failure) return AxsCacheKeeperImageDiscoveryCheck(mask,kind,source,@"method",failure,index+1);
+            // Bind the ABI record to the exact IMP that passed the fingerprint gate;
+            // do not learn a same-image swizzle between the two checks.
+            if ([source isEqual:@"imageFingerprint"] &&
+                [methods.lastObject[@"implementation"] pointerValue]!=sourceImplementations[index])
+                return AxsCacheKeeperImageDiscoveryCheck(mask,kind,source,@"method",@"methodsChanged",index+1);
+        }
+        if (validatedMethods) *validatedMethods=methods;
+    }
+    if (validatedContract) *validatedContract=contract;
+    if (validatedLegacyBase && [source isEqual:@"imageFingerprint"]) *validatedLegacyBase=info.dli_fbase;
+    return AxsCacheKeeperImageDiscoveryCheck(mask,kind,source,@"complete",@"none",0);
+}
 
 @interface AxsCacheKeeperImageBinding : NSObject
 @property(nonatomic,weak) id owner;
@@ -68,6 +240,7 @@ static BOOL AxsCacheKeeperImageKnownUUID(const void *base) {
 @property(nonatomic,weak) id config;
 @property(nonatomic,weak) id memory;
 @property(nonatomic,strong) id initialAttributes;
+@property(nonatomic) AxsCacheKeeperImageContract contract;
 @property(nonatomic,weak) id initialFileManager;
 @property(nonatomic,copy) NSString *initialReason;
 @property(nonatomic) BOOL rootRefreshAttempted;
@@ -102,12 +275,14 @@ static BOOL AxsCacheKeeperImageKnownUUID(const void *base) {
 @property(nonatomic) BOOL foreground;
 @property(nonatomic) BOOL hasTime;
 @property(atomic) BOOL supported;
-@property(nonatomic) BOOL pinnedTestSDK;
+@property(nonatomic) AxsCacheKeeperImageContract pinnedTestContract;
+@property(atomic,copy) NSDictionary *discoveryCheck;
+@property(nonatomic) BOOL discoveryRefreshPending;
 @property(atomic) BOOL capacityExceeded;
 @property(nonatomic) NSUInteger queued,submitted,completed,skipped;
 @property(nonatomic,copy) NSString *state;
 @property(nonatomic,copy) NSString *reason;
-- (void)axs_cachekeeper_observe:(id)owner sourceReason:(NSString *)sourceReason attributes:(id)attributes;
+- (void)axs_cachekeeper_observe:(id)owner sourceReason:(NSString *)sourceReason attributes:(id)attributes contract:(AxsCacheKeeperImageContract)contract;
 - (void)axs_cachekeeper_observeCreatedRoot:(AxsCacheKeeperImageBinding *)binding;
 - (void)axs_cachekeeper_publish;
 @end
@@ -126,9 +301,12 @@ static NSString *AxsCacheKeeperImageConfigurationReason(id config) {
     if ([AxsCacheKeeperImageConfigKind(config) isEqual:@"unsupported"]) return @"configurationClass";
     if (!AxsCacheKeeperImageMethodsUnchanged()) return @"sdkMethodsChanged";
     NSArray *methods;@synchronized(AxsCacheKeeperImageCache.class) {methods=axs_cachekeeper_image_methods;}
-    for (NSDictionary *entry in methods) if (entry[@"class"]==axs_cachekeeper_image_config_class &&
-        (const void *)class_getMethodImplementation(object_getClass(config),NSSelectorFromString(entry[@"selector"]))!=[entry[@"implementation"] pointerValue])
-        return @"configurationGetter";
+    for (NSDictionary *entry in methods) if (entry[@"class"]==axs_cachekeeper_image_config_class) {
+        if ([entry[@"absent"] boolValue]) {
+            if (class_getInstanceMethod(object_getClass(config),NSSelectorFromString(entry[@"selector"]))) return @"configurationGetter";
+        } else if ((const void *)class_getMethodImplementation(object_getClass(config),NSSelectorFromString(entry[@"selector"]))!=[entry[@"implementation"] pointerValue])
+            return @"configurationGetter";
+    }
     return nil;
 }
 static NSString *AxsCacheKeeperImageStructureReason(id owner,id disk,id config) {
@@ -158,8 +336,10 @@ static NSString *AxsCacheKeeperImageInstanceReason(AxsCacheKeeperImageBinding *b
     if (![AxsCacheKeeperImageGet(owner,"diskCachePath") isEqual:binding.path] ||
         ![AxsCacheKeeperImageGet(disk,"diskCachePath") isEqual:binding.path]) return @"pathValueChanged";
     if (AxsCacheKeeperImageGet(disk,"fileManager")!=binding.initialFileManager) return @"fileManagerIdentity";
-    id attr=AxsCacheKeeperImageGet(config,"ioQueueAttributes");
-    if (attr!=binding.initialAttributes || !AxsCacheKeeperImageSerialAttributes(attr)) return @"queueAttributesChanged";
+    if (binding.contract==AxsCacheKeeperImageContractModern) {
+        id attr=AxsCacheKeeperImageGet(config,"ioQueueAttributes");
+        if (attr!=binding.initialAttributes || !AxsCacheKeeperImageSerialAttributes(attr)) return @"queueAttributesChanged";
+    } else if (binding.contract!=AxsCacheKeeperImageContractFixedSerialLegacy) return @"sdkMethodsChanged";
     return nil;
 }
 static BOOL AxsCacheKeeperImageInstanceUnchanged(AxsCacheKeeperImageBinding *binding) {
@@ -187,20 +367,22 @@ static void AxsCacheKeeperImageSetExtendedData(id disk,SEL selector,id data,id k
 static id AxsCacheKeeperImageInit(id object __attribute__((ns_consumed)),SEL selector,id space,id directory,id config) __attribute__((ns_returns_retained));
 static id AxsCacheKeeperImageInit(id object __attribute__((ns_consumed)),SEL selector,id space,id directory,id config) {
     __typeof__(axs_cachekeeper_image_init_original) original;
-    @synchronized(AxsCacheKeeperImageCache.class) {original=axs_cachekeeper_image_init_original;}
+    AxsCacheKeeperImageContract contract;
+    @synchronized(AxsCacheKeeperImageCache.class) {original=axs_cachekeeper_image_init_original;contract=axs_cachekeeper_image_contract;}
     // Capture before the SDK constructs its queue or invokes configurable initializers.
     // A custom backend cannot become trusted by changing the copied config before returning.
     id source=config ?: ((id (*)(id,SEL))objc_msgSend)(axs_cachekeeper_image_config_class,sel_registerName("defaultCacheConfig"));
     NSString *reason=AxsCacheKeeperImageConfigurationReason(source);id attributes=nil;
     if (!reason) {
-        attributes=AxsCacheKeeperImageGet(source,"ioQueueAttributes");
+        if (contract==AxsCacheKeeperImageContractModern) attributes=AxsCacheKeeperImageGet(source,"ioQueueAttributes");
         if (((Class (*)(id,SEL))objc_msgSend)(source,sel_registerName("memoryCacheClass"))!=axs_cachekeeper_memory_class) reason=@"memoryBackend";
         else if (((Class (*)(id,SEL))objc_msgSend)(source,sel_registerName("diskCacheClass"))!=axs_cachekeeper_disk_class) reason=@"diskBackend";
         else if (AxsCacheKeeperImageGet(source,"fileManager")) reason=@"customFileManager";
-        else if (!AxsCacheKeeperImageSerialAttributes(attributes)) reason=@"initialQueueAttributes";
+        else if (contract==AxsCacheKeeperImageContractModern && !AxsCacheKeeperImageSerialAttributes(attributes)) reason=@"initialQueueAttributes";
+        else if (contract==AxsCacheKeeperImageContractUnknown) reason=@"sdkMethodsChanged";
     }
     id owner=original(object,selector,space,directory,config);
-    [axs_cachekeeper_image_observer axs_cachekeeper_observe:owner sourceReason:reason attributes:attributes];return owner;
+    [axs_cachekeeper_image_observer axs_cachekeeper_observe:owner sourceReason:reason attributes:attributes contract:contract];return owner;
 }
 
 // Resolves only the system-provided home alias. Every component below that root is opened
@@ -309,70 +491,97 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
         _provider=[provider copy];_bindings=[NSMutableArray new];
         _work=dispatch_queue_create("dev.local.cachekeeper.images",DISPATCH_QUEUE_SERIAL);
         _state=@"notObserved";_reason=@"none";_foreground=YES;
+        _discoveryCheck=AxsCacheKeeperImageDiscoveryCheck(0,@"unknown",@"unknown",@"notChecked",@"none",0);
         [self axs_cachekeeper_publish];
         _observer=[observer copy];
     }return self;
 }
 #if AXS_CACHEKEEPER_IMAGE_TESTING
-- (void)usePinnedSDKForIntegrationTests { self.pinnedTestSDK=YES; }
+- (void)usePinnedSDKForIntegrationTests { self.pinnedTestContract=AxsCacheKeeperImageContractModern; }
+- (void)usePinnedLegacySDKForIntegrationTests { self.pinnedTestContract=AxsCacheKeeperImageContractFixedSerialLegacy; }
 - (NSDictionary *)instanceDiagnosticsForIntegrationTests:(id)owner {
     for (AxsCacheKeeperImageBinding *binding in [self axs_cachekeeper_bindings]) if (binding.owner==owner)
         return @{@"initialReason":binding.initialReason ?: @"none",@"currentReason":AxsCacheKeeperImageInstanceReason(binding) ?: @"none",
             @"configKind":AxsCacheKeeperImageConfigKind(binding.config)};
     return @{@"initialReason":@"notObserved",@"currentReason":@"notObserved",@"configKind":@"unsupported"};
 }
+- (NSDictionary *)discoveryDiagnosticsForIntegrationTests {
+    @synchronized(AxsCacheKeeperImageCache.class) {
+        Class __unsafe_unretained classes[4]={Nil,Nil,Nil,Nil};
+        return AxsCacheKeeperImageDiscover(self.pinnedTestContract,classes,NULL,NULL,NULL);
+    }
+}
+- (NSDictionary *)methodDiagnosticsForIntegrationTests:(NSUInteger)index ownerClass:(Class)ownerClass {
+    if (!index || index>AxsCacheKeeperImageMethodCount || !ownerClass) return nil;
+    @synchronized(AxsCacheKeeperImageCache.class) {
+        const AxsCacheKeeperImageMethodSpec *spec=&AxsCacheKeeperImageMethodSpecs[index-1];
+        Class cls=spec->classMethod ? object_getClass(ownerClass) : ownerClass;
+        Dl_info info={0};
+        if (!AxsCacheKeeperImageSourceInfo(NSClassFromString(@"SDImageCache"),&info))
+            return @{@"methodIndex":@(index),@"failure":@"imageLookup"};
+        NSString *failure=AxsCacheKeeperImageMethodFailure(cls,spec,info.dli_fbase,nil);
+        return @{@"methodIndex":@(index),@"failure":failure ?: @"none"};
+    }
+}
 #endif
 - (void)startObserving {
     @synchronized(AxsCacheKeeperImageCache.class) {
-        if (axs_cachekeeper_image_init_original) {
-            self.supported=AxsCacheKeeperImageMethodsUnchanged();axs_cachekeeper_image_observer=self;return;
-        }
-        Class image=NSClassFromString(@"SDImageCache"),disk=NSClassFromString(@"SDDiskCache"),config=NSClassFromString(@"SDImageCacheConfig"),memory=NSClassFromString(@"SDMemoryCache");
-        const char *imageName=image ? class_getImageName(image) : NULL;
-        Dl_info imageInfo={0};Method initializer=image ? class_getInstanceMethod(image,sel_registerName("initWithNamespace:diskCacheDirectory:config:")) : NULL;
-        if (!imageName || !disk || !config || !memory || !initializer ||
-            strcmp(imageName,class_getImageName(disk) ?: "") || strcmp(imageName,class_getImageName(config) ?: "") || strcmp(imageName,class_getImageName(memory) ?: "") ||
-            !dladdr((const void *)method_getImplementation(initializer),&imageInfo)) return;
-        NSBundle *bundle=[NSBundle bundleForClass:image];NSString *version=bundle.infoDictionary[@"CFBundleShortVersionString"];
-        BOOL framework=[bundle.bundlePath.pathExtension isEqual:@"framework"] && [bundle.bundlePath.lastPathComponent isEqual:@"SDWebImage.framework"];
-        BOOL known=(framework && [@[@"5.15.5",@"5.21.7"] containsObject:version]) || AxsCacheKeeperImageKnownUUID(imageInfo.dli_fbase);
-#if AXS_CACHEKEEPER_IMAGE_TESTING
-        known=known || self.pinnedTestSDK;
-#endif
-        if (!known) return;
-        NSMutableArray *methods=[NSMutableArray new];
-        if (!AxsCacheKeeperImageMethod(image,"initWithNamespace:diskCacheDirectory:config:","@",@[@"@",@"@",@"@"],imageInfo.dli_fbase,methods)) return;
-        for (NSString *name in @[@"diskCache",@"diskCachePath",@"config",@"ioQueue",@"memoryCache"])
-            if (!AxsCacheKeeperImageMethod(image,name.UTF8String,"@",@[],imageInfo.dli_fbase,methods)) return;
-        for (NSString *name in @[@"diskCachePath",@"config",@"fileManager"])
-            if (!AxsCacheKeeperImageMethod(disk,name.UTF8String,"@",@[],imageInfo.dli_fbase,methods)) return;
-        for (NSString *name in @[@"fileManager",@"ioQueueAttributes"])
-            if (!AxsCacheKeeperImageMethod(config,name.UTF8String,"@",@[],imageInfo.dli_fbase,methods)) return;
-        if (!AxsCacheKeeperImageMethod(config,"diskCacheClass","#",@[],imageInfo.dli_fbase,methods) ||
-            !AxsCacheKeeperImageMethod(config,"memoryCacheClass","#",@[],imageInfo.dli_fbase,methods) ||
-            !AxsCacheKeeperImageMethod(config,"copyWithZone:","@",@[[NSString stringWithUTF8String:@encode(NSZone *)]],imageInfo.dli_fbase,methods) ||
-            !AxsCacheKeeperImageMethod(object_getClass(config),"defaultCacheConfig","@",@[],imageInfo.dli_fbase,methods) ||
-            !AxsCacheKeeperImageMethod(memory,"config","@",@[],imageInfo.dli_fbase,methods) ||
-            !AxsCacheKeeperImageMethod(memory,"initWithConfig:","@",@[@"@"],imageInfo.dli_fbase,methods) ||
-            !AxsCacheKeeperImageMethod(memory,"commonInit","v",@[],imageInfo.dli_fbase,methods) ||
-            !AxsCacheKeeperImageMethod(disk,"initWithCachePath:config:","@",@[@"@",@"@"],imageInfo.dli_fbase,methods) ||
-            !AxsCacheKeeperImageMethod(disk,"commonInit","v",@[],imageInfo.dli_fbase,methods) ||
-            !AxsCacheKeeperImageMethod(disk,"removeAllData","v",@[],imageInfo.dli_fbase,methods) ||
-            !AxsCacheKeeperImageMethod(disk,"cachePathForKey:","@",@[@"@"],imageInfo.dli_fbase,methods) ||
-            !AxsCacheKeeperImageMethod(disk,"cachePathForKey:inPath:","@",@[@"@",@"@"],imageInfo.dli_fbase,methods) ||
-            !AxsCacheKeeperImageMethod(disk,"setData:forKey:","v",@[@"@",@"@"],imageInfo.dli_fbase,methods) ||
-            !AxsCacheKeeperImageMethod(disk,"setExtendedData:forKey:","v",@[@"@",@"@"],imageInfo.dli_fbase,methods)) return;
-        axs_cachekeeper_image_class=image;axs_cachekeeper_disk_class=disk;axs_cachekeeper_image_config_class=config;axs_cachekeeper_memory_class=memory;
+        Class __unsafe_unretained classes[4]={Nil,Nil,Nil,Nil};NSMutableArray *methods=nil;
+        AxsCacheKeeperImageContract contract=AxsCacheKeeperImageContractUnknown;const void *legacyBase=NULL;
+        self.discoveryCheck=AxsCacheKeeperImageDiscover(self.pinnedTestContract,classes,&methods,&contract,&legacyBase);
+        self.supported=[self.discoveryCheck[@"stage"] isEqual:@"complete"];
+        if (!self.supported) return;
+        if (axs_cachekeeper_image_init_original) {axs_cachekeeper_image_observer=self;return;}
+        Class image=classes[0],disk=classes[1];
+        Method initializer=class_getInstanceMethod(image,sel_registerName(AxsCacheKeeperImageMethodSpecs[0].selector));
+        axs_cachekeeper_image_class=image;axs_cachekeeper_disk_class=disk;axs_cachekeeper_image_config_class=classes[2];axs_cachekeeper_memory_class=classes[3];
+        axs_cachekeeper_image_contract=contract;
+        axs_cachekeeper_image_legacy_base=legacyBase;
         axs_cachekeeper_image_init_original=(__typeof__(axs_cachekeeper_image_init_original))method_setImplementation(initializer,(IMP)AxsCacheKeeperImageInit);
         axs_cachekeeper_image_data_original=method_setImplementation(class_getInstanceMethod(disk,sel_registerName("setData:forKey:")),(IMP)AxsCacheKeeperImageSetData);
         axs_cachekeeper_image_extended_original=method_setImplementation(class_getInstanceMethod(disk,sel_registerName("setExtendedData:forKey:")),(IMP)AxsCacheKeeperImageSetExtendedData);
         axs_cachekeeper_image_remove_original=method_setImplementation(class_getInstanceMethod(disk,sel_registerName("removeAllData")),(IMP)AxsCacheKeeperImageRemoveAll);
         NSMutableArray *installed=[NSMutableArray new];
-        for (NSDictionary *entry in methods) {
-            NSMutableDictionary *record=[entry mutableCopy];record[@"implementation"]=[NSValue valueWithPointer:(const void *)class_getMethodImplementation(entry[@"class"],NSSelectorFromString(entry[@"selector"]))];[installed addObject:record];
+        for (NSUInteger index=0;index<methods.count;index++) {
+            NSDictionary *entry=methods[index];NSMutableDictionary *record=[entry mutableCopy];
+            Class cls=entry[@"class"];NSString *selector=entry[@"selector"];IMP replacement=NULL,original=NULL;
+            if (cls==image && [selector isEqual:@"initWithNamespace:diskCacheDirectory:config:"]) {
+                replacement=(IMP)AxsCacheKeeperImageInit;original=(IMP)axs_cachekeeper_image_init_original;
+            } else if (cls==disk && [selector isEqual:@"setData:forKey:"]) {
+                replacement=(IMP)AxsCacheKeeperImageSetData;original=axs_cachekeeper_image_data_original;
+            } else if (cls==disk && [selector isEqual:@"setExtendedData:forKey:"]) {
+                replacement=(IMP)AxsCacheKeeperImageSetExtendedData;original=axs_cachekeeper_image_extended_original;
+            } else if (cls==disk && [selector isEqual:@"removeAllData"]) {
+                replacement=(IMP)AxsCacheKeeperImageRemoveAll;original=axs_cachekeeper_image_remove_original;
+            }
+            // Preserve the admitted IMPs. Only our four known wrappers may replace them;
+            // a concurrent swizzle must never become the next trusted baseline.
+            if (replacement) {
+                if ((const void *)original!=[entry[@"implementation"] pointerValue] && !axs_cachekeeper_image_installation_failure_index)
+                    axs_cachekeeper_image_installation_failure_index=index+1;
+                record[@"implementation"]=[NSValue valueWithPointer:(const void *)replacement];
+            }
+            [installed addObject:record];
         }
-        axs_cachekeeper_image_methods=installed;axs_cachekeeper_image_observer=self;self.supported=YES;
+        axs_cachekeeper_image_methods=installed;axs_cachekeeper_image_observer=self;
+        self.discoveryCheck=AxsCacheKeeperImageDiscover(self.pinnedTestContract,classes,NULL,NULL,NULL);
+        self.supported=[self.discoveryCheck[@"stage"] isEqual:@"complete"];
     }
+}
+- (void)requestDiscoveryRefresh {
+    @synchronized(self) {
+        if (self.discoveryRefreshPending) return;
+        self.discoveryRefreshPending=YES;
+    }
+    dispatch_async(self.work,^{
+        @synchronized(self) {self.discoveryRefreshPending=NO;}
+        NSDictionary *before=self.discoveryCheck;
+        [self startObserving];
+        if ([before isEqual:self.discoveryCheck]) return;
+        // Loader noise needs no installation or filesystem read. A changed contract revokes
+        // queued authorization before refreshing policy and publishing the new diagnosis.
+        [self axs_cachekeeper_cancel];[self axs_cachekeeper_refresh];
+    });
 }
 - (NSArray<AxsCacheKeeperImageBinding *> *)axs_cachekeeper_bindings {
     @synchronized(self) {return [self.bindings copy];}
@@ -380,11 +589,11 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
 - (void)axs_cachekeeper_cancel {
     @synchronized(self) {self.generation++;for (AxsCacheKeeperImageBinding *binding in self.bindings) binding.restricted=NO;}
 }
-- (void)axs_cachekeeper_observe:(id)owner sourceReason:(NSString *)sourceReason attributes:(id)attributes {
+- (void)axs_cachekeeper_observe:(id)owner sourceReason:(NSString *)sourceReason attributes:(id)attributes contract:(AxsCacheKeeperImageContract)contract {
     if (!owner || self.capacityExceeded || object_getClass(owner)!=axs_cachekeeper_image_class || !AxsCacheKeeperImageMethodsUnchanged()) return;
     id disk=AxsCacheKeeperImageGet(owner,"diskCache"),config=AxsCacheKeeperImageGet(owner,"config");
     if (!disk || !config) return;
-    AxsCacheKeeperImageBinding *binding=[AxsCacheKeeperImageBinding new];binding.owner=owner;binding.disk=disk;binding.config=config;
+    AxsCacheKeeperImageBinding *binding=[AxsCacheKeeperImageBinding new];binding.owner=owner;binding.disk=disk;binding.config=config;binding.contract=contract;
     binding.queue=AxsCacheKeeperImageGet(owner,"ioQueue");binding.path=[AxsCacheKeeperImageGet(owner,"diskCachePath") copy];binding.engine=self;
     if (!binding.queue || !binding.path.length) return;
     binding.initialReason=sourceReason ?: AxsCacheKeeperImageStructureReason(owner,disk,config);
@@ -392,7 +601,8 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
         binding.memory=AxsCacheKeeperImageGet(owner,"memoryCache");
         binding.initialAttributes=attributes;
         binding.initialFileManager=AxsCacheKeeperImageGet(disk,"fileManager");
-        if (AxsCacheKeeperImageGet(config,"ioQueueAttributes")!=attributes) binding.initialReason=@"queueAttributesChanged";
+        if (contract==AxsCacheKeeperImageContractModern && AxsCacheKeeperImageGet(config,"ioQueueAttributes")!=attributes)
+            binding.initialReason=@"queueAttributesChanged";
     }
     if (!binding.initialReason)
         dispatch_queue_set_specific(binding.queue,AxsCacheKeeperImageQueueKey,(__bridge void *)binding,NULL);
@@ -563,7 +773,12 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
         receipt=@{@"schemaVersion":@1,@"sdk":@"SDWebImage",@"state":state ?: @"notObserved",@"reason":self.reason ?: @"none",
             @"observed":@(observed),@"eligible":@(eligible),@"restricted":@(restricted),@"writesBlocked":@(writes),
             @"queued":@(self.queued),@"submitted":@(self.submitted),@"apiCompleted":@(self.completed),@"skipped":@(self.skipped),
-            @"pending":@(pending),@"updated":NSDate.date,@"bytesState":@"notMeasured"};
+            @"pending":@(pending),@"updated":NSDate.date,@"bytesState":@"notMeasured",@"discoveryCheck":self.discoveryCheck};
+        if (self.context[@"installationCheck"]) {
+            NSMutableDictionary *record=[receipt mutableCopy];
+            record[@"installationCheck"]=axs_cachekeeper_installation_check_projection(self.context[@"installationCheck"]) ?: @{@"state":@"invalid",@"errorCode":@0};
+            receipt=record;
+        }
         self.lastReceipt=receipt;
     }
     if (self.observer) self.observer(receipt);

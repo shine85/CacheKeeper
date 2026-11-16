@@ -5,6 +5,10 @@ THEOS_PLATFORM_DEB_COMPRESSION_TYPE = gzip
 FINALPACKAGE = 1
 DEBUG = 0
 include $(THEOS)/makefiles/common.mk
+AXS_CACHEKEEPER_PACKAGE_VERSION := $(shell python3 scripts/package_version.py)
+ifeq ($(strip $(AXS_CACHEKEEPER_PACKAGE_VERSION)),)
+$(error Unable to read a valid package version from control)
+endif
 BUNDLE_NAME = CacheKeeperPrefs
 CacheKeeperPrefs_FILES = Prefs/Settings.m Prefs/SearchInput.m Prefs/ScanPage.m Prefs/InspectionPage.m Prefs/DiagnosticsPage.m AxsCacheKeeperDiagnostics.m AxsCacheKeeperAppList.m AxsCacheKeeperInstallation.m AxsCacheKeeperDiagnosticChannel.m
 CacheKeeperPrefs_FILES += Prefs/SearchDiagnostics.m
@@ -21,6 +25,7 @@ include $(THEOS_MAKE_PATH)/bundle.mk
 TWEAK_NAME = CacheKeeper
 CacheKeeper_FILES = Cleaner.m Desktop.xm Permissions.m Scanner.m Baseline.m AxsCacheKeeperNetworkCache.m AxsCacheKeeperDirectories.m AxsCacheKeeperInspection.m AxsCacheKeeperProcessObservation.m AxsCacheKeeperCleanupJob.m AxsCacheKeeperCleanupRules.m AxsCacheKeeperReceipts.m AxsCacheKeeperCleanupSchedule.m
 CacheKeeper_CFLAGS = -fobjc-arc -IVendor -DAXS_CACHEKEEPER_PDF_SERVER=1
+CacheKeeper_CFLAGS += -DAXS_CACHEKEEPER_PACKAGE_VERSION=\"$(AXS_CACHEKEEPER_PACKAGE_VERSION)\"
 CacheKeeper_FILES += AxsCacheKeeperPDFInspection.m AxsCacheKeeperPDFSession.m
 CacheKeeper_FILES += AxsCacheKeeperDependencySnapshot.m AxsCacheKeeperInstallation.m AxsCacheKeeperDiagnosticChannel.m
 CacheKeeper_FILES += AxsCacheKeeperWebKitCache.m AxsCacheKeeperWebKitObservation.m AxsCacheKeeperWebKitRuntime.xm

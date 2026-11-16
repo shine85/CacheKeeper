@@ -1581,8 +1581,8 @@ int main(int argc, const char *argv[]) {
         } @finally { inspectionRestored=chmod(deniedInspectionFile.fileSystemRepresentation,inspectionMode.st_mode&07777); }
         require(inspectionRestored==0 && [deniedInspectionReport[@"failures"] isEqual:@1] &&
             ![deniedInspectionReport[@"coverageComplete"] boolValue] &&
-            [deniedInspectionReport[@"inspectionReadFailure"] isEqual:@{@"state":@"notRecorded"}],
-            @"未细分文件头错误显式notRecorded，不从残留errno伪造可信阶段");
+            [deniedInspectionReport[@"inspectionReadFailure"] isEqual:@{@"stage":@"openFile",@"errorDomain":@"posix",@"errorCode":@(EACCES)}],
+            @"文件头打开失败保留即时openFile和EACCES，不使用残留errno");
 
         NSString *inspectionRoot=[fixture stringByAppendingPathComponent:@"inspection"];
         require([fm createDirectoryAtPath:inspectionRoot withIntermediateDirectories:YES attributes:nil error:nil], @"建立深度检测目录");

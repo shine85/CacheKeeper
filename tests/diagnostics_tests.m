@@ -22,6 +22,84 @@ static NSDictionary *dxfiles(NSString *folder) {
     }
     return files;
 }
+static void dxruntime_receipts(Class cls,NSString *fixture) {
+    NSString *folder=[fixture stringByAppendingPathComponent:@"diagnostics-runtime-receipts"];
+    dxcheck([NSFileManager.defaultManager createDirectoryAtPath:[folder stringByAppendingPathComponent:@"Status"] withIntermediateDirectories:YES attributes:nil error:nil],@"创建运行回执导出夹具");
+    dxwrite(folder,@"appEnabled.plist",@{@"test.runtime":@YES});
+    AxsCacheKeeperDiagnostics *session=[[cls alloc] initWithFolder:folder];
+    NSDictionary *environment=@{@"pluginVersion":@"0.7.2-999.1"};
+    NSDictionary *runtime=@{@"schemaVersion":@1,@"packageVersion":@"0.7.2-154.1",@"firstObserved":@90.25};
+    NSDictionary *discovery=@{@"schemaVersion":@1,@"stage":@"method",@"classMask":@15,@"imageKind":@"main",
+        @"source":@"imageUUID",@"methodIndex":@25,@"failure":@"argumentType"};
+    NSDictionary *web=@{@"schemaVersion":@1,@"requested":@YES,@"timedOut":@NO,@"state":@"blocked",@"reason":@"installationUnverified",
+        @"persistentStores":@1,@"nonPersistentStores":@0,@"submitted":@0,@"completed":@0,@"pending":@0,
+        @"updated":[NSDate dateWithTimeIntervalSince1970:100],@"bytesState":@"notMeasured"};
+    NSDictionary *image=@{@"schemaVersion":@1,@"sdk":@"SDWebImage",@"state":@"unsupported",@"reason":@"unsupportedSDK",
+        @"observed":@0,@"eligible":@0,@"restricted":@0,@"writesBlocked":@0,@"queued":@0,@"submitted":@0,
+        @"apiCompleted":@0,@"skipped":@0,@"pending":@0,@"updated":[NSDate dateWithTimeIntervalSince1970:120],@"bytesState":@"notMeasured"};
+    NSArray *resamples=@[
+        @{@"fdErrno":@0,@"pathErrno":@0,@"fdDifferenceMask":@0,@"pathDifferenceMask":@4,@"pathFDDifferenceMask":@0},
+        @{@"fdErrno":@5,@"pathErrno":@0,@"pathDifferenceMask":@4},
+        @{@"fdErrno":@0,@"pathErrno":@2,@"fdDifferenceMask":@0},
+        @{@"fdErrno":@5,@"pathErrno":@2}];
+    // Removing new fields from either production projection/export must fail these saved-file fixtures.
+    // Expected values come from the literal contract, never from a projection helper.
+    for (NSArray *source in @[@[@"webkit",@"webKitDiskCache",web,@100],@[@"imagecache",@"imageDiskCache",image,@120]]) {
+        NSString *file=[NSString stringWithFormat:@"Status/test.runtime.%@.plist",source[0]],*exportKey=source[1];
+        BOOL isImage=[exportKey isEqual:@"imageDiskCache"];
+        NSMutableDictionary *record=[source[2] mutableCopy];record[@"runtimeInfo"]=runtime;
+        if (isImage) record[@"discoveryCheck"]=discovery;
+        for (NSDictionary *resample in resamples) {
+            NSDictionary *check=@{@"state":@"failed",@"errorCode":@2,@"detail":@{@"target":@"root",@"operation":@"openIdentity",@"errno":@0,
+                @"identity":@{@"schemaVersion":@1,@"comparison":@"pathToFD",@"differenceMask":@4,@"resample":resample}}};
+            record[@"installationCheck"]=check;
+            dxwrite(folder,file,record);
+            NSDictionary *before=dxfiles(folder),*report=[session reportWithApps:@[] environment:environment];
+            NSMutableDictionary *expected=[record mutableCopy];expected[@"updated"]=source[3];
+            NSDictionary *exported=dxapp(report,@"test.runtime")[exportKey];
+            dxcheck([exported isEqual:@{@"state":@"available",@"data":expected}],
+                @"新运行回执通过真实导出保留身份差异、各补采结果和代码来源，不被面板版本覆盖");
+            NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:nil];
+            NSDictionary *decoded=json ? [NSJSONSerialization JSONObjectWithData:json options:0 error:nil] : nil;
+            dxcheck([dxapp(decoded,@"test.runtime")[exportKey] isEqual:exported],@"运行回执的固定投影完整进入最终 JSON");
+            dxcheck([before isEqual:dxfiles(folder)],@"导出新增运行证据不改写已有回执或配置");
+        }
+        NSArray *paths=@[@[],@[@"runtimeInfo"],@[@"installationCheck"],@[@"installationCheck",@"detail"],
+            @[@"installationCheck",@"detail",@"identity"],@[@"installationCheck",@"detail",@"identity",@"resample"]];
+        if (isImage) paths=[paths arrayByAddingObject:@[@"discoveryCheck"]];
+        for (NSArray *path in paths) {
+            NSMutableDictionary *invalid=[record mutableCopy],*leaf=invalid;
+            for (NSString *key in path) {
+                NSMutableDictionary *child=[leaf[key] mutableCopy];leaf[key]=child;leaf=child;
+            }
+            leaf[@"privatePath"]=@"private-runtime-export-canary";
+            dxwrite(folder,file,invalid);
+            NSDictionary *report=[session reportWithApps:@[] environment:environment];
+            NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:nil];
+            NSString *text=json ? [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] : nil;
+            dxcheck([dxapp(report,@"test.runtime")[exportKey] isEqual:@{@"state":@"invalid"}] && text &&
+                ![text containsString:@"private-runtime-export-canary"],@"任一新增回执层级混入私密额外字段均拒绝整个来源且不泄漏 JSON");
+        }
+        for (NSString *key in isImage ? @[@"runtimeInfo",@"installationCheck",@"discoveryCheck"] : @[@"runtimeInfo",@"installationCheck"]) {
+            NSMutableDictionary *invalid=[record mutableCopy];invalid[key]=@"private-runtime-export-canary";
+            dxwrite(folder,file,invalid);
+            NSDictionary *report=[session reportWithApps:@[] environment:environment];
+            NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:nil];
+            NSString *text=json ? [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] : nil;
+            dxcheck([dxapp(report,@"test.runtime")[exportKey] isEqual:@{@"state":@"invalid"}] && text &&
+                ![text containsString:@"private-runtime-export-canary"],@"新增证据坏容器不得静默降级为有效旧回执或泄漏原始文本");
+        }
+        NSDictionary *oldCheck=@{@"state":@"failed",@"errorCode":@2,@"detail":@{@"target":@"root",@"operation":@"openIdentity",@"errno":@0}};
+        NSMutableDictionary *legacy=[source[2] mutableCopy];legacy[@"installationCheck"]=oldCheck;
+        dxwrite(folder,file,legacy);
+        NSMutableDictionary *expected=[legacy mutableCopy];expected[@"updated"]=source[3];
+        dxcheck([dxapp([session reportWithApps:@[] environment:environment],@"test.runtime")[exportKey] isEqual:@{@"state":@"available",@"data":expected}],
+            @"旧安装失败详情完整可读且不补造 identity、补采、构建来源或 SDK 发现");
+        dxwrite(folder,file,source[2]);expected=[source[2] mutableCopy];expected[@"updated"]=source[3];
+        dxcheck([dxapp([session reportWithApps:@[] environment:environment],@"test.runtime")[exportKey] isEqual:@{@"state":@"available",@"data":expected}],
+            @"同一会话重读旧回执不沿用新证据，不补造安装检查、构建来源或 SDK 发现");
+    }
+}
 static void dxinventory(Class cls,NSString *fixture) {
     NSString *folder=[fixture stringByAppendingPathComponent:@"diagnostics-install-union"];
     dxcheck([NSFileManager.defaultManager createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:nil],@"创建安装集合夹具");
@@ -119,6 +197,7 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     Class cls=NSClassFromString(@"AxsCacheKeeperDiagnostics");
     dxcheck(cls!=Nil,@"应提供可调用的诊断采集实现");
     dxinventory(cls,fixture);
+    dxruntime_receipts(cls,fixture);
     NSString *folder=[fixture stringByAppendingPathComponent:@"diagnostics"];
     dxcheck([NSFileManager.defaultManager createDirectoryAtPath:[folder stringByAppendingPathComponent:@"Status"] withIntermediateDirectories:YES attributes:nil error:nil],@"创建夹具");
     NSDictionary *states=@{@"test.active":@{@"enabled":@YES,@"mode":@"auto"},@"test.disabled":@{@"enabled":@NO},@"../invalid":@YES};
@@ -147,6 +226,21 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     dxcheck([failureExport[@"inspectionReadFailure"] isEqual:readFailure] && [failureExport[@"errorCategories"] containsObject:@"读取"] &&
         [failureExport[@"failures"] isEqual:@1] && [failureExport[@"coverageComplete"] isEqual:@NO],
         @"固定openRoot详情贯通真实报告导出并保持旧错误类别和覆盖状态");
+    for (NSDictionary *detail in @[
+        @{@"stage":@"enumerate",@"errorDomain":@"posix",@"errorCode":@5},
+        @{@"stage":@"openFile",@"errorDomain":@"posix",@"errorCode":@13},
+        @{@"stage":@"readHeader",@"errorDomain":@"posix",@"errorCode":@5},
+        @{@"stage":@"rootRecheck",@"errorDomain":@"identity",@"errorCode":@0},
+        @{@"stage":@"ancestorRecheck",@"errorDomain":@"identity",@"errorCode":@0},
+        @{@"stage":@"fileRecheck",@"errorDomain":@"identity",@"errorCode":@0},
+        @{@"stage":@"shortRead",@"errorDomain":@"read",@"errorCode":@0},
+        @{@"stage":@"depthLimit",@"errorDomain":@"limit",@"errorCode":@0}]) {
+        dxwrite(folder,@"Status/test.active.inspection.plist",@{@"reports":@{@"SystemData":@{
+            @"coverageComplete":@NO,@"inspectionReadFailure":detail}}});
+        NSDictionary *detailExport=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"inspection"][@"data"][@"reports"][0];
+        dxcheck([detailExport[@"inspectionReadFailure"] isEqual:detail] && ![detailExport[@"coverageComplete"] boolValue],
+            @"FD深检失败阶段完整导出，身份变化和短读不伪装成errno");
+    }
     NSMutableArray *badReadFailures=[NSMutableArray new];
     for (id code in @[@YES,@0,@(-1),@1.5,@(NAN),@(INFINITY),@"13",@[]]) {
         NSMutableDictionary *bad=[readFailure mutableCopy];bad[@"errorCode"]=code;[badReadFailures addObject:bad];
@@ -156,6 +250,12 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
         NSMutableDictionary *bad=[readFailure mutableCopy];[bad addEntriesFromDictionary:change];[badReadFailures addObject:bad];
     }
     [badReadFailures addObjectsFromArray:@[@42,@"private-inspection-canary",@[],@{},@{@"state":@"invalid"}]];
+    [badReadFailures addObjectsFromArray:@[
+        @{@"stage":@"openRoot",@"errorDomain":@"identity",@"errorCode":@0},
+        @{@"stage":@"rootRecheck",@"errorDomain":@"identity",@"errorCode":@1},
+        @{@"stage":@"rootRecheck",@"errorDomain":@"identity",@"errorCode":@NO},
+        @{@"stage":@"shortRead",@"errorDomain":@"posix",@"errorCode":@5},
+        @{@"stage":@"depthLimit",@"errorDomain":@"read",@"errorCode":@0}]];
     for (id bad in badReadFailures) {
         dxwrite(folder,@"Status/test.active.inspection.plist",@{@"reports":@{@"Library/Caches":@{@"inspectionReadFailure":bad}}});
         NSDictionary *badFailureExport=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"inspection"][@"data"][@"reports"][0];

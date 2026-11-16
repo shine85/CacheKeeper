@@ -1,6 +1,7 @@
 #import "AxsCacheKeeperImageCacheRuntime.h"
 #import "AxsCacheKeeperImageCache.h"
 #import "AxsCacheKeeperInstallation.h"
+#import "AxsCacheKeeperRuntimeBuild.h"
 #import "AxsCacheKeeperPolicy.h"
 #import <UIKit/UIKit.h>
 #include <roothide.h>
@@ -39,15 +40,20 @@ static NSDictionary *AxsCacheKeeperImageContext(void) {
         id state=states[bundle] ?: @NO;
         BOOL valid=axs_cachekeeper_image_access && !stateError && !selectionError && axs_cachekeeper_state_valid(state);
         NSString *version=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"],*installation=@"";
-        if (valid && axs_cachekeeper_app_enabled(state)) {
-            if (!axs_cachekeeper_image_installation || !axs_cachekeeper_validate_installation_snapshot(axs_cachekeeper_image_installation,NSBundle.mainBundle.bundleURL,version,NULL))
-                axs_cachekeeper_image_installation=axs_cachekeeper_installation_snapshot(NSBundle.mainBundle.bundleURL,bundle,version,NULL);
+        NSError *installationError=nil;
+        BOOL installationRequested=valid && axs_cachekeeper_app_enabled(state);
+        if (installationRequested) {
+            if (!axs_cachekeeper_image_installation || !axs_cachekeeper_validate_installation_snapshot(axs_cachekeeper_image_installation,NSBundle.mainBundle.bundleURL,version,&installationError)) {
+                installationError=nil;
+                axs_cachekeeper_image_installation=axs_cachekeeper_installation_snapshot(NSBundle.mainBundle.bundleURL,bundle,version,&installationError);
+            }
             if ([axs_cachekeeper_image_installation[@"installationState"] isEqual:@"verified"])
                 installation=axs_cachekeeper_image_installation[@"fingerprint"] ?: @"";
         }
         return @{@"valid":@(valid),@"appState":state,@"selected":selected[bundle] ?: @[],
             @"home":NSHomeDirectory(),@"bundle":bundle ?: @"",@"version":version ?: @"",
-            @"installation":installation,@"reportWritable":@(axs_cachekeeper_image_report_writable)};
+            @"installation":installation,@"installationCheck":axs_cachekeeper_installation_check_result(installationRequested,axs_cachekeeper_image_installation,installationError),
+            @"reportWritable":@(axs_cachekeeper_image_report_writable)};
     }
 }
 static void AxsCacheKeeperImageEndBackground(void) {
@@ -61,7 +67,7 @@ static void AxsCacheKeeperImageDidLoad(const struct mach_header *header,intptr_t
     if (atomic_exchange(&axs_cachekeeper_image_discovery_pending,true)) return;
     dispatch_async(dispatch_get_main_queue(),^{
         atomic_store(&axs_cachekeeper_image_discovery_pending,false);
-        [axs_cachekeeper_image_engine startObserving];
+        [axs_cachekeeper_image_engine requestDiscoveryRefresh];
     });
 }
 void axs_cachekeeper_configure_image_cache(BOOL containerEligible,BOOL configurationAccess) {
@@ -74,7 +80,8 @@ void axs_cachekeeper_configure_image_cache(BOOL containerEligible,BOOL configura
         axs_cachekeeper_image_engine=[[AxsCacheKeeperImageCache alloc] initWithContextProvider:^NSDictionary *{return AxsCacheKeeperImageContext();}
             observer:^(NSDictionary *receipt) {
                 @synchronized(axs_cachekeeper_image_context_lock) {
-                    axs_cachekeeper_image_pending_report=axs_cachekeeper_image_cache_projection(receipt);
+                    NSMutableDictionary *record=[receipt mutableCopy];record[@"runtimeInfo"]=axs_cachekeeper_runtime_info();
+                    axs_cachekeeper_image_pending_report=axs_cachekeeper_image_cache_projection(record);
                     AxsCacheKeeperImageFlushReport();
                 }
                 dispatch_async(dispatch_get_main_queue(),^{

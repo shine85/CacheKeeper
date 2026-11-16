@@ -1,6 +1,8 @@
 #pragma once
 #import <Foundation/Foundation.h>
 #import "AxsCacheKeeperInstallationDetail.h"
+#import "AxsCacheKeeperInstallationCheck.h"
+#import "AxsCacheKeeperRuntimeInfo.h"
 #include <math.h>
 
 static inline BOOL axs_cachekeeper_webkit_boolean(id value) {
@@ -12,18 +14,7 @@ static inline BOOL axs_cachekeeper_webkit_counter(id value) {
     return isfinite(number) && number>=0 && number<=9007199254740991.0 && floor(number)==number;
 }
 static inline NSDictionary *axs_cachekeeper_webkit_installation_check(id value) {
-    if (![value isKindOfClass:NSDictionary.class] || [value count]!=(value[@"detail"] ? 3 : 2) ||
-        ![value[@"state"] isKindOfClass:NSString.class] ||
-        ![@[@"notRequested",@"verified",@"versionUnknown",@"failed",@"invalid"] containsObject:value[@"state"]] ||
-        !axs_cachekeeper_webkit_counter(value[@"errorCode"]) || [value[@"errorCode"] unsignedIntegerValue]>7) return nil;
-    if (![value[@"state"] isEqual:@"failed"] && [value[@"errorCode"] unsignedIntegerValue]!=0) return nil;
-    NSMutableDictionary *result=[@{@"state":[value[@"state"] copy],@"errorCode":[value[@"errorCode"] copy]} mutableCopy];
-    if (value[@"detail"]) {
-        NSDictionary *detail=axs_cachekeeper_installation_detail_projection(value[@"detail"]);
-        if (!detail || ![value[@"state"] isEqual:@"failed"] || ![value[@"errorCode"] unsignedIntegerValue]) return nil;
-        result[@"detail"]=detail;
-    }
-    return [result copy];
+    return axs_cachekeeper_installation_check_projection(value);
 }
 // A closed projection prevents runtime identities or website content entering saved/exported state.
 static inline NSDictionary *axs_cachekeeper_webkit_projection(id value) {
@@ -35,6 +26,10 @@ static inline NSDictionary *axs_cachekeeper_webkit_projection(id value) {
         installationCheck=axs_cachekeeper_webkit_installation_check(value[@"installationCheck"]);
         if (!installationCheck) return nil;
         keys=[keys arrayByAddingObject:@"installationCheck"];
+    }
+    if (value[@"runtimeInfo"]) {
+        if (!axs_cachekeeper_runtime_info_projection(value[@"runtimeInfo"])) return nil;
+        keys=[keys arrayByAddingObject:@"runtimeInfo"];
     }
     if ([value count]!=keys.count || ![[NSSet setWithArray:[value allKeys]] isEqual:[NSSet setWithArray:keys]]) return nil;
     if (!axs_cachekeeper_webkit_counter(value[@"schemaVersion"]) || [value[@"schemaVersion"] unsignedIntegerValue]!=1 ||

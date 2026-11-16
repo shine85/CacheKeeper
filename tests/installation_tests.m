@@ -226,10 +226,14 @@ static void aidetail(NSError *error, NSInteger code, NSString *target, NSString 
     NSDictionary *expected=@{@"target":target,@"operation":operation,@"errno":@(number)};
     aicheck([error.domain isEqual:@"dev.local.cachekeeper.installation"] && error.code==code,
         @"精准详情不改变原有安装错误域及错误码");
-    aicheck([error.userInfo[@"detail"] isEqual:expected],
+    NSDictionary *detail=error.userInfo[@"detail"];
+    aicheck([[detail dictionaryWithValuesForKeys:@[@"target",@"operation",@"errno"]] isEqual:expected],
         [NSString stringWithFormat:@"安装失败必须保留准确阶段及即时errno: %@/%@",target,operation]);
-    aicheck([axs_cachekeeper_installation_detail_projection(error.userInfo[@"detail"]) isEqual:expected],
+    aicheck([axs_cachekeeper_installation_detail_projection(detail) isEqual:detail],
         @"生产安装失败详情通过唯一严格投影");
+    if ([@[@"openIdentity",@"recheckIdentity",@"snapshotIdentity"] containsObject:operation])
+        aicheck([detail[@"identity"][@"differenceMask"] unsignedIntegerValue]>0,@"真实身份变化必须保留非零字段差异");
+    else aicheck([detail isEqual:expected],@"普通错误不混入身份差异字段");
 }
 
 static void aidetail_projection(void) {
@@ -372,6 +376,8 @@ static void aidetail_files(NSString *fixture) {
         }
         errno=EACCES;aicheck(!axs_cachekeeper_validate_installation_snapshot(bound,changedURL,@"1.0",&error),@"任何绑定文件身份变化均撤销旧快照");
         aidetail(error,6,target,@"snapshotIdentity",0);
+        NSUInteger mask=[error.userInfo[@"detail"][@"identity"][@"differenceMask"] unsignedIntegerValue];
+        aicheck((mask&([target isEqual:@"root"] ? 4 : 64))!=0,@"真实目录模式或文件长度变化保留对应差异位");
     }
 }
 

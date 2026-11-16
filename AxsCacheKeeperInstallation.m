@@ -16,11 +16,14 @@ extern ssize_t axs_cachekeeper_installation_test_read(int fd, void *buffer, size
 #define axs_cachekeeper_installation_read read
 #endif
 
+static BOOL axs_cachekeeper_installation_error_detail(NSError **error, NSInteger code, NSString *message, NSDictionary *detail) {
+    if (error) *error=[NSError errorWithDomain:@"dev.local.cachekeeper.installation" code:code
+        userInfo:@{NSLocalizedDescriptionKey:message,@"detail":detail}];
+    return NO;
+}
 static BOOL axs_cachekeeper_installation_error(NSError **error, NSInteger code, NSString *message,
                                               NSString *target, NSString *operation, int number) {
-    if (error) *error=[NSError errorWithDomain:@"dev.local.cachekeeper.installation" code:code
-        userInfo:@{NSLocalizedDescriptionKey:message,@"detail":@{@"target":target,@"operation":operation,@"errno":@(number)}}];
-    return NO;
+    return axs_cachekeeper_installation_error_detail(error,code,message,@{@"target":target,@"operation":operation,@"errno":@(number)});
 }
 static BOOL axs_cachekeeper_installation_string(id value, BOOL nonempty) {
     if (![value isKindOfClass:NSString.class] || (nonempty && ![value length])) return NO;
@@ -32,11 +35,44 @@ static BOOL axs_cachekeeper_installation_component(id value) {
         [value rangeOfString:@"/"].location==NSNotFound;
 }
 static NSArray *axs_cachekeeper_installation_stat(struct stat st) {
+    // Bit positions in diagnostic differences use this same vector, including both timestamp components.
     return @[@(st.st_dev),@(st.st_ino),@(st.st_mode),@(st.st_nlink),@(st.st_uid),@(st.st_gid),@(st.st_size),
         @(st.st_mtimespec.tv_sec),@(st.st_mtimespec.tv_nsec),@(st.st_ctimespec.tv_sec),@(st.st_ctimespec.tv_nsec)];
 }
-static BOOL axs_cachekeeper_installation_same(struct stat a, struct stat b) {
-    return [axs_cachekeeper_installation_stat(a) isEqual:axs_cachekeeper_installation_stat(b)];
+static NSUInteger axs_cachekeeper_installation_difference(id before, id after) {
+    if (![before isKindOfClass:NSArray.class] || ![after isKindOfClass:NSArray.class] ||
+        [before count]!=AxsCacheKeeperInstallationIdentityFieldCount || [after count]!=AxsCacheKeeperInstallationIdentityFieldCount) return NSNotFound;
+    NSUInteger mask=0;
+    for (NSUInteger index=0;index<AxsCacheKeeperInstallationIdentityFieldCount;index++) {
+        id a=before[index],b=after[index];
+        if (![a isKindOfClass:NSNumber.class] || ![b isKindOfClass:NSNumber.class] ||
+            CFGetTypeID((__bridge CFTypeRef)a)==CFBooleanGetTypeID() || CFGetTypeID((__bridge CFTypeRef)b)==CFBooleanGetTypeID()) return NSNotFound;
+        if (![a isEqual:b]) mask|=1U<<index;
+    }
+    return mask;
+}
+static BOOL axs_cachekeeper_installation_identity_error(NSError **error, NSInteger code, NSString *message,
+    NSString *target, NSString *operation, NSString *comparison, NSUInteger mask, NSDictionary *resample) {
+    NSMutableDictionary *detail=[@{@"target":target,@"operation":operation,@"errno":@0} mutableCopy];
+    // Malformed private snapshots are still rejected, but cannot be presented as measured stat differences.
+    if (mask && mask<=AxsCacheKeeperInstallationIdentityAllFields) {
+        NSMutableDictionary *identity=[@{@"schemaVersion":@1,@"comparison":comparison,@"differenceMask":@(mask)} mutableCopy];
+        if (resample) identity[@"resample"]=resample;
+        detail[@"identity"]=[identity copy];
+    }
+    return axs_cachekeeper_installation_error_detail(error,code,message,[detail copy]);
+}
+static NSDictionary *axs_cachekeeper_installation_resample(int root, int fd, const char *name, NSString *path,
+    struct stat before, struct stat opened) {
+    struct stat fdAfter,pathAfter;
+    int fdResult=fstat(fd,&fdAfter),fdError=fdResult ? errno : 0;
+    int pathResult=path ? lstat(path.fileSystemRepresentation,&pathAfter) : fstatat(root,name,&pathAfter,AT_SYMLINK_NOFOLLOW);
+    int pathError=pathResult ? errno : 0;
+    NSMutableDictionary *result=[@{@"fdErrno":@(fdError),@"pathErrno":@(pathError)} mutableCopy];
+    if (!fdResult) result[@"fdDifferenceMask"]=@(axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(opened),axs_cachekeeper_installation_stat(fdAfter)));
+    if (!pathResult) result[@"pathDifferenceMask"]=@(axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(before),axs_cachekeeper_installation_stat(pathAfter)));
+    if (!fdResult && !pathResult) result[@"pathFDDifferenceMask"]=@(axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(pathAfter),axs_cachekeeper_installation_stat(fdAfter)));
+    return [result copy];
 }
 static NSString *axs_cachekeeper_installation_path(NSURL *url, NSError **error) {
     if (![url isKindOfClass:NSURL.class] || !url.isFileURL || !axs_cachekeeper_installation_string(url.path,YES) || !url.path.isAbsolutePath) {
@@ -71,8 +107,10 @@ static int axs_cachekeeper_installation_open_root(NSString *path, NSError **erro
     if (!S_ISDIR(opened.st_mode)) {
         close(fd);axs_cachekeeper_installation_error(error,2,@"已打开安装包不是目录",@"root",@"type",0);return -1;
     }
-    if (!axs_cachekeeper_installation_same(before,opened)) {
-        close(fd);axs_cachekeeper_installation_error(error,2,@"安装包目录在打开时变化",@"root",@"openIdentity",0);return -1;
+    NSUInteger difference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(before),axs_cachekeeper_installation_stat(opened));
+    if (difference) {
+        NSDictionary *resample=error ? axs_cachekeeper_installation_resample(-1,fd,NULL,path,before,opened) : nil;
+        close(fd);axs_cachekeeper_installation_identity_error(error,2,@"安装包目录在打开时变化",@"root",@"openIdentity",@"pathToFD",difference,resample);return -1;
     }
     return fd;
 }
@@ -94,8 +132,10 @@ static int axs_cachekeeper_installation_open_file(int root, const char *name, NS
     if (!S_ISREG(opened.st_mode)) {
         close(fd);axs_cachekeeper_installation_error(error,3,@"已打开安装文件不是普通文件",target,@"type",0);return -1;
     }
-    if (!axs_cachekeeper_installation_same(before,opened)) {
-        close(fd);axs_cachekeeper_installation_error(error,3,@"安装文件在打开时变化",target,@"openIdentity",0);return -1;
+    NSUInteger difference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(before),axs_cachekeeper_installation_stat(opened));
+    if (difference) {
+        NSDictionary *resample=error ? axs_cachekeeper_installation_resample(root,fd,name,nil,before,opened) : nil;
+        close(fd);axs_cachekeeper_installation_identity_error(error,3,@"安装文件在打开时变化",target,@"openIdentity",@"pathToFD",difference,resample);return -1;
     }
     *identity=opened;return fd;
 }
@@ -108,8 +148,12 @@ static BOOL axs_cachekeeper_installation_recheck(int root, int fd, const char *n
     if (path ? lstat(path.fileSystemRepresentation,&b) : fstatat(root,name,&b,AT_SYMLINK_NOFOLLOW)) {
         int number=errno;return axs_cachekeeper_installation_error(error,6,@"无法复核当前安装路径身份",target,@"recheckPath",number);
     }
-    if (!axs_cachekeeper_installation_same(before,a) || !axs_cachekeeper_installation_same(a,b))
-        return axs_cachekeeper_installation_error(error,6,@"安装文件在读取期间变化，等待安装稳定",target,@"recheckIdentity",0);
+    NSUInteger referenceDifference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(before),axs_cachekeeper_installation_stat(a));
+    if (referenceDifference)
+        return axs_cachekeeper_installation_identity_error(error,6,@"安装文件在读取期间变化，等待安装稳定",target,@"recheckIdentity",@"referenceToFD",referenceDifference,nil);
+    NSUInteger pathDifference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(a),axs_cachekeeper_installation_stat(b));
+    if (pathDifference)
+        return axs_cachekeeper_installation_identity_error(error,6,@"安装文件在读取期间变化，等待安装稳定",target,@"recheckIdentity",@"fdToPath",pathDifference,nil);
     return YES;
 }
 static BOOL axs_cachekeeper_installation_check(int root, int info, int executable, NSString *path, NSString *name,
@@ -215,12 +259,15 @@ BOOL axs_cachekeeper_validate_installation_snapshot(NSDictionary *snapshot, NSUR
         info=axs_cachekeeper_installation_open_file(root,"Info.plist",@"info",&infoStat,error);if (info<0) return NO;
         NSString *name=snapshot[@"_executable"];
         executable=axs_cachekeeper_installation_open_file(root,name.fileSystemRepresentation,@"main",&executableStat,error);if (executable<0) return NO;
-        if (![axs_cachekeeper_installation_stat(rootStat) isEqual:snapshot[@"_root"]])
-            return axs_cachekeeper_installation_error(error,6,@"安装目录身份已变化，旧作业已失效",@"root",@"snapshotIdentity",0);
-        if (![axs_cachekeeper_installation_stat(infoStat) isEqual:snapshot[@"_info"]])
-            return axs_cachekeeper_installation_error(error,6,@"安装信息身份已变化，旧作业已失效",@"info",@"snapshotIdentity",0);
-        if (![axs_cachekeeper_installation_stat(executableStat) isEqual:snapshot[@"_main"]])
-            return axs_cachekeeper_installation_error(error,6,@"主程序身份已变化，旧作业已失效",@"main",@"snapshotIdentity",0);
+        NSUInteger rootDifference=axs_cachekeeper_installation_difference(snapshot[@"_root"],axs_cachekeeper_installation_stat(rootStat));
+        if (rootDifference)
+            return axs_cachekeeper_installation_identity_error(error,6,@"安装目录身份已变化，旧作业已失效",@"root",@"snapshotIdentity",@"snapshotToFD",rootDifference,nil);
+        NSUInteger infoDifference=axs_cachekeeper_installation_difference(snapshot[@"_info"],axs_cachekeeper_installation_stat(infoStat));
+        if (infoDifference)
+            return axs_cachekeeper_installation_identity_error(error,6,@"安装信息身份已变化，旧作业已失效",@"info",@"snapshotIdentity",@"snapshotToFD",infoDifference,nil);
+        NSUInteger mainDifference=axs_cachekeeper_installation_difference(snapshot[@"_main"],axs_cachekeeper_installation_stat(executableStat));
+        if (mainDifference)
+            return axs_cachekeeper_installation_identity_error(error,6,@"主程序身份已变化，旧作业已失效",@"main",@"snapshotIdentity",@"snapshotToFD",mainDifference,nil);
         valid=axs_cachekeeper_installation_check(root,info,executable,path,name,rootStat,infoStat,executableStat,error);
     } @finally { if (executable>=0) close(executable);if (info>=0) close(info);close(root); }
     return valid;

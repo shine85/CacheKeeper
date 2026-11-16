@@ -18,10 +18,16 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "tests/run_ui_tests.py").read_text(encoding="utf-8-sig")
 CURRENT = "2de3a496eaf6df9a1312862adcfd54acd73c39c0"
 LEGACY = "fb50c1d20f24db5322b2f8f379de3618f75fe08e"
-ALL_SUITES = ["WebKit", "SDK521", "Search", "SDK515"]
-ALL_EXPORTS = ["WebKit", "SDK521", "SDK515", "Search"]
+FIXED_SERIAL = "a6b6e44eadf0d39250c10a7cc0e3b91d0bdb0e94"
+ALL_SUITES = ["WebKit", "SDK521", "Search", "SDK515", "SDK510", "SDK510Absent"]
+ALL_EXPORTS = ["WebKit", "SDK521", "SDK515", "SDK510", "SDK510Absent", "Search"]
+WITHOUT515_SUITES = [name for name in ALL_SUITES if name != "SDK515"]
+WITHOUT515_EXPORTS = [name for name in ALL_EXPORTS if name != "SDK515"]
+WITHOUT510_SUITES = ALL_SUITES[:4]
+WITHOUT510_EXPORTS = [name for name in ALL_EXPORTS if not name.startswith("SDK510")]
 RESULTS = {"WebKitResults.xcresult": "WebKit", "ImageCacheResults.xcresult": "SDK521",
-           "ImageCache515Results.xcresult": "SDK515", "Results.xcresult": "Search"}
+           "ImageCache515Results.xcresult": "SDK515", "ImageCache510Results.xcresult": "SDK510",
+           "ImageCache510AbsentResults.xcresult": "SDK510Absent", "Results.xcresult": "Search"}
 STAMP = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
 FIXTURES = ROOT / "tmp/diagnostics-144-followup" / ("runner-fixtures-" + STAMP)
 
@@ -31,25 +37,35 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
     fixture = FIXTURES / name
     (fixture / "tests/ui").mkdir(parents=True)
     spec = (ROOT / "tests/ui/project.yml").read_text(encoding="utf-8-sig")
-    (fixture / "tests/ui/project.yml").write_text(spec + ("\n# " + CURRENT if ambiguous_spec else ""), encoding="utf-8")
+    extra = "\n# ImageCacheIntegrationTests" if ambiguous_spec == "target" else ("\n# " + CURRENT if ambiguous_spec else "")
+    (fixture / "tests/ui/project.yml").write_text(spec + extra, encoding="utf-8")
     output = fixture / "tmp/input-ui-tests"
     resolved = output / "CacheKeeperInputTests.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
     commands, suites, exports = [], [], []
     stdout, stderr = io.StringIO(), io.StringIO()
-    builds = 0
+    configured_sdk = "521"
 
     def fake_run(command, **kwargs):
-        nonlocal builds
+        nonlocal configured_sdk
         command = list(map(str, command))
         timeout = kwargs.get("timeout")
         if len(command) > 1 and command[1].endswith("run_search_editing_red.py"):
             stage, expected_timeout = "searchRed", 1200
+        elif len(command) > 1 and command[1].endswith("run_image_legacy_red.py"):
+            stage, expected_timeout = "imageLegacyRed", 1200
         elif command[0] == "xcodegen":
-            stage = "generate515" if "image-sdk-5.15.5.yml" in command[command.index("--spec") + 1] else "generate521"
+            spec_name = Path(command[command.index("--spec") + 1]).name
+            configured_sdk = {"project.yml": "521", "image-sdk-5.15.5.yml": "515",
+                              "image-sdk-5.10.4.yml": "510"}[spec_name]
+            if configured_sdk == "510":
+                variant = Path(command[command.index("--spec") + 1]).read_text(encoding="utf-8")
+                assert variant.count(FIXED_SERIAL) == 1 and CURRENT not in variant and LEGACY not in variant
+                assert "ImageCacheIntegrationTests" not in variant
+                assert variant.count("ImageCacheLegacyIntegrationTests") == 3
+            stage = "generate" + configured_sdk
             expected_timeout = 60
         elif command[:2] == ["xcodebuild", "build-for-testing"]:
-            builds += 1
-            stage = "build521" if builds == 1 else "build515"
+            stage = "build" + configured_sdk
             expected_timeout = 600
         elif command[:2] == ["xcodebuild", "test-without-building"]:
             result = Path(command[command.index("-resultBundlePath") + 1])
@@ -62,6 +78,9 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
                 assert "-only-testing:WebKitIntegrationTests" in command
             elif stage in ("SDK521", "SDK515"):
                 assert "-only-testing:ImageCacheIntegrationTests" in command
+            elif stage in ("SDK510", "SDK510Absent"):
+                test_class = "ImageCacheLegacyAbsentAPITests" if stage == "SDK510Absent" else "ImageCacheLegacyIntegrationTests"
+                assert "-only-testing:ImageCacheLegacyIntegrationTests/" + test_class in command
             else:
                 assert "-skip-testing:WebKitIntegrationTests" in command
                 assert "-skip-testing:ImageCacheIntegrationTests" in command
@@ -89,9 +108,9 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
             raise subprocess.TimeoutExpired(command, timeout)
         if failure == "oserror":
             raise OSError("simulated command launch failure: " + stage)
-        if stage in ("build521", "build515"):
+        if stage in ("build521", "build515", "build510"):
             resolved.parent.mkdir(parents=True, exist_ok=True)
-            revision = CURRENT if stage == "build521" else LEGACY
+            revision = {"build521": CURRENT, "build515": LEGACY, "build510": FIXED_SERIAL}[stage]
             if bad_pin == stage + "_wrong":
                 revision = "0" * 40
             content = json.dumps({"version": 2, "pins": [{"identity": "sdwebimage", "kind": "remoteSourceControl",
@@ -139,16 +158,29 @@ cases = [
     ("sdk515_fails", {"SDK515": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "5.15.5"),
     ("all_suites_fail", {name: "exit" for name in ALL_SUITES}, None, False, ALL_SUITES, ALL_EXPORTS, True, "5.15.5"),
     ("launch_error_continue", {"WebKit": "oserror"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "WebKit"),
-    ("legacy_generation_fails", {"generate515": "exit"}, None, False, ALL_SUITES[:3], ["WebKit", "SDK521", "Search"], True, "5.15.5"),
-    ("legacy_build_fails", {"build515": "exit"}, None, False, ALL_SUITES[:3], ["WebKit", "SDK521", "Search"], True, "5.15.5"),
-    ("legacy_build_timeout", {"build515": "timeout"}, None, False, ALL_SUITES[:3], ["WebKit", "SDK521", "Search"], True, "5.15.5"),
-    ("legacy_pin_wrong", {}, "build515_wrong", False, ALL_SUITES[:3], ["WebKit", "SDK521", "Search"], True, "5.15.5"),
-    ("legacy_pin_malformed", {}, "build515_json", False, ALL_SUITES[:3], ["WebKit", "SDK521", "Search"], True, "5.15.5"),
-    ("legacy_pin_invalid_shape", {}, "build515_shape", False, ALL_SUITES[:3], ["WebKit", "SDK521", "Search"], True, "5.15.5"),
-    ("legacy_pin_mixed_shape", {}, "build515_mixed", False, ALL_SUITES[:3], ["WebKit", "SDK521", "Search"], True, "5.15.5"),
+    ("legacy_generation_fails", {"generate515": "exit"}, None, False, WITHOUT515_SUITES, WITHOUT515_EXPORTS, True, "5.15.5"),
+    ("legacy_build_fails", {"build515": "exit"}, None, False, WITHOUT515_SUITES, WITHOUT515_EXPORTS, True, "5.15.5"),
+    ("legacy_build_timeout", {"build515": "timeout"}, None, False, WITHOUT515_SUITES, WITHOUT515_EXPORTS, True, "5.15.5"),
+    ("legacy_pin_wrong", {}, "build515_wrong", False, WITHOUT515_SUITES, WITHOUT515_EXPORTS, True, "5.15.5"),
+    ("legacy_pin_malformed", {}, "build515_json", False, WITHOUT515_SUITES, WITHOUT515_EXPORTS, True, "5.15.5"),
+    ("legacy_pin_invalid_shape", {}, "build515_shape", False, WITHOUT515_SUITES, WITHOUT515_EXPORTS, True, "5.15.5"),
+    ("legacy_pin_mixed_shape", {}, "build515_mixed", False, WITHOUT515_SUITES, WITHOUT515_EXPORTS, True, "5.15.5"),
     ("ambiguous_spec", {}, None, True, ALL_SUITES[:3], ["WebKit", "SDK521", "Search"], True, "5.15.5"),
     ("attachment_failure_continue", {"exportWebKit": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "attachments"),
     ("suite_and_attachment_fail", {"SDK521": "exit", "exportWebKit": "timeout"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "5.21.7"),
+    ("fixed_generation_fails", {"generate510": "exit"}, None, False, WITHOUT510_SUITES, WITHOUT510_EXPORTS, True, "5.10.4"),
+    ("fixed_baseline_failure_collects_green", {"imageLegacyRed": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "5.10.4 admission baseline"),
+    ("fixed_baseline_timeout_collects_green", {"imageLegacyRed": "timeout"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "5.10.4 admission baseline"),
+    ("ambiguous_fixed_target", {}, None, "target", WITHOUT510_SUITES, WITHOUT510_EXPORTS, True, "5.10.4"),
+    ("fixed_build_fails", {"build510": "exit"}, None, False, WITHOUT510_SUITES, WITHOUT510_EXPORTS, True, "5.10.4"),
+    ("fixed_build_timeout", {"build510": "timeout"}, None, False, WITHOUT510_SUITES, WITHOUT510_EXPORTS, True, "5.10.4"),
+    ("fixed_pin_wrong", {}, "build510_wrong", False, WITHOUT510_SUITES, WITHOUT510_EXPORTS, True, "5.10.4"),
+    ("fixed_pin_malformed", {}, "build510_json", False, WITHOUT510_SUITES, WITHOUT510_EXPORTS, True, "5.10.4"),
+    ("fixed_pin_invalid_shape", {}, "build510_shape", False, WITHOUT510_SUITES, WITHOUT510_EXPORTS, True, "5.10.4"),
+    ("fixed_pin_mixed_shape", {}, "build510_mixed", False, WITHOUT510_SUITES, WITHOUT510_EXPORTS, True, "5.10.4"),
+    ("fixed_suite_fails_continue", {"SDK510": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "5.10.4"),
+    ("fixed_absent_suite_fails", {"SDK510Absent": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "5.10.4"),
+    ("fixed_attachment_fails_continue", {"exportSDK510": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "attachments"),
     ("initial_build_fail_stop", {"build521": "exit"}, None, False, [], [], True, None),
     ("initial_pin_fail_stop", {}, "build521_wrong", False, [], [], True, None),
     ("initial_sign_fail_stop", {"sign": "exit"}, None, False, [], [], True, None),
@@ -169,7 +201,7 @@ for name, failures, bad_pin, ambiguous, want_suites, want_exports, want_failure,
         summaries = [line for line in result["stderr"].splitlines() if "failed suites/stages:" in line]
         if len(summaries) != 1 or summary_label not in summaries[0]:
             errors.append("missing aggregate failure summary containing " + summary_label)
-    if name.startswith("initial_") and any(stage in result["commands"] for stage in ("generate515", "build515")):
+    if name.startswith("initial_") and any(stage in result["commands"] for stage in ("generate515", "build515", "generate510", "build510")):
         errors.append("initial build/sign/pin failure must stop before compatibility generation")
     if name in ("legacy_generation_fails", "ambiguous_spec") and "build515" in result["commands"]:
         errors.append("failed compatibility preparation must not build")

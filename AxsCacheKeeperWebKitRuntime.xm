@@ -3,6 +3,7 @@
 #import "AxsCacheKeeperWebKitCache.h"
 #import "AxsCacheKeeperWebKitObservation.h"
 #import "AxsCacheKeeperInstallation.h"
+#import "AxsCacheKeeperRuntimeBuild.h"
 #import "AxsCacheKeeperPolicy.h"
 #include <roothide.h>
 #include <sys/sysctl.h>
@@ -66,15 +67,7 @@ static NSDictionary *axs_cachekeeper_webkit_read_context(BOOL access) {
         BOOL verified=[axs_cachekeeper_webkit_installation[@"installationState"] isEqual:@"verified"];
         if (verified)
             installation=axs_cachekeeper_webkit_installation[@"fingerprint"] ?: @"";
-        // Never persist NSError descriptions, bundle paths or version strings in runtime receipts.
-        NSInteger code=[installationError.domain isEqual:@"dev.local.cachekeeper.installation"] && installationError.code>=1 && installationError.code<=7 ? installationError.code : 0;
-        installationCheck=@{@"state":verified ? @"verified" : axs_cachekeeper_webkit_installation ? @"versionUnknown" : @"failed",@"errorCode":@(code)};
-        if (code && !verified && !axs_cachekeeper_webkit_installation) {
-            NSDictionary *detail=axs_cachekeeper_installation_detail_projection(installationError.userInfo[@"detail"]);
-            if (detail) {
-                NSMutableDictionary *check=[installationCheck mutableCopy];check[@"detail"]=detail;installationCheck=[check copy];
-            } else if (installationError.userInfo[@"detail"]) installationCheck=@{@"state":@"invalid",@"errorCode":@0};
-        }
+        installationCheck=axs_cachekeeper_installation_check_result(YES,axs_cachekeeper_webkit_installation,installationError);
         process=axs_cachekeeper_webkit_process();
     }
     // Preserve private identity across disable/re-enable so configuration changes do not fabricate a new install.
@@ -164,7 +157,9 @@ void axs_cachekeeper_configure_webkit(BOOL containerEligible, BOOL configuration
                 });
             } clock:^{return NSProcessInfo.processInfo.systemUptime;} observer:^(NSDictionary *receipt) {
                 BOOL access=axs_cachekeeper_webkit_access;
-                dispatch_async(axs_cachekeeper_webkit_io,^{axs_cachekeeper_webkit_pending_report=receipt;axs_cachekeeper_webkit_flush_report(access);});
+                NSMutableDictionary *record=[receipt mutableCopy];record[@"runtimeInfo"]=axs_cachekeeper_runtime_info();
+                NSDictionary *projected=axs_cachekeeper_webkit_projection(record);
+                dispatch_async(axs_cachekeeper_webkit_io,^{axs_cachekeeper_webkit_pending_report=projected;axs_cachekeeper_webkit_flush_report(access);});
                 // Defer until a synchronous completion has had a chance to queue the next store.
                 dispatch_async(dispatch_get_main_queue(),^{
                     NSDictionary *current=axs_cachekeeper_webkit_engine.receipt;

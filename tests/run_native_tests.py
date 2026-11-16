@@ -13,6 +13,14 @@ if sys.platform != "darwin" or not compiler:
 output = root / "tmp" / ("cache-tests-" + str(time.time_ns()))
 output.mkdir(parents=True)
 try:
+    subprocess.run([sys.executable, str(root / "tests/package_version_tests.py")], check=True, timeout=60)
+    subprocess.run([sys.executable, str(root / "tests/run_runtime_receipt_tests.py")], check=True, timeout=60)
+    subprocess.run([sys.executable, str(root / "tests/run_installation_identity_tests.py")], check=True, timeout=60)
+    subprocess.run([sys.executable, str(root / "tests/run_inspection_traversal_tests.py")], check=True, timeout=60)
+    subprocess.run([sys.executable, str(root / "tests/run_image_publication_tests.py")], check=True, timeout=60)
+    subprocess.run([sys.executable, str(root / "tests/run_image_legacy_source_tests.py")], check=True, timeout=60)
+    # Two compilations and four isolated processes; each test process stays bounded at 30 s.
+    subprocess.run([sys.executable, str(root / "tests/run_image_runtime_source_tests.py")], check=True, timeout=120)
     # Catch the Logos/Objective-C boundary before the expensive UIKit and Theos stages.
     installation_object = output / "installation.o"
     installation_flags = [compiler, "clang++", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra"]

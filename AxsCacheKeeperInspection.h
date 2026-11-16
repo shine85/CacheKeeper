@@ -9,10 +9,12 @@
 @property(nonatomic,readonly) BOOL complete;
 - (instancetype)initWithRoot:(NSString *)root;
 - (instancetype)initWithRoot:(NSString *)root searchRoots:(NSArray<NSDictionary *> *)searchRoots;
-// 默认 100000 项、真实 lstat；可注入预算/读取以确定性验证搜索边界和读取失败。
+// 默认孪生预算 100000 项。兼容原 stat 注入；真实身份仍以父 FD 的 fstatat 为准。
 - (instancetype)initWithRoot:(NSString *)root searchRoots:(NSArray<NSDictionary *> *)searchRoots
                  searchLimit:(NSUInteger)searchLimit stat:(int (^)(const char *, struct stat *))statBlock;
 - (void)advance:(NSUInteger)limit;
+// 与 advance 在同一任务线程调用；立即释放主遍历和孪生搜索持有的全部 FD。
+- (void)cancel;
 - (NSDictionary *)report;
 @end
 
