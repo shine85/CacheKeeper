@@ -15,6 +15,14 @@ HASHES = {
 EXPECTED_RED = "FAIL: storage inventory: all registrations and configured-only entries survive saved report export"
 
 
+def normalized_stderr(text: str) -> str:
+    # macOS may warn that the Foundation test substitute shares the private
+    # LSApplicationWorkspace class name with CoreServices. It is runtime noise;
+    # the exact exit code and behavioral assertion remain strict below.
+    lines = [line for line in text.splitlines() if "Class LSApplicationWorkspace is implemented in both" not in line]
+    return "\n".join(lines).strip()
+
+
 def run() -> int:
     compiler = shutil.which("xcrun")
     if sys.platform != "darwin" or not compiler:
@@ -48,7 +56,7 @@ def run() -> int:
             result = subprocess.run([str(binary), str(output / (role + "-fixtures"))], capture_output=True,
                                     text=True, encoding="utf-8", timeout=60)
             if role == "red":
-                if result.returncode != 1 or result.stderr.strip() != EXPECTED_RED:
+                if result.returncode != 1 or normalized_stderr(result.stderr) != EXPECTED_RED:
                     raise SystemExit("FAIL: incorrect all-app inventory behavior RED\n" + result.stdout + result.stderr)
                 print("PASS: exact old-source all-app inventory RED:", result.stderr.strip())
             else:
