@@ -149,7 +149,10 @@
 }
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];[self.statusTimer invalidate];self.statusTimer=nil;
-    // Switching to the target APP must leave the request alive until its monotonic deadline.
+}
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    // App backgrounding leaves this controller in the stack; release only after a completed departure.
     if (self.isMovingFromParentViewController || self.isBeingDismissed || self.navigationController.isBeingDismissed ||
         (self.navigationController && self.navigationController.topViewController!=self) || self.presentedViewController)
         [self.axs_cachekeeper_hostClient axs_cachekeeper_cancel];

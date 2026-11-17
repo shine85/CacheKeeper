@@ -1,6 +1,20 @@
 import XCTest
 
 final class InputUITests: XCTestCase {
+    private func typeAndWaitForValue(_ text: String, into field: XCUIElement) -> Bool {
+        var value = ""
+        for character in text {
+            value.append(character)
+            field.typeText(String(character))
+            let updated = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", value), object: field)
+            guard XCTWaiter.wait(for: [updated], timeout: 5) == .completed else {
+                XCTFail("Text field did not reach expected value: \(value)")
+                return false
+            }
+        }
+        return true
+    }
+
     func testKeyboardInputCancelAndReturn() {
         let app = XCUIApplication()
         app.launch()
@@ -9,7 +23,7 @@ final class InputUITests: XCTestCase {
         for _ in 0..<10 {
             field.tap()
             XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "Tap must actually show a keyboard")
-            field.typeText("baidu")
+            guard typeAndWaitForValue("baidu", into: field) else { return }
             XCTAssertEqual(field.value as? String, "baidu")
             app.buttons["取消"].tap()
             XCTAssertTrue(field.waitForExistence(timeout: 3))
@@ -18,7 +32,8 @@ final class InputUITests: XCTestCase {
             XCTAssertFalse(app.buttons["取消"].exists)
         }
         field.tap()
-        field.typeText("test.bundle\n")
+        guard typeAndWaitForValue("test.bundle", into: field) else { return }
+        field.typeText("\n")
         XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5), "Return must dismiss the keyboard")
         XCTAssertEqual(field.value as? String, "test.bundle")
         app.buttons["诊断"].tap()
@@ -34,7 +49,7 @@ final class InputUITests: XCTestCase {
         app.activate()
         field.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
-        field.typeText("return")
+        guard typeAndWaitForValue("return", into: field) else { return }
         XCTAssertEqual(field.value as? String, "return")
     }
 }
