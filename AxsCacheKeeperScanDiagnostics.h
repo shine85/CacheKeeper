@@ -5,6 +5,21 @@
 
 static const NSUInteger AxsCacheKeeperScanErrorLimit=16;
 
+static inline NSDictionary *axs_cachekeeper_scan_progress_projection(id value) {
+    if (![value isKindOfClass:NSDictionary.class] ||
+        ![@[@"running",@"complete",@"partial",@"cancelled",@"superseded",@"interrupted",@"identityChanged",@"entryLimit",@"depthLimit",@"timeLimit",@"readError",@"saveFailed"] containsObject:value[@"state"] ?: NSNull.null]) return nil;
+    NSMutableDictionary *out=[@{@"state":value[@"state"]} mutableCopy];
+    for (NSString *key in @[@"slices",@"entriesVisited",@"rootsCompleted",@"rootsTotal",@"entryLimit",@"sliceEntryLimit",@"maxOpenDirectories",@"wallTimeLimitSeconds"]) {
+        id number=value[key];
+        if (![number isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)number)==CFBooleanGetTypeID() ||
+            !isfinite([number doubleValue]) || [number doubleValue]<0 || [number doubleValue]>UINT32_MAX ||
+            [number doubleValue]!=trunc([number doubleValue])) return nil;
+        out[key]=number;
+    }
+    if ([out[@"rootsCompleted"] unsignedIntegerValue]>[out[@"rootsTotal"] unsignedIntegerValue]) return nil;
+    return out;
+}
+
 static inline BOOL axs_cachekeeper_scan_integer(id value, uint64_t maximum) {
     if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID()) return NO;
     double number=[value doubleValue];

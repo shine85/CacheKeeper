@@ -8,6 +8,7 @@
 #import "AxsCacheKeeperWebKitStatus.h"
 #import "AxsCacheKeeperImageCacheStatus.h"
 #import "AxsCacheKeeperStorageInventory.h"
+#import "AxsCacheKeeperHostEvidence.h"
 
 static NSDictionary *AxsCacheKeeperDiagnosticRead(NSString *folder,NSString *name) {
     NSError *error=nil;
@@ -103,6 +104,9 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
 - (NSDictionary *)axs_cachekeeper_record:(NSDictionary *)record {
     if (![record isKindOfClass:NSDictionary.class]) return @{@"invalidRecord":@YES};
     NSMutableDictionary *out=[NSMutableDictionary new];
+    if (record[@"scanProgress"]) out[@"scanProgress"]=axs_cachekeeper_scan_progress_projection(record[@"scanProgress"]) ?: @{@"state":@"invalid"};
+    if (record[@"scanState"]) out[@"scanState"]=[@[@"running",@"complete",@"partial",@"cancelled",@"interrupted",@"saveFailed"] containsObject:record[@"scanState"]] ? record[@"scanState"] : @"invalid";
+    if (axs_cachekeeper_scan_integer(record[@"partialCount"],UINT32_MAX)) out[@"partialCount"]=record[@"partialCount"];
     if (record[@"scanDiagnostics"]) out[@"scanDiagnostics"]=axs_cachekeeper_scan_diagnostics_projection(record[@"scanDiagnostics"]) ?: @{@"state":@"invalid"};
     for (NSString *key in @[@"inspectionReadFailure",@"mainReadFailure",@"twinReadFailure"])
         if (record[key]) out[key]=axs_cachekeeper_inspection_read_failure_projection(record[key]) ?: @{@"state":@"invalid"};
@@ -253,8 +257,18 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
         } else if ([directories[@"state"] isEqual:@"available"]) app[@"selectionState"]=@"missing";
         NSDictionary *scan=snapshots[@"data"][bundle];
         app[@"scan"]=[redactor axs_cachekeeper_record:scan ? @{@"state":@"available",@"data":scan} : @{@"state":[snapshots[@"state"] isEqual:@"available"] ? @"missing" : snapshots[@"state"]}];
-        for (NSArray *source in @[@[@"cleanup",@"auto"],@[@"inspection",@"inspection"],@[@"network",@"network"],@[@"probe",@"probe"]])
+        for (NSArray *source in @[@[@"cleanup",@"auto"],@[@"inspection",@"inspection"],@[@"probe",@"probe"]])
             app[source[0]]=[redactor axs_cachekeeper_record:AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.%@.plist",bundle,source[1]])];
+        NSDictionary *networkRead=AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.network.plist",bundle]);
+        NSDictionary *hostRead=AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.host.plist",bundle]);
+        NSDictionary *observedRead=AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.hostObserved.plist",bundle]);
+        for (NSString *key in @[@"network",@"hostAutomatic",@"hostObserved"]) {
+            NSDictionary *raw=[key isEqual:@"network"] ? networkRead : ([key isEqual:@"hostAutomatic"] ? hostRead : observedRead);
+            if ([raw[@"state"] isEqual:@"available"]) {
+                NSDictionary *data=[key isEqual:@"network"] ? axs_cachekeeper_network_projection(raw[@"data"]) : ([key isEqual:@"hostAutomatic"] ? axs_cachekeeper_host_projection(raw[@"data"]) : axs_cachekeeper_host_observed_projection(raw[@"data"]));
+                app[key]=data ? @{@"state":@"available",@"data":data} : @{@"state":@"invalid"};
+            } else app[key]=[redactor axs_cachekeeper_record:raw];
+        }
         NSDictionary *webKitRead=AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.webkit.plist",bundle]);
         if ([webKitRead[@"state"] isEqual:@"available"]) {
             NSMutableDictionary *webKit=[axs_cachekeeper_webkit_projection_with_aliases(webKitRead[@"data"],operationAliases) mutableCopy];
@@ -271,6 +285,8 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
                 app[@"imageDiskCache"]=@{@"state":@"available",@"data":imageCache};
             } else app[@"imageDiskCache"]=@{@"state":@"invalid"};
         } else app[@"imageDiskCache"]=[redactor axs_cachekeeper_record:imageRead];
+        app[@"capabilities"]=axs_cachekeeper_capabilities(@{@"standardDirectories":scan ? @{@"state":@"available",@"data":scan} : @{@"state":[snapshots[@"state"] isEqual:@"available"] ? @"missing" : snapshots[@"state"]},
+            @"network":networkRead,@"image":imageRead,@"webKit":webKitRead,@"hostAutomatic":hostRead,@"hostObserved":observedRead},environment[@"pluginVersion"]);
         [savedSDKApps addObject:@{@"bundle":bundle,@"webKitDiskCache":webKitRead,@"imageDiskCache":imageRead}];
         [exported addObject:app];
         if (progress) progress(exported.count,bundles.count);
@@ -298,6 +314,6 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
         @"sourceStates":@{@"configuration":states[@"state"],@"selection":directories[@"state"],@"snapshots":snapshots[@"state"],@"installedApplications":installedSnapshotAvailable ? @"available" : @"unavailable"},
         @"batch":[redactor axs_cachekeeper_record:batch],
         @"collection":collection,
-        @"notes":@[@"按传入安装快照与当前配置的并集汇总已有记录；缺配置 APP 保持禁用。notInSnapshot 只表示传入快照缺条目，不确认卸载；安装来源缺失或含坏身份条目时标记 unavailable。",@"只汇总插件已保存记录，不重新扫描 APP；历史、缺失与损坏状态保留。各记录时间不同，不是原子快照。",@"汇总完成不等于清理完成或深度检测完成；覆盖、失败、取消、截断与原始时间分别判断。",@"诊断通道只核验本轮握手；verified 不表示取得 APP 容器访问或清理能力，notObserved 表示未观察到，invalid 表示状态记录损坏。",@"字节是逻辑记录值；硬链接孪生大小不等于实际释放空间。",@"未知路径组件和账号已匿名化；自由文本只导出原因类别，不含文件内容或原始日志。"]};
+        @"notes":@[@"按传入安装快照与当前配置的并集汇总已有记录；缺配置 APP 保持禁用。notInSnapshot 只表示传入快照缺条目，不确认卸载；安装来源缺失或含坏身份条目时标记 unavailable。",@"只汇总插件已保存记录，不重新扫描、唤醒或只读探测 APP；能力摘要来自本轮原始读取，保留各记录时间、运行版本和失败分支。宿主 notify 是未经认证的自报告，既不授予资源删除权限，也不证明限制或恢复实测成功。各记录时间不同，不是原子快照。",@"汇总完成不等于清理完成或深度检测完成；覆盖、失败、取消、截断与原始时间分别判断。",@"诊断通道只核验本轮握手；verified 不表示取得 APP 容器访问或清理能力，notObserved 表示未观察到，invalid 表示状态记录损坏。",@"字节是逻辑记录值；硬链接孪生大小不等于实际释放空间。",@"未知路径组件和账号已匿名化；自由文本只导出原因类别，不含文件内容或原始日志。"]};
 }
 @end

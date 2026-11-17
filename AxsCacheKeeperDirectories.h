@@ -17,8 +17,16 @@ NSArray<NSString *> *axs_cachekeeper_discover_cache_roots(NSURL *home, NSError *
 NSArray<NSDictionary *> *axs_cachekeeper_scan_targets_diagnostics(NSURL *home, NSDictionary *groups, BOOL homeWasRejected, NSError **error,
                                                                  NSDictionary **diagnostics);
 NSDictionary *axs_cachekeeper_measure_directory(NSURL *root, NSTimeInterval deadline, NSUInteger entryLimit);
+NSArray<NSDictionary *> *axs_cachekeeper_bounded_scan_targets(NSURL *home, NSDictionary *groups, BOOL homeWasRejected, NSDictionary **diagnostics);
+// A discovery identity includes directory mutation times, not only inode identity.
+static inline NSArray *axs_cachekeeper_scan_identity(const struct stat *info) {
+    return @[@(info->st_dev),@(info->st_ino),@(info->st_mtimespec.tv_sec),@(info->st_mtimespec.tv_nsec),
+        @(info->st_ctimespec.tv_sec),@(info->st_ctimespec.tv_nsec)];
+}
 
 #if defined(AXS_CACHEKEEPER_SCAN_TESTING)
+NSArray<NSDictionary *> *axs_cachekeeper_bounded_scan_targets_dependencies(NSURL *home, NSDictionary *groups, BOOL homeWasRejected,
+    NSDictionary **diagnostics, void (^event)(NSString *stage, NSURL *root));
 NSDictionary *axs_cachekeeper_measure_directory_dependencies(NSURL *root, NSTimeInterval deadline, NSUInteger entryLimit,
     NSTimeInterval (^clock)(void), int (^statBlock)(const char *,struct stat *),
     NSEnumerator<NSURL *> *(^enumerator)(NSURL *,BOOL (^)(NSURL *,NSError *)));

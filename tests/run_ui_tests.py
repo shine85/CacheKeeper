@@ -109,9 +109,13 @@ try:
                                  "-only-testing:ImageCacheIntegrationTests",
                                  "-resultBundlePath", str(output / "ImageCacheResults.xcresult"),
                                  "-parallel-testing-enabled", "NO"], timeout=420)
+    run_step("ScanPage", ["xcodebuild", "test-without-building", *build_options,
+                          "-only-testing:ScanPageTests", "-resultBundlePath", str(output / "ScanPageTests.xcresult"),
+                          "-parallel-testing-enabled", "NO"], timeout=420)
     run_step("Search/XCUI", ["xcodebuild", "test-without-building", *build_options,
                              "-skip-testing:WebKitIntegrationTests",
                              "-skip-testing:ImageCacheIntegrationTests",
+                             "-skip-testing:ScanPageTests",
                              "-resultBundlePath", str(output / "Results.xcresult"),
                              "-parallel-testing-enabled", "NO"], timeout=900)
     run_sdk_variant("5.15.5", "fb50c1d20f24db5322b2f8f379de3618f75fe08e", "ImageCacheIntegrationTests",
@@ -126,7 +130,8 @@ try:
                      ("SDWebImage 5.10.4 absent API", "ImageCacheLegacyIntegrationTests/ImageCacheLegacyAbsentAPITests",
                       "ImageCache510AbsentResults.xcresult")])
 finally:
-    for result, screenshots in [("WebKitResults.xcresult", "WebKitScreenshots"),
+    for result, screenshots in [("ScanPageTests.xcresult", "ScanPageScreenshots"),
+                                ("WebKitResults.xcresult", "WebKitScreenshots"),
                                 ("ImageCacheResults.xcresult", "ImageCacheScreenshots"),
                                 ("ImageCache515Results.xcresult", "ImageCache515Screenshots"),
                                 ("ImageCache510Results.xcresult", "ImageCache510Screenshots"),

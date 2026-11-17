@@ -3,6 +3,8 @@
 #import "AxsCacheKeeperFileAccess.h"
 #import "AxsCacheKeeperScanDiagnostics.h"
 #include <errno.h>
+#include <dirent.h>
+#include <string.h>
 
 static NSError *axs_cachekeeper_scan_local_error(void) {
     return [NSError errorWithDomain:@"dev.local.cachekeeper.scan" code:1
@@ -211,6 +213,80 @@ NSArray<NSDictionary *> *axs_cachekeeper_scan_targets_diagnostics(NSURL *home, N
     }
     if (output) *output=[diagnostics copy];return targets;
 }
+
+// Discovery is a separate bounded phase: never materialize a huge directory listing.
+static NSArray<NSDictionary *> *axs_cachekeeper_bounded_scan_targets_body(NSURL *home, NSDictionary *groups, BOOL homeWasRejected, NSDictionary **output,
+    void (^event)(NSString *,NSURL *)) {
+    NSMutableDictionary *diagnostics=axs_cachekeeper_scan_diagnostics_new();
+    if(!home && homeWasRejected) diagnostics[@"containerState"]=@"invalidHome";
+    NSMutableArray *targets=[NSMutableArray new];NSMutableArray *roots=[NSMutableArray new];
+    [roots addObject:@{@"url":home ?: NSNull.null,@"scope":@"home",@"prefix":@""}];
+    NSDictionary *valid=axs_cachekeeper_valid_group_homes(groups);
+    NSMutableSet *visited=[NSMutableSet new];
+    for(NSString *key in [valid.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        NSURL *url=valid[key];if([visited containsObject:url.path]) continue;[visited addObject:url.path];
+        if(roots.count>=33) {diagnostics[@"entryLimitExceeded"]=@YES;break;}
+        [roots addObject:@{@"url":url,@"scope":@"group",@"prefix":[NSString stringWithFormat:@"Group/%@/",key]}];
+    }
+    NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+.1;NSUInteger entries=0;BOOL stopped=NO;
+    for(NSDictionary *source in roots) {
+        if(stopped) break;
+        NSURL *container=[source[@"url"] isKindOfClass:NSURL.class] ? source[@"url"] : nil;
+        NSString *scope=source[@"scope"];struct stat identity;
+        int containerFD=axs_cachekeeper_scan_open_root(container,scope,[scope isEqual:@"home"],diagnostics,NULL,&identity);
+        if(containerFD<0) continue;
+        for(NSString *base in @[@"",@"Library"]) {
+            int fd=base.length ? openat(containerFD,"Library",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) : dup(containerFD);
+            if(fd<0) {if(errno!=ENOENT) axs_cachekeeper_scan_failure(diagnostics,scope,@"rootOpen",[NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil],nil,YES,NO);continue;}
+            struct stat baseIdentity;
+            if(fstat(fd,&baseIdentity)) {int code=errno;close(fd);axs_cachekeeper_scan_failure(diagnostics,scope,@"rootStat",[NSError errorWithDomain:NSPOSIXErrorDomain code:code userInfo:nil],nil,YES,YES);continue;}
+            NSURL *baseRoot=base.length ? [container URLByAppendingPathComponent:base] : container;
+            DIR *directory=fdopendir(fd);if(!directory) {int code=errno;close(fd);axs_cachekeeper_scan_failure(diagnostics,scope,@"listChildren",[NSError errorWithDomain:NSPOSIXErrorDomain code:code userInfo:nil],nil,YES,NO);continue;}
+            while(YES) {
+                if(entries>=4096 || targets.count>=256 || NSProcessInfo.processInfo.systemUptime>=deadline) {
+                    diagnostics[entries>=4096 || targets.count>=256 ? @"entryLimitExceeded" : @"timeBudgetExceeded"]=@YES;stopped=YES;break;
+                }
+                errno=0;struct dirent *entry=readdir(directory);
+                if(!entry) {if(errno) axs_cachekeeper_scan_failure(diagnostics,scope,@"listChildren",[NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil],nil,YES,NO);break;}
+                if(!strcmp(entry->d_name,".") || !strcmp(entry->d_name,"..")) continue;
+                entries++;
+                if(!base.length && !strcmp(entry->d_name,"Library")) continue;
+                struct stat info;if(fstatat(dirfd(directory),entry->d_name,&info,AT_SYMLINK_NOFOLLOW)) {axs_cachekeeper_scan_failure(diagnostics,scope,@"entryStat",[NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil],nil,YES,YES);continue;}
+                if(!S_ISDIR(info.st_mode)) continue;
+                NSString *name=[[NSString alloc] initWithBytes:entry->d_name length:strlen(entry->d_name) encoding:NSUTF8StringEncoding];
+                if(!name) {axs_cachekeeper_scan_failure(diagnostics,scope,@"entryStat",[NSError errorWithDomain:NSPOSIXErrorDomain code:EILSEQ userInfo:nil],nil,YES,YES);continue;}
+                NSString *relative=base.length ? [base stringByAppendingPathComponent:name] : name;
+                if(axs_cachekeeper_hidden_directory(relative)) continue;
+                NSString *path=[source[@"prefix"] stringByAppendingString:relative];
+                [targets addObject:@{@"path":path,@"root":[container URLByAppendingPathComponent:relative],@"scope":scope,
+                    @"identity":@[@(info.st_dev),@(info.st_ino)],@"sourceRoot":baseRoot,@"sourceIdentity":axs_cachekeeper_scan_identity(&baseIdentity),
+                    @"readOnly":@(![scope isEqual:@"home"] || !axs_cachekeeper_cache_path(relative))}];
+            }
+            if(event) event(@"enumerated",baseRoot);
+            struct stat held,bound;
+            if(fstat(dirfd(directory),&held) || (base.length ? fstatat(containerFD,"Library",&bound,AT_SYMLINK_NOFOLLOW) : fstat(containerFD,&bound)) ||
+               !S_ISDIR(bound.st_mode) || ![axs_cachekeeper_scan_identity(&baseIdentity) isEqual:axs_cachekeeper_scan_identity(&held)] ||
+               ![axs_cachekeeper_scan_identity(&baseIdentity) isEqual:axs_cachekeeper_scan_identity(&bound)])
+                axs_cachekeeper_scan_failure(diagnostics,scope,@"rootRecheck",nil,@"identityChanged",YES,NO);
+            closedir(directory);if(stopped) break;
+        }
+        struct stat finalContainer;
+        if(fstat(containerFD,&finalContainer) || ![axs_cachekeeper_scan_identity(&identity) isEqual:axs_cachekeeper_scan_identity(&finalContainer)])
+            axs_cachekeeper_scan_failure(diagnostics,scope,@"rootRecheck",nil,@"identityChanged",YES,NO);
+        axs_cachekeeper_scan_recheck_root(container,&identity,scope,[scope isEqual:@"home"],diagnostics,NULL);close(containerFD);
+    }
+    if([diagnostics[@"entryLimitExceeded"] boolValue] || [diagnostics[@"timeBudgetExceeded"] boolValue]) {diagnostics[@"discoveryComplete"]=@NO;diagnostics[@"measurementComplete"]=@NO;}
+    if(output) *output=diagnostics;return targets;
+}
+NSArray<NSDictionary *> *axs_cachekeeper_bounded_scan_targets(NSURL *home, NSDictionary *groups, BOOL homeWasRejected, NSDictionary **output) {
+    return axs_cachekeeper_bounded_scan_targets_body(home,groups,homeWasRejected,output,nil);
+}
+#if defined(AXS_CACHEKEEPER_SCAN_TESTING)
+NSArray<NSDictionary *> *axs_cachekeeper_bounded_scan_targets_dependencies(NSURL *home, NSDictionary *groups, BOOL homeWasRejected,
+    NSDictionary **output, void (^event)(NSString *,NSURL *)) {
+    return axs_cachekeeper_bounded_scan_targets_body(home,groups,homeWasRejected,output,event);
+}
+#endif
 
 static NSDictionary *axs_cachekeeper_measure_directory_body(NSURL *root, NSTimeInterval deadline, NSUInteger entryLimit,
     NSTimeInterval (^clock)(void), int (^statBlock)(const char *,struct stat *),

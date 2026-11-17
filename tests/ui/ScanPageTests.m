@@ -1,0 +1,133 @@
+#import <XCTest/XCTest.h>
+#import "ScanHostEvidenceBoundary.h"
+#import "../../AxsCacheKeeperDiagnostics.h"
+// The visual harness already owns a CKScanPage navigation substitute. Compile the
+// actual product implementation under an isolated class name, unchanged behavior.
+#define CKScanPage AxsCacheKeeperActualScanPage
+#define AxsCacheKeeperHostEvidenceClient AxsCacheKeeperScanHostClient
+#import "../../Prefs/ScanPage.m"
+#undef CKScanPage
+#undef AxsCacheKeeperHostEvidenceClient
+
+@interface AxsCacheKeeperScanFixture : AxsCacheKeeperActualScanPage
+@property(nonatomic,copy) NSString *axs_cachekeeper_folder,*axs_cachekeeper_lastMessage;
+@property(nonatomic) NSUInteger axs_cachekeeper_oldProbeCalls;
+@end
+@implementation AxsCacheKeeperScanFixture
+- (NSString *)file:(NSString *)name {return [self.axs_cachekeeper_folder stringByAppendingPathComponent:name];}
+- (void)message:(NSString *)text {self.axs_cachekeeper_lastMessage=text;}
+- (void)axs_cachekeeper_begin_probe {self.axs_cachekeeper_oldProbeCalls++;[super axs_cachekeeper_begin_probe];}
+@end
+
+@interface AxsCacheKeeperScanPageTests : XCTestCase
+@property(nonatomic,strong) UIWindow *window,*previousWindow;
+@property(nonatomic,strong) AxsCacheKeeperScanFixture *page;
+@property(nonatomic,strong) AxsCacheKeeperHostEvidenceServer *server;
+@property(nonatomic,copy) NSString *folder;
+@end
+@implementation AxsCacheKeeperScanPageTests
+- (void)setUp {
+    [super setUp];axs_cachekeeper_scan_host_fail(AxsCacheKeeperScanHostFailureNone);self.folder=[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    [NSFileManager.defaultManager createDirectoryAtPath:[self.folder stringByAppendingPathComponent:@"Status"] withIntermediateDirectories:YES attributes:nil error:NULL];
+    self.page=[AxsCacheKeeperScanFixture new];self.page.axs_cachekeeper_folder=self.folder;self.page.bundle=[@"dev.local.scanpage." stringByAppendingString:[NSUUID.UUID.UUIDString stringByReplacingOccurrencesOfString:@"-" withString:@""]];self.page.appName=@"扫描测试";
+    [@{self.page.bundle:@{@"enabled":@NO}} writeToFile:[self.page file:@"appEnabled.plist"] atomically:YES];
+    self.previousWindow=UIApplication.sharedApplication.delegate.window;self.window=[[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];self.window.rootViewController=[[UINavigationController alloc] initWithRootViewController:self.page];[self.window makeKeyAndVisible];[self.page loadViewIfNeeded];
+    XCTAssertEqual([self.page tableView:self.page.tableView numberOfRowsInSection:0],8);
+}
+- (void)tearDown {
+    [self.server axs_cachekeeper_invalidate];self.server=nil;[self.page.timer invalidate];[self.page.statusTimer invalidate];[self.page.axs_cachekeeper_hostClient axs_cachekeeper_cancel];
+    XCTAssertEqual(axs_cachekeeper_scan_host_active_tokens(),0u);axs_cachekeeper_scan_host_fail(AxsCacheKeeperScanHostFailureNone);
+    self.window.hidden=YES;self.window.rootViewController=nil;[self.previousWindow makeKeyWindow];self.page=nil;self.window=nil;
+    [NSFileManager.defaultManager removeItemAtPath:self.folder error:NULL];[super tearDown];
+}
+- (NSDictionary *)axs_cachekeeper_progress:(NSString *)state {
+    return @{@"state":state,@"slices":@2,@"entriesVisited":@10,@"rootsCompleted":@0,@"rootsTotal":@1,@"entryLimit":@100,@"sliceEntryLimit":@10,@"maxOpenDirectories":@2,@"wallTimeLimitSeconds":@300};
+}
+- (void)axs_cachekeeper_receipt:(NSString *)state error:(NSString *)error {
+    NSMutableDictionary *diagnostics=axs_cachekeeper_scan_diagnostics_new();diagnostics[@"measurementComplete"]=@NO;
+    NSMutableDictionary *record=[@{@"bundle":self.page.bundle,@"token":self.page.token,@"rows":@[],@"previousRows":@[],@"updated":NSDate.date,@"complete":@NO,@"scanDiagnostics":diagnostics,@"scanProgress":[self axs_cachekeeper_progress:state]} mutableCopy];
+    if (error) record[@"error"]=error;
+    XCTAssertTrue([record writeToURL:[NSURL fileURLWithPath:[self.page file:@"scan.plist"]] error:NULL]);
+}
+- (void)testRunningReceiptKeepsWaitingAndStopRetainsToken {
+    [self.page scan];NSString *token=self.page.token;XCTAssertNotNil(self.page.timer);
+    self.page.started=NSProcessInfo.processInfo.systemUptime-40;
+    [self axs_cachekeeper_receipt:@"running" error:nil];[self.page check];
+    XCTAssertNotNil(self.page.timer);XCTAssertTrue([self.page.title containsString:@"已计量"]);
+    [self.page scan];NSDictionary *request=[NSDictionary dictionaryWithContentsOfFile:[self.page file:@"request.plist"]];
+    XCTAssertEqualObjects(request[@"token"],token);XCTAssertEqualObjects(self.page.token,token);XCTAssertTrue([request[@"cancel"] boolValue]);XCTAssertNotNil(self.page.timer);XCTAssertEqualObjects(self.page.scanButton.title,@"正在停止");
+    [self axs_cachekeeper_receipt:@"cancelled" error:nil];[self.page check];XCTAssertNil(self.page.timer);XCTAssertEqualObjects(self.page.title,self.page.appName);XCTAssertTrue(self.page.scanButton.enabled);
+}
+- (void)testSaveFailureStopsWaitingAndShowsRealFailure {
+    [self.page scan];[self axs_cachekeeper_receipt:@"saveFailed" error:@"检测结果保存失败；本次未完成"];
+    [self.page check];XCTAssertNil(self.page.timer);XCTAssertTrue([self.page.axs_cachekeeper_lastMessage containsString:@"保存失败"]);XCTAssertTrue(self.page.scanButton.enabled);
+}
+- (void)testRequestWriteFailureDoesNotStartTimer {
+    [NSFileManager.defaultManager createDirectoryAtPath:[self.page file:@"request.plist"] withIntermediateDirectories:NO attributes:nil error:NULL];
+    [self.page scan];XCTAssertNil(self.page.timer);XCTAssertTrue([self.page.axs_cachekeeper_lastMessage containsString:@"无法写入检测请求"]);
+}
+- (void)axs_cachekeeper_startServer {
+    self.server=[[AxsCacheKeeperHostEvidenceServer alloc] initWithBundle:self.page.bundle folder:self.folder runtimeInfo:@{@"schemaVersion":@1,@"packageVersion":@"0.7.2-167.1",@"firstObserved":@1700000000}];
+    [self.server axs_cachekeeper_observeContainer:YES authorizationAttempted:NO authorizationCode:0 sharedAccess:NO];(void)[self.server axs_cachekeeper_snapshot];
+}
+- (void)axs_cachekeeper_tapHost {
+    NSIndexPath *path=[NSIndexPath indexPathForRow:7 inSection:0];
+    UITableViewCell *cell=[self.page tableView:self.page.tableView cellForRowAtIndexPath:path];XCTAssertEqualObjects(cell.accessibilityIdentifier,@"CacheKeeperReadonlyHost");
+    [self.page.tableView selectRowAtIndexPath:path animated:NO scrollPosition:UITableViewScrollPositionNone];[self.page tableView:self.page.tableView didSelectRowAtIndexPath:path];
+}
+- (void)axs_cachekeeper_waitHost {
+    XCTestExpectation *done=[self expectationForPredicate:[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *bindings) {(void)object;(void)bindings;[self.page axs_cachekeeper_reload];return !self.page.axs_cachekeeper_hostPending;}] evaluatedWithObject:self.page handler:nil];
+    [self waitForExpectations:@[done] timeout:5];
+}
+- (void)testDisabledAppReadonlyInteractionPreservesConfigAndUsesFullPackageVersion {
+    [self axs_cachekeeper_startServer];NSData *before=[NSData dataWithContentsOfFile:[self.page file:@"appEnabled.plist"]];
+    [self axs_cachekeeper_tapHost];[self axs_cachekeeper_waitHost];
+    XCTAssertEqual(self.page.axs_cachekeeper_oldProbeCalls,0u);XCTAssertTrue([self.page.axs_cachekeeper_hostStatus containsString:@"currentVersion"]);XCTAssertEqual(self.page.axs_cachekeeper_hostClient.axs_cachekeeper_activeTokenCount,0u);
+    XCTAssertEqualObjects(before,[NSData dataWithContentsOfFile:[self.page file:@"appEnabled.plist"]]);
+    NSDictionary *record=[NSDictionary dictionaryWithContentsOfFile:[self.page file:[NSString stringWithFormat:@"Status/%@.hostObserved.plist",self.page.bundle]]];XCTAssertEqualObjects(record[@"state"],@"observed");XCTAssertFalse([record[@"data"][@"authorizationAttempted"] boolValue]);
+    UITableViewCell *old=[self.page tableView:self.page.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:4 inSection:0]];XCTAssertEqualObjects(old.textLabel.text,@"检查网络限制");
+    [self.page tableView:self.page.tableView didSelectRowAtIndexPath:[NSIndexPath indexPathForRow:4 inSection:0]];XCTAssertEqual(self.page.axs_cachekeeper_oldProbeCalls,1u);XCTAssertFalse(self.page.probePending);XCTAssertTrue([self.page.probeStatus containsString:@"未开启"]);
+}
+- (void)testReadonlySaveFailureIsVisibleAndSeparateFromHost {
+    [self axs_cachekeeper_startServer];NSString *path=[self.page file:[NSString stringWithFormat:@"Status/%@.hostObserved.plist",self.page.bundle]];
+    [NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:NO attributes:nil error:NULL];
+    [self axs_cachekeeper_tapHost];[self axs_cachekeeper_waitHost];XCTAssertTrue([self.page.axs_cachekeeper_hostStatus containsString:@"面板观察保存失败"]);
+    XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:[self.page file:[NSString stringWithFormat:@"Status/%@.host.plist",self.page.bundle]]]);
+}
+- (void)axs_cachekeeper_assertImmediateFailure:(AxsCacheKeeperScanHostFailure)failure {
+    NSTimeInterval oldTime=NSDate.date.timeIntervalSince1970-60;
+    NSDictionary *host=@{@"schemaVersion":@1,@"source":@"hostAutomatic",@"transportTrust":@"unauthenticated",@"updated":@(oldTime),@"runtimeInfo":@{@"schemaVersion":@1,@"packageVersion":@"0.7.2-154.1",@"firstObserved":@1700000000},@"existingContainerGatePassed":@YES,@"authorizationAttempted":@NO,@"sharedAccessGranted":@NO,@"authorizationCode":@0,@"configurationReadScope":@"appEnabled",@"configurationReadState":@"notPermitted",@"previousPublishState":@"notAttempted",@"previousPublishErrorCode":@0};
+    NSString *observed=[self.page file:[NSString stringWithFormat:@"Status/%@.hostObserved.plist",self.page.bundle]];
+    NSString *automatic=[self.page file:[NSString stringWithFormat:@"Status/%@.host.plist",self.page.bundle]];
+    XCTAssertTrue([@{@"source":@"panelObserved",@"state":@"observed",@"updated":@(oldTime),@"data":host} writeToURL:[NSURL fileURLWithPath:observed] error:NULL]);XCTAssertTrue([host writeToURL:[NSURL fileURLWithPath:automatic] error:NULL]);
+    NSData *automaticBefore=[NSData dataWithContentsOfFile:automatic],*configBefore=[NSData dataWithContentsOfFile:[self.page file:@"appEnabled.plist"]];
+    NSString *resource=[self.page file:@"user-resource.bin"];NSData *resourceBefore=[@"retained app data" dataUsingEncoding:NSUTF8StringEncoding];XCTAssertTrue([resourceBefore writeToFile:resource atomically:YES]);
+    axs_cachekeeper_scan_host_fail(failure);[self axs_cachekeeper_tapHost];
+    XCTAssertFalse(self.page.axs_cachekeeper_hostPending);XCTAssertTrue(self.page.axs_cachekeeper_hostResultConsumed);XCTAssertTrue([self.page.axs_cachekeeper_hostStatus containsString:@"transportError"]);XCTAssertFalse([self.page.axs_cachekeeper_hostStatus containsString:@"154.1"]);
+    NSDictionary *saved=[NSDictionary dictionaryWithContentsOfFile:observed];XCTAssertEqualObjects(saved[@"source"],@"panelObserved");XCTAssertEqualObjects(saved[@"state"],@"transportError");XCTAssertGreaterThan([saved[@"updated"] doubleValue],oldTime);XCTAssertNil(saved[@"data"]);
+    NSData *terminalBefore=[NSData dataWithContentsOfFile:observed];[self.page axs_cachekeeper_reload];XCTAssertEqualObjects([NSData dataWithContentsOfFile:observed],terminalBefore);
+    XCTAssertEqual(self.page.axs_cachekeeper_hostClient.axs_cachekeeper_activeTokenCount,0u);XCTAssertEqual(axs_cachekeeper_scan_host_active_tokens(),0u);
+    NSUInteger expectedTokens=failure==AxsCacheKeeperScanHostFailureFirstRegister ? 0 : (failure==AxsCacheKeeperScanHostFailureSecondRegister ? 1 : 2);
+    XCTAssertEqual(axs_cachekeeper_scan_host_cancel_calls(),expectedTokens);XCTAssertEqual(axs_cachekeeper_scan_host_register_calls(),failure==AxsCacheKeeperScanHostFailureFirstRegister ? 1u : 2u);
+    NSDictionary *report=[[[AxsCacheKeeperDiagnostics alloc] initWithFolder:self.folder] reportWithApps:@[@{@"id":self.page.bundle}] environment:@{@"pluginVersion":@"0.7.2-167.1"}];
+    NSDictionary *app=[report[@"apps"] firstObject],*record=app[@"hostObserved"][@"data"];
+    XCTAssertEqualObjects(record[@"state"],@"transportError");XCTAssertEqualObjects(record[@"updated"],saved[@"updated"]);XCTAssertNil(record[@"data"]);
+    XCTAssertEqualObjects(app[@"capabilities"][@"hostObserved"][@"observationState"],@"transportError");XCTAssertEqualObjects(app[@"capabilities"][@"hostObserved"][@"runtimeVersionState"],@"notRecorded");
+    XCTAssertEqualObjects([NSData dataWithContentsOfFile:automatic],automaticBefore);XCTAssertEqualObjects([NSData dataWithContentsOfFile:[self.page file:@"appEnabled.plist"]],configBefore);XCTAssertEqualObjects([NSData dataWithContentsOfFile:resource],resourceBefore);XCTAssertEqual(self.page.axs_cachekeeper_oldProbeCalls,0u);
+    NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:NULL];XCTAssertNotNil(json);
+}
+- (void)testReadonlyFirstRegistrationFailureReplacesOldObserved { [self axs_cachekeeper_assertImmediateFailure:AxsCacheKeeperScanHostFailureFirstRegister]; }
+- (void)testReadonlySecondRegistrationFailureReplacesOldObserved { [self axs_cachekeeper_assertImmediateFailure:AxsCacheKeeperScanHostFailureSecondRegister]; }
+- (void)testReadonlySetFailureReplacesOldObserved { [self axs_cachekeeper_assertImmediateFailure:AxsCacheKeeperScanHostFailureSet]; }
+- (void)testReadonlyPostFailureReplacesOldObserved { [self axs_cachekeeper_assertImmediateFailure:AxsCacheKeeperScanHostFailurePost]; }
+- (void)testReplaceLeaveAndOverdueRequestReleaseTokens {
+    [self axs_cachekeeper_tapHost];AxsCacheKeeperScanHostClient *previous=self.page.axs_cachekeeper_hostClient;[self axs_cachekeeper_tapHost];XCTAssertEqual(previous.axs_cachekeeper_activeTokenCount,0u);XCTAssertEqualObjects([previous axs_cachekeeper_poll][@"state"],@"cancelled");
+    // Exercise the real client's existing deadline branch as if UIKit returned after suspension.
+    [self.page.axs_cachekeeper_hostClient setValue:@(NSProcessInfo.processInfo.systemUptime-1) forKey:@"axs_cachekeeper_deadline"];
+    [self.page axs_cachekeeper_reload];XCTAssertTrue([self.page.axs_cachekeeper_hostStatus containsString:@"timedOut"]);XCTAssertEqual(self.page.axs_cachekeeper_hostClient.axs_cachekeeper_activeTokenCount,0u);
+    [self axs_cachekeeper_tapHost];
+    [self.page viewWillDisappear:NO];XCTAssertGreaterThan(self.page.axs_cachekeeper_hostClient.axs_cachekeeper_activeTokenCount,0u);
+    [self.page viewWillAppear:NO];[self.page.navigationController pushViewController:[UIViewController new] animated:NO];
+    XCTAssertEqual(self.page.axs_cachekeeper_hostClient.axs_cachekeeper_activeTokenCount,0u);
+}
+@end

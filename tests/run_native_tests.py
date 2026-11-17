@@ -36,6 +36,8 @@ SCRIPT_GROUPS = (
     ("image-runtime-source", "run_image_runtime_source_tests.py", 240),
     ("inspection-export", "run_inspection_export_tests.py", 180),
     ("scan-diagnostics", "run_scan_diagnostics_tests.py", 180),
+    ("scan-task", "run_scan_task_tests.py", 180),
+    ("host-evidence", "run_host_evidence_tests.py", 240),
     ("hardlink", "run_hardlink_tests.py", 180),
     ("diagnostic-channel-export-red", "run_diagnostic_channel_export_red.py", 180),
     ("diagnostic-channel-paths-red", "run_diagnostic_channel_paths_red.py", 180),

@@ -598,7 +598,12 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
     if (readError) {
         [self axs_cachekeeper_configuration_error];[self axs_cachekeeper_refresh_after_write];return;
     }
-    if ([existing[@"remaining"] count] && ![existing[@"error"] length]) return;
+    if ([existing[@"remaining"] count] && ![existing[@"error"] length]) {
+        NSMutableDictionary *stop=[existing mutableCopy];stop[@"cancel"]=@YES;
+        if (![stop writeToFile:path atomically:YES]) [self axs_cachekeeper_configuration_error];
+        else self.batchSnapshot=stop;
+        [self axs_cachekeeper_refresh_after_write];return;
+    }
     NSMutableArray *bundles=[NSMutableArray array];
     for (NSDictionary *app in self.apps) [bundles addObject:app[@"id"]];
     if (!bundles.count) return;
@@ -662,8 +667,8 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
     BOOL stopped=[self.batchSnapshot[@"error"] length]>0;
     BOOL active=[self.batchSnapshot[@"remaining"] count]>0 && !stopped;
     UIBarButtonItem *scanButton=self.navigationItem.rightBarButtonItem;
-    BOOL enabled=!active && self.apps.count>0 && !self.sourceErrors[@"batch.plist"];
-    NSString *title=active ? [NSString stringWithFormat:@"%@/%@",self.batchSnapshot[@"completed"],self.batchSnapshot[@"total"]] : stopped ? @"重试检测" : @"检测全部";
+    BOOL enabled=self.apps.count>0 && !self.sourceErrors[@"batch.plist"] && (!active || ![self.batchSnapshot[@"cancel"] boolValue]);
+    NSString *title=active ? [NSString stringWithFormat:@"停止 %@/%@",self.batchSnapshot[@"completed"],self.batchSnapshot[@"total"]] : stopped ? @"重试检测" : @"检测全部";
     if (scanButton.enabled!=enabled) scanButton.enabled=enabled;
     if (![scanButton.title isEqual:title]) scanButton.title=title;
     [self.table reloadData];

@@ -12,12 +12,12 @@ endif
 BUNDLE_NAME = CacheKeeperPrefs
 CacheKeeperPrefs_FILES = Prefs/Settings.m Prefs/SearchInput.m Prefs/ScanPage.m Prefs/InspectionPage.m Prefs/DiagnosticsPage.m AxsCacheKeeperDiagnostics.m AxsCacheKeeperAppList.m AxsCacheKeeperInstallation.m AxsCacheKeeperDiagnosticChannel.m
 CacheKeeperPrefs_FILES += Prefs/SearchDiagnostics.m
-CacheKeeperPrefs_FILES += AxsCacheKeeperStorageInventory.m
+CacheKeeperPrefs_FILES += AxsCacheKeeperStorageInventory.m AxsCacheKeeperHostEvidence.m
 CacheKeeperPrefs_FILES += AxsCacheKeeperOperationInfo.m
 CacheKeeperPrefs_FILES += Prefs/SearchHitRouting.m
 CacheKeeperPrefs_FILES += AxsCacheKeeperPDFSession.m AxsCacheKeeperPDFInspection.m
 CacheKeeperPrefs_INSTALL_PATH = /Library/PreferenceBundles
-CacheKeeperPrefs_CFLAGS = -fobjc-arc -DAXS_CACHEKEEPER_PDF_CLIENT=1
+CacheKeeperPrefs_CFLAGS = -fobjc-arc -DAXS_CACHEKEEPER_PDF_CLIENT=1 -DAXS_CACHEKEEPER_HOST_CLIENT_ONLY=1
 CacheKeeperPrefs_FRAMEWORKS = UIKit Foundation
 CacheKeeperPrefs_PRIVATE_FRAMEWORKS = Preferences
 CacheKeeperPrefs_LIBRARIES = roothide
@@ -26,13 +26,14 @@ CacheKeeperPrefs_CODESIGN_FLAGS = -S -Idev.local.cachekeeper.preferences
 include $(THEOS_MAKE_PATH)/bundle.mk
 TWEAK_NAME = CacheKeeper
 CacheKeeper_FILES = Cleaner.m Desktop.xm Permissions.m Scanner.m Baseline.m AxsCacheKeeperNetworkCache.m AxsCacheKeeperDirectories.m AxsCacheKeeperInspection.m AxsCacheKeeperProcessObservation.m AxsCacheKeeperCleanupJob.m AxsCacheKeeperCleanupRules.m AxsCacheKeeperReceipts.m AxsCacheKeeperCleanupSchedule.m
-CacheKeeper_CFLAGS = -fobjc-arc -IVendor -DAXS_CACHEKEEPER_PDF_SERVER=1
+CacheKeeper_CFLAGS = -fobjc-arc -IVendor -DAXS_CACHEKEEPER_PDF_SERVER=1 -DAXS_CACHEKEEPER_HOST_SERVER_ONLY=1
 CacheKeeper_CFLAGS += -DAXS_CACHEKEEPER_PACKAGE_VERSION=\"$(AXS_CACHEKEEPER_PACKAGE_VERSION)\"
 CacheKeeper_FILES += AxsCacheKeeperPDFInspection.m AxsCacheKeeperPDFSession.m
 CacheKeeper_FILES += AxsCacheKeeperDependencySnapshot.m AxsCacheKeeperInstallation.m AxsCacheKeeperDiagnosticChannel.m
 CacheKeeper_FILES += AxsCacheKeeperWebKitCache.m AxsCacheKeeperWebKitObservation.m AxsCacheKeeperWebKitRuntime.xm
 CacheKeeper_FILES += AxsCacheKeeperImageCache.m AxsCacheKeeperImageCacheRuntime.m
-CacheKeeper_FILES += AxsCacheKeeperOperationInfo.m
+CacheKeeper_FILES += AxsCacheKeeperOperationInfo.m AxsCacheKeeperHostEvidence.m
+CacheKeeper_FILES += AxsCacheKeeperScanTask.m
 CacheKeeper_FRAMEWORKS = UIKit Foundation WebKit
 CacheKeeper_LIBRARIES = roothide sandy substrate
 CacheKeeper_LDFLAGS = -LVendor

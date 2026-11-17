@@ -1,0 +1,378 @@
+#import "AxsCacheKeeperScanTask.h"
+#import "AxsCacheKeeperDirectories.h"
+#import "AxsCacheKeeperFileAccess.h"
+#import "AxsCacheKeeperRecords.h"
+#import "AxsCacheKeeperInspection.h"
+#include <dirent.h>
+#include <string.h>
+
+static const NSUInteger AxsCacheKeeperScanSliceEntries=512;
+static const NSUInteger AxsCacheKeeperScanTaskEntries=2000000;
+static const NSUInteger AxsCacheKeeperScanDepth=64;
+static const NSUInteger AxsCacheKeeperScanActiveBatch=4;
+static const NSTimeInterval AxsCacheKeeperScanTaskSeconds=300;
+
+static BOOL AxsCacheKeeperScanSame(const struct stat *a,const struct stat *b) {
+    return S_ISDIR(b->st_mode) && a->st_dev==b->st_dev && a->st_ino==b->st_ino;
+}
+static BOOL AxsCacheKeeperScanUnchanged(const struct stat *a,const struct stat *b) {
+    return AxsCacheKeeperScanSame(a,b) && a->st_mtimespec.tv_sec==b->st_mtimespec.tv_sec &&
+        a->st_mtimespec.tv_nsec==b->st_mtimespec.tv_nsec && a->st_ctimespec.tv_sec==b->st_ctimespec.tv_sec &&
+        a->st_ctimespec.tv_nsec==b->st_ctimespec.tv_nsec;
+}
+@interface AxsCacheKeeperScanFrame : NSObject {
+@public DIR *directory;struct stat identity;
+}
+@property(nonatomic,strong) NSData *name;
+@end
+@implementation AxsCacheKeeperScanFrame
+- (void)dealloc {if(directory) closedir(directory);}
+@end
+
+@implementation AxsCacheKeeperScanCursor {
+    NSURL *_root;NSMutableArray<AxsCacheKeeperScanFrame *> *_stack;
+    NSMutableDictionary *_diagnostics;NSString *_state;struct stat _identity;
+    unsigned long long _bytes;NSUInteger _limit,_depth;
+}
+- (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth {
+    if (!(self=[super init])) return nil;
+    _root=root;_limit=limit;_depth=MIN(MAX(depth,(NSUInteger)1),AxsCacheKeeperScanDepth);
+    _stack=[NSMutableArray new];_diagnostics=axs_cachekeeper_scan_diagnostics_new();_state=@"running";
+    struct stat original,opened;
+    if (!root.isFileURL || lstat(root.fileSystemRepresentation,&original)) { [self axs_cachekeeper_fail:@"readError" code:errno ?: EINVAL stat:YES];return self; }
+    int fd=axs_cachekeeper_open_directory(root.path);
+    if(fd<0) { [self axs_cachekeeper_fail:@"readError" code:errno stat:NO];return self; }
+    if(fstat(fd,&opened) || !AxsCacheKeeperScanSame(&original,&opened)) {close(fd);[self axs_cachekeeper_fail:@"identityChanged" code:ESTALE stat:NO];return self;}
+    DIR *directory=fdopendir(fd);
+    if(!directory) {int code=errno;close(fd);[self axs_cachekeeper_fail:@"readError" code:code stat:NO];return self;}
+    _identity=opened;AxsCacheKeeperScanFrame *frame=[AxsCacheKeeperScanFrame new];frame->directory=directory;frame->identity=opened;[_stack addObject:frame];
+    return self;
+}
+- (void)axs_cachekeeper_fail:(NSString *)state code:(int)code stat:(BOOL)statFailure {
+    axs_cachekeeper_scan_count(_diagnostics,statFailure ? @"statErrors" : @"enumerationErrors",1);
+    axs_cachekeeper_scan_error(_diagnostics,@"home",statFailure ? @"entryStat" : @"enumerate",
+        [state isEqual:@"identityChanged"] ? @"identityChanged" : (code==EACCES || code==EPERM ? @"permissionDenied" : @"readFailure"),@"posix",MAX(0,MIN(code,255)),1);
+    [self stopWithState:state];
+}
+- (BOOL)axs_cachekeeper_validate {
+    struct stat current;
+    if(lstat(_root.fileSystemRepresentation,&current) || !AxsCacheKeeperScanUnchanged(&_identity,&current)) return NO;
+    for(NSUInteger i=0;i<_stack.count;i++) {
+        AxsCacheKeeperScanFrame *frame=_stack[i];
+        if(fstat(dirfd(frame->directory),&current) || !AxsCacheKeeperScanUnchanged(&frame->identity,&current)) return NO;
+        if(i && (fstatat(dirfd(_stack[i-1]->directory),frame.name.bytes,&current,AT_SYMLINK_NOFOLLOW) || !AxsCacheKeeperScanSame(&frame->identity,&current))) return NO;
+    }
+    return YES;
+}
+- (void)advanceEntries:(NSUInteger)entries seconds:(NSTimeInterval)seconds {
+    if(![_state isEqual:@"running"]) return;
+    if(![self axs_cachekeeper_validate]) {[self axs_cachekeeper_fail:@"identityChanged" code:ESTALE stat:NO];return;}
+    NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+MAX(0,seconds);
+    NSUInteger visited=0;
+    while(_stack.count && visited<entries && NSProcessInfo.processInfo.systemUptime<deadline) { @autoreleasepool {
+        AxsCacheKeeperScanFrame *frame=_stack.lastObject;errno=0;struct dirent *entry=readdir(frame->directory);
+        if(!entry) {
+            int code=errno;struct stat current;
+            if(code) {[self axs_cachekeeper_fail:@"readError" code:code stat:NO];break;}
+            if(fstat(dirfd(frame->directory),&current) || !AxsCacheKeeperScanUnchanged(&frame->identity,&current)) {[self axs_cachekeeper_fail:@"identityChanged" code:ESTALE stat:NO];break;}
+            [_stack removeLastObject];continue;
+        }
+        if(!strcmp(entry->d_name,".") || !strcmp(entry->d_name,"..")) continue;
+        if([_diagnostics[@"entriesVisited"] unsignedLongLongValue]>=_limit) {[self stopWithState:@"entryLimit"];break;}
+        visited++;axs_cachekeeper_scan_count(_diagnostics,@"entriesVisited",1);
+        struct stat info;
+        if(fstatat(dirfd(frame->directory),entry->d_name,&info,AT_SYMLINK_NOFOLLOW)) {[self axs_cachekeeper_fail:@"readError" code:errno stat:YES];break;}
+        if(S_ISDIR(info.st_mode)) {
+            if(_stack.count>=_depth) {[self stopWithState:@"depthLimit"];break;}
+            int fd=openat(dirfd(frame->directory),entry->d_name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+            if(fd<0) {[self axs_cachekeeper_fail:@"readError" code:errno stat:NO];break;}
+            struct stat opened;
+            if(fstat(fd,&opened) || !AxsCacheKeeperScanSame(&info,&opened)) {close(fd);[self axs_cachekeeper_fail:@"identityChanged" code:ESTALE stat:NO];break;}
+            DIR *directory=fdopendir(fd);
+            if(!directory) {int code=errno;close(fd);[self axs_cachekeeper_fail:@"readError" code:code stat:NO];break;}
+            AxsCacheKeeperScanFrame *child=[AxsCacheKeeperScanFrame new];child->directory=directory;child->identity=opened;
+            child.name=[NSData dataWithBytes:entry->d_name length:strlen(entry->d_name)+1];[_stack addObject:child];
+        } else if(S_ISREG(info.st_mode) && info.st_size>0) {
+            if(UINT64_MAX-_bytes<(uint64_t)info.st_size) {[self axs_cachekeeper_fail:@"readError" code:EOVERFLOW stat:YES];break;}
+            _bytes+=(uint64_t)info.st_size;
+        }
+    } }
+    if([_state isEqual:@"running"]) {
+        // Recheck after the last entry too; otherwise a rename during a slice could publish success.
+        if(![self axs_cachekeeper_validate]) [self axs_cachekeeper_fail:@"identityChanged" code:ESTALE stat:NO];
+        else if(!_stack.count) _state=@"complete";
+    }
+}
+- (void)stopWithState:(NSString *)state {
+    if(![_state isEqual:@"running"]) return;
+    _state=[state copy];_diagnostics[@"measurementComplete"]=@NO;
+    if([state isEqual:@"entryLimit"] || [state isEqual:@"depthLimit"]) _diagnostics[@"entryLimitExceeded"]=@YES;
+    if([state isEqual:@"timeLimit"]) _diagnostics[@"timeBudgetExceeded"]=@YES;
+    [_stack removeAllObjects];
+}
+- (NSString *)state {return _state;}
+- (NSUInteger)openDirectoryCount {return _stack.count;}
+- (NSDictionary *)result {
+    NSMutableDictionary *diagnostics=[_diagnostics mutableCopy];diagnostics[@"measurementComplete"]=@([_state isEqual:@"complete"]);
+    return @{@"bytes":@(_bytes),@"complete":diagnostics[@"measurementComplete"],@"scanDiagnostics":diagnostics};
+}
+@end
+
+@interface AxsCacheKeeperScanTask : NSObject
+@property(nonatomic,copy) NSString *bundle;
+@property(nonatomic,copy) NSString *token;
+@property(nonatomic,copy) NSString *state;
+@property(nonatomic,copy) NSString *error;
+@property(nonatomic,strong) NSDictionary *context;
+@property(nonatomic,strong) NSDictionary *old;
+@property(nonatomic,strong) NSDictionary *discovery;
+@property(nonatomic,strong) NSArray *candidates;
+@property(nonatomic,strong) NSMutableArray *rows;
+@property(nonatomic,strong) AxsCacheKeeperScanCursor *cursor;
+@property(nonatomic) NSUInteger index;
+@property(nonatomic) NSUInteger slices;
+@property(nonatomic) NSUInteger entries;
+@property(nonatomic) NSTimeInterval started;
+@property(nonatomic) NSTimeInterval lastPublished;
+@property(nonatomic) BOOL batch;
+- (void)stop:(NSString *)state;
+- (NSDictionary *)snapshot;
+@end
+static NSString *AxsCacheKeeperScanMessage(NSString *state) {
+    NSDictionary *messages=@{@"running":@"正在分片计量，当前容量为部分结果",@"partial":@"部分目录无法完整计量，结果不完整",
+        @"cancelled":@"检测已取消，保留部分结果",@"superseded":@"已由新请求替换，旧任务停止",@"interrupted":@"检测因服务重启中断，请重新检测",
+        @"identityChanged":@"容器或目录在计量期间变化，已停止，需重新检测",@"entryLimit":@"达到条目总上限，保留部分结果",
+        @"depthLimit":@"达到目录深度/句柄上限，保留部分结果",@"timeLimit":@"达到本次任务总时间上限，保留部分结果",
+        @"readError":@"目录读取失败，保留部分结果",@"saveFailed":@"检测结果保存失败；本次计量已停止，未记为完成"};
+    return messages[state] ?: @"";
+}
+@implementation AxsCacheKeeperScanTask
+- (void)stop:(NSString *)state {
+    self.state=state;[self.cursor stopWithState:state];
+    if(self.cursor) {
+        NSMutableDictionary *row=[self.cursor.result mutableCopy];NSDictionary *candidate=self.candidates[self.index];
+        row[@"path"]=candidate[@"path"];row[@"manageable"]=@(![candidate[@"readOnly"] boolValue]);
+        row[@"scanDiagnostics"]=axs_cachekeeper_scan_scope(row[@"scanDiagnostics"],candidate[@"scope"]);
+        [self.rows addObject:row];self.entries+=[row[@"scanDiagnostics"][@"entriesVisited"] unsignedIntegerValue];self.cursor=nil;
+    }
+}
+- (NSDictionary *)snapshot {
+    NSMutableArray *rows=[self.rows mutableCopy];NSMutableDictionary *diagnostics=[self.discovery mutableCopy];
+    if(self.cursor) {
+        NSDictionary *candidate=self.candidates[self.index];NSMutableDictionary *row=[self.cursor.result mutableCopy];
+        row[@"path"]=candidate[@"path"];row[@"manageable"]=@(![candidate[@"readOnly"] boolValue]);
+        row[@"scanDiagnostics"]=axs_cachekeeper_scan_scope(row[@"scanDiagnostics"],candidate[@"scope"]);[rows addObject:row];
+    }
+    for(NSDictionary *row in rows) axs_cachekeeper_scan_merge(diagnostics,row[@"scanDiagnostics"]);
+    BOOL complete=[self.state isEqual:@"complete"] && [diagnostics[@"measurementComplete"] boolValue];
+    diagnostics[@"measurementComplete"]=@(complete);
+    if([self.state isEqual:@"entryLimit"] || [self.state isEqual:@"depthLimit"]) diagnostics[@"entryLimitExceeded"]=@YES;
+    if([self.state isEqual:@"timeLimit"]) diagnostics[@"timeBudgetExceeded"]=@YES;
+    NSString *message=AxsCacheKeeperScanMessage(self.state);
+    if(self.error.length) message=[message stringByAppendingFormat:@"%@%@",message.length ? @"；" : @"",self.error];
+    NSMutableDictionary *groups=[NSMutableDictionary new];for(NSString *key in self.context[@"groups"]) groups[key]=[self.context[@"groups"][key] path];
+    return @{@"bundle":self.bundle,@"token":self.token,@"home":[self.context[@"home"] path] ?: @"",@"groups":groups,
+        @"rows":rows,@"previousRows":self.old[@"rows"] ?: @[],@"recentScans":axs_cachekeeper_recent_scans(self.old),
+        @"updated":NSDate.date,@"error":message,@"complete":@(complete),@"scanDiagnostics":diagnostics,
+        @"scanProgress":@{@"state":self.state,@"slices":@(self.slices),@"entriesVisited":diagnostics[@"entriesVisited"],
+            @"rootsCompleted":@(self.index),@"rootsTotal":@(self.candidates.count),@"entryLimit":@(AxsCacheKeeperScanTaskEntries),
+            @"sliceEntryLimit":@(AxsCacheKeeperScanSliceEntries),@"maxOpenDirectories":@(AxsCacheKeeperScanDepth),@"wallTimeLimitSeconds":@(AxsCacheKeeperScanTaskSeconds)}};
+}
+@end
+
+@implementation AxsCacheKeeperScanService {
+    NSString *_folder,*_singleToken,*_batchToken;NSDictionary *(^_resolver)(NSString *);BOOL (^_writer)(NSDictionary *,NSString *);
+    AxsCacheKeeperScanTask *_single;NSMutableArray<AxsCacheKeeperScanTask *> *_batchTasks;
+    NSUInteger _turn;BOOL _recovered;NSDictionary *_pendingBatch;
+}
+- (instancetype)initWithFolder:(NSString *)folder resolver:(NSDictionary *(^)(NSString *))resolver writer:(BOOL (^)(NSDictionary *,NSString *))writer {
+    if((self=[super init])) {_folder=[folder copy];_resolver=[resolver copy];_writer=[writer copy];_batchTasks=[NSMutableArray new];}return self;
+}
+- (NSString *)path:(NSString *)name {return [_folder stringByAppendingPathComponent:name];}
+- (NSTimeInterval)axs_cachekeeper_now {
+#if defined(AXS_CACHEKEEPER_SCAN_TESTING)
+    if(self.axs_cachekeeper_clock) return self.axs_cachekeeper_clock();
+#endif
+    return NSProcessInfo.processInfo.systemUptime;
+}
+- (BOOL)write:(NSDictionary *)record name:(NSString *)name {
+    if(_writer) return _writer(record,[self path:name]);
+    NSError *error=nil;BOOL saved=[record writeToURL:[NSURL fileURLWithPath:[self path:name]] error:&error];
+    if(!saved) NSLog(@"[CacheKeeper] 计量记录保存失败 (%@/%ld)",error.domain,(long)error.code);return saved;
+}
+- (NSDictionary *)context:(NSString *)bundle {
+    NSDictionary *provided=_resolver(bundle);NSMutableDictionary *context=[NSMutableDictionary new];
+    NSURL *home=provided[@"home"];if([home isKindOfClass:NSURL.class] && home.isFileURL) context[@"home"]=home.URLByResolvingSymlinksInPath;
+    context[@"groups"]=provided[@"groups"] ?: @{};context[@"homeWasRejected"]=provided[@"homeWasRejected"] ?: @NO;
+    NSMutableDictionary *identities=[NSMutableDictionary new];
+    NSMutableDictionary *roots=[context[@"groups"] mutableCopy];if(home) roots[@"primary"]=context[@"home"];
+    for(NSString *key in roots) {struct stat info;NSURL *url=roots[key];
+        if(lstat(url.fileSystemRepresentation,&info) || !S_ISDIR(info.st_mode)) identities[key]=@[];
+        else identities[key]=@[@(info.st_dev),@(info.st_ino)];
+    }
+    context[@"identities"]=identities;
+    return context;
+}
+- (NSDictionary *)interrupted:(NSDictionary *)record {
+    if(![record[@"scanProgress"][@"state"] isEqual:@"running"]) return record;
+    NSMutableDictionary *result=[record mutableCopy],*progress=[record[@"scanProgress"] mutableCopy],*diagnostics=[record[@"scanDiagnostics"] mutableCopy];
+    progress[@"state"]=@"interrupted";result[@"scanProgress"]=progress;result[@"complete"]=@NO;
+    diagnostics[@"measurementComplete"]=@NO;result[@"scanDiagnostics"]=diagnostics;result[@"error"]=AxsCacheKeeperScanMessage(@"interrupted");result[@"updated"]=NSDate.date;return result;
+}
+- (BOOL)recover {
+    NSError *error=nil;NSDictionary *saved=axs_cachekeeper_read_records([self path:@"snapshots.plist"],&error);
+    if(error) return NO;
+    NSMutableDictionary *history=[saved mutableCopy];BOOL changed=NO;
+    for(NSString *bundle in saved) {NSDictionary *result=[self interrupted:saved[bundle]];if(result!=saved[bundle]) {history[bundle]=result;changed=YES;}}
+    if(changed && ![self write:history name:@"snapshots.plist"]) return NO;
+    NSDictionary *scan=axs_cachekeeper_read_records([self path:@"scan.plist"],&error);if(error) return NO;
+    if(scan) {NSDictionary *result=[self interrupted:scan];if(result!=scan && ![self write:result name:@"scan.plist"]) return NO;_singleToken=scan[@"token"];}
+    NSDictionary *batch=axs_cachekeeper_read_input([self path:@"batch.plist"],&error);if(error) return NO;
+    if([batch[@"scanState"] isEqual:@"running"] && [batch[@"remaining"] count]) {
+        NSMutableDictionary *next=[batch mutableCopy];next[@"scanState"]=@"interrupted";next[@"error"]=AxsCacheKeeperScanMessage(@"interrupted");
+        if(![self write:next name:@"batch.plist"]) return NO;
+    }
+    return YES;
+}
+- (AxsCacheKeeperScanTask *)task:(NSString *)bundle token:(NSString *)token batch:(BOOL)batch {
+    AxsCacheKeeperScanTask *task=[AxsCacheKeeperScanTask new];task.bundle=bundle;task.token=token;task.batch=batch;task.state=@"running";
+    task.started=[self axs_cachekeeper_now];task.rows=[NSMutableArray new];task.context=[self context:bundle];
+    NSError *error=nil;NSDictionary *history=axs_cachekeeper_read_records([self path:@"snapshots.plist"],&error);task.old=history[bundle];
+    if(error) {task.error=@"历史记录不可读，已保留原文件";task.discovery=axs_cachekeeper_scan_diagnostics_new();task.candidates=@[];[task stop:@"saveFailed"];return task;}
+    NSDictionary *diagnostics=nil;
+    task.candidates=axs_cachekeeper_bounded_scan_targets(task.context[@"home"],task.context[@"groups"],[task.context[@"homeWasRejected"] boolValue],&diagnostics);
+    task.discovery=diagnostics;
+    if(![diagnostics[@"discoveryComplete"] boolValue]) task.error=@"目录发现未完整完成";
+    // Bound retained metadata even when a container exposes many independent top-level roots.
+    if(task.candidates.count>256) {task.candidates=[task.candidates subarrayWithRange:NSMakeRange(0,256)];task.error=@"候选目录超过 256 项上限，发现不完整";NSMutableDictionary *limited=[diagnostics mutableCopy];limited[@"discoveryComplete"]=@NO;limited[@"measurementComplete"]=@NO;limited[@"entryLimitExceeded"]=@YES;task.discovery=limited;}
+    return task;
+}
+- (BOOL)axs_cachekeeper_candidate_current:(NSDictionary *)candidate {
+    NSURL *root=candidate[@"root"],*source=candidate[@"sourceRoot"];struct stat current,parent;
+    return [root.path isEqual:root.URLByResolvingSymlinksInPath.path] && !lstat(root.fileSystemRepresentation,&current) &&
+        S_ISDIR(current.st_mode) && [candidate[@"identity"] isEqual:@[@(current.st_dev),@(current.st_ino)]] &&
+        !lstat(source.fileSystemRepresentation,&parent) && S_ISDIR(parent.st_mode) &&
+        [candidate[@"sourceIdentity"] isEqual:axs_cachekeeper_scan_identity(&parent)];
+}
+- (void)advance:(AxsCacheKeeperScanTask *)task {
+    if(![task.state isEqual:@"running"]) return;
+    if(![[self context:task.bundle] isEqual:task.context]) {[task stop:@"identityChanged"];return;}
+    if([self axs_cachekeeper_now]-task.started>AxsCacheKeeperScanTaskSeconds) {[task stop:@"timeLimit"];return;}
+    if(task.index>=task.candidates.count) {task.state=[task.discovery[@"measurementComplete"] boolValue] ? @"complete" : @"partial";return;}
+    NSDictionary *candidate=task.candidates[task.index];NSURL *root=candidate[@"root"];
+    // Discovered roots cannot acquire an intermediate symlink between discovery and opening.
+    if(![self axs_cachekeeper_candidate_current:candidate]) {[task stop:@"identityChanged"];return;}
+    if(!task.cursor) task.cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:root entryLimit:AxsCacheKeeperScanTaskEntries-task.entries depthLimit:AxsCacheKeeperScanDepth];
+    [task.cursor advanceEntries:AxsCacheKeeperScanSliceEntries seconds:.05];task.slices++;
+    if(![task.cursor.state isEqual:@"running"]) {
+        NSString *state=task.cursor.state;[task stop:state];task.index++;
+        if([state isEqual:@"complete"]) {
+            task.state=task.index==task.candidates.count ? ([task.discovery[@"measurementComplete"] boolValue] ? @"complete" : @"partial") : @"running";
+        }
+    }
+}
+- (BOOL)current:(AxsCacheKeeperScanTask *)task {
+    NSDictionary *request=axs_cachekeeper_read_input([self path:task.batch ? @"batch.plist" : @"request.plist"],NULL);
+    return [request[@"token"] isEqual:task.token] && (task.batch ? [request[@"remaining"] containsObject:task.bundle] : [request[@"bundle"] isEqual:task.bundle]);
+}
+- (void)retire:(AxsCacheKeeperScanTask *)task {
+    [task stop:@"superseded"];
+    NSError *error=nil;NSMutableDictionary *history=[axs_cachekeeper_read_records([self path:@"snapshots.plist"],&error) mutableCopy];
+    if(!error && [history[task.bundle][@"token"] isEqual:task.token]) {
+        history[task.bundle]=task.snapshot;[self write:history name:@"snapshots.plist"];
+    }
+    // Retiring work never writes the shared single-request receipt.
+}
+- (BOOL)publish:(AxsCacheKeeperScanTask *)task {
+    if(![self current:task]) return NO;
+    if(![task.state isEqual:@"saveFailed"] && ![[self context:task.bundle] isEqual:task.context]) [task stop:@"identityChanged"];
+    if([task.state isEqual:@"complete"]) for(NSDictionary *candidate in task.candidates) {
+        if(![self axs_cachekeeper_candidate_current:candidate]) {[task stop:@"identityChanged"];break;}
+    }
+    // A request may change during filesystem work. No old generation is labelled with a new token.
+    NSDictionary *request=axs_cachekeeper_read_input([self path:task.batch ? @"batch.plist" : @"request.plist"],NULL);
+    if([request[@"cancel"] boolValue]) [task stop:@"cancelled"];
+    NSError *error=nil;NSMutableDictionary *history=[axs_cachekeeper_read_records([self path:@"snapshots.plist"],&error) mutableCopy];
+    if(!history && !error) history=[NSMutableDictionary new];
+    NSDictionary *result=task.snapshot;history[task.bundle]=result;
+    BOOL saved=!error && [self write:history name:@"snapshots.plist"];
+    if(!saved) {[task stop:@"saveFailed"];result=task.snapshot;}
+    if(!task.batch && ![self write:result name:@"scan.plist"]) {
+        [task stop:@"saveFailed"];result=task.snapshot;
+        // Preserve a visible failure in the history channel when the dedicated receipt is unwritable.
+        if(!error) {history[task.bundle]=result;[self write:history name:@"snapshots.plist"];}
+        return NO;
+    }
+    task.lastPublished=NSProcessInfo.processInfo.systemUptime;return saved;
+}
+- (void)finishBatch:(AxsCacheKeeperScanTask *)task saved:(BOOL)saved {
+    NSDictionary *current=axs_cachekeeper_read_input([self path:@"batch.plist"],NULL);
+    if(![current[@"token"] isEqual:task.token]) return;
+    NSMutableDictionary *next=[current mutableCopy];
+    if(!saved) {next[@"error"]=AxsCacheKeeperScanMessage(@"saveFailed");next[@"scanState"]=@"saveFailed";}
+    else {
+        NSMutableArray *remaining=[current[@"remaining"] mutableCopy];[remaining removeObject:task.bundle];next[@"remaining"]=remaining;
+        next[@"completed"]=@([current[@"completed"] unsignedIntegerValue]+1);
+        if(![task.state isEqual:@"complete"]) next[@"partialCount"]=@([current[@"partialCount"] unsignedIntegerValue]+1);
+        next[@"scanState"]=remaining.count ? @"running" : ([next[@"partialCount"] unsignedIntegerValue] ? @"partial" : @"complete");
+    }
+    if(![self write:next name:@"batch.plist"]) _pendingBatch=next;
+}
+- (BOOL)tick {
+    if(!_recovered) {_recovered=[self recover];if(!_recovered) return NO;}
+    NSDictionary *request=axs_cachekeeper_read_input([self path:@"request.plist"],NULL);
+    if(_single && (![request[@"token"] isEqual:_single.token] || ![request[@"bundle"] isEqual:_single.bundle])) {[self retire:_single];_single=nil;}
+    if(request && ![request[@"token"] isEqual:_singleToken]) {
+        _singleToken=request[@"token"];
+        // Single requests own this app while active. Discard its old batch cursor;
+        // the batch member stays pending and starts afresh after the single finishes.
+        for(AxsCacheKeeperScanTask *task in [_batchTasks copy]) if([task.bundle isEqual:request[@"bundle"]]) {
+            [self retire:task];[_batchTasks removeObject:task];
+        }
+        _single=[self task:request[@"bundle"] token:_singleToken batch:NO];
+        if(![request[@"cancel"] boolValue] && self.acceptedRequest) self.acceptedRequest(request[@"bundle"],[request[@"diagnostic"] boolValue]);
+        if([request[@"cancel"] boolValue]) [_single stop:@"cancelled"];
+    }
+    if(_single && [request[@"cancel"] boolValue]) [_single stop:@"cancelled"];
+    NSDictionary *batch=axs_cachekeeper_read_input([self path:@"batch.plist"],NULL);
+    if(![batch[@"token"] isEqual:_batchToken]) {
+        for(AxsCacheKeeperScanTask *task in _batchTasks) [self retire:task];
+        [_batchTasks removeAllObjects];_batchToken=batch[@"token"];_pendingBatch=nil;
+    }
+    if(_pendingBatch) {
+        NSMutableDictionary *pending=[_pendingBatch mutableCopy];
+        // Progress belongs to the completed member; control belongs to the current
+        // request. A later stop/error must survive retrying an earlier progress write.
+        if([batch[@"cancel"] boolValue]) {pending[@"cancel"]=@YES;pending[@"scanState"]=@"cancelled";pending[@"error"]=AxsCacheKeeperScanMessage(@"cancelled");}
+        else if([batch[@"error"] length]) {pending[@"error"]=batch[@"error"];if(batch[@"scanState"]) pending[@"scanState"]=batch[@"scanState"];}
+        _pendingBatch=pending;
+        if([self write:pending name:@"batch.plist"]) {_pendingBatch=nil;batch=pending;}
+    }
+    if([batch[@"error"] length] || [batch[@"cancel"] boolValue]) {
+        for(AxsCacheKeeperScanTask *task in _batchTasks) {[task stop:[batch[@"cancel"] boolValue] ? @"cancelled" : @"saveFailed"];[self publish:task];}
+        [_batchTasks removeAllObjects];
+        if(!_pendingBatch && [batch[@"cancel"] boolValue] && ![batch[@"scanState"] isEqual:@"cancelled"]) {NSMutableDictionary *next=[batch mutableCopy];next[@"scanState"]=@"cancelled";next[@"error"]=AxsCacheKeeperScanMessage(@"cancelled");[self write:next name:@"batch.plist"];}
+    } else if(!_pendingBatch && [batch[@"remaining"] count] && [batch[@"token"] length]) {
+        for(NSString *bundle in batch[@"remaining"]) {
+            if(_batchTasks.count>=AxsCacheKeeperScanActiveBatch) break;
+            if(_single && [bundle isEqual:_single.bundle]) continue;
+            BOOL present=NO;for(AxsCacheKeeperScanTask *task in _batchTasks) if([task.bundle isEqual:bundle]) present=YES;
+            if(!present) {[_batchTasks addObject:[self task:bundle token:_batchToken batch:YES]];if(self.acceptedRequest) self.acceptedRequest(bundle,NO);}
+        }
+        if(![batch[@"scanState"] isEqual:@"running"]) {NSMutableDictionary *next=[batch mutableCopy];next[@"scanState"]=@"running";if(![self write:next name:@"batch.plist"]) _pendingBatch=next;}
+    }
+    // One quantum per call; single and batch jobs share the same round-robin lane.
+    NSMutableArray *ready=_pendingBatch ? [NSMutableArray new] : [_batchTasks mutableCopy];if(_single) [ready addObject:_single];
+    if(!ready.count) return _pendingBatch!=nil;
+    AxsCacheKeeperScanTask *task=ready[_turn++%ready.count];
+    [self advance:task];
+    // Publish at most once per second per job, except first/terminal receipts.
+    BOOL terminal=![task.state isEqual:@"running"];
+    if(!task.lastPublished || terminal || NSProcessInfo.processInfo.systemUptime-task.lastPublished>=1) {
+        BOOL saved=[self publish:task];terminal=![task.state isEqual:@"running"];
+        if(terminal && task.batch) {[self finishBatch:task saved:saved];[_batchTasks removeObject:task];}
+        else if(terminal && saved) _single=nil;
+    }
+    return _single || _batchTasks.count || [batch[@"remaining"] count];
+}
+@end

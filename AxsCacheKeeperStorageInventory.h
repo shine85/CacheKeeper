@@ -11,6 +11,7 @@ extern "C" {
 NSDictionary *axs_cachekeeper_storage_inventory(id registryInventory, NSDictionary *statesRead,
     NSDictionary *directoriesRead, NSDictionary *snapshotsRead, NSArray *savedSDKApps,
     NSString *(^pathRedactor)(NSString *path));
+NSDictionary *axs_cachekeeper_capabilities(NSDictionary *rawEnvelopes, NSString *panelVersion);
 #ifdef __cplusplus
 }
 #endif

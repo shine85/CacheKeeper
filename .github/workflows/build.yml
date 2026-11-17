@@ -87,6 +87,8 @@ jobs:
             tmp/search-editing-red/red-summary.json
             tmp/search-editing-red/red.log
             tmp/input-ui-tests/Results.xcresult
+            tmp/input-ui-tests/ScanPageTests.xcresult
+            tmp/input-ui-tests/ScanPageScreenshots
             tmp/input-ui-tests/Screenshots
             tmp/input-ui-tests/WebKitResults.xcresult
             tmp/input-ui-tests/WebKitScreenshots

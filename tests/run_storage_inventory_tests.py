@@ -41,6 +41,7 @@ def run() -> int:
                 # Test translation unit imports the production storage .m to instrument only
                 # inline policy call boundaries. Never link that same implementation twice.
                 sources.append(ROOT / "AxsCacheKeeperDiagnostics.m")
+                sources.append(ROOT / "AxsCacheKeeperHostEvidence.m")
                 installation_source = ROOT / "AxsCacheKeeperInstallation.m"
             # Only the system-class lookup boundary is substituted, identically
             # for pinned RED and current GREEN. The included source stays intact.

@@ -8,6 +8,8 @@
 static inline BOOL axs_cachekeeper_record_valid(id value, NSUInteger depth) {
     if (depth>8 || ![value isKindOfClass:NSDictionary.class]) return NO;
     NSDictionary *record=value;
+    if (record[@"scanProgress"] && (!axs_cachekeeper_scan_progress_projection(record[@"scanProgress"]) ||
+        !record[@"scanDiagnostics"] || !record[@"complete"] || !record[@"updated"])) return NO;
     if (record[@"scanDiagnostics"] && !axs_cachekeeper_scan_diagnostics_projection(record[@"scanDiagnostics"])) return NO;
     for (NSString *key in @[@"inspectionReadFailure",@"mainReadFailure",@"twinReadFailure"])
         if (record[key] && !axs_cachekeeper_inspection_read_failure_projection(record[key])) return NO;

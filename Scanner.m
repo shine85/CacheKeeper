@@ -20,6 +20,7 @@
 #import "AxsCacheKeeperPDFSession.h"
 #import "AxsCacheKeeperFileAccess.h"
 #import "AxsCacheKeeperScanDiagnostics.h"
+#import "AxsCacheKeeperScanTask.h"
 static id SRead(id target,NSString *name) { SEL s=NSSelectorFromString(name);return [target respondsToSelector:s]?((id(*)(id,SEL))objc_msgSend)(target,s):nil; }
 static id AxsCacheKeeperAppProxy(NSString *bundle) {
     Class proxy=NSClassFromString(@"LSApplicationProxy"); SEL selector=NSSelectorFromString(@"applicationProxyForIdentifier:");
@@ -68,96 +69,30 @@ AxsCacheKeeperPDFRoot *axs_cachekeeper_pdf_resolve_root(NSString *bundle,NSStrin
     if (![root validate]) {if (stage) *stage=@"identityRecheck";if (code) *code=ESTALE;return nil;}
     if (code) *code=0;return root;
 }
+// All task state, filesystem work and receipts live on this serial queue. The
+// desktop timer is only a wake-up source; continuations do not wait two seconds.
+static void AxsCacheKeeperScanPump(AxsCacheKeeperScanService *service,dispatch_queue_t queue,BOOL *scheduled) {
+    BOOL active=[service tick];
+    if(!active) {*scheduled=NO;return;}
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,100*NSEC_PER_MSEC),queue,^{AxsCacheKeeperScanPump(service,queue,scheduled);});
+}
 void CKScanRequests(void) {
-    static BOOL busy;
-    static NSDictionary *pendingBatchReceipt;
-    if (busy) return;
-    NSString *folder=jbroot(@"/var/mobile/Library/CacheKeeper");
-    NSString *requestPath=[folder stringByAppendingPathComponent:@"request.plist"];
-    NSError *requestError=nil;
-    NSDictionary *request=axs_cachekeeper_read_input(requestPath,&requestError);
-    if (requestError) { NSLog(@"[CacheKeeper] 检测请求无效，未执行");return; }
-    NSString *batchPath=[folder stringByAppendingPathComponent:@"batch.plist"];
-    NSError *batchError=nil;
-    NSMutableDictionary *batch=[axs_cachekeeper_read_input(batchPath,&batchError) mutableCopy];
-    if (pendingBatchReceipt) {
-        if (batchError) return;
-        pendingBatchReceipt=axs_cachekeeper_retry_batch_receipt(pendingBatchReceipt,batch,^BOOL(NSDictionary *receipt) {
-            return [receipt writeToFile:batchPath atomically:YES];
-        });
-        return;
-    }
-    if (!request && batchError) { NSLog(@"[CacheKeeper] 批量检测请求无效，未执行");return; }
-    BOOL batchItem=NO;
-    if (!request && [batch[@"remaining"] count]) {
-        if ([batch[@"error"] length]) return;
-        if (![batch[@"token"] isKindOfClass:NSString.class] || ![batch[@"token"] length]) { NSLog(@"[CacheKeeper] 批量检测缺少请求标识，未执行");return; }
-        NSString *next=[batch[@"remaining"] firstObject];
-        request=@{@"bundle":next,@"token":batch[@"token"]};
-        batchItem=YES;
-    }
-    NSString *bundle=request[@"bundle"],*token=request[@"token"];
-    if (!axs_cachekeeper_bundle_id(bundle) || ![token isKindOfClass:NSString.class] || !token.length) return;
-    // 检测仍只读；让下一次满足进程条件的清理轮重新预检，不沿用旧静默/未知登记。
-    if (!([request[@"diagnostic"] isKindOfClass:NSNumber.class] && [request[@"diagnostic"] boolValue]))
-        [AxsCacheKeeperProcessObservation requestRecheckForBundle:bundle];
-    id app=AxsCacheKeeperAppProxy(bundle),providedHome=SRead(app,@"dataContainerURL");
-    NSURL *home=axs_cachekeeper_container_url(providedHome);
-    BOOL homeWasRejected=!home && providedHome!=nil;
-    NSDictionary *groups=axs_cachekeeper_valid_group_homes(SRead(app,@"groupContainerURLs"));
-    if (!batchItem) [NSFileManager.defaultManager removeItemAtPath:requestPath error:nil];
-    busy=YES;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
-        NSError *directoryError=nil;
-        NSDictionary *discoveryDiagnostics=nil;
-        NSArray *candidates=axs_cachekeeper_scan_targets_diagnostics(home,groups,homeWasRejected,&directoryError,&discoveryDiagnostics);
-        NSMutableDictionary *scanDiagnostics=[discoveryDiagnostics mutableCopy];
-        NSMutableArray *rows=[NSMutableArray array];
-        NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+15;
-        NSUInteger remainingDirectories=candidates.count;
-        for (NSDictionary *candidate in candidates) {
-            NSString *relative=candidate[@"path"];
-            // 把剩余时间分给其余目录，避免前面的巨大目录耗尽整次检测时间。
-            NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
-            NSTimeInterval directoryDeadline=now+MAX(0,deadline-now)/MAX((NSUInteger)1,remainingDirectories);
-            remainingDirectories--;
-            NSMutableDictionary *row=[axs_cachekeeper_measure_directory(candidate[@"root"],directoryDeadline,100000) mutableCopy];
-            NSDictionary *measurement=axs_cachekeeper_scan_scope(row[@"scanDiagnostics"],candidate[@"scope"]);
-            row[@"scanDiagnostics"]=measurement;row[@"path"]=relative;
-            row[@"manageable"]=@(![candidate[@"readOnly"] boolValue]);
-            axs_cachekeeper_scan_merge(scanDiagnostics,measurement);[rows addObject:row];
-        }
-        NSError *historyError=nil;
-        NSMutableDictionary *history=[axs_cachekeeper_read_records([folder stringByAppendingPathComponent:@"snapshots.plist"],&historyError) mutableCopy];
-        if (!history && !historyError) history=[NSMutableDictionary new];
-        NSDictionary *old=history[bundle];
-        NSMutableDictionary *groupPaths=[NSMutableDictionary new];
-        for (NSString *identifier in groups) groupPaths[identifier]=[groups[identifier] path];
-        NSMutableDictionary *result=[@{@"token":token,@"bundle":bundle,@"home":home.path?:@"",@"groups":groupPaths,@"rows":rows,@"updated":NSDate.date,@"previousRows":old[@"rows"]?:@[],@"recentScans":axs_cachekeeper_recent_scans(old),
-            @"scanDiagnostics":[scanDiagnostics copy],
-            @"error":home ? (directoryError.localizedDescription ?: @"") : @"此 APP 没有可读取的标准数据容器"} mutableCopy];
-        history[bundle]=result;
-        NSError *saveError=nil;
-        BOOL historySaved=!historyError && [history writeToURL:[NSURL fileURLWithPath:[folder stringByAppendingPathComponent:@"snapshots.plist"]] error:&saveError];
-        if (historyError) result[@"error"]=historyError.localizedDescription;
-        else if (!historySaved) {
-            result[@"error"]=[NSString stringWithFormat:@"%@\n检测结果未能持久保存：%@（%@/%ld）。检查配置目录可写性后重试。",result[@"error"],saveError.localizedDescription,saveError.domain,(long)saveError.code];
-            NSLog(@"[CacheKeeper] %@",result[@"error"]);
-        }
-        NSString *batchFailure=historySaved ? nil : result[@"error"];
-        if (!batchItem && ![result writeToURL:[NSURL fileURLWithPath:[folder stringByAppendingPathComponent:@"scan.plist"]] error:&saveError]) NSLog(@"[CacheKeeper] 检测回执写入失败：%@",saveError);
-        dispatch_async(dispatch_get_main_queue(),^{
-            if (batchItem) {
-                NSDictionary *current=axs_cachekeeper_read_input(batchPath,NULL);
-                NSDictionary *next=axs_cachekeeper_batch_result(current,token,bundle,batchFailure);
-                if (next && ![next writeToFile:batchPath atomically:YES]) {
-                    pendingBatchReceipt=next;
-                    NSLog(@"[CacheKeeper] 批量检测回执保存失败，仅重试保存，不重复扫描");
-                }
-            }
-            busy=NO;
-        });
+    static dispatch_queue_t queue;static AxsCacheKeeperScanService *service;static BOOL scheduled;static dispatch_once_t once;
+    dispatch_once(&once,^{
+        queue=dispatch_queue_create("dev.local.cachekeeper.scan",DISPATCH_QUEUE_SERIAL);
+        service=[[AxsCacheKeeperScanService alloc] initWithFolder:jbroot(@"/var/mobile/Library/CacheKeeper") resolver:^NSDictionary *(NSString *bundle) {
+            id app=AxsCacheKeeperAppProxy(bundle),provided=SRead(app,@"dataContainerURL");
+            NSURL *home=axs_cachekeeper_container_url(provided);
+            NSMutableDictionary *context=[@{@"groups":axs_cachekeeper_valid_group_homes(SRead(app,@"groupContainerURLs")),@"homeWasRejected":@(!home && provided!=nil)} mutableCopy];
+            if(home) context[@"home"]=home;return context;
+        } writer:nil];
+        service.acceptedRequest=^(NSString *bundle,BOOL diagnostic) {
+            // Preserve the existing explicit scan's next-cleanup preflight, once per
+            // accepted request. Diagnostic-only requests remain strictly read-only.
+            if(!diagnostic) dispatch_async(dispatch_get_main_queue(),^{[AxsCacheKeeperProcessObservation requestRecheckForBundle:bundle];});
+        };
     });
+    dispatch_async(queue,^{if(!scheduled) {scheduled=YES;AxsCacheKeeperScanPump(service,queue,&scheduled);}});
 }
 void CKInspectRequests(void) {
     static BOOL busy;static NSString *lastToken;

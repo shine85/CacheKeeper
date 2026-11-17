@@ -15,7 +15,7 @@ with tempfile.TemporaryDirectory(prefix="observation-export-", dir=ROOT / "tmp")
     output = pathlib.Path(directory)
     binary = output / "observation-export"
     sources = ["tests/observation_export_tests.m", "AxsCacheKeeperDiagnostics.m",
-               "AxsCacheKeeperStorageInventory.m", "AxsCacheKeeperOperationInfo.m",
+               "AxsCacheKeeperStorageInventory.m", "AxsCacheKeeperHostEvidence.m", "AxsCacheKeeperOperationInfo.m",
                "AxsCacheKeeperInstallation.m", "AxsCacheKeeperPDFInspection.m"]
     subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-I" + str(ROOT),
                     "-I" + str(ROOT / "tests/include"), "-framework", "Foundation",

@@ -19,15 +19,15 @@ SOURCE = (ROOT / "tests/run_ui_tests.py").read_text(encoding="utf-8-sig")
 CURRENT = "2de3a496eaf6df9a1312862adcfd54acd73c39c0"
 LEGACY = "fb50c1d20f24db5322b2f8f379de3618f75fe08e"
 FIXED_SERIAL = "a6b6e44eadf0d39250c10a7cc0e3b91d0bdb0e94"
-ALL_SUITES = ["WebKit", "SDK521", "Search", "SDK515", "SDK510", "SDK510Absent"]
-ALL_EXPORTS = ["WebKit", "SDK521", "SDK515", "SDK510", "SDK510Absent", "Search"]
+ALL_SUITES = ["WebKit", "SDK521", "ScanPage", "Search", "SDK515", "SDK510", "SDK510Absent"]
+ALL_EXPORTS = ["ScanPage", "WebKit", "SDK521", "SDK515", "SDK510", "SDK510Absent", "Search"]
 WITHOUT515_SUITES = [name for name in ALL_SUITES if name != "SDK515"]
 WITHOUT515_EXPORTS = [name for name in ALL_EXPORTS if name != "SDK515"]
-WITHOUT510_SUITES = ALL_SUITES[:4]
+WITHOUT510_SUITES = [name for name in ALL_SUITES if not name.startswith("SDK510")]
 WITHOUT510_EXPORTS = [name for name in ALL_EXPORTS if not name.startswith("SDK510")]
 RESULTS = {"WebKitResults.xcresult": "WebKit", "ImageCacheResults.xcresult": "SDK521",
            "ImageCache515Results.xcresult": "SDK515", "ImageCache510Results.xcresult": "SDK510",
-           "ImageCache510AbsentResults.xcresult": "SDK510Absent", "Results.xcresult": "Search"}
+           "ImageCache510AbsentResults.xcresult": "SDK510Absent", "Results.xcresult": "Search", "ScanPageTests.xcresult": "ScanPage"}
 STAMP = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
 FIXTURES = ROOT / "tmp/diagnostics-144-followup" / ("runner-fixtures-" + STAMP)
 
@@ -76,6 +76,8 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
             assert command[-2:] == ["-parallel-testing-enabled", "NO"]
             if stage == "WebKit":
                 assert "-only-testing:WebKitIntegrationTests" in command
+            elif stage == "ScanPage":
+                assert "-only-testing:ScanPageTests" in command
             elif stage in ("SDK521", "SDK515"):
                 assert "-only-testing:ImageCacheIntegrationTests" in command
             elif stage in ("SDK510", "SDK510Absent"):
@@ -84,6 +86,7 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
             else:
                 assert "-skip-testing:WebKitIntegrationTests" in command
                 assert "-skip-testing:ImageCacheIntegrationTests" in command
+                assert "-skip-testing:ScanPageTests" in command
         elif command[:4] == ["xcrun", "xcresulttool", "export", "attachments"]:
             name = RESULTS[Path(command[command.index("--path") + 1]).name]
             exports.append(name)
@@ -154,6 +157,8 @@ cases = [
     ("all_pass", {}, None, False, ALL_SUITES, ALL_EXPORTS, False, None),
     ("webkit_fails_continue", {"WebKit": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "WebKit"),
     ("sdk521_fails_continue", {"SDK521": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "5.21.7"),
+    ("scanpage_failure_continue", {"ScanPage": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "ScanPage"),
+    ("scanpage_attachment_failure_continue", {"exportScanPage": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "attachments"),
     ("search_timeout_continue", {"Search": "timeout"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "Search"),
     ("sdk515_fails", {"SDK515": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "5.15.5"),
     ("all_suites_fail", {name: "exit" for name in ALL_SUITES}, None, False, ALL_SUITES, ALL_EXPORTS, True, "5.15.5"),
@@ -165,7 +170,7 @@ cases = [
     ("legacy_pin_malformed", {}, "build515_json", False, WITHOUT515_SUITES, WITHOUT515_EXPORTS, True, "5.15.5"),
     ("legacy_pin_invalid_shape", {}, "build515_shape", False, WITHOUT515_SUITES, WITHOUT515_EXPORTS, True, "5.15.5"),
     ("legacy_pin_mixed_shape", {}, "build515_mixed", False, WITHOUT515_SUITES, WITHOUT515_EXPORTS, True, "5.15.5"),
-    ("ambiguous_spec", {}, None, True, ALL_SUITES[:3], ["WebKit", "SDK521", "Search"], True, "5.15.5"),
+    ("ambiguous_spec", {}, None, True, ALL_SUITES[:4], ["ScanPage", "WebKit", "SDK521", "Search"], True, "5.15.5"),
     ("attachment_failure_continue", {"exportWebKit": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "attachments"),
     ("suite_and_attachment_fail", {"SDK521": "exit", "exportWebKit": "timeout"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "5.21.7"),
     ("fixed_generation_fails", {"generate510": "exit"}, None, False, WITHOUT510_SUITES, WITHOUT510_EXPORTS, True, "5.10.4"),

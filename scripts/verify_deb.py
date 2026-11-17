@@ -44,8 +44,11 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
                 info.get('CFBundleShortVersionString') != base or info.get('CFBundleVersion') != (build or base)):
             raise SystemExit('Preference bundle and Debian package versions disagree')
         required_classes = {
-            '/CacheKeeper.dylib': (b'AxsCacheKeeperImageCache', b'AxsCacheKeeperWebKitCache'),
-            '/CacheKeeperPrefs': (b'AxsCacheKeeperSearchHitRouting', b'AxsCacheKeeperSearchInput'),
+            '/CacheKeeper.dylib': (b'AxsCacheKeeperImageCache', b'AxsCacheKeeperWebKitCache',
+                                    b'AxsCacheKeeperScanService', b'AxsCacheKeeperScanCursor',
+                                    b'AxsCacheKeeperHostEvidenceServer'),
+            '/CacheKeeperPrefs': (b'AxsCacheKeeperSearchHitRouting', b'AxsCacheKeeperSearchInput',
+                                    b'AxsCacheKeeperHostEvidenceClient'),
             '/ckrestore': (),
         }
         for suffix, markers in required_classes.items():
@@ -67,6 +70,9 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
                 payload = binary[offset:offset + size]
                 if any(marker not in payload for marker in markers):
                     raise SystemExit(f'Missing product implementation in a slice: {suffix}')
+                if ((suffix == '/CacheKeeper.dylib' and b'AxsCacheKeeperHostEvidenceClient' in payload) or
+                        (suffix == '/CacheKeeperPrefs' and b'AxsCacheKeeperHostEvidenceServer' in payload)):
+                    raise SystemExit(f'Host runtime class leaked across target boundary: {suffix}')
                 if suffix == '/CacheKeeper.dylib':
                     runtime_markers = (version.encode('ascii') + b'\0', b'runtimeInfo\0',
                                        b'packageVersion\0', b'firstObserved\0')
@@ -78,7 +84,8 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
                         b'instanceDiagnosticsForIntegrationTests', b'discoveryDiagnosticsForIntegrationTests',
                         b'methodDiagnosticsForIntegrationTests',
                         b'axs_cachekeeper_installation_test_read', b'ImageCacheIntegrationTests',
-                        b'AxsCacheKeeperRegrowingWindow')):
+                        b'AxsCacheKeeperRegrowingWindow', b'axs_cachekeeper_clock', b'ScanPageTests',
+                        b'AxsCacheKeeperScanHostClient', b'axs_cachekeeper_scan_host_fail')):
                     raise SystemExit(f'Test implementation leaked into binary: {suffix}')
             if architectures != {(0x100000c, 0), (0x100000c, 2)}:
                 raise SystemExit(f'Unexpected architectures: {suffix}')

@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix="inspection-export-", dir=ROOT / "tmp") 
                         "-I" + str(ROOT / "tests/include"), "-framework", "Foundation",
                         str(ROOT / "tests/inspection_export_tests.m"), str(source),
                         str(ROOT / "AxsCacheKeeperOperationInfo.m"),
-                        *([str(ROOT / "AxsCacheKeeperStorageInventory.m")] if name == "current" else []),
+                        *([str(ROOT / "AxsCacheKeeperStorageInventory.m"), str(ROOT / "AxsCacheKeeperHostEvidence.m")] if name == "current" else []),
                         str(ROOT / "AxsCacheKeeperInstallation.m"), str(ROOT / "AxsCacheKeeperPDFInspection.m"),
                         "-o", str(binary)], check=True, timeout=60)
         result = subprocess.run([str(binary), str(output / (name + "-fixture"))], capture_output=True, text=True, timeout=60)

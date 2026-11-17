@@ -4,6 +4,8 @@
 #import "AxsCacheKeeperScanDiagnostics.h"
 #import "AxsCacheKeeperImageCacheStatus.h"
 #import "AxsCacheKeeperWebKitStatus.h"
+#import "AxsCacheKeeperHostEvidence.h"
+#import "AxsCacheKeeperRecords.h"
 
 static BOOL axs_cachekeeper_inventory_count(id value) {
     if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID()) return NO;
@@ -37,7 +39,49 @@ static NSDictionary *axs_cachekeeper_inventory_sdk(id wrapper,BOOL image) {
     out[@"receiptState"]=projected[@"state"];out[@"sourceUpdated"]=time;
     for (NSString *key in image ? @[@"observed",@"eligible",@"restricted",@"writesBlocked",@"queued",@"submitted",@"apiCompleted",@"skipped",@"pending"] : @[@"persistentStores",@"nonPersistentStores",@"submitted",@"completed",@"pending"])
         if (axs_cachekeeper_inventory_count(projected[key])) out[key]=projected[key];
+    for (NSString *key in @[@"runtimeInfo",@"discoveryCheck",@"installationCheck",@"reason"]) if (projected[key]) out[key]=projected[key];
     out[@"bytesState"]=@"notMeasured";return [out copy];
+}
+// A pure view over this report's raw reads. Version and observation axes stay independent.
+NSDictionary *axs_cachekeeper_capabilities(NSDictionary *raw,NSString *panelVersion) {
+    NSMutableDictionary *out=[NSMutableDictionary new];
+    for (NSString *key in @[@"standardDirectories",@"network",@"image",@"webKit",@"hostAutomatic",@"hostObserved"]) {
+        NSDictionary *envelope=raw[key];NSString *source=axs_cachekeeper_inventory_source(envelope);
+        NSMutableDictionary *entry=[@{@"sourceState":source,@"observationScope":@"savedRecords",@"runtimeVersionState":@"notRecorded",@"resourceContract":@"notEstablishedByReceipt",@"effectVerification":@"notVerified"} mutableCopy];
+        NSDictionary *data=nil;
+        if ([source isEqual:@"available"]) {
+            if ([key isEqual:@"network"]) data=axs_cachekeeper_network_projection(envelope[@"data"]);
+            else if ([key isEqual:@"image"]) data=axs_cachekeeper_image_cache_raw_projection(envelope[@"data"]);
+            else if ([key isEqual:@"webKit"]) data=axs_cachekeeper_webkit_raw_projection(envelope[@"data"]);
+            else if ([key isEqual:@"hostAutomatic"]) data=axs_cachekeeper_host_projection(envelope[@"data"]);
+            else if ([key isEqual:@"hostObserved"]) data=axs_cachekeeper_host_observed_projection(envelope[@"data"]);
+            else data=axs_cachekeeper_record_valid(envelope[@"data"],0) ? envelope[@"data"] : nil;
+            if (!data) entry[@"sourceState"]=@"invalid";
+        }
+        if (data) {
+            id updated=data[@"updated"];NSNumber *time=[updated isKindOfClass:NSDate.class] ? axs_cachekeeper_inventory_time(updated) : ([updated isKindOfClass:NSNumber.class] ? updated : nil);
+            if (time) entry[@"sourceUpdated"]=time;
+            NSDictionary *runtime=data[@"runtimeInfo"];
+            if ([key isEqual:@"hostObserved"]) {
+                entry[@"observationState"]=data[@"state"];
+                if ([data[@"state"] isEqual:@"observed"]) runtime=data[@"data"][@"runtimeInfo"];
+            }
+            entry[@"runtimeVersionState"]=axs_cachekeeper_host_version_state(runtime,panelVersion);
+            NSDictionary *runtimeProjection=axs_cachekeeper_runtime_info_projection(runtime);
+            if (runtimeProjection) entry[@"runtimeInfo"]=runtimeProjection;
+            if ([key isEqual:@"standardDirectories"]) {
+                for (NSString *field in @[@"complete",@"coverageComplete",@"measurementComplete"]) if (axs_cachekeeper_input_boolean(data[field])) entry[field]=@([data[field] boolValue]);
+                NSDictionary *progress=axs_cachekeeper_scan_progress_projection(data[@"scanProgress"]),*diagnostics=axs_cachekeeper_scan_diagnostics_projection(data[@"scanDiagnostics"]);
+                if (progress) entry[@"scanProgress"]=progress;if (diagnostics) entry[@"scanDiagnostics"]=diagnostics;
+            } else for (NSString *field in @[@"state",@"reason",@"discoveryCheck",@"installationCheck",@"prevent",@"applied",@"submitted",@"completed",@"apiCompleted",@"pending",@"observed",@"eligible",@"restricted",@"writesBlocked"])
+                if (data[field]) entry[field]=data[field];
+            if ([key isEqual:@"network"]) entry[@"actionState"]=[data[@"prevent"] boolValue] ? ([data[@"applied"] boolValue] ? @"restrictionReported" : @"restrictionNotApplied") : ([data[@"applied"] boolValue] ? @"unrestrictedOrRestoreReported" : @"restorePending");
+            if ([key isEqual:@"image"] || [key isEqual:@"webKit"]) entry[@"actionState"]=data[@"state"];
+            if ([key isEqual:@"standardDirectories"]) entry[@"resourceContract"]=@"standardDirectoryRulesOnly";
+        }
+        out[key]=entry;
+    }
+    return out;
 }
 static NSArray *axs_cachekeeper_inventory_sorted_queue(NSArray *rows) {
     NSArray *sorted=[rows sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b) {
