@@ -19,10 +19,13 @@
 - (void)axs_cachekeeper_begin_probe {self.axs_cachekeeper_oldProbeCalls++;[super axs_cachekeeper_begin_probe];}
 @end
 
-@interface AxsCacheKeeperScanPageTests : XCTestCase
+@interface AxsCacheKeeperScanPageTests : XCTestCase <UINavigationControllerDelegate>
 @property(nonatomic,strong) UIWindow *window,*previousWindow;
 @property(nonatomic,strong) AxsCacheKeeperScanFixture *page;
 @property(nonatomic,strong) AxsCacheKeeperHostEvidenceServer *server;
+@property(nonatomic,weak) UINavigationController *expectedNavigation;
+@property(nonatomic,weak) UIViewController *expectedController;
+@property(nonatomic,strong) XCTestExpectation *navigationFinished;
 @property(nonatomic,copy) NSString *folder;
 @end
 @implementation AxsCacheKeeperScanPageTests
@@ -33,6 +36,12 @@
     [@{self.page.bundle:@{@"enabled":@NO}} writeToFile:[self.page file:@"appEnabled.plist"] atomically:YES];
     self.previousWindow=UIApplication.sharedApplication.delegate.window;self.window=[[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];self.window.rootViewController=[[UINavigationController alloc] initWithRootViewController:self.page];[self.window makeKeyAndVisible];[self.page loadViewIfNeeded];
     XCTAssertEqual([self.page tableView:self.page.tableView numberOfRowsInSection:0],8);
+}
+- (void)navigationController:(UINavigationController *)navigationController didShowViewController:(UIViewController *)viewController animated:(BOOL)animated {
+    (void)animated;
+    if (self.navigationFinished && navigationController==self.expectedNavigation && viewController==self.expectedController) {
+        [self.navigationFinished fulfill];self.navigationFinished=nil;self.expectedNavigation=nil;self.expectedController=nil;
+    }
 }
 - (void)tearDown {
     [self.server axs_cachekeeper_invalidate];self.server=nil;[self.page.timer invalidate];[self.page.statusTimer invalidate];[self.page.axs_cachekeeper_hostClient axs_cachekeeper_cancel];
@@ -130,8 +139,12 @@
     [self.page.axs_cachekeeper_hostClient setValue:@(NSProcessInfo.processInfo.systemUptime-1) forKey:@"axs_cachekeeper_deadline"];
     [self.page axs_cachekeeper_reload];XCTAssertTrue([self.page.axs_cachekeeper_hostStatus containsString:@"timedOut"]);XCTAssertEqual(self.page.axs_cachekeeper_hostClient.axs_cachekeeper_activeTokenCount,0u);
     [self axs_cachekeeper_tapHost];
-    [self.page viewWillDisappear:NO];XCTAssertGreaterThan(self.page.axs_cachekeeper_hostClient.axs_cachekeeper_activeTokenCount,0u);
-    [self.page viewWillAppear:NO];[self.page.navigationController pushViewController:[UIViewController new] animated:NO];
+    XCTAssertGreaterThan(self.page.axs_cachekeeper_hostClient.axs_cachekeeper_activeTokenCount,0u);
+    UINavigationController *navigation=self.page.navigationController;UIViewController *detail=[UIViewController new];
+    XCTestExpectation *shown=[self expectationWithDescription:@"UIKit completed the navigation away from ScanPage"];
+    self.expectedNavigation=navigation;self.expectedController=detail;self.navigationFinished=shown;navigation.delegate=self;
+    [navigation pushViewController:detail animated:NO];[self waitForExpectations:@[shown] timeout:5];
+    XCTAssertEqual(navigation.viewControllers.firstObject,self.page);
     XCTAssertEqual(self.page.axs_cachekeeper_hostClient.axs_cachekeeper_activeTokenCount,0u);
 }
 @end
