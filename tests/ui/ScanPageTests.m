@@ -92,14 +92,18 @@
     [self axs_cachekeeper_startServer];NSString *path=[self.page file:[NSString stringWithFormat:@"Status/%@.hostObserved.plist",self.page.bundle]];
     [NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:NO attributes:nil error:NULL];
     [self axs_cachekeeper_tapHost];[self axs_cachekeeper_waitHost];XCTAssertTrue([self.page.axs_cachekeeper_hostStatus containsString:@"面板观察保存失败"]);
-    XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:[self.page file:[NSString stringWithFormat:@"Status/%@.host.plist",self.page.bundle]]]);
+    NSString *hostPath=[self.page file:[NSString stringWithFormat:@"Status/%@.host.plist",self.page.bundle]];
+    BOOL hostExists=[NSFileManager.defaultManager fileExistsAtPath:hostPath];
+    XCTAssertFalse(hostExists);
 }
 - (void)axs_cachekeeper_assertImmediateFailure:(AxsCacheKeeperScanHostFailure)failure {
     NSTimeInterval oldTime=NSDate.date.timeIntervalSince1970-60;
     NSDictionary *host=@{@"schemaVersion":@1,@"source":@"hostAutomatic",@"transportTrust":@"unauthenticated",@"updated":@(oldTime),@"runtimeInfo":@{@"schemaVersion":@1,@"packageVersion":@"0.7.2-154.1",@"firstObserved":@1700000000},@"existingContainerGatePassed":@YES,@"authorizationAttempted":@NO,@"sharedAccessGranted":@NO,@"authorizationCode":@0,@"configurationReadScope":@"appEnabled",@"configurationReadState":@"notPermitted",@"previousPublishState":@"notAttempted",@"previousPublishErrorCode":@0};
     NSString *observed=[self.page file:[NSString stringWithFormat:@"Status/%@.hostObserved.plist",self.page.bundle]];
     NSString *automatic=[self.page file:[NSString stringWithFormat:@"Status/%@.host.plist",self.page.bundle]];
-    XCTAssertTrue([@{@"source":@"panelObserved",@"state":@"observed",@"updated":@(oldTime),@"data":host} writeToURL:[NSURL fileURLWithPath:observed] error:NULL]);XCTAssertTrue([host writeToURL:[NSURL fileURLWithPath:automatic] error:NULL]);
+    NSDictionary *previousObservation=@{@"source":@"panelObserved",@"state":@"observed",@"updated":@(oldTime),@"data":host};
+    BOOL previousObservationSaved=[previousObservation writeToURL:[NSURL fileURLWithPath:observed] error:NULL];
+    XCTAssertTrue(previousObservationSaved);XCTAssertTrue([host writeToURL:[NSURL fileURLWithPath:automatic] error:NULL]);
     NSData *automaticBefore=[NSData dataWithContentsOfFile:automatic],*configBefore=[NSData dataWithContentsOfFile:[self.page file:@"appEnabled.plist"]];
     NSString *resource=[self.page file:@"user-resource.bin"];NSData *resourceBefore=[@"retained app data" dataUsingEncoding:NSUTF8StringEncoding];XCTAssertTrue([resourceBefore writeToFile:resource atomically:YES]);
     axs_cachekeeper_scan_host_fail(failure);[self axs_cachekeeper_tapHost];
