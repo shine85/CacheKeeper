@@ -83,6 +83,14 @@ def webkit(output, compiler):
     run_command([str(webkit_tests)], check=True, timeout=60)
     webkit_source = (root / "AxsCacheKeeperWebKitCache.m").read_text(encoding="utf-8-sig")
     webkit_mutations = [
+        ("initial-configuration-deadline", [("[self axs_cachekeeper_schedule_initial_preparation:++_initialPreparationID after:10];", "++_initialPreparationID;")],
+         "initial configuration wait owns the first preparation deadline"),
+        ("preparation-deadline", [("[self axs_cachekeeper_schedule_preparation:attempt after:MAX(0,10-(now-_preparationStarted))];", "(void)attempt;")],
+         "preparation owns a deadline before API submission"),
+        ("equal-refresh", [("if (_preparing && wasPending) [self axs_cachekeeper_read_preparation];", "if (NO) [self axs_cachekeeper_read_preparation];")],
+         "equal refresh resumes preparation without resetting its deadline"),
+        ("foreground-state", [("_reason=@\"foregroundAgain\";\n    if (!_flight) _state=@\"blocked\";", "if (_flight) _reason=@\"foregroundAgain\";")],
+         "foreground cancellation settles top-level queued state"),
         ("exclusion", [("if ([context[@\"excludedPaths\"] count]) return @\"exclusionUnrepresentable\";", "")],
          "any exclusion blocks broad API"),
         ("in-flight", [("if (_flight) { _reason=@\"inFlight\";", "if (NO) { _reason=@\"inFlight\";"),
@@ -105,7 +113,8 @@ def webkit(output, compiler):
                         str(root / "tests" / "webkit_cache_tests.m"), "-o", str(executable)],
                        check=True, timeout=60)
         result = run_command([str(executable)], capture_output=True, text=True, timeout=60)
-        if result.returncode == 0 or expected not in result.stderr:
+        failures = [line for line in (result.stdout + result.stderr).splitlines() if line.startswith("FAIL:")]
+        if result.returncode != 1 or failures != ["FAIL: webkit-cache: " + expected]:
             raise SystemExit("FAIL: WebKit mutation did not hit its behavioral assertion: " + name + "\n" + result.stdout + result.stderr)
         print("PASS: WebKit behavior mutation caught: " + name)
 

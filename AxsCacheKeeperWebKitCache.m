@@ -16,14 +16,21 @@
     AxsCacheKeeperWebKitDeadlineScheduler _schedule;
     NSTimeInterval (^_clock)(void);
     void (^_observer)(NSDictionary *);
+    BOOL (^_backgroundTimeValidation)(void);
     NSDictionary *_context;
     NSMapTable *_stores;
     NSMutableArray<AxsCacheKeeperWebKitStoreReference *> *_queue;
+    AxsCacheKeeperWebKitStoreReference *_preparingReference;
     id<AxsCacheKeeperWebKitStore> _flight;
     NSUInteger _contextGeneration,_foregroundGeneration,_lastBackgroundGeneration,_preparationID,_flightID;
     NSUInteger _flightContextGeneration,_submitted,_completed;
-    BOOL _activeSeen,_background,_hasTime,_preparing,_timedOut,_configurationPending,_contextRefreshInProgress;
+    BOOL _activeSeen,_background,_hasTime,_preparing,_timedOut,_configurationPending,_configurationRevoked,_contextRefreshInProgress;
     NSTimeInterval _flightStarted;
+    NSTimeInterval _preparationStarted;
+    NSUInteger _preparationAttempt;
+    NSTimeInterval _initialPreparationStarted;
+    NSUInteger _initialPreparationID;
+    BOOL _initialPreparationWaiting,_initialPreparationExpired,_inheritInitialPreparation;
     NSString *_state,*_reason;
     NSDate *_updated;
     NSMutableDictionary *_operationHistory;
@@ -77,6 +84,7 @@
     [self axs_cachekeeper_publish];
 }
 - (NSString *)axs_cachekeeper_block_reason {
+    if (_configurationRevoked) return @"notAuthorized";
     if (_configurationPending) return @"authorizationChanged";
     NSDictionary *context=_context;
     for (NSString *key in @[@"readable",@"valid",@"enabled",@"requested",@"reportWritable"])
@@ -104,7 +112,7 @@
         axs_cachekeeper_operation_transition_reason(_operationHistory,reference.actionID,@"skipped",reason,NO);
     if (_preparingAction) axs_cachekeeper_operation_transition_reason(_operationHistory,_preparingAction,@"skipped",reason,NO);
     _preparingAction=0;
-    _queue=nil;_preparing=NO;++_preparationID;
+    _queue=nil;_preparing=NO;_preparingReference=nil;++_preparationID;++_preparationAttempt;
 }
 - (void)axs_cachekeeper_refresh_idle_state {
     NSString *blocked=[self axs_cachekeeper_block_reason];
@@ -128,7 +136,18 @@
         if ([copy[key] conformsToProtocol:@protocol(NSCopying)]) copy[key]=[copy[key] copy];
     BOOL wasPending=_configurationPending;
     _configurationPending=NO;
-    if ([_context isEqual:copy] && !wasPending) return;
+    BOOL changed=!_context;
+    for (NSString *key in @[@"readable",@"valid",@"enabled",@"requested",@"excludedPaths",@"installation",@"process",@"reportWritable"])
+        if (![_context[key] isEqual:copy[key]]) changed=YES;
+    if (!changed) {
+        _context=[copy copy];
+        if (wasPending && !_contextRefreshInProgress) {axs_cachekeeper_operation_refresh(_operationHistory,_operationEvent,@"applied");axs_cachekeeper_operation_finish(_operationHistory,_operationEvent);}
+        if (_preparing && wasPending) [self axs_cachekeeper_read_preparation];
+        else if (!_flight && _queue.count && wasPending) [self axs_cachekeeper_prepare_next];
+        else if (!_flight && !_preparing && !_queue.count && [@[@"blocked",@"disabled"] containsObject:_state] &&
+            [@[@"authorizationChanged",@"configurationInvalid",@"configurationUnreadable",@"notAuthorized"] containsObject:_reason]) [self axs_cachekeeper_refresh_idle_state];
+        [self axs_cachekeeper_publish];return;
+    }
     BOOL identityChanged=_context && (![_context[@"installation"] isEqual:copy[@"installation"]] || ![_context[@"process"] isEqual:copy[@"process"]]);
     if (!_context || ![_context[@"installation"] isEqual:copy[@"installation"]]) ++_installationGeneration;
     _context=[copy copy];++_contextGeneration;
@@ -147,12 +166,31 @@
     [self axs_cachekeeper_publish];
 }
 - (void)suspendForConfiguration {
+    [self suspendForConfigurationWithAuthorization:YES];
+}
+- (void)suspendForConfigurationWithAuthorization:(BOOL)authorized {
     NSAssert(NSThread.isMainThread,@"WebKit configuration requires main thread");
-    _configurationPending=YES;++_contextGeneration;[self axs_cachekeeper_cancel_queue];
+    _configurationPending=YES;++_preparationID;
+    _configurationRevoked=!authorized;
+    if (!authorized) {
+        ++_contextGeneration;_initialPreparationWaiting=NO;_inheritInitialPreparation=NO;++_initialPreparationID;
+        [self axs_cachekeeper_cancel_queue_reason:@"notAuthorized"];
+    }
     [self axs_cachekeeper_begin_event:@"configuration" refreshing:YES];
-    _reason=@"authorizationChanged";
-    if (!_flight) _state=@"blocked";
+    if (!authorized || ![_reason isEqual:@"foregroundAgain"])
+        _reason=authorized ? @"authorizationChanged" : @"notAuthorized";
+    if (!_flight) _state=_preparing ? @"queued" : (authorized ? @"blocked" : @"disabled");
     [self axs_cachekeeper_publish];
+}
+- (BOOL)hasPendingWork { return _flight!=nil || _preparing || _queue.count>0 || _initialPreparationWaiting; }
+- (void)rejectRevokedConfiguration {
+    NSAssert(NSThread.isMainThread,@"WebKit rejection requires main thread");
+    if (!_configurationRevoked) return;
+    _configurationPending=NO;[self axs_cachekeeper_cancel_queue_reason:@"notAuthorized"];
+    if (!_flight) _state=@"disabled";_reason=@"notAuthorized";[self axs_cachekeeper_publish];
+}
+- (void)setBackgroundTimeValidation:(BOOL (^)(void))validation {
+    NSAssert(NSThread.isMainThread,@"WebKit time validation requires main thread");_backgroundTimeValidation=[validation copy];
 }
 - (BOOL)observationAllowed {
     NSAssert(NSThread.isMainThread,@"WebKit observation requires main thread");
@@ -174,12 +212,56 @@
     NSAssert(NSThread.isMainThread,@"WebKit lifecycle requires main thread");
     NSUInteger event=[self axs_cachekeeper_begin_event:@"foreground" refreshing:NO];axs_cachekeeper_operation_finish(_operationHistory,event);
     _activeSeen=YES;_background=NO;_hasTime=NO;++_foregroundGeneration;
+    _initialPreparationWaiting=NO;_initialPreparationExpired=NO;_inheritInitialPreparation=NO;++_initialPreparationID;
     [self axs_cachekeeper_cancel_queue_reason:@"foregroundAgain"];
-    if (_flight) _reason=@"foregroundAgain";
+    _reason=@"foregroundAgain";
+    if (!_flight) _state=@"blocked";
     [self checkTimeout];[self axs_cachekeeper_publish];
+}
+- (void)axs_cachekeeper_expire_initial_preparation {
+    if (_initialPreparationWaiting) {
+        _initialPreparationWaiting=NO;_initialPreparationExpired=YES;++_initialPreparationID;
+        NSUInteger event=[self axs_cachekeeper_begin_event:@"background" refreshing:NO];
+        axs_cachekeeper_operation_event_reason(_operationHistory,event,@"deadlineExceeded");
+        axs_cachekeeper_operation_finish(_operationHistory,event);
+    }
+    if (_initialPreparationExpired && !_configurationRevoked) {
+        [self axs_cachekeeper_cancel_queue_reason:@"deadlineExceeded"];
+        if (!_flight) _state=@"blocked";_reason=@"deadlineExceeded";[self axs_cachekeeper_publish];
+    }
+}
+- (void)axs_cachekeeper_schedule_initial_preparation:(NSUInteger)request after:(NSTimeInterval)delay {
+    __weak typeof(self) weakSelf=self;
+    _schedule(delay,^{
+        void (^check)(void)=^{
+            AxsCacheKeeperWebKitCache *self=weakSelf;
+            if (!self || !self->_initialPreparationWaiting || self->_initialPreparationID!=request) return;
+            NSTimeInterval now=self->_clock ? self->_clock() : NSProcessInfo.processInfo.systemUptime;
+            NSTimeInterval remaining=10-(now-self->_initialPreparationStarted);
+            if (remaining>0) [self axs_cachekeeper_schedule_initial_preparation:request after:remaining];
+            else [self axs_cachekeeper_expire_initial_preparation];
+        };
+        if (NSThread.isMainThread) check();else dispatch_async(dispatch_get_main_queue(),check);
+    });
+}
+- (void)beginBackgroundPreparation {
+    NSAssert(NSThread.isMainThread,@"WebKit initial preparation requires main thread");
+    if (_initialPreparationWaiting || _initialPreparationExpired || !_activeSeen || _configurationRevoked) return;
+    _background=YES;_initialPreparationWaiting=YES;
+    _initialPreparationStarted=_clock ? _clock() : NSProcessInfo.processInfo.systemUptime;
+    [self axs_cachekeeper_schedule_initial_preparation:++_initialPreparationID after:10];
+}
+- (BOOL)backgroundPreparationAllowed {
+    NSAssert(NSThread.isMainThread,@"WebKit initial preparation requires main thread");
+    NSTimeInterval now=_clock ? _clock() : NSProcessInfo.processInfo.systemUptime;
+    if (_initialPreparationWaiting && now-_initialPreparationStarted>=10) [self axs_cachekeeper_expire_initial_preparation];
+    if (_initialPreparationExpired) {[self axs_cachekeeper_expire_initial_preparation];return NO;}
+    return YES;
 }
 - (void)didEnterBackgroundWithTime:(BOOL)hasTime {
     NSAssert(NSThread.isMainThread,@"WebKit lifecycle requires main thread");
+    if (![self backgroundPreparationAllowed]) return;
+    _inheritInitialPreparation=_initialPreparationWaiting;_initialPreparationWaiting=NO;++_initialPreparationID;
     NSDictionary *lastEvent=[[[axs_cachekeeper_operation_snapshot(_operationHistory)[@"processes"] lastObject] objectForKey:@"events"] lastObject];
     if ([_operationTrigger isEqual:@"background"] && [lastEvent[@"state"] isEqual:@"active"] && ![lastEvent[@"refresh"] isEqual:@"requested"])
         _batchEvent=_operationEvent;
@@ -203,22 +285,55 @@
 - (void)axs_cachekeeper_prepare_next {
     if (_flight || _preparing || !_queue.count || !_background || !_hasTime) return;
     NSString *blocked=[self axs_cachekeeper_block_reason];
-    if (blocked) {[self axs_cachekeeper_cancel_queue];[self axs_cachekeeper_refresh_idle_state];[self axs_cachekeeper_publish];return;}
+    if (blocked && !(_configurationPending && !_configurationRevoked)) {[self axs_cachekeeper_cancel_queue];[self axs_cachekeeper_refresh_idle_state];[self axs_cachekeeper_publish];return;}
     AxsCacheKeeperWebKitStoreReference *reference=_queue.firstObject;[_queue removeObjectAtIndex:0];
     if (!reference.store) {
         axs_cachekeeper_operation_transition_reason(_operationHistory,reference.actionID,@"skipped",@"storeUnavailable",NO);
         _state=@"blocked";_reason=@"storeUnavailable";[self axs_cachekeeper_publish];[self axs_cachekeeper_prepare_next];return;
     }
-    _preparingAction=reference.actionID;
-    _preparing=YES;NSUInteger preparation=++_preparationID,generation=_contextGeneration,foreground=_foregroundGeneration,event=reference.eventID,action=reference.actionID;
-    _state=@"queued";_reason=@"none";[self axs_cachekeeper_publish];
+    _preparingAction=reference.actionID;_preparingReference=reference;
+    _preparing=YES;_preparationStarted=_inheritInitialPreparation ? _initialPreparationStarted : (_clock ? _clock() : NSProcessInfo.processInfo.systemUptime);
+    _inheritInitialPreparation=NO;
+    NSUInteger attempt=++_preparationAttempt;
+    NSTimeInterval now=_clock ? _clock() : NSProcessInfo.processInfo.systemUptime;
+    [self axs_cachekeeper_schedule_preparation:attempt after:MAX(0,10-(now-_preparationStarted))];
+    _state=@"queued";_reason=_configurationPending ? @"authorizationChanged" : @"none";[self axs_cachekeeper_publish];
+    [self axs_cachekeeper_read_preparation];
+}
+- (void)axs_cachekeeper_schedule_preparation:(NSUInteger)attempt after:(NSTimeInterval)delay {
+    __weak typeof(self) weakSelf=self;
+    _schedule(delay,^{
+        void (^check)(void)=^{
+            AxsCacheKeeperWebKitCache *self=weakSelf;
+            if (!self || !self->_preparing || self->_preparationAttempt!=attempt) return;
+            NSTimeInterval now=self->_clock ? self->_clock() : NSProcessInfo.processInfo.systemUptime;
+            NSTimeInterval remaining=10-(now-self->_preparationStarted);
+            if (remaining>0) [self axs_cachekeeper_schedule_preparation:attempt after:remaining];
+            else {
+                [self axs_cachekeeper_cancel_queue_reason:@"deadlineExceeded"];
+                self->_state=@"blocked";self->_reason=@"deadlineExceeded";[self axs_cachekeeper_publish];
+            }
+        };
+        if (NSThread.isMainThread) check();else dispatch_async(dispatch_get_main_queue(),check);
+    });
+}
+- (void)axs_cachekeeper_read_preparation {
+    if (!_preparing || !_preparingReference || _configurationPending) return;
+    AxsCacheKeeperWebKitStoreReference *reference=_preparingReference;
+    NSUInteger preparation=++_preparationID,generation=_contextGeneration,foreground=_foregroundGeneration,event=reference.eventID,action=reference.actionID;
     __weak typeof(self) weakSelf=self;
     void (^reply)(NSDictionary *,BOOL)=^(NSDictionary *context,BOOL hasTime) {
         void (^accept)(void)=^{
             AxsCacheKeeperWebKitCache *self=weakSelf;
             if (!self || !self->_preparing || self->_preparationID!=preparation) return;
-            self->_preparing=NO;
+            NSTimeInterval now=self->_clock ? self->_clock() : NSProcessInfo.processInfo.systemUptime;
+            if (now-self->_preparationStarted>=10) {
+                [self axs_cachekeeper_cancel_queue_reason:@"deadlineExceeded"];
+                self->_state=@"blocked";self->_reason=@"deadlineExceeded";[self axs_cachekeeper_publish];return;
+            }
+            if (self->_configurationPending) return;
             [self updateContext:context];
+            if (!self->_preparing || self->_preparationID!=preparation) return;
             if (self->_contextGeneration!=generation || self->_foregroundGeneration!=foreground || !self->_background || !self->_hasTime || !hasTime) {
                 NSString *skipReason=[self axs_cachekeeper_block_reason] ?: ((!self->_hasTime || !hasTime) ? @"noBackgroundTime" : (!self->_background ? @"foregroundAgain" : @"authorizationChanged"));
                 axs_cachekeeper_operation_transition_reason(self->_operationHistory,action,@"skipped",skipReason,NO);
@@ -231,13 +346,28 @@
                 return;
             }
             id<AxsCacheKeeperWebKitStore> store=reference.store;
-            if (!store || !store.isPersistent) {
-                self->_preparingAction=0;axs_cachekeeper_operation_transition_reason(self->_operationHistory,action,@"skipped",@"storeUnavailable",NO);
+            BOOL persistent=store && store.isPersistent;
+            if (!self->_preparing || self->_preparationID!=preparation) return;
+            if (!persistent) {
+                self->_preparingAction=0;self->_preparing=NO;self->_preparingReference=nil;++self->_preparationAttempt;
+                axs_cachekeeper_operation_transition_reason(self->_operationHistory,action,@"skipped",@"storeUnavailable",NO);
                 self->_state=@"blocked";self->_reason=@"storeUnavailable";[self axs_cachekeeper_publish];[self axs_cachekeeper_prepare_next];return;
             }
             NSString *reason=[self axs_cachekeeper_block_reason];
             if (reason || self->_flight) return;
-            self->_preparingAction=0;
+            if (!self->_preparing || self->_preparationID!=preparation) return;
+            BOOL liveTime=self->_backgroundTimeValidation ? self->_backgroundTimeValidation() : hasTime;
+            NSTimeInterval submissionNow=self->_clock ? self->_clock() : NSProcessInfo.processInfo.systemUptime;
+            if (submissionNow-self->_preparationStarted>=10) {
+                [self axs_cachekeeper_cancel_queue_reason:@"deadlineExceeded"];
+                self->_state=@"blocked";self->_reason=@"deadlineExceeded";[self axs_cachekeeper_publish];return;
+            }
+            if (!self->_background || !self->_hasTime || !liveTime || self->_foregroundGeneration!=foreground) {
+                NSString *skip=!self->_background ? @"foregroundAgain" : @"noBackgroundTime";
+                [self axs_cachekeeper_cancel_queue_reason:skip];self->_state=@"blocked";self->_reason=skip;[self axs_cachekeeper_publish];return;
+            }
+            if (!self->_preparing || self->_preparationID!=preparation || [self axs_cachekeeper_block_reason]) return;
+            self->_preparingAction=0;self->_preparing=NO;self->_preparingReference=nil;++self->_preparationAttempt;
             self->_flight=store;self->_flightContextGeneration=generation;self->_flightForegroundGeneration=foreground;
             self->_flightEvent=event;self->_flightAction=action;
             axs_cachekeeper_operation_transition(self->_operationHistory,action,@"submitted",NO);
@@ -272,11 +402,22 @@
 }
 - (void)axs_cachekeeper_completed:(NSUInteger)flight {
     if (!_flight || flight!=_flightID) return;
-    BOOL sameGeneration=_flightContextGeneration==_contextGeneration && _flightForegroundGeneration==_foregroundGeneration && _flightEvent==_operationEvent;
+    BOOL currentAttempt=_flightContextGeneration==_contextGeneration && _flightForegroundGeneration==_foregroundGeneration &&
+        _flightEvent==_batchEvent && _background && _hasTime && !_configurationRevoked;
+    BOOL sameGeneration=currentAttempt && !_configurationPending && ![self axs_cachekeeper_block_reason];
     axs_cachekeeper_operation_transition(_operationHistory,_flightAction,@"apiCompleted",NO);
     _flight=nil;_completed++;
-    if (sameGeneration) {_state=@"completed";_reason=@"none";}
-    else {[self axs_cachekeeper_cancel_queue];[self axs_cachekeeper_refresh_idle_state];}
+    if (currentAttempt && _configurationPending) {
+        _state=_queue.count ? @"queued" : @"blocked";_reason=@"authorizationChanged";
+        [self axs_cachekeeper_prepare_next];
+    } else if (sameGeneration) {_state=@"completed";_reason=@"none";}
+    else {
+        [self axs_cachekeeper_cancel_queue];
+        NSString *blocked=[self axs_cachekeeper_block_reason];
+        if (blocked) {[self axs_cachekeeper_refresh_idle_state];}
+        else if (![_reason isEqual:@"none"]) _state=@"blocked";
+        else [self axs_cachekeeper_refresh_idle_state];
+    }
     [self axs_cachekeeper_publish];
     if (sameGeneration && _background && _hasTime) [self axs_cachekeeper_prepare_next];
 }
@@ -301,7 +442,7 @@
         if (!reference.store) continue;
         if (reference.persistent) persistent++;else nonPersistent++;
     }
-    BOOL requested=axs_cachekeeper_webkit_boolean(_context[@"requested"]) && [_context[@"requested"] boolValue];
+    BOOL requested=!_configurationRevoked && axs_cachekeeper_webkit_boolean(_context[@"requested"]) && [_context[@"requested"] boolValue];
     NSMutableDictionary *receipt=[@{@"schemaVersion":@1,@"requested":@(requested),@"timedOut":@(_timedOut),@"state":_state ?: @"disabled",@"reason":_reason ?: @"notAuthorized",
         @"persistentStores":@(persistent),@"nonPersistentStores":@(nonPersistent),@"submitted":@(_submitted),@"completed":@(_completed),@"pending":@(_flight ? 1 : 0),
         @"updated":_updated ?: NSDate.date,@"bytesState":@"notMeasured"} mutableCopy];

@@ -21,10 +21,18 @@ typedef void (^AxsCacheKeeperWebKitDeadlineScheduler)(NSTimeInterval delay, void
                            observer:(void (^)(NSDictionary *receipt))observer;
 // A fresh synchronous authorization read suspends new work until its own validation arrives.
 - (void)suspendForConfiguration;
+- (void)suspendForConfigurationWithAuthorization:(BOOL)authorized;
+- (BOOL)hasPendingWork;
+// Runtime validates the live UIKit task again at the actual API boundary.
+- (void)setBackgroundTimeValidation:(BOOL (^)(void))validation;
+- (void)rejectRevokedConfiguration;
 - (BOOL)observationAllowed;
 - (void)updateContext:(NSDictionary *)context;
 - (void)observeStore:(id<AxsCacheKeeperWebKitStore>)store;
 - (void)didBecomeActive;
+// Initial configuration wait shares the first store's preparation deadline; it grants no task/time.
+- (void)beginBackgroundPreparation;
+- (BOOL)backgroundPreparationAllowed;
 - (void)didEnterBackgroundWithTime:(BOOL)hasTime;
 - (void)expireBackgroundTime;
 - (void)checkTimeout;

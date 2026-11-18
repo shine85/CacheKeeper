@@ -32,6 +32,7 @@ CacheKeeper_CFLAGS += -DAXS_CACHEKEEPER_PACKAGE_VERSION=\"$(AXS_CACHEKEEPER_PACK
 CacheKeeper_FILES += AxsCacheKeeperPDFInspection.m AxsCacheKeeperPDFSession.m
 CacheKeeper_FILES += AxsCacheKeeperDependencySnapshot.m AxsCacheKeeperInstallation.m AxsCacheKeeperDiagnosticChannel.m
 CacheKeeper_FILES += AxsCacheKeeperWebKitCache.m AxsCacheKeeperWebKitObservation.m AxsCacheKeeperWebKitRuntime.xm
+CacheKeeper_FILES += AxsCacheKeeperWebKitCoordinator.m
 CacheKeeper_FILES += AxsCacheKeeperImageCache.m AxsCacheKeeperImageCacheRuntime.m
 CacheKeeper_FILES += AxsCacheKeeperOperationInfo.m AxsCacheKeeperHostEvidence.m
 CacheKeeper_FILES += AxsCacheKeeperScanTask.m

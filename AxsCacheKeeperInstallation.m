@@ -1,5 +1,7 @@
 #import "AxsCacheKeeperInstallation.h"
 #import "AxsCacheKeeperPolicy.h"
+#import "AxsCacheKeeperContainerScope.h"
+#import "AxsCacheKeeperImageMachOObservation.h"
 #import <objc/message.h>
 #import <CommonCrypto/CommonDigest.h>
 #include <sys/stat.h>
@@ -11,6 +13,8 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 #include <string.h>
+#include <mach-o/fat.h>
+#include <libkern/OSByteOrder.h>
 #if __has_feature(ptrauth_calls)
 #include <ptrauth.h>
 #endif
@@ -285,6 +289,84 @@ static NSString *axs_cachekeeper_installation_fingerprint(NSArray *parts) {
     NSMutableString *result=[NSMutableString new];
     for (NSUInteger i=0;i<sizeof(digest);i++) [result appendFormat:@"%02x",digest[i]];
     return result;
+}
+typedef struct {int fd;uint64_t offset,length;} AxsCacheKeeperInstallationImageReader;
+static BOOL axs_cachekeeper_installation_image_read(uintptr_t address,void *buffer,size_t length,void *opaque) {
+    AxsCacheKeeperInstallationImageReader *reader=opaque;
+    if (address>reader->length || length>reader->length-address || reader->offset>INT64_MAX-address) return NO;
+    size_t readBytes=0;NSUInteger interrupted=0;
+    while (readBytes<length) {
+        ssize_t count=pread(reader->fd,(unsigned char *)buffer+readBytes,length-readBytes,(off_t)(reader->offset+address+readBytes));
+        if (count<0 && errno==EINTR && ++interrupted<=4) continue;
+        if (count<=0) return NO;readBytes+=(size_t)count;
+    }
+    return YES;
+}
+static NSDictionary *axs_cachekeeper_installation_image_failure(NSString *reason) {
+    return @{@"schemaVersion":@1,@"state":@"notVerified",@"reason":reason,@"mappingBackingIdentity":@"notVerified"};
+}
+NSDictionary *axs_cachekeeper_installation_image_observation(NSDictionary *snapshot,NSURL *url,NSString *version,int32_t cpu,int32_t subtype) {
+    if (NSThread.isMainThread) return axs_cachekeeper_installation_image_failure(@"mainThread");
+    if (!axs_cachekeeper_validate_installation_snapshot_with_context(snapshot,url,version,AxsCacheKeeperInstallationContextHostMainBundle,nil))
+        return axs_cachekeeper_installation_image_failure(@"snapshot");
+    NSString *path=axs_cachekeeper_installation_path(url,nil),*name=snapshot[@"_executable"];
+    AxsCacheKeeperInstallationIdentity rootIdentity,fileIdentity;int root=axs_cachekeeper_installation_open_root(path,&rootIdentity,AxsCacheKeeperInstallationContextHostMainBundle,nil);
+    if (root<0) return axs_cachekeeper_installation_image_failure(@"snapshot");
+    int fd=axs_cachekeeper_installation_open_file(root,name.fileSystemRepresentation,@"main",&fileIdentity,[path stringByAppendingPathComponent:name],AxsCacheKeeperInstallationContextHostMainBundle,nil);
+    NSDictionary *result=nil;
+    @try {
+        if (fd<0 || axs_cachekeeper_installation_difference(snapshot[@"_root"],axs_cachekeeper_installation_stat(rootIdentity.fd)) ||
+            axs_cachekeeper_installation_difference(snapshot[@"_main"],axs_cachekeeper_installation_stat(fileIdentity.fd))) return axs_cachekeeper_installation_image_failure(@"snapshot");
+        if (fileIdentity.fd.st_size<=0 || (uint64_t)fileIdentity.fd.st_size<sizeof(struct mach_header_64)) return axs_cachekeeper_installation_image_failure(@"invalid");
+        AxsCacheKeeperInstallationImageReader reader={fd,0,(uint64_t)fileIdentity.fd.st_size};struct fat_header header;
+        if (!axs_cachekeeper_installation_image_read(0,&header,sizeof(header),&reader)) return axs_cachekeeper_installation_image_failure(@"read");
+        NSString *container=@"thin";NSData *fatTable=nil;uint32_t magic=header.magic;
+        if (magic==FAT_MAGIC || magic==FAT_CIGAM || magic==FAT_MAGIC_64 || magic==FAT_CIGAM_64) {
+            BOOL swap=magic==FAT_CIGAM || magic==FAT_CIGAM_64,is64=magic==FAT_MAGIC_64 || magic==FAT_CIGAM_64;
+            uint32_t architectures=swap ? OSSwapInt32(header.nfat_arch) : header.nfat_arch;
+            size_t size=is64 ? sizeof(struct fat_arch_64) : sizeof(struct fat_arch);
+            if (!architectures || architectures>64 || sizeof(header)+size*architectures>reader.length) return axs_cachekeeper_installation_image_failure(@"invalid");
+            NSMutableData *table=[NSMutableData dataWithLength:sizeof(header)+size*architectures];
+            if (!axs_cachekeeper_installation_image_read(0,table.mutableBytes,table.length,&reader)) return axs_cachekeeper_installation_image_failure(@"read");
+            if (memcmp(table.bytes,&header,sizeof(header))) return axs_cachekeeper_installation_image_failure(@"changed");
+            fatTable=[table copy];NSUInteger selected=0;uint64_t offset=0,length=0,starts[64]={0},sizes[64]={0};
+            for (uint32_t i=0;i<architectures;i++) {
+                int32_t type,sub;uint64_t start,bytes;uint32_t alignment;
+                if (is64) {
+                    struct fat_arch_64 arch;memcpy(&arch,(const unsigned char *)table.bytes+sizeof(header)+i*size,sizeof(arch));
+                    type=swap ? (int32_t)OSSwapInt32((uint32_t)arch.cputype) : arch.cputype;sub=swap ? (int32_t)OSSwapInt32((uint32_t)arch.cpusubtype) : arch.cpusubtype;
+                    start=swap ? OSSwapInt64(arch.offset) : arch.offset;bytes=swap ? OSSwapInt64(arch.size) : arch.size;alignment=swap ? OSSwapInt32(arch.align) : arch.align;
+                    if (arch.reserved) return axs_cachekeeper_installation_image_failure(@"invalid");
+                } else {
+                    struct fat_arch arch;memcpy(&arch,(const unsigned char *)table.bytes+sizeof(header)+i*size,sizeof(arch));
+                    type=swap ? (int32_t)OSSwapInt32((uint32_t)arch.cputype) : arch.cputype;sub=swap ? (int32_t)OSSwapInt32((uint32_t)arch.cpusubtype) : arch.cpusubtype;
+                    start=swap ? OSSwapInt32(arch.offset) : arch.offset;bytes=swap ? OSSwapInt32(arch.size) : arch.size;alignment=swap ? OSSwapInt32(arch.align) : arch.align;
+                }
+                if (alignment>31 || start<table.length || start>reader.length || bytes<sizeof(struct mach_header_64) || bytes>reader.length-start ||
+                    (start&((UINT64_C(1)<<alignment)-1))) return axs_cachekeeper_installation_image_failure(@"invalid");
+                for (uint32_t n=0;n<i;n++) if (start<starts[n]+sizes[n] && starts[n]<start+bytes) return axs_cachekeeper_installation_image_failure(@"invalid");
+                starts[i]=start;sizes[i]=bytes;
+                if (type==cpu && ((uint32_t)sub&~CPU_SUBTYPE_MASK)==((uint32_t)subtype&~CPU_SUBTYPE_MASK)) {selected++;offset=start;length=bytes;}
+            }
+            if (selected!=1) return axs_cachekeeper_installation_image_failure(selected ? @"ambiguous" : @"architecture");
+            reader.offset=offset;reader.length=length;container=is64 ? @"fat64" : @"fat32";
+        } else if (magic!=MH_MAGIC_64) return axs_cachekeeper_installation_image_failure(@"invalid");
+        NSDictionary *metadata=AxsCacheKeeperImageMachOObservation(0,axs_cachekeeper_installation_image_read,&reader);
+        if (![@[@"complete",@"missingUUID"] containsObject:metadata[@"state"]])
+            return axs_cachekeeper_installation_image_failure([metadata[@"state"] isEqual:@"changed"] ? @"changed" : [metadata[@"state"] isEqual:@"unreadable"] ? @"read" : @"invalid");
+        if ([metadata[@"cpuType"] intValue]!=cpu || ((uint32_t)[metadata[@"cpuSubtype"] intValue]&~CPU_SUBTYPE_MASK)!=((uint32_t)subtype&~CPU_SUBTYPE_MASK))
+            return axs_cachekeeper_installation_image_failure(@"architecture");
+        if (fatTable) {
+            AxsCacheKeeperInstallationImageReader full={fd,0,(uint64_t)fileIdentity.fd.st_size};NSMutableData *after=[NSMutableData dataWithLength:fatTable.length];
+            if (!axs_cachekeeper_installation_image_read(0,after.mutableBytes,after.length,&full) || ![after isEqual:fatTable]) return axs_cachekeeper_installation_image_failure(@"changed");
+        }
+        if (!axs_cachekeeper_installation_recheck(root,fd,name.fileSystemRepresentation,nil,@"main",fileIdentity,nil) ||
+            !axs_cachekeeper_installation_recheck(root,root,NULL,path,@"root",rootIdentity,nil) ||
+            !axs_cachekeeper_validate_installation_snapshot_with_context(snapshot,url,version,AxsCacheKeeperInstallationContextHostMainBundle,nil))
+            return axs_cachekeeper_installation_image_failure(@"changed");
+        result=@{@"schemaVersion":@1,@"state":@"observed",@"reason":@"none",@"container":container,@"metadata":metadata,@"mappingBackingIdentity":@"notVerified"};
+    } @finally {if (fd>=0) close(fd);close(root);}
+    return axs_cachekeeper_installation_image_observation_projection(result);
 }
 NSDictionary *axs_cachekeeper_installation_snapshot_with_context(NSURL *bundleURL, NSString *bundleIdentifier, NSString *systemShortVersion,AxsCacheKeeperInstallationContext context,NSError **error) {
     if (error) *error=nil;
@@ -669,7 +751,7 @@ NSDictionary *axs_cachekeeper_registry_inventory_projection(id registryInventory
     }
     if (!axs_cachekeeper_coverage_number(registryInventory[@"sourceSampledAt"]) ||
         ![registryInventory[@"entries"] isKindOfClass:NSArray.class] || [registryInventory[@"entries"] count]>4096) return axs_cachekeeper_registry_inventory_base(@"invalid");
-    NSMutableDictionary *entries=[NSMutableDictionary new];NSMutableSet *allTokens=[NSMutableSet new];
+    NSMutableDictionary *entries=[NSMutableDictionary new],*ownersByToken=[NSMutableDictionary new];NSMutableSet *allTokens=[NSMutableSet new];
     NSMutableDictionary *roleTokens=[NSMutableDictionary new],*roleAssociations=[NSMutableDictionary new],*roleObserved=[NSMutableDictionary new];
     for (NSString *name in @[@"home",@"group",@"extension"]) {roleTokens[name]=[NSMutableSet new];roleAssociations[name]=@0;roleObserved[name]=@0;}
     NSUInteger homesNotProvided=0;
@@ -688,7 +770,10 @@ NSDictionary *axs_cachekeeper_registry_inventory_projection(id registryInventory
             if (observed) {
                 if (![relation[@"tokens"] isKindOfClass:NSArray.class] || [relation[@"tokens"] count]>16384) return axs_cachekeeper_registry_inventory_base(@"invalid");
                 NSMutableSet *tokens=[NSMutableSet new];
-                for (id token in relation[@"tokens"]) {if (!axs_cachekeeper_registry_token(token) || [tokens containsObject:token]) return axs_cachekeeper_registry_inventory_base(@"invalid");[tokens addObject:token];}
+                for (id token in relation[@"tokens"]) {
+                    if (!axs_cachekeeper_registry_token(token) || [tokens containsObject:token]) return axs_cachekeeper_registry_inventory_base(@"invalid");[tokens addObject:token];
+                    NSMutableSet *owners=ownersByToken[token];if (!owners) ownersByToken[token]=owners=[NSMutableSet new];[owners addObject:entry[@"bundle"]];
+                }
                 if (([name isEqual:@"home"] && (tokens.count>1 || ([relation[@"state"] isEqual:@"available"] && tokens.count!=1))) ||
                     ([relation[@"state"] isEqual:@"notProvided"] && tokens.count)) return axs_cachekeeper_registry_inventory_base(@"invalid");
                 projected[@"tokens"]=[tokens.allObjects sortedArrayUsingSelector:@selector(compare:)];
@@ -700,7 +785,12 @@ NSDictionary *axs_cachekeeper_registry_inventory_projection(id registryInventory
             } else if (relation[@"tokens"]) return axs_cachekeeper_registry_inventory_base(@"invalid");
             relations[name]=projected;
         }
-        entries[entry[@"bundle"]]=@{@"bundle":entry[@"bundle"],@"displayEligible":entry[@"displayEligible"],@"sourceClassification":entry[@"sourceClassification"],@"relationships":relations};
+        NSMutableDictionary *projected=[@{@"bundle":entry[@"bundle"],@"displayEligible":entry[@"displayEligible"],@"sourceClassification":entry[@"sourceClassification"],@"relationships":relations} mutableCopy];
+        if (entry[@"incrementalState"]) {
+            if (![@[@"firstObserved",@"unchanged",@"revalidated",@"invalidated",@"notVerified"] containsObject:entry[@"incrementalState"]]) return axs_cachekeeper_registry_inventory_base(@"invalid");
+            projected[@"incrementalState"]=entry[@"incrementalState"];
+        }
+        entries[entry[@"bundle"]]=projected;
     }
     for (NSString *name in @[@"home",@"group",@"extension"]) {
         NSDictionary *role=coverage[name];NSUInteger associations=[roleAssociations[name] unsignedIntegerValue];
@@ -717,16 +807,55 @@ NSDictionary *axs_cachekeeper_registry_inventory_projection(id registryInventory
         allTokens.count!=[coverage[@"allRolesUniqueRegisteredURLCount"] unsignedIntegerValue]) return axs_cachekeeper_registry_inventory_base(@"invalid");
     out[@"sourceSampledAt"]=registryInventory[@"sourceSampledAt"];
     out[@"entries"]=[entries.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b){return [a[@"bundle"] compare:b[@"bundle"]];}];
+    if (registryInventory[@"scopeObservation"]) {
+        NSDictionary *scope=axs_cachekeeper_container_scope_projection(registryInventory[@"scopeObservation"],allTokens,ownersByToken);
+        if (!scope) return axs_cachekeeper_registry_inventory_base(@"invalid");out[@"scopeObservation"]=scope;
+    }
+    if (registryInventory[@"removedFromProviderCacheCount"]) {
+        if (!axs_cachekeeper_coverage_number(registryInventory[@"removedFromProviderCacheCount"])) return axs_cachekeeper_registry_inventory_base(@"invalid");
+        out[@"removedFromProviderCacheCount"]=registryInventory[@"removedFromProviderCacheCount"];
+    }
     return [out copy];
 }
+static NSDictionary *axs_cachekeeper_registry_scope_sample(NSDictionary *tokens,NSDictionary *ownersByToken) {
+    NSMutableArray *accesses=[NSMutableArray new],*scopes=[NSMutableArray new];NSMutableDictionary *identities=[NSMutableDictionary new];
+    NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+1;NSUInteger attempted=0;BOOL complete=YES;
+    for (NSString *urlText in [tokens.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        NSString *token=tokens[urlText],*state=@"notChecked";NSNumber *scope=@0;
+        if (attempted<4096 && NSProcessInfo.processInfo.systemUptime<deadline) {
+            attempted++;NSError *error=nil;NSURL *url=[NSURL URLWithString:urlText];NSString *path=axs_cachekeeper_installation_path(url,&error);
+            AxsCacheKeeperInstallationIdentity identity;int fd=path ? axs_cachekeeper_installation_open_root(path,&identity,AxsCacheKeeperInstallationContextRegistryBundle,&error) : -1;
+            if (fd>=0) {
+                BOOL stable=axs_cachekeeper_installation_recheck(fd,fd,NULL,path,@"root",identity,&error);close(fd);
+                if (stable) {
+                    NSString *key=[NSString stringWithFormat:@"%llu:%llu",(unsigned long long)identity.fd.st_dev,(unsigned long long)identity.fd.st_ino];
+                    NSMutableDictionary *row=identities[key];
+                    if (!row) {
+                        row=[@{@"index":@(scopes.count+1),@"tokens":[NSMutableArray new],@"owners":[NSMutableSet new]} mutableCopy];
+                        identities[key]=row;[scopes addObject:row];
+                    }
+                    [row[@"tokens"] addObject:token];[row[@"owners"] unionSet:ownersByToken[token] ?: [NSSet set]];scope=row[@"index"];state=@"observed";
+                } else state=@"identityChanged";
+            } else {
+                NSInteger number=[error.userInfo[@"detail"][@"errno"] integerValue];
+                state=number==ENOENT ? @"missing" : number==EACCES || number==EPERM ? @"unreadable" : error.code==6 ? @"identityChanged" : @"invalidRoot";
+            }
+        }
+        if (![state isEqual:@"observed"]) complete=NO;
+        [accesses addObject:@{@"token":token,@"state":state,@"scope":scope}];
+    }
+    NSMutableArray *closed=[NSMutableArray new];
+    for (NSDictionary *scope in scopes) [closed addObject:@{@"index":scope[@"index"],@"tokens":[scope[@"tokens"] sortedArrayUsingSelector:@selector(compare:)],@"owners":[[scope[@"owners"] allObjects] sortedArrayUsingSelector:@selector(compare:)]}];
+    return @{@"schemaVersion":@1,@"state":complete ? @"complete" : @"partial",@"identityBasis":@"rootDeviceInodeAtObservation",@"scopeLifetime":@"thisInventoryOnly",@"deletionAuthorization":@"notGranted",@"accesses":accesses,@"scopes":closed};
+}
 static NSDictionary *axs_cachekeeper_registry_inventory_finish(NSDictionary *coverage,NSDictionary *registry,NSDictionary *apps,
-    NSMutableDictionary *home,NSMutableDictionary *group,NSMutableDictionary *extension,NSNumber *sampledAt) {
+    NSMutableDictionary *home,NSMutableDictionary *group,NSMutableDictionary *extension,NSNumber *sampledAt,NSDictionary *incremental,NSUInteger removed) {
     NSMutableDictionary *out=[coverage mutableCopy];out[@"sourceSampledAt"]=sampledAt;
     NSMutableSet *urls=[NSMutableSet new];for (NSDictionary *role in @[home,group,extension]) [urls addObjectsFromArray:[role[@"_associations"] allValues]];
     NSMutableDictionary *tokens=[NSMutableDictionary new];
     for (NSString *url in [urls.allObjects sortedArrayUsingSelector:@selector(compare:)]) tokens[url]=[NSString stringWithFormat:@"resource-%lu",(unsigned long)tokens.count+1];
     // Index each validated association once; rebuilding it for every registration is quadratic.
-    NSMutableDictionary *ownersByRole=[NSMutableDictionary new];
+    NSMutableDictionary *ownersByRole=[NSMutableDictionary new],*ownersByToken=[NSMutableDictionary new];
     for (NSString *name in @[@"home",@"group",@"extension"]) {
         NSDictionary *role=[name isEqual:@"home"] ? home : [name isEqual:@"group"] ? group : extension;
         NSMutableDictionary *owners=[NSMutableDictionary new];
@@ -736,6 +865,7 @@ static NSDictionary *axs_cachekeeper_registry_inventory_finish(NSDictionary *cov
             if (!owner) continue;
             NSMutableSet *related=owners[owner];if (!related) owners[owner]=related=[NSMutableSet new];
             [related addObject:tokens[role[@"_associations"][identity]]];
+            NSString *token=tokens[role[@"_associations"][identity]];NSMutableSet *allOwners=ownersByToken[token];if (!allOwners) ownersByToken[token]=allOwners=[NSMutableSet new];[allOwners addObject:owner];
         }
         ownersByRole[name]=owners;
     }
@@ -753,9 +883,10 @@ static NSDictionary *axs_cachekeeper_registry_inventory_finish(NSDictionary *cov
             relations[name]=relation;
         }
         BOOL eligible=apps[bundle]!=nil;NSString *type=registry[bundle];
-        [entries addObject:@{@"bundle":bundle,@"displayEligible":@(eligible),@"sourceClassification":[type isEqual:@"System"] ? (eligible ? @"thirdPartySystem" : @"system") : [type isEqual:@"User"] ? @"user" : @"unknown",@"relationships":relations}];
+        [entries addObject:@{@"bundle":bundle,@"displayEligible":@(eligible),@"sourceClassification":[type isEqual:@"System"] ? (eligible ? @"thirdPartySystem" : @"system") : [type isEqual:@"User"] ? @"user" : @"unknown",@"relationships":relations,@"incrementalState":incremental[bundle] ?: @"notVerified"}];
     }
-    out[@"entries"]=entries;return axs_cachekeeper_registry_inventory_projection(out);
+    out[@"entries"]=entries;out[@"scopeObservation"]=axs_cachekeeper_registry_scope_sample(tokens,ownersByToken);out[@"removedFromProviderCacheCount"]=@(removed);
+    return axs_cachekeeper_registry_inventory_projection(out);
 }
 NSArray *axs_cachekeeper_installed_applications_with_registry_inventory(NSMutableDictionary *cache, NSDictionary **coverage, NSDictionary **registryInventory, NSError **error) {
     if (error) *error=nil;
@@ -773,7 +904,7 @@ NSArray *axs_cachekeeper_installed_applications_with_registry_inventory(NSMutabl
     NSMutableDictionary *home=sample ? axs_cachekeeper_coverage_role() : nil,*group=sample ? axs_cachekeeper_coverage_role() : nil,
         *extension=sample ? axs_cachekeeper_coverage_role() : nil,*registry=[NSMutableDictionary new];
     NSUInteger registrations=0,invalidRegistrations=0,groupUsed=0,extensionUsed=0;
-    NSMutableDictionary *apps=[NSMutableDictionary new],*nextCache=[NSMutableDictionary new];
+    NSMutableDictionary *apps=[NSMutableDictionary new],*nextCache=[NSMutableDictionary new],*incremental=[NSMutableDictionary new];
     for (id proxy in installed) { @autoreleasepool {
         NSString *type=axs_cachekeeper_installation_property(proxy,@"applicationType");
         NSURL *url=axs_cachekeeper_installation_property(proxy,@"bundleURL");
@@ -804,6 +935,8 @@ NSArray *axs_cachekeeper_installed_applications_with_registry_inventory(NSMutabl
         // Existing packages get bounded stat checks. Only new/changed packages re-read Info.plist.
         if (!snapshot || !axs_cachekeeper_validate_installation_snapshot_with_context(snapshot,url,systemVersion,AxsCacheKeeperInstallationContextRegistryBundle,nil))
             snapshot=axs_cachekeeper_installation_snapshot_with_context(url,bundle,systemVersion,AxsCacheKeeperInstallationContextRegistryBundle,&installationError);
+        incremental[bundle]=![snapshot[@"installationState"] isEqual:@"verified"] ? ([previous[@"installation"][@"installationState"] isEqual:@"verified"] ? @"invalidated" : @"notVerified") :
+            !previous ? @"firstObserved" : snapshot==previous[@"installation"] ? @"unchanged" : @"revalidated";
         NSDictionary *cached=previous[@"entry"];
         NSString *source=[type isEqual:@"System"] ? @"troll" : @"user";
         if (snapshot && snapshot==previous[@"installation"] && [cached[@"name"] isEqual:effectiveName] && [cached[@"source"] isEqual:source]) {
@@ -838,7 +971,8 @@ NSArray *axs_cachekeeper_installed_applications_with_registry_inventory(NSMutabl
         [result addEntriesFromDictionary:@{@"sourceState":@"available",@"observedRegistrations":@(registrations),@"invalidRegistrationCount":@(invalidRegistrations),
             @"truncatedRegistrationCount":@(truncated),@"allRolesUniqueRegisteredURLCount":@(allURLs.count),@"countsAreLowerBounds":@(partial),@"home":h,@"group":g,@"extension":e}];
         if (coverage) *coverage=[result copy];
-        if (registryInventory) *registryInventory=axs_cachekeeper_registry_inventory_finish(result,registry,apps,home,group,extension,sampledAt);
+        NSUInteger removed=0;for (NSString *bundle in cache) if (!nextCache[bundle]) removed++;
+        if (registryInventory) *registryInventory=axs_cachekeeper_registry_inventory_finish(result,registry,apps,home,group,extension,sampledAt,incremental,removed);
     }
     [cache setDictionary:nextCache];
     return [apps.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b){return [a[@"id"] compare:b[@"id"]];}];

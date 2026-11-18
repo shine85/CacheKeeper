@@ -2,12 +2,14 @@
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperScanDiagnostics.h"
 #import "AxsCacheKeeperInspectionStatus.h"
+#import "AxsCacheKeeperAllocation.h"
 
 // Validate fields consumed by history and report readers before subscripting or messaging them.
 // Unknown fields are preserved for forward compatibility; malformed known fields reject the file.
 static inline BOOL axs_cachekeeper_record_valid(id value, NSUInteger depth) {
     if (depth>8 || ![value isKindOfClass:NSDictionary.class]) return NO;
     NSDictionary *record=value;
+    if (record[@"allocationObservation"] && !axs_cachekeeper_allocation_projection(record[@"allocationObservation"])) return NO;
     if (record[@"scanProgress"] && (!axs_cachekeeper_scan_progress_projection(record[@"scanProgress"]) ||
         !record[@"scanDiagnostics"] || !record[@"complete"] || !record[@"updated"])) return NO;
     if (record[@"scanDiagnostics"] && !axs_cachekeeper_scan_diagnostics_projection(record[@"scanDiagnostics"])) return NO;

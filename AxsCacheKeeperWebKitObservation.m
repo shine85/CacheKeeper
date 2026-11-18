@@ -26,7 +26,7 @@ static const NSUInteger AxsCacheKeeperWebKitPendingViewLimit=32;
     NSAssert(NSThread.isMainThread,@"WebKit bootstrap requires main thread");
     ++_generation;_authorized=authorized;_validated=NO;
     if (!authorized) [_candidates removeAllObjects];
-    [_cache suspendForConfiguration];
+    [_cache suspendForConfigurationWithAuthorization:authorized];
     return _generation;
 }
 - (BOOL)applyContext:(NSDictionary *)context forGeneration:(NSUInteger)generation {

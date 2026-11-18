@@ -40,5 +40,16 @@ void axs_cachekeeper_run_presentation_tests(void) {
     pcheck([alogText containsString:@"105.00 MB"] && [alogText containsString:@"8.82 MB"] && [alogText containsString:@"非目录总占用"] && [alogSize containsString:@"17.99 MB"],@"旧大小与新清理/待识别字节各自标注，互不替代");
     NSString *inspection=axs_cachekeeper_presentation_inspection(@{@"complete":@YES,@"coverageComplete":@YES,@"updated":old,@"files":@0,@"bytes":@0});
     pcheck([inspection containsString:@"深度检测记录（"] && [inspection containsString:@"非实时占用"],@"深度检测与清理回执分别注明时间和性质");
+    NSDictionary *allocation=@{@"schemaVersion":@1,@"scope":@"taskUniqueRegularFileInodeFirstObservation",@"state":@"complete",
+        @"allocatedBytes":@(4*1048576),@"uniqueFiles":@2,@"duplicateFiles":@1,@"untrackedFiles":@0,@"inodeBudget":@65536};
+    NSString *allocationText=axs_cachekeeper_presentation_snapshot(@{@"bytes":@(8*1048576),@"complete":@YES,@"allocationObservation":allocation},old);
+    pcheck([allocationText containsString:@"8.00 MB"] && [allocationText containsString:@"4.00 MB"] && [allocationText containsString:@"可回收空间未核实"],@"逻辑与去重分配量分别显示，不冒充释放量");
+    NSMutableDictionary *limited=[allocation mutableCopy];limited[@"state"]=@"inodeLimit";limited[@"untrackedFiles"]=@1;
+    pcheck([axs_cachekeeper_presentation_allocation(limited) containsString:@"未完整计量"],@"分配量预算不足不能显示完整");
+    limited[@"state"]=@"invalidMetadata";
+    pcheck([axs_cachekeeper_presentation_allocation(limited) containsString:@"已分配量未知"] && ![axs_cachekeeper_presentation_allocation(limited) containsString:@"4.00"],@"变化元数据不能显示已核验容量");
+    limited[@"allocatedBytes"]=@YES;
+    pcheck([axs_cachekeeper_presentation_allocation(limited) containsString:@"记录无效"],@"无效分配记录不冒充零值");
+    pcheck(![size containsString:@"已分配"],@"旧快照缺分配量不伪造测量");
     fprintf(stdout,"PASS: presentation contracts\n");
 }

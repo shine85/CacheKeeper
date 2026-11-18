@@ -1,6 +1,7 @@
 #pragma once
 #import <Foundation/Foundation.h>
 #import "AxsCacheKeeperInstallationDetail.h"
+#import "AxsCacheKeeperInstallationImageObservation.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,6 +28,10 @@ BOOL axs_cachekeeper_validate_installation_snapshot(NSDictionary *snapshot, NSUR
                                                      NSString *currentSystemShortVersion, NSError **error);
 BOOL axs_cachekeeper_validate_installation_snapshot_with_context(NSDictionary *snapshot, NSURL *currentBundleURL,
     NSString *currentSystemShortVersion, AxsCacheKeeperInstallationContext context, NSError **error);
+// Independent background-only Mach-O metadata observation. Reuses the existing snapshot FD/path
+// contract; UUID equality does not authenticate loaded mapping backing or grant execution.
+NSDictionary *axs_cachekeeper_installation_image_observation(NSDictionary *snapshot,NSURL *currentBundleURL,
+    NSString *currentSystemShortVersion,int32_t cpuType,int32_t cpuSubtype);
 // Shared background provider. Caller owns a private serial-queue cache of installation snapshots
 // and display entries; never pass this cache to UI/export. Unchanged packages need metadata only.
 // The returned array contains display entries only, without paths, fingerprints or private snapshots.
@@ -34,8 +39,9 @@ NSArray *axs_cachekeeper_installed_applications(NSMutableDictionary *cache, NSEr
 // Same registry read, before display filtering. Counts describe registered URLs, not access or deletion.
 NSArray *axs_cachekeeper_installed_applications_with_container_coverage(NSMutableDictionary *cache,
                                                                        NSDictionary **coverage, NSError **error);
-// Same bounded role sampling, including non-display registrations. No additional filesystem reads.
-// Resource tokens express exact URL-string equality within this inventory, never physical identity.
+// Same bounded role sampling, including non-display registrations. Background-only root FD sampling
+// adds scopeObservation (4096 roots/1 second), distinct from exact URL registration tokens.
+// Scope IDs merge observed device/inode aliases for this inventory and grant no deletion permission.
 NSArray *axs_cachekeeper_installed_applications_with_registry_inventory(NSMutableDictionary *cache,
     NSDictionary **coverage, NSDictionary **registryInventory, NSError **error);
 // Closed public projection; unknown keys are dropped. Invalid/nil sources remain explicit.

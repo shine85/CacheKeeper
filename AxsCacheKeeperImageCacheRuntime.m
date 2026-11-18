@@ -1,6 +1,7 @@
 #import "AxsCacheKeeperImageCacheRuntime.h"
 #import "AxsCacheKeeperImageCache.h"
 #import "AxsCacheKeeperInstallation.h"
+#import "AxsCacheKeeperImageLegacySource.h"
 #import "AxsCacheKeeperRuntimeBuild.h"
 #import "AxsCacheKeeperPolicy.h"
 #import <UIKit/UIKit.h>
@@ -18,6 +19,7 @@ static BOOL axs_cachekeeper_image_report_writable=YES;
 static UIBackgroundTaskIdentifier axs_cachekeeper_image_background;
 static BOOL axs_cachekeeper_image_had_pending;
 static atomic_bool axs_cachekeeper_image_discovery_pending;
+extern void axs_cachekeeper_image_runtime_view_changed(void);
 
 static NSString *AxsCacheKeeperImageFolder(void) { return jbroot(@"/var/mobile/Library/CacheKeeper"); }
 static void AxsCacheKeeperImageFlushReport(void) {
@@ -46,10 +48,17 @@ static NSDictionary *AxsCacheKeeperImageContext(void) {
             if ([axs_cachekeeper_image_installation[@"installationState"] isEqual:@"verified"])
                 installation=axs_cachekeeper_image_installation[@"fingerprint"] ?: @"";
         }
-        return @{@"valid":@(valid),@"appState":state,@"selected":selected[bundle] ?: @[],
+        NSMutableDictionary *context=[@{@"valid":@(valid),@"appState":state,@"selected":selected[bundle] ?: @[],
             @"home":NSHomeDirectory(),@"bundle":bundle ?: @"",@"version":version ?: @"",
             @"installation":installation,@"installationCheck":axs_cachekeeper_installation_check_result(installationRequested,axs_cachekeeper_image_installation,installationError),
-            @"reportWritable":@(axs_cachekeeper_image_report_writable)};
+            @"reportWritable":@(axs_cachekeeper_image_report_writable)} mutableCopy];
+        if (installationRequested) {
+            struct mach_header_64 mainHeader;
+            BOOL read=AxsCacheKeeperImageLegacyRead((uintptr_t)_dyld_get_image_header(0),&mainHeader,sizeof(mainHeader),VM_PROT_READ) && mainHeader.magic==MH_MAGIC_64;
+            context[@"installationImage"]=read ? axs_cachekeeper_installation_image_observation(axs_cachekeeper_image_installation,NSBundle.mainBundle.bundleURL,version,mainHeader.cputype,mainHeader.cpusubtype) :
+                @{@"schemaVersion":@1,@"state":@"notVerified",@"reason":@"read",@"mappingBackingIdentity":@"notVerified"};
+        }
+        return [context copy];
     }
 }
 static void AxsCacheKeeperImageEndBackground(void) {
@@ -59,6 +68,7 @@ static void AxsCacheKeeperImageEndBackground(void) {
 }
 static void AxsCacheKeeperImageDidLoad(const struct mach_header *header,intptr_t slide) {
     (void)header;(void)slide;
+    axs_cachekeeper_image_runtime_view_changed();
     // No Objective-C class discovery or filesystem work while the dyld loader lock is held.
     if (atomic_exchange(&axs_cachekeeper_image_discovery_pending,true)) return;
     dispatch_async(dispatch_get_main_queue(),^{
@@ -92,6 +102,7 @@ void axs_cachekeeper_configure_image_cache(BOOL containerEligible,BOOL configura
         [axs_cachekeeper_image_engine loadOperationHistoryFromPath:receiptPath];
         [axs_cachekeeper_image_engine startObserving];
         _dyld_register_func_for_add_image(AxsCacheKeeperImageDidLoad);
+        _dyld_register_func_for_remove_image(AxsCacheKeeperImageDidLoad);
         dispatch_async(dispatch_get_main_queue(),^{
             NSNotificationCenter *center=NSNotificationCenter.defaultCenter;
             [center addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {

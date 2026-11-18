@@ -69,6 +69,7 @@ targets:
       - path: ../../AxsCacheKeeperOperationInfo.m
       - path: ../../AxsCacheKeeperWebKitCache.m
       - path: ../../AxsCacheKeeperWebKitObservation.m
+      - path: ../../AxsCacheKeeperWebKitCoordinator.m
     dependencies:
       - target: InputHarness
       - sdk: WebKit.framework
@@ -100,6 +101,7 @@ targets:
       - path: ../../AxsCacheKeeperOperationInfo.m
       - path: ../../AxsCacheKeeperWebKitCache.m
       - path: ../../AxsCacheKeeperWebKitObservation.m
+      - path: ../../AxsCacheKeeperWebKitCoordinator.m
     dependencies:
       - target: InputHarness
       - sdk: WebKit.framework

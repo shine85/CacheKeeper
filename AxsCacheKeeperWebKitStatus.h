@@ -47,7 +47,7 @@ static inline NSDictionary *axs_cachekeeper_webkit_raw_projection(id value) {
     if (!axs_cachekeeper_webkit_counter(value[@"schemaVersion"]) || [value[@"schemaVersion"] unsignedIntegerValue]!=1 ||
         !axs_cachekeeper_webkit_boolean(value[@"requested"]) || !axs_cachekeeper_webkit_boolean(value[@"timedOut"])) return nil;
     NSArray *states=@[@"disabled",@"notObserved",@"nonPersistentOnly",@"ready",@"queued",@"submitted",@"completed",@"waitingTimedOut",@"blocked",@"stale",@"unsupported"];
-    NSArray *reasons=@[@"none",@"appDisabled",@"notAuthorized",@"configurationUnreadable",@"configurationInvalid",@"exclusionUnrepresentable",@"installationUnverified",@"installationChanged",@"processUnverified",@"storeUnavailable",@"unsupported",@"noBackgroundTime",@"foregroundAgain",@"inFlight",@"authorizationChanged",@"reportWriteFailed",@"interruptedUnknown"];
+    NSArray *reasons=@[@"none",@"appDisabled",@"notAuthorized",@"configurationUnreadable",@"configurationInvalid",@"exclusionUnrepresentable",@"installationUnverified",@"installationChanged",@"processUnverified",@"storeUnavailable",@"unsupported",@"noBackgroundTime",@"foregroundAgain",@"inFlight",@"authorizationChanged",@"reportWriteFailed",@"interruptedUnknown",@"deadlineExceeded"];
     if (![states containsObject:value[@"state"]] || ![reasons containsObject:value[@"reason"]] ||
         ![value[@"bytesState"] isEqual:@"notMeasured"] || ![value[@"updated"] isKindOfClass:NSDate.class] ||
         !isfinite([value[@"updated"] timeIntervalSince1970])) return nil;
@@ -105,6 +105,8 @@ static inline NSString *axs_cachekeeper_webkit_message(id value) {
         @"installationUnverified":@"当前安装身份尚未核实，本轮未执行",@"installationChanged":@"安装身份已变化，等待重新观察网页数据存储",
         @"processUnverified":@"进程实例尚未核实，本轮未执行",@"storeUnavailable":@"已观察的数据存储已释放，本轮未执行",
         @"unsupported":@"系统网页缓存接口不可用，本轮未执行",@"noBackgroundTime":@"后台执行时间不可用，未启动后续回收",
+        @"deadlineExceeded":@"网页缓存准备复核超过 10 秒，本轮未提交；下次使用后转入后台可重试",
+        @"inFlight":@"原系统清理请求仍占用执行槽，本轮未启动新回收",
         @"foregroundAgain":@"APP 已恢复前台，未启动后续回收",@"authorizationChanged":@"设置已变化，未启动后续回收",
         @"reportWriteFailed":@"运行回执无法保存，未启动回收",@"interruptedUnknown":@"上次请求中断，实际结果未知"};
     if (messages[reason]) return messages[reason];

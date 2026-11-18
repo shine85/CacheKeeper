@@ -6,6 +6,7 @@
 #import "AxsCacheKeeperWebKitStatus.h"
 #import "AxsCacheKeeperHostEvidence.h"
 #import "AxsCacheKeeperRecords.h"
+#import "AxsCacheKeeperAllocation.h"
 
 static BOOL axs_cachekeeper_inventory_count(id value) {
     if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID()) return NO;
@@ -39,7 +40,7 @@ static NSDictionary *axs_cachekeeper_inventory_sdk(id wrapper,BOOL image) {
     out[@"receiptState"]=projected[@"state"];out[@"sourceUpdated"]=time;
     for (NSString *key in image ? @[@"observed",@"eligible",@"restricted",@"writesBlocked",@"queued",@"submitted",@"apiCompleted",@"skipped",@"pending"] : @[@"persistentStores",@"nonPersistentStores",@"submitted",@"completed",@"pending"])
         if (axs_cachekeeper_inventory_count(projected[key])) out[key]=projected[key];
-    for (NSString *key in @[@"runtimeInfo",@"discoveryCheck",@"installationCheck",@"reason"]) if (projected[key]) out[key]=projected[key];
+    for (NSString *key in @[@"runtimeInfo",@"discoveryCheck",@"runtimeSourceObservation",@"installedRuntimeRelation",@"installationCheck",@"reason"]) if (projected[key]) out[key]=projected[key];
     out[@"bytesState"]=@"notMeasured";return [out copy];
 }
 // A pure view over this report's raw reads. Version and observation axes stay independent.
@@ -73,7 +74,7 @@ NSDictionary *axs_cachekeeper_capabilities(NSDictionary *raw,NSString *panelVers
                 for (NSString *field in @[@"complete",@"coverageComplete",@"measurementComplete"]) if (axs_cachekeeper_input_boolean(data[field])) entry[field]=@([data[field] boolValue]);
                 NSDictionary *progress=axs_cachekeeper_scan_progress_projection(data[@"scanProgress"]),*diagnostics=axs_cachekeeper_scan_diagnostics_projection(data[@"scanDiagnostics"]);
                 if (progress) entry[@"scanProgress"]=progress;if (diagnostics) entry[@"scanDiagnostics"]=diagnostics;
-            } else for (NSString *field in @[@"state",@"reason",@"discoveryCheck",@"installationCheck",@"prevent",@"applied",@"submitted",@"completed",@"apiCompleted",@"pending",@"observed",@"eligible",@"restricted",@"writesBlocked"])
+            } else for (NSString *field in @[@"state",@"reason",@"discoveryCheck",@"runtimeSourceObservation",@"installedRuntimeRelation",@"installationCheck",@"prevent",@"applied",@"submitted",@"completed",@"apiCompleted",@"pending",@"observed",@"eligible",@"restricted",@"writesBlocked"])
                 if (data[field]) entry[field]=data[field];
             if ([key isEqual:@"network"]) entry[@"actionState"]=[data[@"prevent"] boolValue] ? ([data[@"applied"] boolValue] ? @"restrictionReported" : @"restrictionNotApplied") : ([data[@"applied"] boolValue] ? @"unrestrictedOrRestoreReported" : @"restorePending");
             if ([key isEqual:@"image"] || [key isEqual:@"webKit"]) entry[@"actionState"]=data[@"state"];
@@ -126,6 +127,9 @@ NSDictionary *axs_cachekeeper_storage_inventory(id registryInventory,NSDictionar
         NSNumber *updated=scanValid ? axs_cachekeeper_inventory_time(scan[@"updated"]) : nil;
         if (updated) entry[@"scanUpdated"]=updated;entry[@"scanTimeState"]=updated ? @"available" : @"notRecorded";
         if (scanValid && axs_cachekeeper_input_boolean(scan[@"complete"])) entry[@"scanComplete"]=scan[@"complete"];
+        NSDictionary *allocation=scanValid ? axs_cachekeeper_allocation_projection(scan[@"allocationObservation"]) : nil;
+        entry[@"allocationState"]=allocation ? allocation[@"state"] : scanValid && scan[@"allocationObservation"] ? @"invalid" : @"notMeasured";
+        if (allocation && ![allocation[@"state"] isEqual:@"invalidMetadata"]) entry[@"allocationObservation"]=allocation;
         NSDictionary *scanDiagnostics=scanValid ? axs_cachekeeper_scan_diagnostics_projection(scan[@"scanDiagnostics"]) : nil;
         if (scanDiagnostics) entry[@"scanDiagnostics"]=scanDiagnostics;
         else if (scanValid && scan[@"scanDiagnostics"]) entry[@"scanDiagnosticsState"]=@"invalid";
@@ -154,6 +158,9 @@ NSDictionary *axs_cachekeeper_storage_inventory(id registryInventory,NSDictionar
                 @"freshness":@"savedObservationUnverified",@"currentInstallationMatch":@"notChecked",@"physicalBytes":@"notMeasured",@"reclaimableBytes":@"notMeasured",
                 @"hardLinkDeduplication":@"notMeasured",@"coverageState":@"notRecorded",@"resourceKind":kind,@"appEnabled":@(enabled),
                 @"contractState":scope ? @"standardDirectoryPolicy" : @"noResourceContract",@"authorizationState":@"retainedPendingContract"} mutableCopy];
+            NSDictionary *rowAllocation=valid ? axs_cachekeeper_allocation_projection(sourceRow[@"allocationObservation"]) : nil;
+            row[@"allocationState"]=rowAllocation ? rowAllocation[@"state"] : valid && sourceRow[@"allocationObservation"] ? @"invalid" : @"notMeasured";
+            if (rowAllocation && ![rowAllocation[@"state"] isEqual:@"invalidMetadata"]) row[@"allocationObservation"]=rowAllocation;
             row[@"scanCoverageState"]=scanDiagnostics ? ([scanDiagnostics[@"measurementComplete"] boolValue] ? @"completeAtObservation" : @"partialAtObservation") :
                 axs_cachekeeper_input_boolean(scan[@"complete"]) ? ([scan[@"complete"] boolValue] ? @"completeAtObservation" : @"partialAtObservation") : @"notRecorded";
             if (!pathValid || !valid) row[@"rowState"]=@"invalid";else row[@"rowState"]=@"savedObservation";
@@ -192,5 +199,6 @@ NSDictionary *axs_cachekeeper_storage_inventory(id registryInventory,NSDictionar
         @"entries":entries,@"queues":@{@"standardPolicyCandidates":axs_cachekeeper_inventory_sorted_queue(standard),@"unknownResourceEvidence":axs_cachekeeper_inventory_sorted_queue(unknown)},
         @"queueOrder":@"observedLogicalBytesDescendingThenBundlePathIndex",@"bytesBasis":@"logicalPerPath",@"hardLinkDeduplication":@"notMeasured",
         @"physicalBytes":@"notMeasured",@"reclaimableBytes":@"notMeasured",@"rescanned":@NO,@"cleanupEligibility":@"notGrantedByInventory",
-        @"capabilityGaps":@[@"filesystemContainerAccessNotChecked",@"freshMeasurementAndInstallationBinding",@"crossAppResourcePurposeOwnerRecoveryContracts",@"persistentContractInvalidationAndRevalidation",@"sharedContainerOwnershipAndAuthorization",@"inodeHardLinkAPFSCloneSnapshotDeduplication",@"physicalEffectAttributionAndDeviceRecoveryVerification"]};
+        @"allocationAggregation":@"notSummedAcrossApps",@"allocationLimitations":@[@"regularFilesOnly",@"firstInodeObservationWithinTask",@"crossAppReferencesNotDeduplicated",@"APFSCloneSnapshotAndOpenHandleOwnershipUnknown"],
+        @"capabilityGaps":@[@"containerSubtreeAccessAndBusinessReferencesNotVerified",@"freshMeasurementAndInstallationBinding",@"crossAppResourcePurposeOwnerRecoveryContracts",@"persistentContractInvalidationAndRevalidation",@"sharedContainerOwnershipAndAuthorization",@"crossAppInodeAndAPFSCloneSnapshotDeduplication",@"physicalEffectAttributionAndDeviceRecoveryVerification"]};
 }

@@ -18,7 +18,7 @@ def main():
                         "-DAXS_CACHEKEEPER_SCAN_TESTING=1",
                         "-Werror=implicit-function-declaration", "-I" + str(root / "tests/include"),
                         "-framework", "Foundation"]
-        for name in ("scan_task", "scan_history"):
+        for name in ("scan_task", "scan_history", "scan_coalescing", "scan_allocation"):
             binary = pathlib.Path(directory) / (name + "-tests")
             fixture = pathlib.Path(directory) / name
             fixture.mkdir()
@@ -56,6 +56,42 @@ def main():
             if result.returncode != 1 or failures != [expected]:
                 raise RuntimeError(f"RED {name} must fail only its named assertion; exit={result.returncode}")
             print(f"Verified scan history RED: {name}", flush=True)
+        anchor = "NSArray *publishing=ready;"
+        if product.count(anchor) != 1:
+            raise RuntimeError("RED coalescing mutation anchor changed")
+        source = pathlib.Path(directory) / "coalescing-red.m"
+        source.write_text(product.replace(anchor, "NSArray *publishing=@[task];"), encoding="utf-8")
+        binary = pathlib.Path(directory) / "coalescing-red"
+        fixture = pathlib.Path(directory) / "coalescing-red-fixture"
+        fixture.mkdir()
+        subprocess.run([*flags, "-I" + str(root), str(root / "tests/scan_coalescing_tests.m"),
+                        str(source), str(root / "AxsCacheKeeperDirectories.m"), "-o", str(binary)],
+                       check=True, timeout=60)
+        result = subprocess.run([str(binary), str(fixture)], capture_output=True, text=True, timeout=60)
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        failures = [line for line in result.stderr.splitlines() if line.startswith("FAIL:")]
+        if result.returncode != 1 or failures != ["FAIL: scan coalescing: first cohort is one durable publication"]:
+            raise RuntimeError(f"RED coalescing must fail its named behavior assertion; exit={result.returncode}")
+        print("Verified scan history RED: coalescing", flush=True)
+        old = 'if (old) {_duplicates++;if (![old isEqual:sample]) _failure=@"invalidMetadata";return;}'
+        if product.count(old) != 1:
+            raise RuntimeError("RED allocation mutation anchor changed")
+        source = pathlib.Path(directory) / "allocation-red.m"
+        source.write_text(product.replace(old, 'if (NO && old) {_duplicates++;if (![old isEqual:sample]) _failure=@"invalidMetadata";return;}'), encoding="utf-8")
+        binary = pathlib.Path(directory) / "allocation-red"
+        fixture = pathlib.Path(directory) / "allocation-red-fixture"
+        fixture.mkdir()
+        subprocess.run([*flags, "-I" + str(root), str(root / "tests/scan_allocation_tests.m"),
+                        str(source), str(root / "AxsCacheKeeperDirectories.m"), "-o", str(binary)],
+                       check=True, timeout=60)
+        result = subprocess.run([str(binary), str(fixture)], capture_output=True, text=True, timeout=60)
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        failures = [line for line in result.stderr.splitlines() if line.startswith("FAIL:")]
+        if result.returncode != 1 or failures != ["FAIL: scan allocation: small slices observe actual unique regular file blocks"]:
+            raise RuntimeError(f"RED allocation must fail its named behavior assertion; exit={result.returncode}")
+        print("Verified scan allocation RED: inode deduplication", flush=True)
     return 0
 
 

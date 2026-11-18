@@ -4,6 +4,8 @@
 #import "AxsCacheKeeperInstallationCheck.h"
 #import "AxsCacheKeeperRuntimeInfo.h"
 #import "AxsCacheKeeperImageDiscovery.h"
+#import "AxsCacheKeeperImageSourceObservation.h"
+#import "AxsCacheKeeperInstallationImageObservation.h"
 #include <math.h>
 
 static inline BOOL axs_cachekeeper_image_counter(id value) {
@@ -34,6 +36,15 @@ static inline NSDictionary *axs_cachekeeper_image_cache_raw_projection(id value)
     if (value[@"discoveryCheck"]) {
         if (!axs_cachekeeper_image_discovery_projection(value[@"discoveryCheck"])) return nil;
         keys=[keys arrayByAddingObject:@"discoveryCheck"];
+    }
+    if (value[@"runtimeSourceObservation"]) {
+        if (!axs_cachekeeper_image_runtime_observation_projection(value[@"runtimeSourceObservation"])) return nil;
+        keys=[keys arrayByAddingObject:@"runtimeSourceObservation"];
+    }
+    if (value[@"installedRuntimeRelation"]) {
+        if (!axs_cachekeeper_installed_runtime_relation_projection(value[@"installedRuntimeRelation"]) ||
+            !axs_cachekeeper_installed_runtime_relation_matches(value[@"installedRuntimeRelation"],value[@"runtimeSourceObservation"])) return nil;
+        keys=[keys arrayByAddingObject:@"installedRuntimeRelation"];
     }
     if (value[@"operationHistory"]) {
         if (!axs_cachekeeper_operation_history_validate(value[@"operationHistory"],@"image")) return nil;

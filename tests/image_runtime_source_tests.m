@@ -139,6 +139,13 @@ int main(int argc,const char *argv[]) {
         axs_cachekeeper_runtime_require(dispatch_semaphore_wait(entered,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC))==0,"owner queue is held");
         [engine didEnterBackgroundWithTime:YES];
         axs_cachekeeper_runtime_wait(engine,^BOOL(NSDictionary *r) {return [r[@"pending"] unsignedIntegerValue]==1;},"cleanup queues before helper mutation");
+        NSDictionary *flightGeneration=[engine axs_cachekeeper_operation_context];
+        axs_cachekeeper_image_runtime_view_changed();[engine requestDiscoveryRefresh];
+        dispatch_semaphore_t observed=dispatch_semaphore_create(0);
+        dispatch_async(engine.work,^{dispatch_semaphore_signal(observed);});
+        axs_cachekeeper_runtime_require(dispatch_semaphore_wait(observed,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"pure observation refresh drains");
+        axs_cachekeeper_runtime_require([flightGeneration isEqual:[engine axs_cachekeeper_operation_context]] &&
+            [engine.receipt[@"pending"] unsignedIntegerValue]==1,"pure view observation leaves legitimate queued flight generation intact");
         method_setImplementation(helper,(IMP)axs_cachekeeper_runtime_changed_helper);
         unsigned sourceChecks=atomic_load(&axs_cachekeeper_runtime_source_checks),helperChecks=atomic_load(&axs_cachekeeper_runtime_helper_checks);
         [owner.diskCache setData:[NSData data] forKey:@"changed"];

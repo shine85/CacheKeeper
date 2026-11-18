@@ -46,6 +46,7 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
         required_classes = {
             '/CacheKeeper.dylib': (b'AxsCacheKeeperImageCache', b'AxsCacheKeeperWebKitCache',
                                     b'AxsCacheKeeperScanService', b'AxsCacheKeeperScanCursor',
+                                    b'AxsCacheKeeperScanAllocation', b'AxsCacheKeeperWebKitCoordinator',
                                     b'AxsCacheKeeperHostEvidenceServer'),
             '/CacheKeeperPrefs': (b'AxsCacheKeeperSearchHitRouting', b'AxsCacheKeeperSearchInput',
                                     b'AxsCacheKeeperHostEvidenceClient'),
@@ -83,7 +84,8 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
                         b'ImageCacheLegacyAbsentAPITests', b'AxsCacheKeeperRuntimeSourceHelper', b'AxsCacheKeeperLegacyMethodFixture',
                         b'instanceDiagnosticsForIntegrationTests', b'discoveryDiagnosticsForIntegrationTests',
                         b'methodDiagnosticsForIntegrationTests',
-                        b'axs_cachekeeper_installation_test_read', b'ImageCacheIntegrationTests',
+                        b'axs_cachekeeper_installation_test_read', b'axs_cachekeeper_scan_allocation_test_stats',
+                        b'axs_cachekeeper_didReadHistory', b'allocationLimit:', b'ImageCacheIntegrationTests',
                         b'AxsCacheKeeperRegrowingWindow', b'axs_cachekeeper_clock', b'ScanPageTests',
                         b'AxsCacheKeeperScanHostClient', b'axs_cachekeeper_scan_host_fail')):
                     raise SystemExit(f'Test implementation leaked into binary: {suffix}')

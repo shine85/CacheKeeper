@@ -2,6 +2,7 @@
 #import <WebKit/WebKit.h>
 #import "../../AxsCacheKeeperWebKitCache.h"
 #import "../../AxsCacheKeeperWebKitObservation.h"
+#import "../../AxsCacheKeeperWebKitCoordinator.h"
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netinet/in.h>
@@ -154,20 +155,50 @@ static NSDictionary *axs_cachekeeper_webkit_test_context(void) {
     [self waitForExpectations:@[cookieWritten] timeout:10];
 
     NSDictionary *context=axs_cachekeeper_webkit_test_context();
-    XCTestExpectation *completed=[self expectationWithDescription:@"Actual public WebKit removal callback"];
+    __block XCTestExpectation *completed=[self expectationWithDescription:@"Actual public WebKit removal callback after equal refresh"];
     __block BOOL received=NO;
-    AxsCacheKeeperWebKitCache *engine=[[AxsCacheKeeperWebKitCache alloc] initWithPreparation:^(void (^reply)(NSDictionary *,BOOL)) {reply(context,YES);}
-        clock:^{return NSProcessInfo.processInfo.systemUptime;} observer:^(NSDictionary *receipt) {
+    NSMutableArray *reads=[NSMutableArray new],*expirations=[NSMutableArray new];NSMutableSet *tasks=[NSMutableSet new];
+    __block NSUInteger nextTask=0;
+    // The public WebKit call is real. UIKit task/time boundaries are injected in this hosted test.
+    AxsCacheKeeperWebKitCoordinator *coordinator=[[AxsCacheKeeperWebKitCoordinator alloc] initWithReader:^(void (^reply)(NSDictionary *)) {
+        [reads addObject:[reply copy]];
+    } beginBackground:^NSUInteger(void (^expiration)(void)) {
+        [expirations addObject:[expiration copy]];NSUInteger token=++nextTask;[tasks addObject:@(token)];return token;
+    } endBackground:^(NSUInteger token) {[tasks removeObject:@(token)];}
+    backgroundTime:^BOOL(NSUInteger token) {return [tasks containsObject:@(token)];}
+    clock:^{return NSProcessInfo.processInfo.systemUptime;} scheduler:nil observer:^(NSDictionary *receipt) {
             if (!received && [receipt[@"completed"] unsignedIntegerValue]==1) {received=YES;[completed fulfill];}
         }];
-    AxsCacheKeeperWebKitObservation *observation=[[AxsCacheKeeperWebKitObservation alloc] initWithCache:engine];
-    NSUInteger generation=[observation beginConfigurationWithAuthorization:YES];
-    [observation captureCreatedWebView:view];
-    XCTAssertTrue([observation applyContext:context forGeneration:generation]);
-    [engine didBecomeActive];[engine didEnterBackgroundWithTime:YES];
+    AxsCacheKeeperWebKitCache *engine=coordinator.cache;
+    [coordinator configureWithAuthorization:YES];((void (^)(NSDictionary *))reads[0])(context);
+    [coordinator didBecomeActive];((void (^)(NSDictionary *))reads[1])(context);
+    [coordinator captureCreatedWebView:view];[coordinator didEnterBackground];
+    XCTAssertEqualObjects(engine.receipt[@"state"],@"queued");
+    [coordinator configureWithAuthorization:YES];
+    ((void (^)(NSDictionary *))reads[2])(context);
+    XCTAssertEqualObjects(engine.receipt[@"submitted"],@0);
+    ((void (^)(NSDictionary *))reads[3])(context);
+    XCTAssertEqual(reads.count,5u);
+    ((void (^)(NSDictionary *))reads[4])(context);
     [self waitForExpectations:@[completed] timeout:20];
     XCTAssertEqualObjects(engine.receipt[@"submitted"],@1);XCTAssertEqualObjects(engine.receipt[@"completed"],@1);
     XCTAssertEqualObjects(engine.receipt[@"pending"],@0);XCTAssertEqualObjects(engine.receipt[@"bytesState"],@"notMeasured");
+
+    // Revoke while a second real store action is preparing. Its old enabled reply must not submit.
+    [coordinator didBecomeActive];((void (^)(NSDictionary *))reads[5])(context);[coordinator didEnterBackground];
+    XCTAssertEqualObjects(engine.receipt[@"submitted"],@0);
+    [coordinator configureWithAuthorization:NO];((void (^)(NSDictionary *))reads[6])(context);
+    NSMutableDictionary *closed=[context mutableCopy];closed[@"requested"]=@NO;
+    ((void (^)(NSDictionary *))reads[7])(closed);
+    XCTAssertEqualObjects(engine.receipt[@"submitted"],@0);XCTAssertFalse(coordinator.observation.observing);
+    XCTAssertFalse(engine.hasPendingWork);XCTAssertEqual(tasks.count,0u);
+    [coordinator configureWithAuthorization:YES];((void (^)(NSDictionary *))reads[8])(context);
+    [coordinator didBecomeActive];((void (^)(NSDictionary *))reads[9])(context);
+    [coordinator captureCreatedWebView:view];
+    received=NO;completed=[self expectationWithDescription:@"Actual WebKit callback after authorized recovery"];
+    [coordinator didEnterBackground];((void (^)(NSDictionary *))reads[10])(context);
+    [self waitForExpectations:@[completed] timeout:20];
+    XCTAssertEqualObjects(engine.receipt[@"submitted"],@1);XCTAssertEqualObjects(engine.receipt[@"completed"],@1);
 
     WKWebViewConfiguration *configuration=[WKWebViewConfiguration new];configuration.websiteDataStore=store;
     WKWebView *reopened=[[WKWebView alloc] initWithFrame:CGRectMake(0,0,320,480) configuration:configuration];

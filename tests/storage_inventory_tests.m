@@ -123,6 +123,7 @@ static NSMutableDictionary *simutable(id value) {
     return [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListMutableContainers format:NULL error:nil];
 }
 static void sirole_contract(NSDictionary *registry) {
+    registry=simutable(registry);[(NSMutableDictionary *)registry removeObjectForKey:@"scopeObservation"];
     // Same full token union survives through home/extension: only per-role consistency can reject.
     NSMutableDictionary *missing=simutable(registry);
     for (NSMutableDictionary *entry in missing[@"entries"]) entry[@"relationships"][@"group"][@"tokens"]=[NSMutableArray new];
@@ -314,6 +315,51 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
     siregistrations=@[];siprovider(cache,&registry);
     sicheck([registry[@"state"] isEqual:@"available"] && [registry[@"entries"] count]==0,@"observed empty registry remains distinct from unavailable");
     puts("PASS: all-app registry, saved logical inventory, queues, boundaries and JSON roundtrip");
+#endif
+    // Allocation is an independent observation: old records, invalid metadata and malformed
+    // schemas cannot become reliable disk allocation, physical bytes or deletion permission.
+#if !AXS_CACHEKEEPER_STORAGE_INVENTORY_RED
+    sicheck([siapp(inventory,@"test.inventory.alpha")[@"allocationState"] isEqual:@"notMeasured"] &&
+        !siapp(inventory,@"test.inventory.alpha")[@"allocationObservation"],@"old saved records remain explicitly unmeasured for allocation");
+    NSDictionary *allocation=@{@"schemaVersion":@1,@"scope":@"taskUniqueRegularFileInodeFirstObservation",@"state":@"complete",@"allocatedBytes":@4096,
+        @"uniqueFiles":@1,@"duplicateFiles":@0,@"untrackedFiles":@0,@"inodeBudget":@65536};
+    NSMutableDictionary *allocationScan=[siscan(@[@{@"path":@"Library/Caches",@"bytes":@17,@"allocationObservation":allocation}],date,YES) mutableCopy];
+    allocationScan[@"allocationObservation"]=allocation;
+    NSDictionary *(^allocationInventory)(id)=^NSDictionary *(id observation) {
+        NSMutableDictionary *scan=[allocationScan mutableCopy];scan[@"allocationObservation"]=observation;
+        scan[@"rows"]=@[@{@"path":@"Library/Caches",@"bytes":@17,@"allocationObservation":observation}];
+        return axs_cachekeeper_storage_inventory(registry,@{@"state":@"available",@"data":states},@{@"state":@"available",@"data":@{}},
+            @{@"state":@"available",@"data":@{@"test.inventory.alpha":scan}},@[],^NSString *(NSString *p){return p;});
+    };
+    NSDictionary *allocated=siapp(allocationInventory(allocation),@"test.inventory.alpha");
+    sicheck([allocated[@"allocationObservation"][@"allocatedBytes"] isEqual:@4096] &&
+        [sirow(allocated,@"Library/Caches")[@"observedLogicalBytes"] isEqual:@17] &&
+        [sirow(allocated,@"Library/Caches")[@"physicalBytes"] isEqual:@"notMeasured"],@"logical and allocated remain distinct; physical unmeasured");
+    NSMutableDictionary *invalidAllocation=[allocation mutableCopy];invalidAllocation[@"state"]=@"invalidMetadata";
+    NSDictionary *invalidAllocated=siapp(allocationInventory(invalidAllocation),@"test.inventory.alpha");
+    sicheck([invalidAllocated[@"allocationState"] isEqual:@"invalidMetadata"] && !invalidAllocated[@"allocationObservation"] &&
+        !sirow(invalidAllocated,@"Library/Caches")[@"allocationObservation"],@"invalid metadata hides untrusted allocation numbers");
+    invalidAllocation[@"scope"]=@"private-allocation-canary";
+    sicheck([siapp(allocationInventory(invalidAllocation),@"test.inventory.alpha")[@"allocationState"] isEqual:@"invalid"],@"malformed allocation scope fails closed");
+    sicheck([allocationInventory(allocation)[@"allocationAggregation"] isEqual:@"notSummedAcrossApps"] &&
+        [allocationInventory(allocation)[@"cleanupEligibility"] isEqual:@"notGrantedByInventory"],@"allocation never sums apps or grants deletion");
+    for (NSArray *fixture in @[@[allocation,@"complete"],@[@{@"schemaVersion":@1,@"scope":@"taskUniqueRegularFileInodeFirstObservation",@"state":@"invalidMetadata",
+        @"allocatedBytes":@4096,@"uniqueFiles":@1,@"duplicateFiles":@0,@"untrackedFiles":@0,@"inodeBudget":@65536},@"invalidMetadata"],
+        @[invalidAllocation,@"invalid"]]) {
+        NSMutableDictionary *scan=[allocationScan mutableCopy];scan[@"allocationObservation"]=fixture[0];
+        scan[@"rows"]=@[@{@"path":@"Library/Caches",@"bytes":@17,@"allocationObservation":fixture[0]}];
+        siput(folder,@"snapshots.plist",@{@"test.inventory.alpha":scan});
+        NSDictionary *exportedScan=nil;
+        for (NSDictionary *app in [session reportWithApps:apps environment:@{}][@"apps"])
+            if ([app[@"bundle"] isEqual:@"test.inventory.alpha"]) exportedScan=app[@"scan"][@"data"];
+        NSDictionary *projection=exportedScan[@"allocationObservation"];
+        sicheck([projection[@"state"] isEqual:fixture[1]],@"saved plist report keeps strict task allocation state");
+        if (![fixture[1] isEqual:@"complete"]) sicheck(projection.count==1 && [exportedScan[@"rows"][0][@"allocationObservation"] count]==1,
+            @"saved task and row exports suppress invalid allocation numbers");
+        NSString *json=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:exportedScan options:0 error:nil] encoding:NSUTF8StringEncoding];
+        sicheck(json && ![json containsString:@"private-allocation-canary"],@"malformed allocation scope never leaks in report JSON");
+    }
+    siput(folder,@"snapshots.plist",scans);
 #endif
     return 0;
 }}

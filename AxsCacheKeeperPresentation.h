@@ -1,5 +1,6 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#import "AxsCacheKeeperAllocation.h"
 
 // A compact link to the last record, never a claim that cleanup is live or the app is empty.
 static inline NSString *axs_cachekeeper_presentation_app_record(NSDictionary *report) {
@@ -42,11 +43,21 @@ static inline NSString *axs_cachekeeper_presentation_round_state(NSDictionary *r
     if ([receipt[@"protected"] unsignedIntegerValue]) return @"已检查（有受保护文件保留）";
     return @"本轮处理结束（不代表目录为空）";
 }
+static inline NSString *axs_cachekeeper_presentation_allocation(id value) {
+    NSDictionary *allocation=axs_cachekeeper_allocation_projection(value);
+    if (!allocation) return @"文件已分配量未知（记录无效）";
+    if ([allocation[@"state"] isEqual:@"invalidMetadata"]) return @"文件元数据发生变化，已分配量未知";
+    NSString *coverage=[allocation[@"state"] isEqual:@"complete"] ? @"" :
+        ([allocation[@"state"] isEqual:@"inodeLimit"] ? @"（去重达到上限，未完整计量）" : @"（部分读取）");
+    return [NSString stringWithFormat:@"文件已分配快照：%.2f MB%@；本次检测去重后的目录贡献，共享引用与可回收空间未核实",
+        [allocation[@"allocatedBytes"] doubleValue]/1048576.0,coverage];
+}
 static inline NSString *axs_cachekeeper_presentation_snapshot(NSDictionary *row, id updated) {
     if (!row[@"bytes"]) return @"大小待检测（自动发现尚无大小快照）";
-    return [NSString stringWithFormat:@"大小快照（%@）：%.2f MB%@；非实时占用",
+    NSString *logical=[NSString stringWithFormat:@"大小快照（%@）：%.2f MB%@；非实时占用",
         axs_cachekeeper_presentation_time(updated),[row[@"bytes"] doubleValue]/1048576.0,
         [row[@"complete"] boolValue] ? @"" : @"（未统计完整）"];
+    return row[@"allocationObservation"] ? [logical stringByAppendingFormat:@"\n%@",axs_cachekeeper_presentation_allocation(row[@"allocationObservation"])] : logical;
 }
 static inline NSString *axs_cachekeeper_presentation_receipt(NSDictionary *receipt, NSDictionary *appReport) {
     NSMutableString *text=[NSMutableString stringWithFormat:@"清理记录（%@）：%@\n清理分类统计，非目录总占用；字节为逻辑长度，非实测释放空间。",

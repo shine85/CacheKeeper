@@ -8,6 +8,7 @@
 #import "AxsCacheKeeperWebKitStatus.h"
 #import "AxsCacheKeeperImageCacheStatus.h"
 #import "AxsCacheKeeperStorageInventory.h"
+#import "AxsCacheKeeperAllocation.h"
 #import "AxsCacheKeeperHostEvidence.h"
 #import "AxsCacheKeeperInjectionConditions.h"
 #include <roothide.h>
@@ -116,6 +117,11 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
     if (record[@"scanState"]) out[@"scanState"]=[@[@"running",@"complete",@"partial",@"cancelled",@"interrupted",@"saveFailed"] containsObject:record[@"scanState"]] ? record[@"scanState"] : @"invalid";
     if (axs_cachekeeper_scan_integer(record[@"partialCount"],UINT32_MAX)) out[@"partialCount"]=record[@"partialCount"];
     if (record[@"scanDiagnostics"]) out[@"scanDiagnostics"]=axs_cachekeeper_scan_diagnostics_projection(record[@"scanDiagnostics"]) ?: @{@"state":@"invalid"};
+    if (record[@"allocationObservation"]) {
+        NSDictionary *allocation=axs_cachekeeper_allocation_projection(record[@"allocationObservation"]);
+        out[@"allocationObservation"]=allocation && ![allocation[@"state"] isEqual:@"invalidMetadata"] ? allocation : @{@"state":allocation ? @"invalidMetadata" : @"invalid"};
+    }
+    else if ([record[@"rows"] isKindOfClass:NSArray.class] || (record[@"path"] && record[@"bytes"])) out[@"allocationObservation"]=@{@"state":@"notMeasured"};
     for (NSString *key in @[@"inspectionReadFailure",@"mainReadFailure",@"twinReadFailure"])
         if (record[key]) out[key]=axs_cachekeeper_inspection_read_failure_projection(record[key]) ?: @{@"state":@"invalid"};
     NSArray *numbers=@[@"hardLinkRetained",@"hardLinkRetainedBytes",@"appRuleWaitingForExit",@"bytes",@"files",@"count",@"nlink",@"removed",@"failed",@"failures",@"changed",@"recent",@"remaining",@"remainingBytes",@"deferred",@"deferredBytes",@"unresolved",@"unresolvedBytes",@"protected",@"protectedBytes",@"retainedSubtreeCount",@"lastRemoved",@"lastBytes",@"endReason",@"links",@"hardLinks",@"symlinks",@"hidden",@"twinBytes",@"twinFailures",@"twinHidden",@"twinScanned",@"result",@"errorCode",@"complete",@"coverageComplete",@"measurementComplete",@"cancelled",@"checking",@"skipped",@"manageable",@"twinCoverageComplete",@"twinScanTruncated",@"twinDisplayTruncated",@"linkFilesTruncated",@"enabled",@"autoDiscover",@"urlCache",@"prevent",@"applied",@"total",@"completed",@"remainingCount"];

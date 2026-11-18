@@ -1,5 +1,6 @@
 #import "AxsCacheKeeperImageCache.h"
 #import "AxsCacheKeeperImageLegacySource.h"
+#import "AxsCacheKeeperImageRuntimeSource.h"
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperCleanupRules.h"
 #import <objc/runtime.h>
@@ -374,6 +375,8 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
 @property(atomic) BOOL supported;
 @property(nonatomic) AxsCacheKeeperImageContract pinnedTestContract;
 @property(atomic,copy) NSDictionary *discoveryCheck;
+@property(atomic,copy) NSDictionary *runtimeSourceObservation;
+@property(nonatomic) BOOL runtimeObservationPending;
 @property(nonatomic) BOOL discoveryRefreshPending;
 @property(atomic) BOOL capacityExceeded;
 @property(nonatomic) NSUInteger queued,submitted,completed,skipped;
@@ -582,6 +585,38 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
     if (!pluginRemoving) [binding.engine refreshWithCompletion:nil];
 }
 
+void axs_cachekeeper_image_runtime_view_changed(void) {
+    atomic_fetch_add(&axs_cachekeeper_image_observation_generation,1);
+}
+static NSDictionary *AxsCacheKeeperImageCollectRuntimeObservation(void) {
+    Class __unsafe_unretained classes[5]={objc_getClass("SDImageCache"),objc_getClass("SDDiskCache"),objc_getClass("SDImageCacheConfig"),objc_getClass("SDMemoryCache"),objc_getClass("SDFileAttributeHelper")};
+    AxsCacheKeeperImageObservationMethod specs[27];
+    for (NSUInteger i=0;i<25;i++) specs[i]=(AxsCacheKeeperImageObservationMethod){AxsCacheKeeperImageMethodSpecs[i].ownerIndex,AxsCacheKeeperImageMethodSpecs[i].classMethod,AxsCacheKeeperImageMethodSpecs[i].selector};
+    specs[25]=(AxsCacheKeeperImageObservationMethod){4,YES,"setExtendedAttribute:value:atPath:traverseLink:overwrite:error:"};
+    specs[26]=(AxsCacheKeeperImageObservationMethod){4,YES,"removeExtendedAttribute:atPath:traverseLink:error:"};
+    BOOL saved=NO;const void *originals[4]={NULL};
+    @synchronized(AxsCacheKeeperImageCache.class) {
+        saved=classes[0] && classes[0]==axs_cachekeeper_image_class && axs_cachekeeper_image_init_original;
+        if (saved) {
+            originals[0]=(const void *)axs_cachekeeper_image_init_original;originals[1]=(const void *)axs_cachekeeper_image_remove_original;
+            originals[2]=(const void *)axs_cachekeeper_image_data_original;originals[3]=(const void *)axs_cachekeeper_image_extended_original;
+        }
+    }
+    const void *wrappers[4]={(const void *)AxsCacheKeeperImageInit,(const void *)AxsCacheKeeperImageRemoveAll,(const void *)AxsCacheKeeperImageSetData,(const void *)AxsCacheKeeperImageSetExtendedData};
+    return AxsCacheKeeperImageRuntimeObservation(classes,specs,originals,wrappers,saved);
+}
+static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installation,NSDictionary *runtime) {
+    NSDictionary *disk=axs_cachekeeper_installation_image_observation_projection(installation);
+    if (!disk) return nil;
+    NSString *uuid=disk[@"metadata"][@"uuid"];
+    NSMutableDictionary *out=[@{@"schemaVersion":@1,@"installationImage":disk,@"mappingBackingIdentity":@"notVerified"} mutableCopy];
+    for (NSArray *pair in @[@[@"mainModule",@"mainUUIDRelation"],@[@"candidateModule",@"candidateUUIDRelation"]]) {
+        NSUInteger module=[runtime[pair[0]] unsignedIntegerValue];NSString *loaded=nil;
+        if ([runtime[@"state"] isEqual:@"complete"] && module && module<=[runtime[@"modules"] count]) loaded=runtime[@"modules"][module-1][@"metadata"][@"uuid"];
+        out[pair[1]]=uuid && loaded ? ([uuid isEqual:loaded] ? @"same" : @"different") : @"notCompared";
+    }
+    return axs_cachekeeper_installed_runtime_relation_projection(out);
+}
 @implementation AxsCacheKeeperImageCache
 - (instancetype)initWithContextProvider:(AxsCacheKeeperImageContextProvider)provider observer:(void (^)(NSDictionary *))observer {
     if ((self=[super init])) {
@@ -622,7 +657,15 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
     }
 }
 #endif
+- (void)axs_cachekeeper_request_runtime_observation {
+    @synchronized(self) {if (self.runtimeObservationPending) return;self.runtimeObservationPending=YES;}
+    dispatch_async(self.work,^{
+        @synchronized(self) {self.runtimeObservationPending=NO;}
+        self.runtimeSourceObservation=AxsCacheKeeperImageCollectRuntimeObservation();[self axs_cachekeeper_publish];
+    });
+}
 - (void)startObserving {
+    @try {
     @synchronized(AxsCacheKeeperImageCache.class) {
         Class __unsafe_unretained classes[4]={Nil,Nil,Nil,Nil};NSMutableArray *methods=nil;
         AxsCacheKeeperImageContract contract=AxsCacheKeeperImageContractUnknown;const void *legacyBase=NULL;
@@ -665,6 +708,7 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
         self.discoveryCheck=AxsCacheKeeperImageDiscover(self.pinnedTestContract,classes,NULL,NULL,NULL);
         self.supported=[self.discoveryCheck[@"stage"] isEqual:@"complete"];
     }
+    } @finally {[self axs_cachekeeper_request_runtime_observation];}
 }
 - (void)restoreOperationHistory:(id)history {
     // Called before observation starts; the component queue orders later refreshes.
@@ -925,6 +969,11 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
             @"observed":@(observed),@"eligible":@(eligible),@"restricted":@(restricted),@"writesBlocked":@(writes),
             @"queued":@(self.queued),@"submitted":@(self.submitted),@"apiCompleted":@(self.completed),@"skipped":@(self.skipped),
             @"pending":@(pending),@"updated":NSDate.date,@"bytesState":@"notMeasured",@"discoveryCheck":self.discoveryCheck};
+        if (self.runtimeSourceObservation) {
+            NSMutableDictionary *record=[receipt mutableCopy];record[@"runtimeSourceObservation"]=self.runtimeSourceObservation;receipt=record;
+        }
+        NSDictionary *installedRelation=AxsCacheKeeperImageInstalledRelation(self.context[@"installationImage"],self.runtimeSourceObservation);
+        if (installedRelation) {NSMutableDictionary *record=[receipt mutableCopy];record[@"installedRuntimeRelation"]=installedRelation;receipt=record;}
         if (self.context[@"installationCheck"]) {
             NSMutableDictionary *record=[receipt mutableCopy];
             record[@"installationCheck"]=axs_cachekeeper_installation_check_projection(self.context[@"installationCheck"]) ?: @{@"state":@"invalid",@"errorCode":@0};
