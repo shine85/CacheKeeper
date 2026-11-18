@@ -5,6 +5,7 @@
 
 enum {
     AxsCacheKeeperInstallationIdentityFieldCount=11,
+    AxsCacheKeeperInstallationIdentityObjectFields=(1U<<7)-1,
     AxsCacheKeeperInstallationIdentityAllFields=(1U<<AxsCacheKeeperInstallationIdentityFieldCount)-1
 };
 static inline BOOL axs_cachekeeper_installation_detail_number(id value, NSUInteger maximum, NSUInteger *result) {
@@ -86,8 +87,8 @@ static inline NSDictionary *axs_cachekeeper_installation_identity_projection(id 
         ![value[@"comparison"] isKindOfClass:NSString.class]) return nil;
     NSString *comparison=value[@"comparison"];
     BOOL allowed=([operation isEqual:@"openIdentity"] && [comparison isEqual:@"pathToFD"]) ||
-        ([operation isEqual:@"recheckIdentity"] && [@[@"referenceToFD",@"fdToPath"] containsObject:comparison]) ||
-        ([operation isEqual:@"snapshotIdentity"] && [comparison isEqual:@"snapshotToFD"]);
+        ([operation isEqual:@"recheckIdentity"] && [@[@"referenceToFD",@"fdToPath",@"referenceToPath"] containsObject:comparison]) ||
+        ([operation isEqual:@"snapshotIdentity"] && [@[@"snapshotToFD",@"snapshotToPath"] containsObject:comparison]);
     if (!allowed) return nil;
     NSMutableDictionary *result=[@{@"schemaVersion":@(schema),@"comparison":[comparison copy],@"differenceMask":@(mask)} mutableCopy];
     if (value[@"resample"]) {

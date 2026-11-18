@@ -8,6 +8,8 @@ extern "C" {
 
 // Call on a background queue, using only the system application's bundleURL.
 // Snapshots (including fingerprint and private identity fields) stay in memory; never export them.
+// Path and FD each bind all eleven fields; only seven non-time fields must agree across views.
+// Legacy single-view snapshots fail closed and must be recollected.
 // Missing version/build remain absent with installationState=versionUnknown; invalid files fail closed.
 // Failures retain codes 1..7 and add userInfo.detail through the fixed, non-sensitive detail contract.
 typedef NS_ENUM(NSUInteger, AxsCacheKeeperInstallationContext) {

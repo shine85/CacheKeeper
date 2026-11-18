@@ -185,6 +185,8 @@ static inline BOOL axs_cachekeeper_input_schema(id value, NSString *name) {
         return YES;
     }
     if ([name isEqual:@"batch.plist"]) {
+        for (NSString *field in @[@"started",@"updated",@"finished"])
+            if (dictionary[field] && ![dictionary[field] isKindOfClass:NSDate.class]) return NO;
         if (dictionary[@"error"] && ![dictionary[@"error"] isKindOfClass:NSString.class]) return NO;
         if (dictionary[@"scanState"] && ![@[@"running",@"complete",@"partial",@"cancelled",@"interrupted",@"saveFailed"] containsObject:dictionary[@"scanState"]]) return NO;
         if (dictionary[@"cancel"] && !axs_cachekeeper_input_boolean(dictionary[@"cancel"])) return NO;

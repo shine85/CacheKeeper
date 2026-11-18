@@ -18,6 +18,14 @@ PINNED1541_HASHES = {
 }
 EARLIEST_RED = "FAIL: installation-identity: pinned154.1 earliest verified root FD survives true chmod before second fstat"
 
+PINNED1701 = "2f709487961f717dbc6a8c480fd0e339cdfbbad3"
+PINNED1701_HASHES = {
+    "AxsCacheKeeperInstallation.m": "9c11bda3001822b054dd270adffd31d08e8601cb700b20ef45e08d347569e438",
+    "AxsCacheKeeperInstallation.h": "ad418661ffaf5ef2baaa74eaa2ebd6fc41797960179e411dac0cc5dd67add78e",
+    "AxsCacheKeeperInstallationDetail.h": "2bb4a61c2f70e0c53f75096e8857a1da938fb5b5ec05bc13467c716acafa442e",
+}
+DUAL_VIEW_RED = "FAIL: installation-identity: stable 1920 dual-view projection accepts independently stable installation"
+
 
 def run() -> int:
     compiler = shutil.which("xcrun")
@@ -27,7 +35,7 @@ def run() -> int:
     (ROOT / "tmp").mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="installation-identity-", dir=ROOT / "tmp") as temporary:
         folder = pathlib.Path(temporary)
-        for role in ("red", "pinned1541-red", "green"):
+        for role in ("red", "pinned1541-red", "pinned1701-red", "green"):
             target = folder / role
             (target / "tests").mkdir(parents=True)
             names = ["AxsCacheKeeperInstallation.m", "AxsCacheKeeperInstallation.h", "AxsCacheKeeperInstallationDetail.h"]
@@ -35,10 +43,12 @@ def run() -> int:
                 names.append("AxsCacheKeeperInstallationCheck.h")
             for name in names:
                 if role != "green":
-                    commit = BASELINE if role == "red" else PINNED1541
+                    commit = BASELINE if role == "red" else PINNED1541 if role == "pinned1541-red" else PINNED1701
                     source = subprocess.check_output(["git", "show", f"{commit}:{name}"], cwd=ROOT, timeout=15)
                     if role == "pinned1541-red" and hashlib.sha256(source).hexdigest() != PINNED1541_HASHES[name]:
                         raise SystemExit(f"FAIL: pinned154.1 {name} hash does not match the reviewed release")
+                    if role == "pinned1701-red" and hashlib.sha256(source).hexdigest() != PINNED1701_HASHES[name]:
+                        raise SystemExit(f"FAIL: pinned170.1 {name} hash does not match the reviewed release")
                 else:
                     source = (ROOT / name).read_bytes()
                 (target / name).write_bytes(source)
@@ -56,11 +66,13 @@ def run() -> int:
             elif role == "pinned1541-red":
                 # Isolate the real earliest-root regression from current projection APIs.
                 flags.extend(["-DAXS_CACHEKEEPER_INSTALLATION_IDENTITY_RED=1", "-DAXS_CACHEKEEPER_INSTALLATION_EARLIEST_RED=1"])
+            elif role == "pinned1701-red":
+                flags.extend(["-DAXS_CACHEKEEPER_INSTALLATION_IDENTITY_RED=1", "-DAXS_CACHEKEEPER_INSTALLATION_DUAL_VIEW_RED=1"])
             subprocess.run([*flags, str(test), "-o", str(binary)], check=True, timeout=60)
             result = subprocess.run([str(binary), str(target / "fixtures")], capture_output=True, text=True,
                                     encoding="utf-8", timeout=60)
             if role != "green":
-                expected = EXPECTED_RED if role == "red" else EARLIEST_RED
+                expected = EXPECTED_RED if role == "red" else EARLIEST_RED if role == "pinned1541-red" else DUAL_VIEW_RED
                 if result.returncode != 1 or result.stderr.strip() != expected or result.stdout.strip():
                     raise SystemExit(f"FAIL: expected original-source identity assertion; got {result.returncode}\n{result.stdout}{result.stderr}")
                 print(f"PASS: exact installation source {role} RED:", result.stderr.strip())

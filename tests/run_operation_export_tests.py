@@ -31,6 +31,7 @@ def run() -> int:
             if role == "green":
                 sources.append(ROOT / "AxsCacheKeeperStorageInventory.m")
                 sources.append(ROOT / "AxsCacheKeeperHostEvidence.m")
+                sources.append(ROOT / "AxsCacheKeeperInjectionConditions.m")
             subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-I" + str(ROOT),
                             "-I" + str(ROOT / "tests/include"), "-framework", "Foundation",
                             *map(str, sources), "-o", str(binary)], check=True, timeout=60)

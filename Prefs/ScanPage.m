@@ -10,6 +10,7 @@
 #import "../AxsCacheKeeperInspection.h"
 #import "../AxsCacheKeeperProbe.h"
 #import "../AxsCacheKeeperHostEvidence.h"
+#import "../AxsCacheKeeperInjectionConditions.h"
 #import "../AxsCacheKeeperWebKitStatus.h"
 #import "../AxsCacheKeeperImageCacheStatus.h"
 #include <dlfcn.h>
@@ -19,6 +20,8 @@
 @property(nonatomic,copy) NSString *appName;
 @property(nonatomic,strong) NSArray *rows;
 @property(nonatomic,strong) NSDictionary *previous;
+@property(nonatomic,strong) NSDictionary *axs_cachekeeper_savedInjectionConditions;
+@property(nonatomic) BOOL axs_cachekeeper_injectionReadPending;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,copy) NSString *token;
 @property(nonatomic) NSTimeInterval started;
@@ -63,6 +66,7 @@
     [self axs_cachekeeper_check_probe];
     [self axs_cachekeeper_check_host];
     self.displayCache=nil;
+    [self axs_cachekeeper_refresh_injection_conditions];
     NSDictionary *report=[self axs_cachekeeper_display:[@"Status/" stringByAppendingFormat:@"%@.auto.plist",self.bundle]];
     NSArray *rows=axs_cachekeeper_display_rows(self.rows,report[@"discoveredPaths"]);
     NSDictionary *directories=[self axs_cachekeeper_display:@"directories.plist"];
@@ -72,6 +76,27 @@
     self.unknownRows=axs_cachekeeper_unknown_rows(rows);
     self.enableAllButton.enabled=!self.timer && self.cacheRows.count>0;
     [self.tableView reloadData];
+}
+- (void)axs_cachekeeper_refresh_injection_conditions {
+    if (self.axs_cachekeeper_injectionReadPending || !self.bundle.length) return;
+    self.axs_cachekeeper_injectionReadPending=YES;
+    NSString *bundle=[self.bundle copy];
+    NSString *path=[jbroot(@"/var/mobile/Library/Preferences/com.opa334.choicyprefs.plist") copy];
+    __weak typeof(self) weak=self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+        @autoreleasepool {
+            NSDictionary *projection=axs_cachekeeper_injection_conditions_projection(
+                axs_cachekeeper_injection_conditions_read(path),bundle);
+            dispatch_async(dispatch_get_main_queue(),^{
+                __strong typeof(weak) self=weak;
+                if (!self) return;
+                self.axs_cachekeeper_injectionReadPending=NO;
+                self.axs_cachekeeper_savedInjectionConditions=projection;
+                [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:8 inSection:0]]
+                                      withRowAnimation:UITableViewRowAnimationNone];
+            });
+        }
+    });
 }
 - (void)viewDidLoad {
     [super viewDidLoad];self.title=self.appName;
@@ -310,7 +335,7 @@
 }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)table { return 4; }
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
-    if (section==0) return 8;
+    if (section==0) return 9;
     if (section==1) return MAX((NSUInteger)1,self.cacheRows.count);
     if (section==2) return self.unknownRows.count ? 1+(self.showUnknownData ? self.unknownRows.count : 0) : 0;
     return self.otherRows.count ? 1+(self.showOtherData ? self.otherRows.count : 0) : 0;
@@ -429,6 +454,13 @@
         if (axs_cachekeeper_webkit_raw_projection(record) && record[@"operationHistory"])
             detail=[detail stringByAppendingFormat:@"\n%@",axs_cachekeeper_operation_history_summary(record[@"operationHistory"])];
         cell.detailTextLabel.text=detail;cell.accessoryView=toggle;
+        cell.selectionStyle=UITableViewCellSelectionStyleNone;return cell;
+    }
+    if (path.section==0 && path.row==8) {
+        UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+        cell.textLabel.text=@"保存的注入条件（只读）";cell.detailTextLabel.numberOfLines=0;
+        cell.accessibilityIdentifier=@"CacheKeeperSavedInjectionConditions";
+        cell.detailTextLabel.text=axs_cachekeeper_injection_conditions_summary(self.axs_cachekeeper_savedInjectionConditions);
         cell.selectionStyle=UITableViewCellSelectionStyleNone;return cell;
     }
     if (path.section==0 && path.row==7) {

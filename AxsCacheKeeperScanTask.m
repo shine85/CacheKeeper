@@ -184,6 +184,9 @@ static NSString *AxsCacheKeeperScanMessage(NSString *state) {
     NSString *_folder,*_singleToken,*_batchToken;NSDictionary *(^_resolver)(NSString *);BOOL (^_writer)(NSDictionary *,NSString *);
     AxsCacheKeeperScanTask *_single;NSMutableArray<AxsCacheKeeperScanTask *> *_batchTasks;
     NSUInteger _turn;BOOL _recovered;NSDictionary *_pendingBatch;
+    NSData *_historyBytes;NSDictionary *_historyValue;NSUInteger _historyDecodeCount;
+    NSMutableDictionary *_performance;NSDate *_performanceStarted;
+    NSTimeInterval _performanceStart,_performancePublished;BOOL _performanceActive,_performanceHasWork;
 }
 - (instancetype)initWithFolder:(NSString *)folder resolver:(NSDictionary *(^)(NSString *))resolver writer:(BOOL (^)(NSDictionary *,NSString *))writer {
     if((self=[super init])) {_folder=[folder copy];_resolver=[resolver copy];_writer=[writer copy];_batchTasks=[NSMutableArray new];}return self;
@@ -195,12 +198,69 @@ static NSString *AxsCacheKeeperScanMessage(NSString *state) {
 #endif
     return NSProcessInfo.processInfo.systemUptime;
 }
+- (void)axs_cachekeeper_count:(NSString *)key amount:(double)amount {
+    if(_performance) _performance[key]=@(MIN(9007199254740991.0,MAX(0,[_performance[key] doubleValue]+amount)));
+}
+- (void)axs_cachekeeper_duration:(NSString *)key since:(NSTimeInterval)start {
+    [self axs_cachekeeper_count:key amount:MAX(0,NSProcessInfo.processInfo.systemUptime-start)*1000];
+}
 - (BOOL)write:(NSDictionary *)record name:(NSString *)name {
+    if([name isEqual:@"batch.plist"]) {
+        NSMutableDictionary *dated=[record mutableCopy];dated[@"updated"]=NSDate.date;
+        if([dated[@"scanState"] isEqual:@"running"] && !dated[@"started"]) dated[@"started"]=dated[@"updated"];
+        if([@[@"complete",@"partial",@"cancelled",@"saveFailed"] containsObject:dated[@"scanState"] ?: @""]) dated[@"finished"]=dated[@"updated"];
+        record=dated;
+    }
+    BOOL history=[name isEqual:@"snapshots.plist"];NSTimeInterval start=NSProcessInfo.processInfo.systemUptime;
+    BOOL saved=[self axs_cachekeeper_write:record name:name];
+    if(history) {
+        [self axs_cachekeeper_duration:@"historyWriteMilliseconds" since:start];
+        [self axs_cachekeeper_count:saved ? @"historyWrites" : @"historyWriteFailures" amount:1];
+    }
+    return saved;
+}
+- (BOOL)axs_cachekeeper_write:(NSDictionary *)record name:(NSString *)name {
     if(_writer) return _writer(record,[self path:name]);
-    NSError *error=nil;BOOL saved=[record writeToURL:[NSURL fileURLWithPath:[self path:name]] error:&error];
+    NSError *error=nil;BOOL saved=NO;
+    if([name isEqual:@"snapshots.plist"]) {
+        NSData *data=[NSPropertyListSerialization dataWithPropertyList:record format:NSPropertyListBinaryFormat_v1_0 options:0 error:&error];
+        saved=data && [data writeToFile:[self path:name] options:NSDataWritingAtomic error:&error];
+        // Only persisted bytes are reusable. The next read still compares the actual file.
+        if(saved) {_historyBytes=data;_historyValue=[record copy];}
+    } else saved=[record writeToURL:[NSURL fileURLWithPath:[self path:name]] error:&error];
     if(!saved) NSLog(@"[CacheKeeper] 计量记录保存失败 (%@/%ld)",error.domain,(long)error.code);return saved;
 }
+- (NSDictionary *)axs_cachekeeper_readHistory:(NSError **)error {
+    NSTimeInterval start=NSProcessInfo.processInfo.systemUptime;
+    NSDictionary *result=[self axs_cachekeeper_decodeHistory:error];
+    [self axs_cachekeeper_duration:@"historyReadMilliseconds" since:start];
+    [self axs_cachekeeper_count:@"historyReads" amount:1];return result;
+}
+- (NSDictionary *)axs_cachekeeper_decodeHistory:(NSError **)error {
+    if(error) *error=nil;
+    NSString *path=[self path:@"snapshots.plist"];struct stat info;NSError *failure=nil;
+    if(stat(path.fileSystemRepresentation,&info)) {
+        int code=errno;_historyBytes=nil;_historyValue=nil;
+        if(code!=ENOENT && error) *error=[NSError errorWithDomain:NSPOSIXErrorDomain code:code userInfo:nil];
+        return nil;
+    }
+    NSData *data=S_ISREG(info.st_mode) ? [NSData dataWithContentsOfFile:path options:0 error:&failure] : nil;
+    [self axs_cachekeeper_count:@"historyBytesRead" amount:data.length];
+    if(data && [data isEqualToData:_historyBytes]) return _historyValue;
+    _historyBytes=nil;_historyValue=nil;
+    id value=nil;
+    if(data) {_historyDecodeCount++;[self axs_cachekeeper_count:@"historyDecodes" amount:1];value=[NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:&failure];}
+    if(!value || !axs_cachekeeper_records_valid(value,@"snapshots.plist")) {
+        if(error) *error=failure ?: [NSError errorWithDomain:@"dev.local.cachekeeper.records" code:1 userInfo:@{NSLocalizedDescriptionKey:@"历史记录不可读或字段损坏，已保留原文件"}];
+        return nil;
+    }
+    _historyBytes=data;_historyValue=value;return value;
+}
+#if defined(AXS_CACHEKEEPER_SCAN_TESTING)
+- (NSUInteger)axs_cachekeeper_historyDecodeCount {return _historyDecodeCount;}
+#endif
 - (NSDictionary *)context:(NSString *)bundle {
+    NSTimeInterval start=NSProcessInfo.processInfo.systemUptime;
     NSDictionary *provided=_resolver(bundle);NSMutableDictionary *context=[NSMutableDictionary new];
     NSURL *home=provided[@"home"];if([home isKindOfClass:NSURL.class] && home.isFileURL) context[@"home"]=home.URLByResolvingSymlinksInPath;
     context[@"groups"]=provided[@"groups"] ?: @{};context[@"homeWasRejected"]=provided[@"homeWasRejected"] ?: @NO;
@@ -211,6 +271,7 @@ static NSString *AxsCacheKeeperScanMessage(NSString *state) {
         else identities[key]=@[@(info.st_dev),@(info.st_ino)];
     }
     context[@"identities"]=identities;
+    [self axs_cachekeeper_duration:@"resolveMilliseconds" since:start];
     return context;
 }
 - (NSDictionary *)interrupted:(NSDictionary *)record {
@@ -220,7 +281,7 @@ static NSString *AxsCacheKeeperScanMessage(NSString *state) {
     diagnostics[@"measurementComplete"]=@NO;result[@"scanDiagnostics"]=diagnostics;result[@"error"]=AxsCacheKeeperScanMessage(@"interrupted");result[@"updated"]=NSDate.date;return result;
 }
 - (BOOL)recover {
-    NSError *error=nil;NSDictionary *saved=axs_cachekeeper_read_records([self path:@"snapshots.plist"],&error);
+    NSError *error=nil;NSDictionary *saved=[self axs_cachekeeper_readHistory:&error];
     if(error) return NO;
     NSMutableDictionary *history=[saved mutableCopy];BOOL changed=NO;
     for(NSString *bundle in saved) {NSDictionary *result=[self interrupted:saved[bundle]];if(result!=saved[bundle]) {history[bundle]=result;changed=YES;}}
@@ -235,12 +296,15 @@ static NSString *AxsCacheKeeperScanMessage(NSString *state) {
     return YES;
 }
 - (AxsCacheKeeperScanTask *)task:(NSString *)bundle token:(NSString *)token batch:(BOOL)batch {
+    _performanceHasWork=YES;
     AxsCacheKeeperScanTask *task=[AxsCacheKeeperScanTask new];task.bundle=bundle;task.token=token;task.batch=batch;task.state=@"running";
     task.started=[self axs_cachekeeper_now];task.rows=[NSMutableArray new];task.context=[self context:bundle];
-    NSError *error=nil;NSDictionary *history=axs_cachekeeper_read_records([self path:@"snapshots.plist"],&error);task.old=history[bundle];
+    NSError *error=nil;NSDictionary *history=[self axs_cachekeeper_readHistory:&error];task.old=history[bundle];
     if(error) {task.error=@"历史记录不可读，已保留原文件";task.discovery=axs_cachekeeper_scan_diagnostics_new();task.candidates=@[];[task stop:@"saveFailed"];return task;}
     NSDictionary *diagnostics=nil;
+    NSTimeInterval discoveryStart=NSProcessInfo.processInfo.systemUptime;
     task.candidates=axs_cachekeeper_bounded_scan_targets(task.context[@"home"],task.context[@"groups"],[task.context[@"homeWasRejected"] boolValue],&diagnostics);
+    [self axs_cachekeeper_duration:@"discoveryMilliseconds" since:discoveryStart];
     task.discovery=diagnostics;
     if(![diagnostics[@"discoveryComplete"] boolValue]) task.error=@"目录发现未完整完成";
     // Bound retained metadata even when a container exposes many independent top-level roots.
@@ -262,8 +326,11 @@ static NSString *AxsCacheKeeperScanMessage(NSString *state) {
     NSDictionary *candidate=task.candidates[task.index];NSURL *root=candidate[@"root"];
     // Discovered roots cannot acquire an intermediate symlink between discovery and opening.
     if(![self axs_cachekeeper_candidate_current:candidate]) {[task stop:@"identityChanged"];return;}
+    NSTimeInterval traversalStart=NSProcessInfo.processInfo.systemUptime;
     if(!task.cursor) task.cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:root entryLimit:AxsCacheKeeperScanTaskEntries-task.entries depthLimit:AxsCacheKeeperScanDepth];
     [task.cursor advanceEntries:AxsCacheKeeperScanSliceEntries seconds:.05];task.slices++;
+    [self axs_cachekeeper_duration:@"traversalMilliseconds" since:traversalStart];
+    [self axs_cachekeeper_count:@"slices" amount:1];
     if(![task.cursor.state isEqual:@"running"]) {
         NSString *state=task.cursor.state;[task stop:state];task.index++;
         if([state isEqual:@"complete"]) {
@@ -277,9 +344,10 @@ static NSString *AxsCacheKeeperScanMessage(NSString *state) {
 }
 - (void)retire:(AxsCacheKeeperScanTask *)task {
     [task stop:@"superseded"];
-    NSError *error=nil;NSMutableDictionary *history=[axs_cachekeeper_read_records([self path:@"snapshots.plist"],&error) mutableCopy];
+    NSError *error=nil;NSMutableDictionary *history=[[self axs_cachekeeper_readHistory:&error] mutableCopy];
     if(!error && [history[task.bundle][@"token"] isEqual:task.token]) {
-        history[task.bundle]=task.snapshot;[self write:history name:@"snapshots.plist"];
+        NSDictionary *result=task.snapshot;
+        if(axs_cachekeeper_record_valid(result,0)) {history[task.bundle]=result;[self write:history name:@"snapshots.plist"];}
     }
     // Retiring work never writes the shared single-request receipt.
 }
@@ -292,10 +360,14 @@ static NSString *AxsCacheKeeperScanMessage(NSString *state) {
     // A request may change during filesystem work. No old generation is labelled with a new token.
     NSDictionary *request=axs_cachekeeper_read_input([self path:task.batch ? @"batch.plist" : @"request.plist"],NULL);
     if([request[@"cancel"] boolValue]) [task stop:@"cancelled"];
-    NSError *error=nil;NSMutableDictionary *history=[axs_cachekeeper_read_records([self path:@"snapshots.plist"],&error) mutableCopy];
+    NSError *error=nil;NSMutableDictionary *history=[[self axs_cachekeeper_readHistory:&error] mutableCopy];
     if(!history && !error) history=[NSMutableDictionary new];
+    // Recheck after the potentially expensive history read, including replacement and stop.
+    if(![self current:task]) return NO;
+    request=axs_cachekeeper_read_input([self path:task.batch ? @"batch.plist" : @"request.plist"],NULL);
+    if([request[@"cancel"] boolValue]) [task stop:@"cancelled"];
     NSDictionary *result=task.snapshot;history[task.bundle]=result;
-    BOOL saved=!error && [self write:history name:@"snapshots.plist"];
+    BOOL saved=!error && axs_cachekeeper_record_valid(result,0) && [self write:history name:@"snapshots.plist"];
     if(!saved) {[task stop:@"saveFailed"];result=task.snapshot;}
     if(!task.batch && ![self write:result name:@"scan.plist"]) {
         [task stop:@"saveFailed"];result=task.snapshot;
@@ -303,14 +375,16 @@ static NSString *AxsCacheKeeperScanMessage(NSString *state) {
         if(!error) {history[task.bundle]=result;[self write:history name:@"snapshots.plist"];}
         return NO;
     }
-    task.lastPublished=NSProcessInfo.processInfo.systemUptime;return saved;
+    task.lastPublished=[self axs_cachekeeper_now];return saved;
 }
 - (void)finishBatch:(AxsCacheKeeperScanTask *)task saved:(BOOL)saved {
     NSDictionary *current=axs_cachekeeper_read_input([self path:@"batch.plist"],NULL);
-    if(![current[@"token"] isEqual:task.token]) return;
+    if(![current[@"token"] isEqual:task.token] || ![current[@"remaining"] containsObject:task.bundle]) return;
     NSMutableDictionary *next=[current mutableCopy];
     if(!saved) {next[@"error"]=AxsCacheKeeperScanMessage(@"saveFailed");next[@"scanState"]=@"saveFailed";}
-    else {
+    else if([current[@"cancel"] boolValue] || [task.state isEqual:@"cancelled"]) {
+        next[@"scanState"]=@"cancelled";next[@"error"]=AxsCacheKeeperScanMessage(@"cancelled");
+    } else {
         NSMutableArray *remaining=[current[@"remaining"] mutableCopy];[remaining removeObject:task.bundle];next[@"remaining"]=remaining;
         next[@"completed"]=@([current[@"completed"] unsignedIntegerValue]+1);
         if(![task.state isEqual:@"complete"]) next[@"partialCount"]=@([current[@"partialCount"] unsignedIntegerValue]+1);
@@ -319,6 +393,27 @@ static NSString *AxsCacheKeeperScanMessage(NSString *state) {
     if(![self write:next name:@"batch.plist"]) _pendingBatch=next;
 }
 - (BOOL)tick {
+    if(!_performanceActive) {
+        _performance=[NSMutableDictionary new];_performanceStarted=NSDate.date;
+        _performanceStart=NSProcessInfo.processInfo.systemUptime;_performancePublished=0;_performanceHasWork=NO;
+    }
+    NSTimeInterval start=NSProcessInfo.processInfo.systemUptime;
+    BOOL active=[self axs_cachekeeper_tick];
+    [self axs_cachekeeper_duration:@"workMilliseconds" since:start];
+    NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
+    if(_performanceHasWork && (!_performancePublished || !active || now-_performancePublished>=1)) {
+        NSMutableDictionary *sample=[NSMutableDictionary new];
+        for(NSString *key in @[@"workMilliseconds",@"resolveMilliseconds",@"discoveryMilliseconds",@"traversalMilliseconds",@"historyReadMilliseconds",@"historyWriteMilliseconds",@"historyReads",@"historyDecodes",@"historyWrites",@"historyWriteFailures",@"historyBytesRead",@"slices"])
+            sample[key]=@((unsigned long long)[_performance[key] doubleValue]);
+        sample[@"scope"]=@"serviceActivity";sample[@"started"]=_performanceStarted;sample[@"updated"]=NSDate.date;
+        sample[@"active"]=@(active);sample[@"elapsedMilliseconds"]=@((unsigned long long)(MAX(0,now-_performanceStart)*1000));
+        // Includes completed final history writes; excludes this small telemetry write.
+        // A service activity can contain overlapping single and batch requests.
+        [self write:sample name:@"scanPerformance.plist"];_performancePublished=now;
+    }
+    _performanceActive=active;return active;
+}
+- (BOOL)axs_cachekeeper_tick {
     if(!_recovered) {_recovered=[self recover];if(!_recovered) return NO;}
     NSDictionary *request=axs_cachekeeper_read_input([self path:@"request.plist"],NULL);
     if(_single && (![request[@"token"] isEqual:_single.token] || ![request[@"bundle"] isEqual:_single.bundle])) {[self retire:_single];_single=nil;}
@@ -368,7 +463,7 @@ static NSString *AxsCacheKeeperScanMessage(NSString *state) {
     [self advance:task];
     // Publish at most once per second per job, except first/terminal receipts.
     BOOL terminal=![task.state isEqual:@"running"];
-    if(!task.lastPublished || terminal || NSProcessInfo.processInfo.systemUptime-task.lastPublished>=1) {
+    if(!task.lastPublished || terminal || [self axs_cachekeeper_now]-task.lastPublished>=1) {
         BOOL saved=[self publish:task];terminal=![task.state isEqual:@"running"];
         if(terminal && task.batch) {[self finishBatch:task saved:saved];[_batchTasks removeObject:task];}
         else if(terminal && saved) _single=nil;

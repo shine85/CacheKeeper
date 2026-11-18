@@ -45,6 +45,7 @@ def run():
                         '#define notify_cancel axs_cachekeeper_test_host_cancel\n')
         wrapper.write_text(declarations + '#import "' + (ROOT / "AxsCacheKeeperHostEvidence.m").as_posix() + '"\n', encoding="utf-8")
         sources = [ROOT / x for x in ["tests/host_evidence_tests.m", "AxsCacheKeeperDiagnostics.m",
+                   "AxsCacheKeeperInjectionConditions.m",
                    "AxsCacheKeeperStorageInventory.m", "AxsCacheKeeperOperationInfo.m", "AxsCacheKeeperInstallation.m", "AxsCacheKeeperPDFInspection.m"]]
         flags = ["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-I" + str(ROOT),
                  "-I" + str(ROOT / "tests/include"), "-framework", "Foundation"]

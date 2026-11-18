@@ -42,6 +42,7 @@ def run() -> int:
                 # inline policy call boundaries. Never link that same implementation twice.
                 sources.append(ROOT / "AxsCacheKeeperDiagnostics.m")
                 sources.append(ROOT / "AxsCacheKeeperHostEvidence.m")
+                sources.append(ROOT / "AxsCacheKeeperInjectionConditions.m")
                 installation_source = ROOT / "AxsCacheKeeperInstallation.m"
             # Only the system-class lookup boundary is substituted, identically
             # for pinned RED and current GREEN. The included source stays intact.

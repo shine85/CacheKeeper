@@ -155,6 +155,33 @@ static void axs_cachekeeper_scan_test_export_boundary(NSString *folder) {
     report=axs_cachekeeper_scan_test_export(folder,nil);scan=axs_cachekeeper_scan_test_data(report);
     axs_cachekeeper_scan_test_check(!scan[@"scanDiagnostics"] && !scan[@"rows"][0][@"scanDiagnostics"],
         @"old records without diagnostics must not invent a successful diagnosis");
+    axs_cachekeeper_scan_test_check([report[@"scanPerformance"][@"state"] isEqual:@"missing"],@"old reports do not invent performance evidence");
+    NSMutableDictionary *timing=[@{@"scope":@"serviceActivity",@"active":@NO,
+        @"started":[NSDate dateWithTimeIntervalSince1970:1000],@"updated":[NSDate dateWithTimeIntervalSince1970:1002]} mutableCopy];
+    NSArray *timingNumbers=@[@"elapsedMilliseconds",@"workMilliseconds",@"resolveMilliseconds",@"discoveryMilliseconds",@"traversalMilliseconds",@"historyReadMilliseconds",@"historyWriteMilliseconds",@"historyReads",@"historyDecodes",@"historyWrites",@"historyWriteFailures",@"historyBytesRead",@"slices"];
+    for(NSString *key in timingNumbers) timing[key]=@3;
+    timing[@"privatePath"]=@"private-scan-sentinel";
+    NSString *timingPath=[folder stringByAppendingPathComponent:@"scanPerformance.plist"];
+    axs_cachekeeper_scan_test_check([timing writeToFile:timingPath atomically:YES],@"write performance fixture");
+    report=axs_cachekeeper_scan_test_export(folder,nil);
+    NSDictionary *exportedTiming=report[@"scanPerformance"][@"data"];
+    axs_cachekeeper_scan_test_check([report[@"scanPerformance"][@"state"] isEqual:@"available"] &&
+        [exportedTiming[@"historyWrites"] isEqual:@3] && [exportedTiming[@"started"] isEqual:@1000] && !exportedTiming[@"privatePath"],@"real performance export preserves counters and strips private fields");
+    for(NSString *key in timingNumbers) for(id number in @[@YES,@(-1),@0.5,@(NAN),@(INFINITY),@"private-scan-sentinel"]) {
+        NSMutableDictionary *invalid=[timing mutableCopy];invalid[key]=number;
+        axs_cachekeeper_scan_test_check(!axs_cachekeeper_scan_performance_projection(invalid),@"performance numeric schema rejects malformed evidence");
+    }
+    timing[@"historyWrites"]=@"private-scan-sentinel";
+    axs_cachekeeper_scan_test_check([timing writeToFile:timingPath atomically:YES],@"write malformed timing");
+    report=axs_cachekeeper_scan_test_export(folder,nil);
+    axs_cachekeeper_scan_test_check([report[@"scanPerformance"][@"state"] isEqual:@"invalid"],@"real export reports invalid timing without unsafe values");
+    NSDictionary *batch=@{@"token":@"fixture",@"remaining":@[],@"started":[NSDate dateWithTimeIntervalSince1970:1000],@"finished":[NSDate dateWithTimeIntervalSince1970:1002]};
+    axs_cachekeeper_scan_test_check([batch writeToFile:[folder stringByAppendingPathComponent:@"batch.plist"] atomically:YES],@"write batch dates");
+    report=axs_cachekeeper_scan_test_export(folder,nil);
+    axs_cachekeeper_scan_test_check([report[@"batch"][@"data"][@"finished"] isEqual:@1002],@"batch finish date survives real export");
+    encoded=[NSJSONSerialization dataWithJSONObject:report options:0 error:nil];
+    json=encoded ? [[NSString alloc] initWithData:encoded encoding:NSUTF8StringEncoding] : nil;
+    axs_cachekeeper_scan_test_check(encoded && ![json containsString:@"private-scan-sentinel"],@"performance errors remain JSON safe and private");
     puts("PASS: scan diagnostics real export boundary");
 }
 

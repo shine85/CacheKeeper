@@ -26,6 +26,23 @@ static inline BOOL axs_cachekeeper_scan_integer(id value, uint64_t maximum) {
     return isfinite(number) && number>=0 && number==trunc(number) && number<=maximum;
 }
 
+// Timings cover one active service period, including any overlapping requests.
+// Export only bounded numeric evidence; no paths, tokens or arbitrary text.
+static inline NSDictionary *axs_cachekeeper_scan_performance_projection(id value) {
+    if (![value isKindOfClass:NSDictionary.class] || ![value[@"scope"] isEqual:@"serviceActivity"] ||
+        ![value[@"active"] isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value[@"active"])!=CFBooleanGetTypeID()) return nil;
+    NSMutableDictionary *out=[@{@"scope":@"serviceActivity",@"active":value[@"active"]} mutableCopy];
+    for (NSString *key in @[@"started",@"updated"]) {
+        if (![value[key] isKindOfClass:NSDate.class] || !isfinite([value[key] timeIntervalSince1970])) return nil;
+        out[key]=@([value[key] timeIntervalSince1970]);
+    }
+    for (NSString *key in @[@"elapsedMilliseconds",@"workMilliseconds",@"resolveMilliseconds",@"discoveryMilliseconds",@"traversalMilliseconds",@"historyReadMilliseconds",@"historyWriteMilliseconds",@"historyReads",@"historyDecodes",@"historyWrites",@"historyWriteFailures",@"historyBytesRead",@"slices"]) {
+        if (!axs_cachekeeper_scan_integer(value[key],9007199254740991ULL)) return nil;
+        out[key]=value[key];
+    }
+    return out;
+}
+
 // One schema serves persisted-record validation and the privacy boundary of exported reports.
 static inline NSDictionary *axs_cachekeeper_scan_diagnostics_projection(id value) {
     if (![value isKindOfClass:NSDictionary.class]) return nil;

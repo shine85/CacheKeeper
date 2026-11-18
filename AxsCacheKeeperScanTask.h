@@ -17,6 +17,7 @@
 @property(nonatomic,copy) void (^acceptedRequest)(NSString *bundle, BOOL diagnostic);
 #if defined(AXS_CACHEKEEPER_SCAN_TESTING)
 @property(nonatomic,copy) NSTimeInterval (^axs_cachekeeper_clock)(void);
+@property(nonatomic,readonly) NSUInteger axs_cachekeeper_historyDecodeCount;
 #endif
 - (instancetype)initWithFolder:(NSString *)folder
                       resolver:(NSDictionary *(^)(NSString *bundle))resolver

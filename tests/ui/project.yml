@@ -33,6 +33,7 @@ targets:
       - path: ../../Prefs/SearchHitRouting.m
       - path: ../../Prefs/DiagnosticsPage.m
       - path: ../../AxsCacheKeeperDiagnostics.m
+      - path: ../../AxsCacheKeeperInjectionConditions.m
       - path: ../../AxsCacheKeeperStorageInventory.m
       - path: ../../AxsCacheKeeperHostEvidence.m
       - path: ../../AxsCacheKeeperOperationInfo.m

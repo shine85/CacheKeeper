@@ -20,12 +20,25 @@ static void identity_check(BOOL value, const char *message) {
 // The real path, open FD and filesystem mutation remain real. Only the instant between
 // syscalls (or one failing syscall) is controlled, so a guessed race is not the fixture.
 typedef NS_ENUM(NSUInteger, IdentityMutation) {
-    IdentityUnchanged, IdentityDuringOpen, IdentityDuringFDRecheck, IdentityDuringPathRecheck, IdentityBetweenRootSamples, IdentityStableTimeProjection, IdentityRootSecondFailure
+    IdentityUnchanged, IdentityDuringOpen, IdentityDuringFDRecheck, IdentityDuringPathRecheck, IdentityBetweenRootSamples, IdentityStableTimeProjection, IdentityStablePathTimeProjection, IdentityRootSecondFailure
 };
 static NSString *identity_path,*identity_role;
 static IdentityMutation identity_mutation;
 static int identity_fd=-1,identity_fd_error,identity_path_error;
 static NSUInteger identity_opens,identity_fstats,identity_pathstats;
+// Deterministic view changes are applied to real POSIX samples, never to a fake snapshot provider.
+static BOOL identity_field_mutation,identity_field_fd;
+static NSUInteger identity_field_index,identity_field_sample;
+static void identity_project_field(struct stat *value,BOOL fd,NSUInteger sample) {
+    if (!identity_field_mutation || fd!=identity_field_fd || sample!=identity_field_sample) return;
+    switch (identity_field_index) {
+        case 0: value->st_dev^=1;break;case 1: value->st_ino^=1;break;
+        case 2: value->st_mode^=S_IXGRP;break;case 3: value->st_nlink^=1;break;
+        case 4: value->st_uid^=1;break;case 5: value->st_gid^=1;break;case 6: value->st_size^=1;break;
+        case 7: value->st_mtimespec.tv_sec^=1;break;case 8: value->st_mtimespec.tv_nsec^=1;break;
+        case 9: value->st_ctimespec.tv_sec^=1;break;case 10: value->st_ctimespec.tv_nsec^=1;break;
+    }
+}
 static NSUInteger identity_fdpaths,identity_realpaths;
 static int identity_fdpath_error,identity_input_resolve_error,identity_fd_resolve_error;
 static BOOL identity_fdpath_invalid;
@@ -83,7 +96,13 @@ static int identity_fstat(int fd,struct stat *value) {
         value->st_mtimespec.tv_sec++;value->st_mtimespec.tv_nsec^=1;
         value->st_ctimespec.tv_sec++;value->st_ctimespec.tv_nsec^=1;
     }
+    if (!result && fd==identity_fd) identity_project_field(value,YES,identity_fstats);
     return result;
+}
+static void identity_project_path_time(struct stat *value) {
+    if (identity_mutation!=IdentityStablePathTimeProjection) return;
+    value->st_mtimespec.tv_sec++;value->st_mtimespec.tv_nsec^=1;
+    value->st_ctimespec.tv_sec++;value->st_ctimespec.tv_nsec^=1;
 }
 static int identity_lstat(const char *path,struct stat *value) {
     if ([identity_role isEqual:@"root"] && identity_matches(path)) {
@@ -93,7 +112,9 @@ static int identity_lstat(const char *path,struct stat *value) {
             errno=identity_path_error;return -1;
         }
     }
-    return lstat(path,value);
+    int result=lstat(path,value);
+    if (!result && [identity_role isEqual:@"root"] && identity_matches(path)) { identity_project_path_time(value);identity_project_field(value,NO,identity_pathstats); }
+    return result;
 }
 static int identity_fstatat(int root,const char *name,struct stat *value,int flags) {
     if (identity_child(name)) {
@@ -104,7 +125,9 @@ static int identity_fstatat(int root,const char *name,struct stat *value,int fla
             errno=identity_path_error;return -1;
         }
     }
-    return fstatat(root,name,value,flags);
+    int result=fstatat(root,name,value,flags);
+    if (!result && identity_child(name)) { identity_project_path_time(value);identity_project_field(value,NO,identity_pathstats); }
+    return result;
 }
 #if !defined(AXS_CACHEKEEPER_INSTALLATION_IDENTITY_RED)
 static int identity_bound_lstat(const char *path,struct stat *value) {
@@ -186,6 +209,7 @@ static NSString *identity_bundle(NSString *fixture) {
 }
 static void identity_reset(NSString *root,NSString *role,IdentityMutation mutation) {
     identity_role=role;identity_path=[role isEqual:@"root"] ? root : [root stringByAppendingPathComponent:[role isEqual:@"info"] ? @"Info.plist" : @"Main"];
+    identity_field_mutation=NO;identity_field_fd=NO;identity_field_index=0;identity_field_sample=0;
     identity_fd=-1;identity_opens=0;identity_fstats=0;identity_pathstats=0;
     identity_fd_error=0;identity_path_error=0;identity_mutation=mutation;
     identity_fdpaths=0;identity_realpaths=0;identity_fdpath_error=0;identity_input_resolve_error=0;identity_fd_resolve_error=0;
@@ -286,7 +310,7 @@ static void identity_recheck_cases(NSString *fixture) {
             NSString *root=identity_bundle(fixture);identity_reset(root,role,mode.unsignedIntegerValue);
             NSError *error=nil;
             identity_check(!axs_cachekeeper_installation_snapshot([NSURL fileURLWithPath:root],@"test.identity",@"1.0",&error),"read-time metadata mutation still rejects the snapshot");
-            NSDictionary *identity=identity_failure(error,role,@"recheckIdentity",mode.unsignedIntegerValue==IdentityDuringFDRecheck ? @"referenceToFD" : @"fdToPath");
+            NSDictionary *identity=identity_failure(error,role,@"recheckIdentity",mode.unsignedIntegerValue==IdentityDuringFDRecheck ? @"referenceToFD" : @"referenceToPath");
             identity_check(([identity[@"differenceMask"] unsignedIntegerValue]&4)!=0 && !identity[@"resample"],"recheck uses its existing evidence without additional diagnostic IO");
             identity_check(identity_opens==1 && identity_fstats==([role isEqual:@"root"] ? 3 : 2) && identity_pathstats==2,"recheck does not grow a retry loop");
         }
@@ -324,14 +348,30 @@ static void identity_second_root_failure_case(NSString *fixture) {
 }
 #endif
 static void identity_stable_projection_case(NSString *fixture) {
-    NSString *root=identity_bundle(fixture);identity_reset(root,@"root",IdentityStableTimeProjection);
-    NSError *error=nil;
-    identity_check(!axs_cachekeeper_installation_snapshot([NSURL fileURLWithPath:root],@"test.identity",@"1.0",&error),
-        "stable injected time projection cannot gain installation eligibility");
-    NSDictionary *identity=identity_failure(error,@"root",@"openIdentity",@"pathToFD");
-    identity_check([identity[@"differenceMask"] isEqual:@1920] && [identity[@"resample"][@"fdDifferenceMask"] isEqual:@0] &&
-        [identity[@"resample"][@"pathDifferenceMask"] isEqual:@0] && [identity[@"resample"][@"pathFDDifferenceMask"] isEqual:@1920],
-        "stable 1920 injection retains both stable view facts and original refusal");
+    for (NSString *role in @[@"root",@"info",@"main"]) {
+        NSString *root=identity_bundle(fixture);identity_reset(root,role,IdentityStableTimeProjection);
+        NSError *error=nil;NSURL *url=[NSURL fileURLWithPath:root];
+        NSDictionary *snapshot=axs_cachekeeper_installation_snapshot(url,@"test.identity",@"1.0",&error);
+        identity_check(snapshot!=nil && !error,"stable 1920 dual-view projection accepts independently stable installation");
+        NSString *key=[@"_" stringByAppendingString:role],*pathKey=[key stringByAppendingString:@"Path"];
+        NSUInteger mask=0;
+        for (NSUInteger index=0;index<11;index++) if (![snapshot[key][index] isEqual:snapshot[pathKey][index]]) mask|=1U<<index;
+        identity_check(mask==1920,
+            "snapshot retains all eleven fields of both independently sampled views");
+        identity_reset(root,role,IdentityStableTimeProjection);
+        identity_check(axs_cachekeeper_validate_installation_snapshot(snapshot,url,@"1.0",&error),"stable dual-view snapshot verifies again without resetting either baseline");
+        identity_reset(root,role,IdentityUnchanged);
+        identity_check(!axs_cachekeeper_validate_installation_snapshot(snapshot,url,@"1.0",&error),"later disappearance of FD time projection invalidates the snapshot");
+        identity_reset(root,role,IdentityUnchanged);
+        NSDictionary *plain=axs_cachekeeper_installation_snapshot(url,@"test.identity",@"1.0",NULL);
+        identity_check(plain && ![plain[@"fingerprint"] isEqual:snapshot[@"fingerprint"]],"fingerprint binds FD view time fields");
+        identity_reset(root,role,IdentityStablePathTimeProjection);
+        NSDictionary *pathProjected=axs_cachekeeper_installation_snapshot(url,@"test.identity",@"1.0",&error);
+        identity_check(pathProjected && !error && [plain[key] isEqual:pathProjected[key]] &&
+            ![plain[@"fingerprint"] isEqual:pathProjected[@"fingerprint"]],"fingerprint independently binds path time fields with unchanged FD view");
+        identity_reset(root,role,IdentityStablePathTimeProjection);
+        identity_check(axs_cachekeeper_validate_installation_snapshot(pathProjected,url,@"1.0",&error),"stable path-only time projection also verifies across snapshots");
+    }
 }
 static void identity_field_cases(NSString *fixture) {
     NSString *root=identity_bundle(fixture);identity_reset(root,@"root",IdentityUnchanged);
@@ -363,10 +403,60 @@ static void identity_field_cases(NSString *fixture) {
         identity_check(!axs_cachekeeper_validate_installation_snapshot(changed,url,@"1.0",&error) && !error.userInfo[@"detail"][@"identity"],
             "invalid private vector elements never become measured fields or an accepted snapshot");
     }
+    for (NSString *role in @[@"root",@"info",@"main"]) {
+        NSString *key=[NSString stringWithFormat:@"_%@Path",role];
+        for (NSUInteger index=0;index<11;index++) {
+            changed=[snapshot mutableCopy];reference=[snapshot[key] mutableCopy];
+            reference[index]=@([reference[index] unsignedLongLongValue]^1ULL);changed[key]=reference;
+            identity_check(!axs_cachekeeper_validate_installation_snapshot(changed,url,@"1.0",&error),"every bound path-view field rejects a changed snapshot");
+            identity_check([identity_failure(error,role,@"snapshotIdentity",@"snapshotToPath")[@"differenceMask"] unsignedIntegerValue]==(1U<<index),
+                "path snapshot difference has its precise non-sensitive field mask");
+        }
+        for (id bad in @[@[],@[@1],@"private-shape",NSNull.null]) {
+            changed=[snapshot mutableCopy];changed[key]=bad;
+            identity_check(!axs_cachekeeper_validate_installation_snapshot(changed,url,@"1.0",&error) && !error.userInfo[@"detail"][@"identity"],
+                "corrupt path identity rejects without fabricated measured values");
+        }
+        for (id bad in @[NSNull.null,@NO,@"0"]) {
+            changed=[snapshot mutableCopy];reference=[snapshot[key] mutableCopy];reference[4]=bad;changed[key]=reference;
+            identity_check(!axs_cachekeeper_validate_installation_snapshot(changed,url,@"1.0",&error) && !error.userInfo[@"detail"][@"identity"],
+                "corrupt path identity elements reject without measured-value evidence");
+        }
+        changed=[snapshot mutableCopy];[changed removeObjectForKey:key];
+        identity_check(!axs_cachekeeper_validate_installation_snapshot(changed,url,@"1.0",&error),"missing one path view rejects the snapshot");
+    }
+    changed=[snapshot mutableCopy];[changed removeObjectForKey:@"_identitySchema"];
+    for (NSString *key in @[@"_rootPath",@"_infoPath",@"_mainPath"]) [changed removeObjectForKey:key];
+    identity_check(!axs_cachekeeper_validate_installation_snapshot(changed,url,@"1.0",&error) && [error.userInfo[@"detail"][@"operation"] isEqual:@"shape"],
+        "legacy single-view snapshot is rejected instead of inventing missing baselines");
     struct stat actual;identity_check(lstat(root.fileSystemRepresentation,&actual)==0,"read atime exclusion fixture");
     struct stat accessed=actual;accessed.st_atimespec.tv_sec++;
     identity_check([axs_cachekeeper_installation_stat(actual) isEqual:axs_cachekeeper_installation_stat(accessed)],"atime is not an installation identity field");
 }
+
+#if !defined(AXS_CACHEKEEPER_INSTALLATION_IDENTITY_RED)
+static void identity_view_field_matrix(NSString *fixture) {
+    for (NSString *role in @[@"root",@"info",@"main"]) {
+        NSString *root=identity_bundle(fixture);NSURL *url=[NSURL fileURLWithPath:root];
+        identity_reset(root,role,IdentityUnchanged);
+        NSDictionary *snapshot=axs_cachekeeper_installation_snapshot(url,@"test.identity",@"1.0",NULL);
+        identity_check(snapshot!=nil,"view matrix begins with a real stable installation");
+        for (NSUInteger entry=0;entry<2;entry++) for (NSUInteger fd=0;fd<2;fd++) {
+            NSUInteger samples=fd && [role isEqual:@"root"] ? 3 : 2;
+            for (NSUInteger sample=1;sample<=samples;sample++) for (NSUInteger field=0;field<11;field++) {
+                identity_reset(root,role,IdentityUnchanged);
+                identity_field_mutation=YES;identity_field_fd=fd;identity_field_index=field;identity_field_sample=sample;
+                NSError *error=nil;
+                BOOL accepted=entry ? axs_cachekeeper_validate_installation_snapshot(snapshot,url,@"1.0",&error) :
+                    axs_cachekeeper_installation_snapshot(url,@"test.identity",@"1.0",&error)!=nil;
+                identity_check(!accepted,"every field in either view at every sampled stage rejects drift in both entrypoints");
+                identity_check(axs_cachekeeper_installation_detail_projection(error.userInfo[@"detail"])!=nil,
+                    "all view drift failures retain only fixed projection fields");
+            }
+        }
+    }
+}
+#endif
 
 #if !defined(AXS_CACHEKEEPER_INSTALLATION_IDENTITY_RED)
 static void identity_schema_cases(void) {
@@ -453,6 +543,9 @@ int main(int argc,const char *argv[]) {
         #if defined(AXS_CACHEKEEPER_INSTALLATION_EARLIEST_RED)
         identity_earliest_root_case(fixture);return 0;
 #endif
+#if defined(AXS_CACHEKEEPER_INSTALLATION_DUAL_VIEW_RED)
+        identity_stable_projection_case(fixture);return 0;
+#endif
         identity_open_case(fixture,@"root",0,0,YES);
 #if !defined(AXS_CACHEKEEPER_INSTALLATION_IDENTITY_RED)
         for (NSString *role in @[@"root",@"info",@"main"]) {
@@ -462,7 +555,7 @@ int main(int argc,const char *argv[]) {
             identity_open_case(fixture,role,0,0,NO);
         }
         identity_earliest_root_case(fixture);identity_second_root_failure_case(fixture);identity_stable_projection_case(fixture);identity_view_failure_cases(fixture);identity_callable_binding_cases(fixture);
-        identity_recheck_cases(fixture);identity_field_cases(fixture);identity_schema_cases();
+        identity_recheck_cases(fixture);identity_field_cases(fixture);identity_view_field_matrix(fixture);identity_schema_cases();
 #endif
         fprintf(stdout,"PASS: installation identity actual refusal, bounded resample and strict schema\n");
     }

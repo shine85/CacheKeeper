@@ -9,6 +9,8 @@
 #import "AxsCacheKeeperImageCacheStatus.h"
 #import "AxsCacheKeeperStorageInventory.h"
 #import "AxsCacheKeeperHostEvidence.h"
+#import "AxsCacheKeeperInjectionConditions.h"
+#include <roothide.h>
 
 static NSDictionary *AxsCacheKeeperDiagnosticRead(NSString *folder,NSString *name) {
     NSError *error=nil;
@@ -17,6 +19,12 @@ static NSDictionary *AxsCacheKeeperDiagnosticRead(NSString *folder,NSString *nam
     id value=[NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:&error];
     if (![value isKindOfClass:NSDictionary.class]) return @{@"state":@"invalid",@"errorCode":@(error.code)};
     return @{@"state":@"available",@"data":value};
+}
+static NSDictionary *AxsCacheKeeperScanPerformanceRead(NSString *folder) {
+    NSDictionary *read=AxsCacheKeeperDiagnosticRead(folder,@"scanPerformance.plist");
+    if (![read[@"state"] isEqual:@"available"]) return read;
+    NSDictionary *projected=axs_cachekeeper_scan_performance_projection(read[@"data"]);
+    return projected ? @{@"state":@"available",@"data":projected} : @{@"state":@"invalid"};
 }
 static NSMutableSet<NSString *> *AxsCacheKeeperDiagnosticConfiguredBundles(NSDictionary *states,NSDictionary *directories) {
     NSMutableSet *bundles=[NSMutableSet new];
@@ -125,14 +133,14 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
     for (NSString *key in @[@"appRuleID",@"state",@"phase",@"mode",@"kind",@"purgeClassification",@"type",@"outcome",@"path",@"source",@"twin"])
         if (record[key] && ![record[key] isKindOfClass:NSString.class]) [invalid addObject:key];
     for (NSString *key in numbers) if (record[key] && ![record[key] isKindOfClass:NSNumber.class]) [invalid addObject:key];
-    for (NSString *key in @[@"updated",@"started"]) if (record[key] && ![record[key] isKindOfClass:NSDate.class]) [invalid addObject:key];
+    for (NSString *key in @[@"updated",@"started",@"finished"]) if (record[key] && ![record[key] isKindOfClass:NSDate.class]) [invalid addObject:key];
     for (NSString *key in @[@"directories",@"reports",@"types",@"ages",@"data"]) if (record[key] && ![record[key] isKindOfClass:NSDictionary.class]) [invalid addObject:key];
     for (NSString *key in @[@"effectivePaths",@"discoveredPaths",@"excludedPaths",@"logPaths",@"rows",@"previousRows",@"recentScans",@"largest",@"largestHardLinks",@"linkTwins",@"retainedSubtrees",@"tasks"]) if (record[key] && ![record[key] isKindOfClass:NSArray.class]) [invalid addObject:key];
     for (NSString *key in @[@"effectivePaths",@"discoveredPaths",@"excludedPaths",@"logPaths"]) if ([record[key] isKindOfClass:NSArray.class])
         for (id path in record[key]) if (![path isKindOfClass:NSString.class]) {[invalid addObject:key];break;}
     if (invalid.count) {out[@"invalidRecord"]=@YES;out[@"invalidFields"]=invalid;}
     for (NSString *key in numbers) if ([record[key] isKindOfClass:NSNumber.class]) out[key]=record[key];
-    for (NSString *key in @[@"updated",@"started"]) if ([record[key] isKindOfClass:NSDate.class]) out[key]=@([record[key] timeIntervalSince1970]);
+    for (NSString *key in @[@"updated",@"started",@"finished"]) if ([record[key] isKindOfClass:NSDate.class]) out[key]=@([record[key] timeIntervalSince1970]);
     for (NSString *key in @[@"path",@"source",@"twin"]) if (record[key]) out[key]=[self axs_cachekeeper_path:record[key]];
     if (axs_cachekeeper_bundle_id(record[@"bundle"])) out[@"bundle"]=record[@"bundle"];
     NSSet *values=[NSSet setWithArray:@[@"douyin-alog",@"auto",@"clean",@"prevent",@"waiting",@"running",@"cleaning",@"complete",@"error",@"paused",@"cache",@"log",@"data",@"mixed",@"unknown",@"scan",@"inspection",@"pending",@"submitted",@"finished",@"partial",@"stopped",@"notStarted",@"timeout",@"conflict",@"available",@"missing",@"unreadable",@"invalid",@"空文件",@"SQLite 数据库",@"二进制 plist",@"媒体文件头",@"归档或压缩文件",@"JSON 数据",@"文本头特征（用途未定）",@"未知二进制",@"数据或登录态名称特征"]];
@@ -204,6 +212,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
 }
 - (NSDictionary *)reportWithApps:(NSArray<NSDictionary *> *)apps environment:(NSDictionary *)environment progress:(void (^)(NSUInteger completed,NSUInteger total))progress {
     NSDate *started=NSDate.date;
+    NSDictionary *injectionConditions=axs_cachekeeper_injection_conditions_read(jbroot(@"/var/mobile/Library/Preferences/com.opa334.choicyprefs.plist"));
     AxsCacheKeeperDiagnosticRedactor *redactor=[AxsCacheKeeperDiagnosticRedactor new];
     NSDictionary *states=AxsCacheKeeperDiagnosticRead(self.folder,@"appEnabled.plist");
     NSDictionary *directories=AxsCacheKeeperDiagnosticRead(self.folder,@"directories.plist");
@@ -232,6 +241,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
     if (progress) progress(0,bundles.count);
     for (NSString *bundle in bundles) {
         NSMutableDictionary *app=[@{@"bundle":bundle} mutableCopy];
+        app[@"savedInjectionConditions"]=axs_cachekeeper_injection_conditions_projection(injectionConditions,bundle);
         NSDictionary *installed=installedMetadata[bundle];
         app[@"installedMetadataAvailable"]=@(installed!=nil);
         app[@"installedMetadataState"]=installed ? @"available" : (installedSnapshotAvailable ? @"notInSnapshot" : @"unavailable");
@@ -313,7 +323,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
         @"pdfLocate":[redactor axs_cachekeeper_pdf:environment[@"pdfLocate"]],
         @"sourceStates":@{@"configuration":states[@"state"],@"selection":directories[@"state"],@"snapshots":snapshots[@"state"],@"installedApplications":installedSnapshotAvailable ? @"available" : @"unavailable"},
         @"batch":[redactor axs_cachekeeper_record:batch],
-        @"collection":collection,
+        @"collection":collection,@"scanPerformance":AxsCacheKeeperScanPerformanceRead(self.folder),
         @"notes":@[@"按传入安装快照与当前配置的并集汇总已有记录；缺配置 APP 保持禁用。notInSnapshot 只表示传入快照缺条目，不确认卸载；安装来源缺失或含坏身份条目时标记 unavailable。",@"只汇总插件已保存记录，不重新扫描、唤醒或只读探测 APP；能力摘要来自本轮原始读取，保留各记录时间、运行版本和失败分支。宿主 notify 是未经认证的自报告，既不授予资源删除权限，也不证明限制或恢复实测成功。各记录时间不同，不是原子快照。",@"汇总完成不等于清理完成或深度检测完成；覆盖、失败、取消、截断与原始时间分别判断。",@"诊断通道只核验本轮握手；verified 不表示取得 APP 容器访问或清理能力，notObserved 表示未观察到，invalid 表示状态记录损坏。",@"字节是逻辑记录值；硬链接孪生大小不等于实际释放空间。",@"未知路径组件和账号已匿名化；自由文本只导出原因类别，不含文件内容或原始日志。"]};
 }
 @end

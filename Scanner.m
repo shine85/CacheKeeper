@@ -74,7 +74,7 @@ AxsCacheKeeperPDFRoot *axs_cachekeeper_pdf_resolve_root(NSString *bundle,NSStrin
 static void AxsCacheKeeperScanPump(AxsCacheKeeperScanService *service,dispatch_queue_t queue,BOOL *scheduled) {
     BOOL active=[service tick];
     if(!active) {*scheduled=NO;return;}
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,100*NSEC_PER_MSEC),queue,^{AxsCacheKeeperScanPump(service,queue,scheduled);});
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_MSEC),queue,^{AxsCacheKeeperScanPump(service,queue,scheduled);});
 }
 void CKScanRequests(void) {
     static dispatch_queue_t queue;static AxsCacheKeeperScanService *service;static BOOL scheduled;static dispatch_once_t once;

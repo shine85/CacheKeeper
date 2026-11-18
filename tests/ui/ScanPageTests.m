@@ -74,7 +74,7 @@
     self.page.axs_cachekeeper_appeared=appeared;
     self.previousWindow=UIApplication.sharedApplication.delegate.window;self.window=[[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];self.window.rootViewController=[[UINavigationController alloc] initWithRootViewController:self.page];[self.window makeKeyAndVisible];[self.page loadViewIfNeeded];
     [self waitForExpectations:@[appeared] timeout:5];
-    XCTAssertEqual([self.page tableView:self.page.tableView numberOfRowsInSection:0],8);
+    XCTAssertEqual([self.page tableView:self.page.tableView numberOfRowsInSection:0],9);
 }
 - (void)navigationController:(UINavigationController *)navigationController didShowViewController:(UIViewController *)viewController animated:(BOOL)animated {
     (void)animated;
@@ -135,6 +135,18 @@
     NSDictionary *record=[NSDictionary dictionaryWithContentsOfFile:[self.page file:[NSString stringWithFormat:@"Status/%@.hostObserved.plist",self.page.bundle]]];XCTAssertEqualObjects(record[@"state"],@"observed");XCTAssertFalse([record[@"data"][@"authorizationAttempted"] boolValue]);
     UITableViewCell *old=[self.page tableView:self.page.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:4 inSection:0]];XCTAssertEqualObjects(old.textLabel.text,@"检查网络限制");
     [self.page tableView:self.page.tableView didSelectRowAtIndexPath:[NSIndexPath indexPathForRow:4 inSection:0]];XCTAssertEqual(self.page.axs_cachekeeper_oldProbeCalls,1u);XCTAssertFalse(self.page.probePending);XCTAssertTrue([self.page.probeStatus containsString:@"未开启"]);
+}
+- (void)testSavedInjectionConditionsRowIsReadonlyAndDoesNotStartOtherChecks {
+    NSData *before=[NSData dataWithContentsOfFile:[self.page file:@"appEnabled.plist"]];
+    UITableViewCell *cell=[self.page tableView:self.page.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:8 inSection:0]];
+    XCTAssertEqualObjects(cell.accessibilityIdentifier,@"CacheKeeperSavedInjectionConditions");
+    XCTAssertTrue([cell.detailTextLabel.text containsString:@"Choicy 保存条件"]);
+    XCTAssertNil(self.page.axs_cachekeeper_hostClient);
+    XCTAssertEqual(self.page.axs_cachekeeper_oldProbeCalls,0u);
+    [self.page tableView:self.page.tableView didSelectRowAtIndexPath:[NSIndexPath indexPathForRow:8 inSection:0]];
+    XCTAssertNil(self.page.axs_cachekeeper_hostClient);
+    XCTAssertEqual(self.page.axs_cachekeeper_oldProbeCalls,0u);
+    XCTAssertEqualObjects(before,[NSData dataWithContentsOfFile:[self.page file:@"appEnabled.plist"]]);
 }
 - (void)testReadonlySaveFailureIsVisibleAndSeparateFromHost {
     [self axs_cachekeeper_startServer];NSString *path=[self.page file:[NSString stringWithFormat:@"Status/%@.hostObserved.plist",self.page.bundle]];

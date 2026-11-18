@@ -25,6 +25,7 @@ def main() -> int:
             root / "tests" / "scan_diagnostics_tests.m",
             root / "AxsCacheKeeperDirectories.m",
             root / "AxsCacheKeeperDiagnostics.m",
+            root / "AxsCacheKeeperInjectionConditions.m",
             root / "AxsCacheKeeperStorageInventory.m",
             root / "AxsCacheKeeperHostEvidence.m",
             root / "AxsCacheKeeperOperationInfo.m",

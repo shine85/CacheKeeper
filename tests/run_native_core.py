@@ -250,6 +250,7 @@ def cache_control(output, compiler):
                     str(root / "tests" / "diagnostic_channel_export_tests.m"),
                     str(root / "tests" / "presentation_tests.m"),
                     str(root / "AxsCacheKeeperDiagnostics.m"),
+                    str(root / "AxsCacheKeeperInjectionConditions.m"),
                     str(root / "AxsCacheKeeperStorageInventory.m"),
                     str(root / "AxsCacheKeeperHostEvidence.m"),
                     str(root / "AxsCacheKeeperOperationInfo.m"),

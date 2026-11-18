@@ -14,6 +14,7 @@ CacheKeeperPrefs_FILES = Prefs/Settings.m Prefs/SearchInput.m Prefs/ScanPage.m P
 CacheKeeperPrefs_FILES += Prefs/SearchDiagnostics.m
 CacheKeeperPrefs_FILES += AxsCacheKeeperStorageInventory.m AxsCacheKeeperHostEvidence.m
 CacheKeeperPrefs_FILES += AxsCacheKeeperOperationInfo.m
+CacheKeeperPrefs_FILES += AxsCacheKeeperInjectionConditions.m
 CacheKeeperPrefs_FILES += Prefs/SearchHitRouting.m
 CacheKeeperPrefs_FILES += AxsCacheKeeperPDFSession.m AxsCacheKeeperPDFInspection.m
 CacheKeeperPrefs_INSTALL_PATH = /Library/PreferenceBundles

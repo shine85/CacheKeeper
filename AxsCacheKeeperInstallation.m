@@ -185,8 +185,10 @@ static NSString *axs_cachekeeper_installation_path(NSURL *url, NSError **error) 
     return path;
 }
 // Resolve parent aliases such as /var, while refusing a symlink at the package root itself.
-// The original path is rechecked against the open FD after every sample.
-static int axs_cachekeeper_installation_open_root(NSString *path, struct stat *identity,AxsCacheKeeperInstallationContext context,NSError **error) {
+// Each view retains its own earliest sample. Time projections may differ between
+// path and FD, but no field may change within either view during or across reads.
+typedef struct { struct stat path; struct stat fd; } AxsCacheKeeperInstallationIdentity;
+static int axs_cachekeeper_installation_open_root(NSString *path, AxsCacheKeeperInstallationIdentity *identity,AxsCacheKeeperInstallationContext context,NSError **error) {
     AxsCacheKeeperInstallationCalls calls=axs_cachekeeper_installation_calls(YES);
     struct stat before,opened;
     if (calls.rootPath(path.fileSystemRepresentation,&before)) {
@@ -207,14 +209,14 @@ static int axs_cachekeeper_installation_open_root(NSString *path, struct stat *i
         close(fd);axs_cachekeeper_installation_error(error,2,@"已打开安装包不是目录",@"root",@"type",0);return -1;
     }
     NSUInteger difference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(before),axs_cachekeeper_installation_stat(opened));
-    if (difference) {
+    if (difference & AxsCacheKeeperInstallationIdentityObjectFields) {
         NSDictionary *resample=error ? axs_cachekeeper_installation_resample(-1,fd,NULL,path,before,opened,calls) : nil;
         NSDictionary *view=error ? axs_cachekeeper_installation_view(fd,path,YES,context,calls,difference) : nil;
         close(fd);axs_cachekeeper_installation_identity_error(error,2,@"安装包目录在打开时变化",@"root",@"openIdentity",@"pathToFD",difference,resample,view);return -1;
     }
-    *identity=opened;return fd;
+    *identity=(AxsCacheKeeperInstallationIdentity){.path=before,.fd=opened};return fd;
 }
-static int axs_cachekeeper_installation_open_file(int root, const char *name, NSString *target, struct stat *identity,NSString *input,AxsCacheKeeperInstallationContext context,NSError **error) {
+static int axs_cachekeeper_installation_open_file(int root, const char *name, NSString *target, AxsCacheKeeperInstallationIdentity *identity,NSString *input,AxsCacheKeeperInstallationContext context,NSError **error) {
     AxsCacheKeeperInstallationCalls calls=axs_cachekeeper_installation_calls(NO);
     struct stat before,opened;
     if (calls.childPath(root,name,&before,AT_SYMLINK_NOFOLLOW)) {
@@ -234,26 +236,26 @@ static int axs_cachekeeper_installation_open_file(int root, const char *name, NS
         close(fd);axs_cachekeeper_installation_error(error,3,@"已打开安装文件不是普通文件",target,@"type",0);return -1;
     }
     NSUInteger difference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(before),axs_cachekeeper_installation_stat(opened));
-    if (difference) {
+    if (difference & AxsCacheKeeperInstallationIdentityObjectFields) {
         NSDictionary *resample=error ? axs_cachekeeper_installation_resample(root,fd,name,nil,before,opened,calls) : nil;
         NSDictionary *view=error ? axs_cachekeeper_installation_view(fd,input,NO,context,calls,difference) : nil;
         close(fd);axs_cachekeeper_installation_identity_error(error,3,@"安装文件在打开时变化",target,@"openIdentity",@"pathToFD",difference,resample,view);return -1;
     }
-    *identity=opened;return fd;
+    *identity=(AxsCacheKeeperInstallationIdentity){.path=before,.fd=opened};return fd;
 }
 // Both snapshot entrypoints retain the earliest verified FD sample; a later sample never resets it.
-static BOOL axs_cachekeeper_installation_root_sample(int root,struct stat earliest,NSString *message,NSError **error) {
+static BOOL axs_cachekeeper_installation_root_sample(int root,AxsCacheKeeperInstallationIdentity earliest,NSString *message,NSError **error) {
     AxsCacheKeeperInstallationCalls calls=axs_cachekeeper_installation_calls(YES);
     struct stat current;
     if (calls.fdCall(root,&current)) {
         int number=errno;return axs_cachekeeper_installation_error(error,2,message,@"root",@"snapshotStat",number);
     }
-    NSUInteger difference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(earliest),axs_cachekeeper_installation_stat(current));
+    NSUInteger difference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(earliest.fd),axs_cachekeeper_installation_stat(current));
     if (difference) return axs_cachekeeper_installation_identity_error(error,6,@"安装目录在读取期间变化，等待安装稳定",@"root",@"recheckIdentity",@"referenceToFD",difference,nil,nil);
     return YES;
 }
 static BOOL axs_cachekeeper_installation_recheck(int root, int fd, const char *name, NSString *path,
-    NSString *target, struct stat before, NSError **error) {
+    NSString *target, AxsCacheKeeperInstallationIdentity before, NSError **error) {
     AxsCacheKeeperInstallationCalls calls=axs_cachekeeper_installation_calls(path!=nil);
     struct stat a,b;
     if (calls.fdCall(fd,&a)) {
@@ -262,16 +264,16 @@ static BOOL axs_cachekeeper_installation_recheck(int root, int fd, const char *n
     if (path ? calls.rootPath(path.fileSystemRepresentation,&b) : calls.childPath(root,name,&b,AT_SYMLINK_NOFOLLOW)) {
         int number=errno;return axs_cachekeeper_installation_error(error,6,@"无法复核当前安装路径身份",target,@"recheckPath",number);
     }
-    NSUInteger referenceDifference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(before),axs_cachekeeper_installation_stat(a));
+    NSUInteger referenceDifference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(before.fd),axs_cachekeeper_installation_stat(a));
     if (referenceDifference)
         return axs_cachekeeper_installation_identity_error(error,6,@"安装文件在读取期间变化，等待安装稳定",target,@"recheckIdentity",@"referenceToFD",referenceDifference,nil,nil);
-    NSUInteger pathDifference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(a),axs_cachekeeper_installation_stat(b));
+    NSUInteger pathDifference=axs_cachekeeper_installation_difference(axs_cachekeeper_installation_stat(before.path),axs_cachekeeper_installation_stat(b));
     if (pathDifference)
-        return axs_cachekeeper_installation_identity_error(error,6,@"安装文件在读取期间变化，等待安装稳定",target,@"recheckIdentity",@"fdToPath",pathDifference,nil,nil);
+        return axs_cachekeeper_installation_identity_error(error,6,@"安装文件在读取期间变化，等待安装稳定",target,@"recheckIdentity",@"referenceToPath",pathDifference,nil,nil);
     return YES;
 }
 static BOOL axs_cachekeeper_installation_check(int root, int info, int executable, NSString *path, NSString *name,
-    struct stat rootBefore, struct stat infoBefore, struct stat executableBefore, NSError **error) {
+    AxsCacheKeeperInstallationIdentity rootBefore, AxsCacheKeeperInstallationIdentity infoBefore, AxsCacheKeeperInstallationIdentity executableBefore, NSError **error) {
     return axs_cachekeeper_installation_recheck(root,root,NULL,path,@"root",rootBefore,error) &&
         axs_cachekeeper_installation_recheck(root,info,"Info.plist",nil,@"info",infoBefore,error) &&
         axs_cachekeeper_installation_recheck(root,executable,name.fileSystemRepresentation,nil,@"main",executableBefore,error);
@@ -293,17 +295,17 @@ NSDictionary *axs_cachekeeper_installation_snapshot_with_context(NSURL *bundleUR
         axs_cachekeeper_installation_error(error,1,@"系统安装版本类型无效",@"input",@"version",0);return nil;
     }
     NSString *path=axs_cachekeeper_installation_path(bundleURL,error);if (!path) return nil;
-    struct stat rootStat;
+    AxsCacheKeeperInstallationIdentity rootStat;
     int root=axs_cachekeeper_installation_open_root(path,&rootStat,context,error);if (root<0) return nil;
     int info=-1,executable=-1;NSDictionary *result=nil;
     @try {
-        struct stat infoStat,executableStat;
+        AxsCacheKeeperInstallationIdentity infoStat,executableStat;
         if (!axs_cachekeeper_installation_root_sample(root,rootStat,@"无法确认安装包目录身份",error)) return nil;
         info=axs_cachekeeper_installation_open_file(root,"Info.plist",@"info",&infoStat,[path stringByAppendingPathComponent:@"Info.plist"],context,error);if (info<0) return nil;
-        if (infoStat.st_size<=0 || infoStat.st_size>1024*1024) {
+        if (infoStat.fd.st_size<=0 || infoStat.fd.st_size>1024*1024) {
             axs_cachekeeper_installation_error(error,4,@"安装信息为空或超过 1 MiB 读取上限",@"info",@"size",0);return nil;
         }
-        NSMutableData *data=[NSMutableData dataWithLength:(NSUInteger)infoStat.st_size];
+        NSMutableData *data=[NSMutableData dataWithLength:(NSUInteger)infoStat.fd.st_size];
         size_t offset=0;NSUInteger interrupts=0;
         while (offset<data.length) {
             ssize_t count=axs_cachekeeper_installation_read(info,(unsigned char *)data.mutableBytes+offset,data.length-offset);
@@ -338,11 +340,12 @@ NSDictionary *axs_cachekeeper_installation_snapshot_with_context(NSURL *bundleUR
         }
         executable=axs_cachekeeper_installation_open_file(root,name.fileSystemRepresentation,@"main",&executableStat,[path stringByAppendingPathComponent:name],context,error);if (executable<0) return nil;
         if (!axs_cachekeeper_installation_check(root,info,executable,path,name,rootStat,infoStat,executableStat,error)) return nil;
-        NSArray *rootIdentity=axs_cachekeeper_installation_stat(rootStat),*infoIdentity=axs_cachekeeper_installation_stat(infoStat),*executableIdentity=axs_cachekeeper_installation_stat(executableStat);
-        NSString *fingerprint=axs_cachekeeper_installation_fingerprint(@[path,bundleIdentifier,version ?: @"",build ?: @"",rootIdentity,infoIdentity,executableIdentity]);
+        NSArray *rootIdentity=axs_cachekeeper_installation_stat(rootStat.fd),*infoIdentity=axs_cachekeeper_installation_stat(infoStat.fd),*executableIdentity=axs_cachekeeper_installation_stat(executableStat.fd);
+        NSArray *rootPathIdentity=axs_cachekeeper_installation_stat(rootStat.path),*infoPathIdentity=axs_cachekeeper_installation_stat(infoStat.path),*executablePathIdentity=axs_cachekeeper_installation_stat(executableStat.path);
+        NSString *fingerprint=axs_cachekeeper_installation_fingerprint(@[path,bundleIdentifier,version ?: @"",build ?: @"",rootIdentity,infoIdentity,executableIdentity,rootPathIdentity,infoPathIdentity,executablePathIdentity]);
         if (!fingerprint) { axs_cachekeeper_installation_error(error,5,@"无法生成安装身份",@"snapshot",@"fingerprint",0);return nil; }
         NSMutableDictionary *snapshot=[@{@"fingerprint":fingerprint,@"installationState":build.length && version.length ? @"verified" : @"versionUnknown",
-            @"_path":path,@"_systemVersion":systemShortVersion ?: @"",@"_executable":name,@"_root":rootIdentity,@"_info":infoIdentity,@"_main":executableIdentity} mutableCopy];
+            @"_path":path,@"_systemVersion":systemShortVersion ?: @"",@"_executable":name,@"_root":rootIdentity,@"_info":infoIdentity,@"_main":executableIdentity,@"_rootPath":rootPathIdentity,@"_infoPath":infoPathIdentity,@"_mainPath":executablePathIdentity,@"_identitySchema":@2} mutableCopy];
         if (build.length) snapshot[@"build"]=build;
         if (version.length) snapshot[@"version"]=version;
         result=[snapshot copy];
@@ -355,6 +358,13 @@ BOOL axs_cachekeeper_validate_installation_snapshot_with_context(NSDictionary *s
         return axs_cachekeeper_installation_error(error,1,@"安装身份不可用",@"snapshot",@"shape",0);
     if (!axs_cachekeeper_installation_component(snapshot[@"_executable"]))
         return axs_cachekeeper_installation_error(error,1,@"安装身份可执行名称无效",@"snapshot",@"executable",0);
+    if (![snapshot[@"_identitySchema"] isKindOfClass:NSNumber.class] ||
+        CFGetTypeID((__bridge CFTypeRef)snapshot[@"_identitySchema"])==CFBooleanGetTypeID() ||
+        ![snapshot[@"_identitySchema"] isEqual:@2])
+        return axs_cachekeeper_installation_error(error,1,@"安装身份缺少双视图版本",@"snapshot",@"shape",0);
+    for (NSString *key in @[@"_root",@"_info",@"_main",@"_rootPath",@"_infoPath",@"_mainPath"])
+        if (axs_cachekeeper_installation_difference(snapshot[key],snapshot[key])==NSNotFound)
+            return axs_cachekeeper_installation_error(error,1,@"安装身份双视图字段无效",@"snapshot",@"shape",0);
     if (currentSystemShortVersion && !axs_cachekeeper_installation_string(currentSystemShortVersion,NO))
         return axs_cachekeeper_installation_error(error,1,@"系统安装版本类型无效",@"input",@"version",0);
     NSString *path=axs_cachekeeper_installation_path(currentBundleURL,error);if (!path) return NO;
@@ -362,24 +372,30 @@ BOOL axs_cachekeeper_validate_installation_snapshot_with_context(NSDictionary *s
         return axs_cachekeeper_installation_error(error,6,@"系统安装位置已改变，旧作业已失效",@"snapshot",@"path",0);
     if (![(currentSystemShortVersion ?: @"") isEqual:snapshot[@"_systemVersion"]])
         return axs_cachekeeper_installation_error(error,6,@"系统安装版本已改变，旧作业已失效",@"snapshot",@"version",0);
-    struct stat rootStat;
+    AxsCacheKeeperInstallationIdentity rootStat;
     int root=axs_cachekeeper_installation_open_root(path,&rootStat,context,error);if (root<0) return NO;
     int info=-1,executable=-1;BOOL valid=NO;
     @try {
-        struct stat infoStat,executableStat;
+        AxsCacheKeeperInstallationIdentity infoStat,executableStat;
         if (!axs_cachekeeper_installation_root_sample(root,rootStat,@"无法复核安装目录",error)) return NO;
         info=axs_cachekeeper_installation_open_file(root,"Info.plist",@"info",&infoStat,[path stringByAppendingPathComponent:@"Info.plist"],context,error);if (info<0) return NO;
         NSString *name=snapshot[@"_executable"];
         executable=axs_cachekeeper_installation_open_file(root,name.fileSystemRepresentation,@"main",&executableStat,[path stringByAppendingPathComponent:name],context,error);if (executable<0) return NO;
-        NSUInteger rootDifference=axs_cachekeeper_installation_difference(snapshot[@"_root"],axs_cachekeeper_installation_stat(rootStat));
+        NSUInteger rootDifference=axs_cachekeeper_installation_difference(snapshot[@"_root"],axs_cachekeeper_installation_stat(rootStat.fd));
         if (rootDifference)
             return axs_cachekeeper_installation_identity_error(error,6,@"安装目录身份已变化，旧作业已失效",@"root",@"snapshotIdentity",@"snapshotToFD",rootDifference,nil,nil);
-        NSUInteger infoDifference=axs_cachekeeper_installation_difference(snapshot[@"_info"],axs_cachekeeper_installation_stat(infoStat));
+        NSUInteger infoDifference=axs_cachekeeper_installation_difference(snapshot[@"_info"],axs_cachekeeper_installation_stat(infoStat.fd));
         if (infoDifference)
             return axs_cachekeeper_installation_identity_error(error,6,@"安装信息身份已变化，旧作业已失效",@"info",@"snapshotIdentity",@"snapshotToFD",infoDifference,nil,nil);
-        NSUInteger mainDifference=axs_cachekeeper_installation_difference(snapshot[@"_main"],axs_cachekeeper_installation_stat(executableStat));
+        NSUInteger mainDifference=axs_cachekeeper_installation_difference(snapshot[@"_main"],axs_cachekeeper_installation_stat(executableStat.fd));
         if (mainDifference)
             return axs_cachekeeper_installation_identity_error(error,6,@"主程序身份已变化，旧作业已失效",@"main",@"snapshotIdentity",@"snapshotToFD",mainDifference,nil,nil);
+        for (NSArray *pair in @[@[@"root",axs_cachekeeper_installation_stat(rootStat.path)],
+            @[@"info",axs_cachekeeper_installation_stat(infoStat.path)],@[@"main",axs_cachekeeper_installation_stat(executableStat.path)]]) {
+            NSString *key=[NSString stringWithFormat:@"_%@Path",pair[0]];
+            NSUInteger difference=axs_cachekeeper_installation_difference(snapshot[key],pair[1]);
+            if (difference) return axs_cachekeeper_installation_identity_error(error,6,@"安装路径视图身份已变化，旧作业已失效",pair[0],@"snapshotIdentity",@"snapshotToPath",difference,nil,nil);
+        }
         valid=axs_cachekeeper_installation_check(root,info,executable,path,name,rootStat,infoStat,executableStat,error);
     } @finally { if (executable>=0) close(executable);if (info>=0) close(info);close(root); }
     return valid;
