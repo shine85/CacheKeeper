@@ -38,10 +38,8 @@ def installation_linkage(output, compiler):
     installation_baseline = output / "installation-baseline"
     installation_baseline.mkdir()
     (installation_baseline / "AxsCacheKeeperInstallation.h").write_text(installation_header, encoding="utf-8")
-    (installation_baseline / "AxsCacheKeeperInstallationDetail.h").write_bytes(
-        (root / "AxsCacheKeeperInstallationDetail.h").read_bytes())
     baseline_object = installation_baseline / "caller.o"
-    run_command([*installation_flags, "-I" + str(installation_baseline), "-c",
+    run_command([*installation_flags, "-I" + str(installation_baseline), "-I" + str(root), "-c",
                     str(installation_caller), "-o", str(baseline_object)], check=True, timeout=60)
     baseline = run_command([*installation_flags, "-framework", "Foundation", str(baseline_object),
                                str(installation_object), "-o", str(installation_baseline / "linkage")],

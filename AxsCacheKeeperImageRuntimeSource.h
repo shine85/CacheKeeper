@@ -84,7 +84,7 @@ static inline NSDictionary *AxsCacheKeeperImageRuntimeObservation(Class __unsafe
     for (NSUInteger i=0;i<5;i++) {
         Class owner=classes[i];
         if (!axs_cachekeeper_image_observation_time(&context)) {
-            [classRows addObject:@{@"index":@(i+1),@"present":@(owner!=Nil),@"nameState":owner ? @"partial" : @"unavailable",@"module":@0}];continue;
+            [classRows addObject:@{@"index":@(i+1),@"present":owner ? @YES : @NO,@"nameState":owner ? @"partial" : @"unavailable",@"module":@0}];continue;
         }
         const char *raw=owner ? class_getImageName(owner) : NULL;
         NSString *name=raw && strnlen(raw,4096)<4096 ? [NSString stringWithUTF8String:raw] : nil;
@@ -96,7 +96,7 @@ static inline NSDictionary *AxsCacheKeeperImageRuntimeObservation(Class __unsafe
         NSUInteger module=nameComplete && matches==1 ? axs_cachekeeper_image_observation_module(&context,context.dyldHeaders[index]) : 0;
         NSString *state=!name ? @"unavailable" : !nameComplete ? @"partial" : matches>1 ? @"ambiguous" : matches==1 && module ? @"matched" : context.partial ? @"partial" : @"notRegistered";
         if (owner && ![state isEqual:@"matched"]) context.partial=YES;
-        [classRows addObject:@{@"index":@(i+1),@"present":@(owner!=Nil),@"nameState":state,@"module":@(module)}];
+        [classRows addObject:@{@"index":@(i+1),@"present":owner ? @YES : @NO,@"nameState":state,@"module":@(module)}];
     }
     NSMutableDictionary *tables=[NSMutableDictionary new];const void *current[27]={NULL};Method selected[27]={NULL};
     static const NSUInteger originalSlots[4]={0,20,23,24};
@@ -125,7 +125,7 @@ static inline NSDictionary *AxsCacheKeeperImageRuntimeObservation(Class __unsafe
     for (NSUInteger i=0;i<4;i++) {
         const void *actual=current[originalSlots[i]];
         NSString *relation=originals[i] && actual ? (AxsCacheKeeperImageLegacyCodeAddress(originals[i])==AxsCacheKeeperImageLegacyCodeAddress(actual) ? @"same" : @"different") : @"notCompared";
-        [originalRows addObject:@{@"index":@(i+1),@"present":@(originals[i]!=NULL),@"module":@(axs_cachekeeper_image_observation_imp(&context,originals[i])),@"currentRelation":relation}];
+        [originalRows addObject:@{@"index":@(i+1),@"present":originals[i] ? @YES : @NO,@"module":@(axs_cachekeeper_image_observation_imp(&context,originals[i])),@"currentRelation":relation}];
     }
     NSNumber *candidateValue=usesSavedOriginal ? originalRows[0][@"module"] : methodRows[0][@"module"];
     NSUInteger candidate=[candidateValue unsignedIntegerValue];
