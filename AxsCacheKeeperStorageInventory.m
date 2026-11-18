@@ -76,7 +76,7 @@ NSDictionary *axs_cachekeeper_capabilities(NSDictionary *raw,NSString *panelVers
                 if (progress) entry[@"scanProgress"]=progress;if (diagnostics) entry[@"scanDiagnostics"]=diagnostics;
             } else for (NSString *field in @[@"state",@"reason",@"discoveryCheck",@"runtimeSourceObservation",@"installedRuntimeRelation",@"installationCheck",@"prevent",@"applied",@"submitted",@"completed",@"apiCompleted",@"pending",@"observed",@"eligible",@"restricted",@"writesBlocked"])
                 if (data[field]) entry[field]=data[field];
-            if ([key isEqual:@"network"]) entry[@"actionState"]=[data[@"prevent"] boolValue] ? ([data[@"applied"] boolValue] ? @"restrictionReported" : @"restrictionNotApplied") : ([data[@"applied"] boolValue] ? @"unrestrictedOrRestoreReported" : @"restorePending");
+            if ([key isEqual:@"network"]) entry[@"actionState"]=data[@"policyObservation"] ?: ([data[@"prevent"] boolValue] ? ([data[@"applied"] boolValue] ? @"restrictionReported" : @"restrictionNotApplied") : ([data[@"applied"] boolValue] ? @"unrestrictedOrRestoreReported" : @"restorePending"));
             if ([key isEqual:@"image"] || [key isEqual:@"webKit"]) entry[@"actionState"]=data[@"state"];
             if ([key isEqual:@"standardDirectories"]) entry[@"resourceContract"]=@"standardDirectoryRulesOnly";
         }

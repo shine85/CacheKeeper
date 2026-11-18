@@ -31,7 +31,7 @@ BOOL axs_cachekeeper_validate_installation_snapshot_with_context(NSDictionary *s
 // Independent background-only Mach-O metadata observation. Reuses the existing snapshot FD/path
 // contract; UUID equality does not authenticate loaded mapping backing or grant execution.
 NSDictionary *axs_cachekeeper_installation_image_observation(NSDictionary *snapshot,NSURL *currentBundleURL,
-    NSString *currentSystemShortVersion,int32_t cpuType,int32_t cpuSubtype);
+    NSString *currentSystemShortVersion);
 // Shared background provider. Caller owns a private serial-queue cache of installation snapshots
 // and display entries; never pass this cache to UI/export. Unchanged packages need metadata only.
 // The returned array contains display entries only, without paths, fingerprints or private snapshots.

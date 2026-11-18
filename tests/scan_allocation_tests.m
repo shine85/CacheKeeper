@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+extern NSUInteger axs_cachekeeper_scan_test_inode_hash(dev_t,ino_t);
+
 static void AxsCacheKeeperAllocationCheck(BOOL value,const char *message) {
     if(!value) {fprintf(stderr,"FAIL: scan allocation: %s\n",message);exit(1);}
 }
@@ -60,6 +62,15 @@ int main(int argc,const char **argv) { @autoreleasepool {
     samples[0].st_blocks=1;samples[1]=samples[0];samples[1].st_blocks=2;
     observation=axs_cachekeeper_scan_allocation_test_stats(samples,2,2);
     AxsCacheKeeperAllocationCheck([observation[@"state"] isEqual:@"invalidMetadata"] && [observation[@"duplicateFiles"] unsignedIntegerValue]==1,"changed same inode metadata is explicitly invalid");
+    // Sequential inodes mirror the large same-device directories seen in full scans.
+    NSMutableSet *hashes=[NSMutableSet set];
+    for (NSUInteger index=0;index<4096;index++) {
+        [hashes addObject:@(axs_cachekeeper_scan_test_inode_hash(7,0x100000000ULL+index))];
+    }
+    AxsCacheKeeperAllocationCheck(hashes.count>=2048,"same-device sequential inode keys distribute across hash buckets");
+    samples[0].st_dev=1;samples[1]=samples[0];samples[1].st_dev=2;
+    observation=axs_cachekeeper_scan_allocation_test_stats(samples,2,2);
+    AxsCacheKeeperAllocationCheck([observation[@"uniqueFiles"] unsignedIntegerValue]==2,"same inode on distinct devices counts separately");
     NSMutableDictionary *bad=[observation mutableCopy];bad[@"path"]=@"/private/secret";
     AxsCacheKeeperAllocationCheck(!axs_cachekeeper_allocation_projection(bad),"unknown sensitive allocation fields reject closed schema");
     bad=[observation mutableCopy];bad[@"allocatedBytes"]=@YES;

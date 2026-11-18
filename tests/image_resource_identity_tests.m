@@ -116,22 +116,22 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
     NSString *alphaPath=ckbundle(folder,@"test.identity.alpha",ckimage(),@"1"),*betaPath=ckbundle(folder,@"test.identity.beta",ckimage(),@"1");
     __block NSDictionary *observation=nil;ckbackground(^{
         NSDictionary *snapshot=axs_cachekeeper_installation_snapshot([NSURL fileURLWithPath:alphaPath],@"test.identity.alpha",@"1",nil);
-        observation=axs_cachekeeper_installation_image_observation(snapshot,[NSURL fileURLWithPath:alphaPath],@"1",CPU_TYPE_ARM64,CPU_SUBTYPE_ARM64_ALL);
+        observation=axs_cachekeeper_installation_image_observation(snapshot,[NSURL fileURLWithPath:alphaPath],@"1");
     });
     ckrequire([observation[@"state"] isEqual:@"observed"] && [observation[@"container"] isEqual:@"thin"] &&
         [observation[@"mappingBackingIdentity"] isEqual:@"notVerified"],"safe FD metadata does not authenticate mapping backing");
-    ckrequire([axs_cachekeeper_installation_image_observation(nil,nil,nil,0,0)[@"reason"] isEqual:@"mainThread"],"main thread does not read executable metadata");
+    ckrequire([axs_cachekeeper_installation_image_observation(nil,nil,nil)[@"reason"] isEqual:@"mainThread"],"main thread does not read executable metadata");
     ckbackground(^{
         NSDictionary *snapshot=axs_cachekeeper_installation_snapshot([NSURL fileURLWithPath:alphaPath],@"test.identity.alpha",@"1",nil);
         ckreplacementPath=[alphaPath stringByAppendingPathComponent:@"Fixture"];ckreplacementBytes=ckimage();ckreplaceDuringRead=YES;
-        observation=axs_cachekeeper_installation_image_observation(snapshot,[NSURL fileURLWithPath:alphaPath],@"1",CPU_TYPE_ARM64,CPU_SUBTYPE_ARM64_ALL);
+        observation=axs_cachekeeper_installation_image_observation(snapshot,[NSURL fileURLWithPath:alphaPath],@"1");
     });
     ckrequire([observation[@"reason"] isEqual:@"changed"],"real replacement during FD metadata read cannot preserve installation binding");
     for (NSUInteger i=0;i<2;i++) {
         ckbundle(folder,@"test.identity.alpha",ckfat(i!=0),@"1");
         ckbackground(^{
             NSDictionary *snapshot=axs_cachekeeper_installation_snapshot([NSURL fileURLWithPath:alphaPath],@"test.identity.alpha",@"1",nil);
-            observation=axs_cachekeeper_installation_image_observation(snapshot,[NSURL fileURLWithPath:alphaPath],@"1",CPU_TYPE_ARM64,CPU_SUBTYPE_ARM64_ALL);
+            observation=axs_cachekeeper_installation_image_observation(snapshot,[NSURL fileURLWithPath:alphaPath],@"1");
         });
         ckrequire(i ? [observation[@"reason"] isEqual:@"ambiguous"] : [observation[@"container"] isEqual:@"fat32"],"fat selection requires exactly one nonoverlapping architecture");
     }
@@ -144,13 +144,24 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
     NSMutableData *wrongCPU=ckimage();((struct mach_header_64 *)wrongCPU.mutableBytes)->cputype=CPU_TYPE_X86_64;
     NSMutableData *badCommand=ckimage();((struct uuid_command *)((unsigned char *)badCommand.mutableBytes+sizeof(struct mach_header_64)))->cmdsize=7;
     NSMutableData *excessCommands=ckimage();((struct mach_header_64 *)excessCommands.mutableBytes)->sizeofcmds=65537;
+    NSMutableData *dylib=ckimage();((struct mach_header_64 *)dylib.mutableBytes)->filetype=MH_DYLIB;
+    NSMutableData *subMismatch=ckfat64();
+    ((struct mach_header_64 *)((uint8_t *)subMismatch.mutableBytes+128))->cpusubtype=CPU_SUBTYPE_ARM64E;
+    NSMutableData *arm64eThin=ckimage();((struct mach_header_64 *)arm64eThin.mutableBytes)->cpusubtype=CPU_SUBTYPE_ARM64E;
+    ckbundle(folder,@"test.identity.alpha",arm64eThin,@"1");
+    ckbackground(^{
+        NSDictionary *snap=axs_cachekeeper_installation_snapshot([NSURL fileURLWithPath:alphaPath],@"test.identity.alpha",@"1",nil);
+        observation=axs_cachekeeper_installation_image_observation(snap,[NSURL fileURLWithPath:alphaPath],@"1");
+    });
+    ckrequire([observation[@"metadata"][@"cpuSubtype"] intValue]==CPU_SUBTYPE_ARM64E &&
+        [observation[@"mappingBackingIdentity"] isEqual:@"notVerified"],"on-disk executable subtype is independent of loaded image zero");
     for (NSArray *fixture in @[@[ckfat64(),@"observed",@"none"],@[outOfBounds,@"notVerified",@"invalid"],
         @[reserved,@"notVerified",@"invalid"],@[overlap,@"notVerified",@"invalid"],@[misaligned,@"notVerified",@"invalid"],
-        @[wrongCPU,@"notVerified",@"architecture"],@[badCommand,@"notVerified",@"invalid"],@[excessCommands,@"notVerified",@"invalid"]]) {
+        @[wrongCPU,@"notVerified",@"architecture"],@[dylib,@"notVerified",@"invalid"],@[subMismatch,@"notVerified",@"architecture"],@[badCommand,@"notVerified",@"invalid"],@[excessCommands,@"notVerified",@"invalid"]]) {
         ckbundle(folder,@"test.identity.alpha",fixture[0],@"1");
         ckbackground(^{
             NSDictionary *snapshot=axs_cachekeeper_installation_snapshot([NSURL fileURLWithPath:alphaPath],@"test.identity.alpha",@"1",nil);
-            observation=axs_cachekeeper_installation_image_observation(snapshot,[NSURL fileURLWithPath:alphaPath],@"1",CPU_TYPE_ARM64,CPU_SUBTYPE_ARM64_ALL);
+            observation=axs_cachekeeper_installation_image_observation(snapshot,[NSURL fileURLWithPath:alphaPath],@"1");
         });
         ckrequire([observation[@"state"] isEqual:fixture[1]] && [observation[@"reason"] isEqual:fixture[2]],"real disk fat64/bounds/overlap/CPU/command fixture uses strict production parser");
         if ([observation[@"state"] isEqual:@"observed"]) ckrequire([observation[@"container"] isEqual:@"fat64"],"actual fat64 slice metadata is observed");

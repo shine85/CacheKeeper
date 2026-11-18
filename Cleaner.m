@@ -52,12 +52,15 @@ static uint32_t axs_cachekeeper_refresh_network(void) {
         (!readable ? axs_cachekeeper_probe_result(2,readError.code) : axs_cachekeeper_probe_result(3,0));
     BOOL prevent = readable && axs_cachekeeper_should_prevent(states[bundle]);
     BOOL restoring=axs_cachekeeper_previous_prevent || axs_cachekeeper_restore_pending;
-    if (!prevent && !restoring && !(readable && axs_cachekeeper_app_enabled(states[bundle]))) {
+    BOOL explicitlyOff=readable && !readError && states[bundle]!=nil &&
+        axs_cachekeeper_state_valid(states[bundle]) && !axs_cachekeeper_app_enabled(states[bundle]);
+    BOOL inactiveObservation=explicitlyOff && !restoring;
+    if (!prevent && !restoring && !inactiveObservation && !(readable && axs_cachekeeper_app_enabled(states[bundle]))) {
         axs_cachekeeper_publish_network_report(folder,bundle);return diagnostic;
     }
-    BOOL applied = axs_cachekeeper_configure_network_cache(prevent);
+    BOOL applied = inactiveObservation || axs_cachekeeper_configure_network_cache(prevent);
     axs_cachekeeper_restore_pending = !prevent && !applied;
-    NSString *message = !readable ? @"配置不可读或字段无效，未限制网络缓存" :
+    NSString *message = inactiveObservation ? @"此宿主进程当前未启用网络缓存限制" : !readable ? @"配置不可读或字段无效，未限制网络缓存" :
         (prevent ? (applied ? @"标准 NSURLCache 磁盘容量已置 0" : @"磁盘容量设置未生效，自动模式仍会退出后清理") :
         (applied ? (restoring ? @"未禁止网络缓存，已恢复 APP 请求的容量" : @"已读取配置；当前模式／选项未请求网络限制") : @"关闭后的容量恢复尚未成功；下次刷新时重试，可重新启动 APP 恢复"));
     if (readable && axs_cachekeeper_app_enabled(states[bundle])) diagnostic=axs_cachekeeper_probe_result(prevent ? (applied ? 5 : 6) : 4,0);
@@ -65,7 +68,9 @@ static uint32_t axs_cachekeeper_refresh_network(void) {
     if (prevent == axs_cachekeeper_previous_prevent && [message isEqual:axs_cachekeeper_previous_message]) return diagnostic;
     axs_cachekeeper_previous_prevent = prevent;
     axs_cachekeeper_previous_message=nil;
-    axs_cachekeeper_pending_network_report=@{@"pid":@(getpid()), @"updated":NSDate.date, @"prevent":@(prevent),@"applied":@(applied), @"message":message,@"runtimeInfo":axs_cachekeeper_runtime_info()};
+    NSMutableDictionary *report=[@{@"pid":@(getpid()), @"updated":NSDate.date, @"prevent":@(prevent),@"applied":@(applied), @"message":message,@"runtimeInfo":axs_cachekeeper_runtime_info()} mutableCopy];
+    if (inactiveObservation) report[@"policyObservation"]=@"disabledInProcess";
+    axs_cachekeeper_pending_network_report=report;
     axs_cachekeeper_publish_network_report(folder,bundle);
     return prevent && applied && axs_cachekeeper_pending_network_report ? axs_cachekeeper_probe_result(7,0) : diagnostic;
 }

@@ -113,6 +113,18 @@ static void CKExport(NSString *folder,NSString *bundle) {
     [fm removeItemAtPath:path(@"host") error:NULL];app=[report()[@"apps"] firstObject];CKRequire([app[@"hostAutomatic"][@"state"] isEqual:@"missing"],"missing host remains missing");
     [@"damaged" writeToFile:path(@"host") atomically:YES encoding:NSUTF8StringEncoding error:NULL];app=[report()[@"apps"] firstObject];CKRequire([app[@"hostAutomatic"][@"state"] isEqual:@"invalid"],"damaged host distinct");
     [fm removeItemAtPath:path(@"host") error:NULL];[fm createDirectoryAtPath:path(@"host") withIntermediateDirectories:NO attributes:nil error:NULL];app=[report()[@"apps"] firstObject];CKRequire([app[@"hostAutomatic"][@"state"] isEqual:@"unreadable"],"unreadable host distinct");
+    NSDictionary *off=@{@"prevent":@NO,@"applied":@YES,@"policyObservation":@"disabledInProcess",@"runtimeInfo":CKInfo(@"0.7.2-175.1"),@"updated":NSDate.date};
+    CKRequire([axs_cachekeeper_network_projection(off)[@"policyObservation"] isEqual:@"disabledInProcess"],"off observation survives export without claiming restoration");
+    CKRequire([off writeToFile:path(@"network") atomically:YES],"save explicit disabled receipt");
+    app=[report()[@"apps"] firstObject];
+    CKRequire([app[@"network"][@"data"][@"policyObservation"] isEqual:@"disabledInProcess"] &&
+        [app[@"capabilities"][@"network"][@"actionState"] isEqual:@"disabledInProcess"] &&
+        [app[@"capabilities"][@"network"][@"effectVerification"] isEqual:@"notVerified"],
+        "saved disabled process observation and verification state reach the diagnostic export");
+    for (NSDictionary *change in @[@{@"prevent":@YES},@{@"applied":@NO},@{@"policyObservation":@"other"}]) {
+        NSMutableDictionary *bad=[off mutableCopy];[bad addEntriesFromDictionary:change];
+        CKRequire(!axs_cachekeeper_network_projection(bad),"contradictory off observation rejected");
+    }
     NSDictionary *legacy=axs_cachekeeper_network_projection(@{@"prevent":@YES,@"applied":@NO});CKRequire(legacy && [legacy[@"updatedState"] isEqual:@"notRecorded"] && !legacy[@"runtimeInfo"],"old unversioned undated network fields retained");
     for (id bad in @[@"/private/scansecret",@{@"packageVersion":@"/private/scansecret",@"unknown":@"private-content"}]) {
         NSDictionary *cap=axs_cachekeeper_capabilities(@{@"standardDirectories":@{@"state":@"available",@"data":@{@"updated":NSDate.date,@"complete":@NO,@"runtimeInfo":bad,@"unknownPath":@"/private/scansecret"}}},@"0.7.2-167.1");

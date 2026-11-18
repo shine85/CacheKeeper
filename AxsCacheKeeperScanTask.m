@@ -22,6 +22,17 @@ static BOOL AxsCacheKeeperScanUnchanged(const struct stat *a,const struct stat *
 }
 // One observation set per app task spans all discovered roots. Logical bytes
 // remain per path; first-observed regular-file allocation never counts an inode twice.
+// A two-element NSArray can hash by count. Hash the identity bytes and still
+// compare the full device/inode pair for equality, including across roots.
+static NSData *AxsCacheKeeperScanInodeKey(dev_t device,ino_t inode) {
+    const uint64_t identity[2]={(uint64_t)device,(uint64_t)inode};
+    return [NSData dataWithBytes:identity length:sizeof(identity)];
+}
+#if defined(AXS_CACHEKEEPER_SCAN_TESTING)
+NSUInteger axs_cachekeeper_scan_test_inode_hash(dev_t device,ino_t inode) {
+    return AxsCacheKeeperScanInodeKey(device,inode).hash;
+}
+#endif
 @interface AxsCacheKeeperScanAllocation : NSObject
 @property(nonatomic,strong) NSMutableDictionary *inodes;
 @property(nonatomic) NSUInteger budget,duplicates,untracked;
@@ -37,7 +48,7 @@ static BOOL AxsCacheKeeperScanUnchanged(const struct stat *a,const struct stat *
     return self;
 }
 - (void)observe:(const struct stat *)info {
-    NSArray *key=@[@(info->st_dev),@(info->st_ino)];
+    NSData *key=AxsCacheKeeperScanInodeKey(info->st_dev,info->st_ino);
     NSArray *sample=@[@(info->st_size),@(info->st_blocks),@(info->st_nlink),@(info->st_mtimespec.tv_sec),
         @(info->st_mtimespec.tv_nsec),@(info->st_ctimespec.tv_sec),@(info->st_ctimespec.tv_nsec)];
     NSArray *old=_inodes[key];

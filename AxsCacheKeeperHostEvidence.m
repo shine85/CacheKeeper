@@ -67,6 +67,11 @@ NSDictionary *axs_cachekeeper_network_projection(id value) {
     if (![value isKindOfClass:NSDictionary.class] || !axs_cachekeeper_input_boolean(value[@"prevent"]) || !axs_cachekeeper_input_boolean(value[@"applied"])) return nil;
     if (value[@"updated"] && (![value[@"updated"] isKindOfClass:NSDate.class] || !isfinite([value[@"updated"] timeIntervalSince1970]))) return nil;
     NSMutableDictionary *out=[@{@"prevent":@([value[@"prevent"] boolValue]),@"applied":@([value[@"applied"] boolValue]),@"effectVerification":@"notVerified",@"updatedState":value[@"updated"] ? @"recorded" : @"notRecorded"} mutableCopy];
+    if (value[@"policyObservation"]) {
+        if (![value[@"policyObservation"] isEqual:@"disabledInProcess"] || [value[@"prevent"] boolValue] ||
+            ![value[@"applied"] boolValue] || !value[@"updated"] || !value[@"runtimeInfo"]) return nil;
+        out[@"policyObservation"]=@"disabledInProcess";
+    }
     if (value[@"updated"]) out[@"updated"]=@([value[@"updated"] timeIntervalSince1970]);
     if (value[@"runtimeInfo"]) {NSDictionary *info=axs_cachekeeper_runtime_info_projection(value[@"runtimeInfo"]);if (!info) return nil;out[@"runtimeInfo"]=info;}
     return out;

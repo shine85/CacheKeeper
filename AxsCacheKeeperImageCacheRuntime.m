@@ -1,7 +1,6 @@
 #import "AxsCacheKeeperImageCacheRuntime.h"
 #import "AxsCacheKeeperImageCache.h"
 #import "AxsCacheKeeperInstallation.h"
-#import "AxsCacheKeeperImageLegacySource.h"
 #import "AxsCacheKeeperRuntimeBuild.h"
 #import "AxsCacheKeeperPolicy.h"
 #import <UIKit/UIKit.h>
@@ -53,10 +52,8 @@ static NSDictionary *AxsCacheKeeperImageContext(void) {
             @"installation":installation,@"installationCheck":axs_cachekeeper_installation_check_result(installationRequested,axs_cachekeeper_image_installation,installationError),
             @"reportWritable":@(axs_cachekeeper_image_report_writable)} mutableCopy];
         if (installationRequested) {
-            struct mach_header_64 mainHeader;
-            BOOL read=AxsCacheKeeperImageLegacyRead((uintptr_t)_dyld_get_image_header(0),&mainHeader,sizeof(mainHeader),VM_PROT_READ) && mainHeader.magic==MH_MAGIC_64;
-            context[@"installationImage"]=read ? axs_cachekeeper_installation_image_observation(axs_cachekeeper_image_installation,NSBundle.mainBundle.bundleURL,version,mainHeader.cputype,mainHeader.cpusubtype) :
-                @{@"schemaVersion":@1,@"state":@"notVerified",@"reason":@"read",@"mappingBackingIdentity":@"notVerified"};
+            context[@"installationImage"]=axs_cachekeeper_installation_image_observation(
+                axs_cachekeeper_image_installation,NSBundle.mainBundle.bundleURL,version);
         }
         return [context copy];
     }

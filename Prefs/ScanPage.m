@@ -411,8 +411,9 @@
         toggle.enabled=axs_cachekeeper_wants_restriction(states[self.bundle]);
         cell.detailTextLabel.text=toggle.enabled ? @"仅限标准 NSURLCache，可能增加流量；不改变内存缓存" : @"只清理模式不限制网络缓存；选项已保留";
         NSDictionary *result=[self axs_cachekeeper_display:[NSString stringWithFormat:@"Status/%@.network.plist",self.bundle]];
-        if (axs_cachekeeper_input_boolean(result[@"prevent"]) && axs_cachekeeper_input_boolean(result[@"applied"])) {
-            NSString *status=[result[@"prevent"] boolValue] ? ([result[@"applied"] boolValue] ? @"磁盘容量已置零" : @"限制未生效") :
+        NSDictionary *network=axs_cachekeeper_network_projection(result);
+        if (network) {
+            NSString *status=network[@"policyObservation"] ? @"此宿主进程未启用限制" : [result[@"prevent"] boolValue] ? ([result[@"applied"] boolValue] ? @"磁盘容量已置零" : @"限制未生效") :
                 ([result[@"applied"] boolValue] ? @"未限制或已恢复容量" : @"容量恢复待重试");
             cell.detailTextLabel.text=[cell.detailTextLabel.text stringByAppendingFormat:@"\n上次应用结果（%@）：%@",axs_cachekeeper_time_string(result[@"updated"]),status];
         }

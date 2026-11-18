@@ -305,7 +305,7 @@ static BOOL axs_cachekeeper_installation_image_read(uintptr_t address,void *buff
 static NSDictionary *axs_cachekeeper_installation_image_failure(NSString *reason) {
     return @{@"schemaVersion":@1,@"state":@"notVerified",@"reason":reason,@"mappingBackingIdentity":@"notVerified"};
 }
-NSDictionary *axs_cachekeeper_installation_image_observation(NSDictionary *snapshot,NSURL *url,NSString *version,int32_t cpu,int32_t subtype) {
+NSDictionary *axs_cachekeeper_installation_image_observation(NSDictionary *snapshot,NSURL *url,NSString *version) {
     if (NSThread.isMainThread) return axs_cachekeeper_installation_image_failure(@"mainThread");
     if (!axs_cachekeeper_validate_installation_snapshot_with_context(snapshot,url,version,AxsCacheKeeperInstallationContextHostMainBundle,nil))
         return axs_cachekeeper_installation_image_failure(@"snapshot");
@@ -320,7 +320,7 @@ NSDictionary *axs_cachekeeper_installation_image_observation(NSDictionary *snaps
         if (fileIdentity.fd.st_size<=0 || (uint64_t)fileIdentity.fd.st_size<sizeof(struct mach_header_64)) return axs_cachekeeper_installation_image_failure(@"invalid");
         AxsCacheKeeperInstallationImageReader reader={fd,0,(uint64_t)fileIdentity.fd.st_size};struct fat_header header;
         if (!axs_cachekeeper_installation_image_read(0,&header,sizeof(header),&reader)) return axs_cachekeeper_installation_image_failure(@"read");
-        NSString *container=@"thin";NSData *fatTable=nil;uint32_t magic=header.magic;
+        NSString *container=@"thin";NSData *fatTable=nil;int32_t tableSubtype=0;uint32_t magic=header.magic;
         if (magic==FAT_MAGIC || magic==FAT_CIGAM || magic==FAT_MAGIC_64 || magic==FAT_CIGAM_64) {
             BOOL swap=magic==FAT_CIGAM || magic==FAT_CIGAM_64,is64=magic==FAT_MAGIC_64 || magic==FAT_CIGAM_64;
             uint32_t architectures=swap ? OSSwapInt32(header.nfat_arch) : header.nfat_arch;
@@ -346,7 +346,9 @@ NSDictionary *axs_cachekeeper_installation_image_observation(NSDictionary *snaps
                     (start&((UINT64_C(1)<<alignment)-1))) return axs_cachekeeper_installation_image_failure(@"invalid");
                 for (uint32_t n=0;n<i;n++) if (start<starts[n]+sizes[n] && starts[n]<start+bytes) return axs_cachekeeper_installation_image_failure(@"invalid");
                 starts[i]=start;sizes[i]=bytes;
-                if (type==cpu && ((uint32_t)sub&~CPU_SUBTYPE_MASK)==((uint32_t)subtype&~CPU_SUBTYPE_MASK)) {selected++;offset=start;length=bytes;}
+                // Inspect the installed executable independently of dyld image 0.
+                // Multiple ARM64 slices cannot identify a unique on-disk candidate.
+                if (type==CPU_TYPE_ARM64) {selected++;offset=start;length=bytes;tableSubtype=sub;}
             }
             if (selected!=1) return axs_cachekeeper_installation_image_failure(selected ? @"ambiguous" : @"architecture");
             reader.offset=offset;reader.length=length;container=is64 ? @"fat64" : @"fat32";
@@ -354,7 +356,8 @@ NSDictionary *axs_cachekeeper_installation_image_observation(NSDictionary *snaps
         NSDictionary *metadata=AxsCacheKeeperImageMachOObservation(0,axs_cachekeeper_installation_image_read,&reader);
         if (![@[@"complete",@"missingUUID"] containsObject:metadata[@"state"]])
             return axs_cachekeeper_installation_image_failure([metadata[@"state"] isEqual:@"changed"] ? @"changed" : [metadata[@"state"] isEqual:@"unreadable"] ? @"read" : @"invalid");
-        if ([metadata[@"cpuType"] intValue]!=cpu || ((uint32_t)[metadata[@"cpuSubtype"] intValue]&~CPU_SUBTYPE_MASK)!=((uint32_t)subtype&~CPU_SUBTYPE_MASK))
+        if ([metadata[@"fileType"] unsignedIntValue]!=MH_EXECUTE) return axs_cachekeeper_installation_image_failure(@"invalid");
+        if ([metadata[@"cpuType"] intValue]!=CPU_TYPE_ARM64 || (fatTable && [metadata[@"cpuSubtype"] intValue]!=tableSubtype))
             return axs_cachekeeper_installation_image_failure(@"architecture");
         if (fatTable) {
             AxsCacheKeeperInstallationImageReader full={fd,0,(uint64_t)fileIdentity.fd.st_size};NSMutableData *after=[NSMutableData dataWithLength:fatTable.length];
