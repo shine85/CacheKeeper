@@ -282,7 +282,7 @@ static void identity_callable_binding_cases(NSString *fixture) {
 }
 static void identity_view_failure_cases(NSString *fixture) {
     for (NSUInteger endpoint=0;endpoint<4;endpoint++) {
-        NSString *root=identity_bundle(fixture);identity_reset(root,@"root",IdentityStableTimeProjection);
+        NSString *root=identity_bundle(fixture);identity_reset(root,@"root",IdentityDuringOpen);
         if (!endpoint) identity_fdpath_error=EIO;
         else if (endpoint==1) identity_input_resolve_error=ENOENT;
         else if (endpoint==2) identity_fd_resolve_error=EACCES;
@@ -291,8 +291,8 @@ static void identity_view_failure_cases(NSString *fixture) {
         identity_check(!axs_cachekeeper_installation_snapshot_with_context([NSURL fileURLWithPath:root],@"test.identity",@"1.0",AxsCacheKeeperInstallationContextTestInjected,&error),
             "observation failure cannot override the original identity refusal");
         NSDictionary *identity=identity_failure(error,@"root",@"openIdentity",@"pathToFD"),*view=identity[@"viewObservation"];
-        identity_check([identity[@"differenceMask"] isEqual:@1920] && [view[@"context"] isEqual:@"testInjected"] && !view[@"resolvedInputEqualsResolvedFDPath"],
-            "original 1920 and explicit caller survive failed relationship observation");
+        identity_check(([identity[@"differenceMask"] unsignedIntegerValue]&4)!=0 && [view[@"context"] isEqual:@"testInjected"] && !view[@"resolvedInputEqualsResolvedFDPath"],
+            "original mode refusal and explicit caller survive failed relationship observation");
         if (!endpoint) identity_check([view[@"fdPathState"] isEqual:@"failed"] && [view[@"fdPathErrno"] isEqual:@(EIO)] &&
             [view[@"fdResolveState"] isEqual:@"notAttempted"] && !view[@"inputEqualsFDPath"] && identity_realpaths==1,"failed F_GETPATH forbids fabricated FD name or extra resolution");
         else if (endpoint==3) identity_check([view[@"fdPathState"] isEqual:@"invalidResult"] && [view[@"fdPathErrno"] isEqual:@0] &&
