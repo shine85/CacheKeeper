@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 #import "../AxsCacheKeeperScanTask.h"
 #import "../AxsCacheKeeperRecords.h"
 #import "../AxsCacheKeeperDirectories.h"
@@ -10,6 +11,19 @@ static void axs_cachekeeper_test_file(NSString *path, NSUInteger size) {axs_cach
 static NSDictionary *axs_cachekeeper_test_read(NSString *folder, NSString *name) { return [NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:name]]; }
 static void axs_cachekeeper_test_request(NSString *folder, NSString *token, NSString *bundle, BOOL cancel) {
     axs_cachekeeper_test_check([@{@"token":token,@"bundle":bundle,@"cancel":@(cancel)} writeToFile:[folder stringByAppendingPathComponent:@"request.plist"] atomically:YES],"request write");
+}
+static IMP axs_cachekeeper_test_cursor_advance;
+static void axs_cachekeeper_test_short_slice(id cursor,SEL selector,NSUInteger entries,NSTimeInterval seconds) {
+    // A slow quantum may consume fewer entries than the maximum. Keep real IO
+    // and the production cursor, changing only its allowed entry budget.
+    ((void (*)(id,SEL,NSUInteger,NSTimeInterval))axs_cachekeeper_test_cursor_advance)(cursor,selector,MIN(entries,16),seconds);
+}
+static NSUInteger axs_cachekeeper_test_wait_batch(AxsCacheKeeperScanService *service,NSString *folder) {
+    NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+10;NSUInteger ticks=0;
+    while([axs_cachekeeper_test_read(folder,@"batch.plist")[@"remaining"] count] && NSProcessInfo.processInfo.systemUptime<deadline) {
+        [service tick];ticks++;
+    }
+    return ticks;
 }
 int main(int argc, const char **argv) { @autoreleasepool {
     axs_cachekeeper_test_check(argc==2,"fixture argument");NSString *base=[NSString stringWithUTF8String:argv[1]];
@@ -68,7 +82,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     for(NSUInteger i=0;i<3;i++) [service tick];
     axs_cachekeeper_test_check([axs_cachekeeper_test_read(folder,@"snapshots.plist")[@"small.app"][@"scanProgress"][@"state"] isEqual:@"complete"],"small batch member completes while large task remains active");
     axs_cachekeeper_test_check([axs_cachekeeper_test_read(folder,@"batch.plist")[@"completed"] unsignedIntegerValue]==1,"batch completed counts terminal members only");
-    for(NSUInteger i=0;i<30 && [axs_cachekeeper_test_read(folder,@"batch.plist")[@"remaining"] count];i++) [service tick];
+    axs_cachekeeper_test_wait_batch(service,folder);
     axs_cachekeeper_test_check([axs_cachekeeper_test_read(folder,@"batch.plist")[@"completed"] unsignedIntegerValue]==2,"batch finishes continued large task");
     NSDictionary *completed=axs_cachekeeper_test_read(folder,@"snapshots.plist")[@"large.app"];
     axs_cachekeeper_test_request(folder,@"history",@"large.app",NO);[service tick];
@@ -131,6 +145,9 @@ int main(int argc, const char **argv) { @autoreleasepool {
     axs_cachekeeper_test_request(blockedFolder,@"cancel-independent",@"other.large",YES);[blocked tick];
     axs_cachekeeper_test_check([axs_cachekeeper_test_read(blockedFolder,@"scan.plist")[@"scanProgress"][@"state"] isEqual:@"cancelled"],"permanent batch save failure cannot starve single cancellation");
 
+    Method advanceMethod=class_getInstanceMethod(AxsCacheKeeperScanCursor.class,@selector(advanceEntries:seconds:));
+    axs_cachekeeper_test_check(advanceMethod!=NULL,"actual cursor quantum method exists");
+    axs_cachekeeper_test_cursor_advance=method_setImplementation(advanceMethod,(IMP)axs_cachekeeper_test_short_slice);
     for(NSUInteger variant=0;variant<3;variant++) {
         NSString *overlap=[base stringByAppendingPathComponent:[NSString stringWithFormat:@"overlap-%lu",(unsigned long)variant]];axs_cachekeeper_test_directory(overlap);
         __block BOOL rejectRetire=variant==2;
@@ -146,11 +163,19 @@ int main(int argc, const char **argv) { @autoreleasepool {
         axs_cachekeeper_test_check([axs_cachekeeper_test_read(overlap,@"batch.plist")[@"completed"] unsignedIntegerValue]==0,"overlap has no phantom batch completion");
         axs_cachekeeper_test_check([axs_cachekeeper_test_read(overlap,@"snapshots.plist")[@"large.app"][@"token"] isEqual:@"overlap-single"],"deferred batch never overwrites active single");
         rejectRetire=NO;
-        for(NSUInteger i=0;i<30 && [axs_cachekeeper_test_read(overlap,@"batch.plist")[@"remaining"] count];i++) [overlapService tick];
-        axs_cachekeeper_test_check([axs_cachekeeper_test_read(overlap,@"batch.plist")[@"completed"] unsignedIntegerValue]==1 &&
-            [axs_cachekeeper_test_read(overlap,@"snapshots.plist")[@"large.app"][@"token"] isEqual:@"overlap-batch"] &&
-            [axs_cachekeeper_test_read(overlap,@"snapshots.plist")[@"large.app"][@"scanProgress"][@"state"] isEqual:@"complete"],"deferred batch completion has matching durable terminal");
+        NSUInteger overlapTicks=axs_cachekeeper_test_wait_batch(overlapService,overlap);
+        NSDictionary *overlapResult=axs_cachekeeper_test_read(overlap,@"batch.plist");
+        NSDictionary *overlapHistory=axs_cachekeeper_test_read(overlap,@"snapshots.plist")[@"large.app"];
+        fprintf(stdout,"INFO: scan overlap variant=%lu ticks=%lu completed=%lu remaining=%lu state=%s\n",(unsigned long)variant,(unsigned long)overlapTicks,
+            (unsigned long)[overlapResult[@"completed"] unsignedIntegerValue],(unsigned long)[overlapResult[@"remaining"] count],
+            [overlapHistory[@"scanProgress"][@"state"] UTF8String] ?: "absent");
+        axs_cachekeeper_test_check(overlapTicks>30,"deferred work survives smaller real cursor quanta beyond the old tick cap");
+        axs_cachekeeper_test_check([overlapResult[@"token"] isEqual:@"overlap-batch"] && [overlapResult[@"scanState"] isEqual:@"complete"] &&
+            [overlapResult[@"remaining"] isKindOfClass:NSArray.class] && [overlapResult[@"completed"] unsignedIntegerValue]==1 && ![overlapResult[@"remaining"] count] &&
+            [overlapHistory[@"token"] isEqual:@"overlap-batch"] &&
+            [overlapHistory[@"scanProgress"][@"state"] isEqual:@"complete"],"deferred batch completion has matching durable terminal");
     }
+    method_setImplementation(advanceMethod,axs_cachekeeper_test_cursor_advance);
     NSString *timed=[base stringByAppendingPathComponent:@"time-gate"];axs_cachekeeper_test_directory(timed);
     __block NSTimeInterval now=1000;
     AxsCacheKeeperScanService *timedService=[[AxsCacheKeeperScanService alloc] initWithFolder:timed resolver:resolver writer:nil];
