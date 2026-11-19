@@ -509,14 +509,20 @@ static NSArray *AxsCacheKeeperImagePathIdentity(NSString *home,NSString *relativ
     if (resultFD) *resultFD=fd;else close(fd);
     return identity;
 }
-static NSString *AxsCacheKeeperImageRelative(NSString *home,NSString *path) {
-    if (![home isKindOfClass:NSString.class] || ![path isKindOfClass:NSString.class] || !path.isAbsolutePath) return nil;
+static NSArray<NSString *> *AxsCacheKeeperImageHomeBases(NSString *home) {
+    if (![home isKindOfClass:NSString.class]) return @[];
+    // Cache only within one worker refresh. FD identity checks still resolve/open the
+    // current home for each owner, so this is never authorization across refreshes.
+    NSString *resolved=home.stringByResolvingSymlinksInPath;
+    return @[home,home.stringByStandardizingPath,resolved,resolved.stringByStandardizingPath];
+}
+static NSString *AxsCacheKeeperImageRelativeWithBases(NSArray<NSString *> *bases,NSString *path) {
+    if (!bases.count || ![path isKindOfClass:NSString.class] || !path.isAbsolutePath) return nil;
     NSArray *components=[path componentsSeparatedByString:@"/"];
     for (NSUInteger i=1;i<components.count;i++)
         if (![components[i] length] || [components[i] isEqual:@"."] || [components[i] isEqual:@".."] || [components[i] containsString:@"\\"]) return nil;
     // Foundation may return either /var or /private/var for the same system container.
-    NSString *resolved=home.stringByResolvingSymlinksInPath;
-    for (NSString *base in @[home,home.stringByStandardizingPath,resolved,resolved.stringByStandardizingPath]) {
+    for (NSString *base in bases) {
         NSString *prefix=[base stringByAppendingString:@"/"];
         if ([path hasPrefix:prefix]) {
             NSString *relative=[path substringFromIndex:prefix.length];
@@ -525,13 +531,15 @@ static NSString *AxsCacheKeeperImageRelative(NSString *home,NSString *path) {
     }
     return nil;
 }
-static NSString *AxsCacheKeeperImageScopeReason(NSDictionary *context,AxsCacheKeeperImageBinding *binding) {
+static NSString *AxsCacheKeeperImageRelative(NSString *home,NSString *path) {
+    return AxsCacheKeeperImageRelativeWithBases(AxsCacheKeeperImageHomeBases(home),path);
+}
+static NSString *AxsCacheKeeperImageScopeReasonWithRelative(NSDictionary *context,AxsCacheKeeperImageBinding *binding,NSString *relative) {
     if (![context[@"valid"] boolValue] || !axs_cachekeeper_state_valid(context[@"appState"]) ||
         !axs_cachekeeper_input_strings(context[@"selected"],axs_cachekeeper_relative_path)) return @"configurationInvalid";
     if (!axs_cachekeeper_app_enabled(context[@"appState"])) return @"appDisabled";
     if (![context[@"installation"] isKindOfClass:NSString.class] || ![context[@"installation"] length]) return @"installationUnverified";
     if (binding.installation && ![binding.installation isEqual:context[@"installation"]]) return @"installationChanged";
-    NSString *relative=AxsCacheKeeperImageRelative(context[@"home"],binding.path);
     if (!relative || axs_cachekeeper_retention_path(relative)) return @"scopeNotAuthorized";
     for (NSString *excluded in axs_cachekeeper_exclusions(context[@"appState"]))
         if (axs_cachekeeper_paths_overlap(relative,excluded)) return @"scopeNotAuthorized";
@@ -539,6 +547,9 @@ static NSString *AxsCacheKeeperImageScopeReason(NSDictionary *context,AxsCacheKe
     NSArray *allowed=axs_cachekeeper_effective_paths(context[@"selected"],context[@"appState"],@[@"Library/Caches",@"tmp"]);
     for (NSString *root in allowed) if (axs_cachekeeper_path_inside(relative,root)) return nil;
     return @"scopeNotAuthorized";
+}
+static NSString *AxsCacheKeeperImageScopeReason(NSDictionary *context,AxsCacheKeeperImageBinding *binding) {
+    return AxsCacheKeeperImageScopeReasonWithRelative(context,binding,AxsCacheKeeperImageRelative(context[@"home"],binding.path));
 }
 static BOOL AxsCacheKeeperImageOverlaps(NSString *left,NSString *right) {
     return left.length && right.length && axs_cachekeeper_paths_overlap(left,right);
@@ -829,15 +840,23 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     self.context=context;
     @synchronized(self) {if (![self.operationInstallation isEqual:context[@"installation"]]) {self.operationInstallation=context[@"installation"];self.installationGeneration++;}}
     NSArray *bindings=[self axs_cachekeeper_bindings];
-    for (AxsCacheKeeperImageBinding *binding in bindings) {
+    NSArray *homeBases=AxsCacheKeeperImageHomeBases(context[@"home"]);
+    NSMutableArray *relativePaths=[NSMutableArray arrayWithCapacity:bindings.count];
+    for (AxsCacheKeeperImageBinding *binding in bindings)
+        [relativePaths addObject:AxsCacheKeeperImageRelativeWithBases(homeBases,binding.path) ?: NSNull.null];
+    for (NSUInteger index=0;index<bindings.count;index++) {
+        AxsCacheKeeperImageBinding *binding=bindings[index];
+        NSString *relative=relativePaths[index]==NSNull.null ? nil : relativePaths[index];
         binding.restricted=NO;binding.eligible=NO;
-        NSString *reason=AxsCacheKeeperImageScopeReason(context,binding);
+        NSString *reason=AxsCacheKeeperImageScopeReasonWithRelative(context,binding,relative);
         if (!reason && !AxsCacheKeeperImageInstanceUnchanged(binding)) reason=@"unsupportedInstance";
-        NSString *relative=!reason ? AxsCacheKeeperImageRelative(context[@"home"],binding.path) : nil;
-        NSArray *identity=relative ? AxsCacheKeeperImagePathIdentity(context[@"home"],relative,NULL) : nil;
+        NSArray *identity=!reason && relative ? AxsCacheKeeperImagePathIdentity(context[@"home"],relative,NULL) : nil;
         if (!reason && (!identity || (binding.identity && ![binding.identity isEqual:identity]))) reason=@"pathChanged";
-        if (!reason) for (AxsCacheKeeperImageBinding *other in bindings)
-            if (other!=binding && (other.owner || other.pending) && AxsCacheKeeperImageOverlaps(relative,AxsCacheKeeperImageRelative(context[@"home"],other.path))) {reason=@"overlappingOwners";break;}
+        if (!reason) for (NSUInteger otherIndex=0;otherIndex<bindings.count;otherIndex++) {
+            AxsCacheKeeperImageBinding *other=bindings[otherIndex];
+            NSString *otherRelative=relativePaths[otherIndex]==NSNull.null ? nil : relativePaths[otherIndex];
+            if (other!=binding && (other.owner || other.pending) && AxsCacheKeeperImageOverlaps(relative,otherRelative)) {reason=@"overlappingOwners";break;}
+        }
         binding.reason=reason ?: @"none";
         if (!reason) {
             binding.installation=context[@"installation"];binding.relative=relative;binding.home=context[@"home"];

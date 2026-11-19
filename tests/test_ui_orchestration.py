@@ -29,7 +29,7 @@ RESULTS = {"WebKitResults.xcresult": "WebKit", "ImageCacheResults.xcresult": "SD
            "ImageCache515Results.xcresult": "SDK515", "ImageCache510Results.xcresult": "SDK510",
            "ImageCache510AbsentResults.xcresult": "SDK510Absent", "Results.xcresult": "Search", "ScanPageTests.xcresult": "ScanPage"}
 STAMP = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-FIXTURES = ROOT / "tmp/diagnostics-144-followup" / ("runner-fixtures-" + STAMP)
+FIXTURES = ROOT / "tmp/feedback-1792" / ("runner-fixtures-" + STAMP)
 
 
 def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
@@ -52,7 +52,9 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
         if len(command) > 1 and command[1].endswith("run_search_editing_red.py"):
             stage, expected_timeout = "searchRed", 1200
         elif len(command) > 1 and command[1].endswith("run_image_legacy_red.py"):
-            stage, expected_timeout = "imageLegacyRed", 1200
+            stage, expected_timeout = "imageLegacyRed", 1320
+        elif command[:3] == ["xcrun", "simctl", "list"]:
+            stage, expected_timeout = "discovery", 300
         elif command[0] == "xcodegen":
             spec_name = Path(command[command.index("--spec") + 1]).name
             configured_sdk = {"project.yml": "521", "image-sdk-5.15.5.yml": "515",
@@ -100,8 +102,9 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
         else:
             raise AssertionError("Unexpected command: " + repr(command))
         assert timeout == expected_timeout, (stage, timeout, expected_timeout)
-        assert kwargs.get("check") is (stage != "boot"), (stage, kwargs)
-        assert not any(key in kwargs for key in ("capture_output", "stdout", "stderr")), kwargs
+        assert kwargs.get("check", True) is (stage != "boot"), (stage, kwargs)
+        assert not any(key in kwargs for key in ("stdout", "stderr")), kwargs
+        assert bool(kwargs.get("capture_output")) == (stage == "discovery")
         commands.append(stage)
         print("SIMULATED external command:", stage, flush=True)
         failure = failures.get(stage)
@@ -128,18 +131,18 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
                 package["pins"].append("invalid")
                 content = json.dumps(package)
             resolved.write_text(content, encoding="utf-8")
-        return subprocess.CompletedProcess(command, 0)
+        return subprocess.CompletedProcess(command, 0, devices if stage == "discovery" else None)
 
     exit_code, exception = 0, None
     devices = json.dumps({"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-17-5": [
         {"isAvailable": True, "name": "iPhone Test", "udid": "TEST-DEVICE"}]}})
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
-            patch.object(sys, "platform", "darwin"), \
-            patch.object(subprocess, "run", fake_run), \
-            patch.object(subprocess, "check_output", return_value=devices):
+            patch.object(sys, "platform", "darwin"):
         try:
-            exec(compile(SOURCE, str(ROOT / "tests/run_ui_tests.py"), "exec"),
-                 {"__file__": str(fixture / "tests/run_ui_tests.py"), "__name__": "__main__"})
+            namespace = {"__file__": str(fixture / "tests/run_ui_tests.py"), "__name__": "ui_runner_fixture"}
+            exec(compile(SOURCE, str(ROOT / "tests/run_ui_tests.py"), "exec"), namespace)
+            namespace["run_command"] = fake_run
+            exit_code = namespace["main"]([])
         except SystemExit as error:
             exit_code = error.code if isinstance(error.code, int) else 1
             if error.code:
@@ -148,7 +151,7 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
             exit_code, exception = 1, type(error).__name__
             traceback.print_exc()
     return {"name": name, "exit": exit_code, "exception": exception, "commands": commands,
-            "suites": suites, "exports": exports, "stdout": stdout.getvalue(), "stderr": stderr.getvalue()}
+            "suites": suites, "exports": exports, "summary": json.loads((output / "run-summary.json").read_text()) if (output / "run-summary.json").exists() else None, "stdout": stdout.getvalue(), "stderr": stderr.getvalue()}
 
 
 cases = [
@@ -189,6 +192,9 @@ cases = [
     ("initial_build_fail_stop", {"build521": "exit"}, None, False, [], [], True, None),
     ("initial_pin_fail_stop", {}, "build521_wrong", False, [], [], True, None),
     ("initial_sign_fail_stop", {"sign": "exit"}, None, False, [], [], True, None),
+    ("discovery_timeout_stop", {"discovery": "timeout"}, None, False, [], [], True, None),
+    ("discovery_exit_stop", {"discovery": "exit"}, None, False, [], [], True, None),
+    ("bootstatus_timeout_stop", {"bootstatus": "timeout"}, None, False, [], [], True, None),
 ]
 results = []
 for name, failures, bad_pin, ambiguous, want_suites, want_exports, want_failure, summary_label in cases:
@@ -200,6 +206,13 @@ for name, failures, bad_pin, ambiguous, want_suites, want_exports, want_failure,
         errors.append(f"attachment schedule: expected {want_exports}, got {result['exports']}")
     if (result["exit"] != 0) != want_failure:
         errors.append(f"exit: expected failure={want_failure}, got {result['exit']}")
+    ledger = result['summary']
+    if not ledger or ledger['state'] != ('failed' if want_failure else 'passed'):
+        errors.append('durable summary disagrees with actual exit')
+    if ledger and any(row['state'] == 'running' for row in ledger['stages']):
+        errors.append('finished command remains running in durable ledger')
+    if name.startswith('discovery_') and 'boot' in result['commands']:
+        errors.append('failed discovery must not boot a simulator')
     if summary_label:
         if result["exception"]:
             errors.append("uncaught failure: " + result["exception"])

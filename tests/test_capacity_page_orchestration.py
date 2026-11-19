@@ -238,7 +238,7 @@ class CapacityOrchestrationTests(unittest.TestCase):
         # Parse the bounded job block without adding a PyYAML dependency to CI.
         import re
         workflow = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8-sig")
-        job = workflow.split("\n  capacity-page:\n", 1)[1].split("\n  build:\n", 1)[0]
+        job = re.split(r"\n  [a-z][a-z0-9-]*:\n", workflow.split("\n  capacity-page:\n", 1)[1], maxsplit=1)[0]
         job_budget = int(re.search(r"^    timeout-minutes: (\d+)$", job, re.M)[1]) * 60
         step_budgets = [int(n) * 60 for n in re.findall(r"^        timeout-minutes: (\d+)$", job, re.M)]
         self.assertEqual(len(step_budgets), 4)

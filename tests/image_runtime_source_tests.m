@@ -101,9 +101,25 @@ static AxsCacheKeeperImageLegacyCheck axs_cachekeeper_runtime_source_check(const
     return axs_cachekeeper_runtime_source_matches(base,implementations) ? AxsCacheKeeperImageLegacyComplete() :
         AxsCacheKeeperImageLegacyResult("mainIdentity","bundle",0,0);
 }
+static atomic_uint axs_cachekeeper_runtime_home_resolutions;
+static atomic_bool axs_cachekeeper_runtime_count_only_home;
+@interface NSString (AxsCacheKeeperCountedHomeResolution)
+- (NSString *)axs_cachekeeper_countedResolvedHome;
+@end
+@implementation NSString (AxsCacheKeeperCountedHomeResolution)
+- (NSString *)axs_cachekeeper_countedResolvedHome {
+    atomic_fetch_add(&axs_cachekeeper_runtime_home_resolutions,1);
+    // The measured fixture uses an already canonical home; count calls without
+    // making the RED depend on host filesystem latency. open/openat/fstat remain real.
+    if (atomic_load(&axs_cachekeeper_runtime_count_only_home)) return self;
+    return self.stringByResolvingSymlinksInPath;
+}
+@end
 #define AxsCacheKeeperImageLegacyHelpersMatch axs_cachekeeper_runtime_helpers_match
 #define AxsCacheKeeperImageLegacySourceCheck axs_cachekeeper_runtime_source_check
+#define stringByResolvingSymlinksInPath axs_cachekeeper_countedResolvedHome
 #import "AxsCacheKeeperImageCache.m"
+#undef stringByResolvingSymlinksInPath
 #undef AxsCacheKeeperImageLegacyHelpersMatch
 #undef AxsCacheKeeperImageLegacySourceCheck
 
@@ -122,11 +138,11 @@ static void axs_cachekeeper_runtime_wait(AxsCacheKeeperImageCache *engine,BOOL (
 }
 int main(int argc,const char *argv[]) {
     @autoreleasepool {
-        axs_cachekeeper_runtime_require(argc==2 && (!strcmp(argv[1],"fingerprint") || !strcmp(argv[1],"pinned")),"one isolated scenario is required");
+        axs_cachekeeper_runtime_require(argc==2 && (!strcmp(argv[1],"fingerprint") || !strcmp(argv[1],"pinned") || !strcmp(argv[1],"refresh")),"one isolated scenario is required");
         axs_cachekeeper_runtime_fingerprinted=!strcmp(argv[1],"fingerprint");
         Method helper=class_getClassMethod(AxsCacheKeeperRuntimeSourceHelper.class,@selector(axs_cachekeeper_sample));
         axs_cachekeeper_runtime_helper_original=method_getImplementation(helper);
-        NSString *home=[[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString] stringByStandardizingPath];
+        NSString *home=[[[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString] stringByStandardizingPath] stringByResolvingSymlinksInPath];
         NSObject *contextLock=[NSObject new];
         NSMutableDictionary *context=[@{@"valid":@YES,@"appState":@{@"enabled":@YES,@"mode":@"auto",@"autoDiscover":@YES},
             @"selected":@[],@"home":home,@"bundle":@"cachekeeper.owned.runtime.fixture",@"version":@"1",@"installation":@"runtime-fixture",@"reportWritable":@YES} mutableCopy];
@@ -134,6 +150,43 @@ int main(int argc,const char *argv[]) {
         AxsCacheKeeperImageCache *engine=[[AxsCacheKeeperImageCache alloc] initWithContextProvider:provider observer:nil];
         if (!axs_cachekeeper_runtime_fingerprinted) [engine usePinnedLegacySDKForIntegrationTests];
         [engine startObserving];axs_cachekeeper_runtime_refresh(engine);
+        if (!strcmp(argv[1],"refresh")) {
+            // Populate the registry while disabled, so setup does not itself run the
+            // deliberately quadratic RED before the measured authorization refresh.
+            @synchronized(contextLock) {context[@"appState"]=@{@"enabled":@NO};}
+            axs_cachekeeper_runtime_refresh(engine);
+            NSMutableArray *owners=[NSMutableArray new];
+            for (NSUInteger i=0;i<64;i++) {
+                SDImageCache *item=[[SDImageCache alloc] initWithNamespace:[NSString stringWithFormat:@"owner-%lu",(unsigned long)i]
+                    diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+                [owners addObject:item];
+            }
+            axs_cachekeeper_runtime_refresh(engine);
+            @synchronized(contextLock) {context[@"appState"]=@{@"enabled":@YES,@"mode":@"auto",@"autoDiscover":@YES};}
+            // Queue-local measurement excludes discovery/owner setup and preserves every FD identity probe.
+            dispatch_semaphore_t measured=dispatch_semaphore_create(0);
+            __block unsigned resolutions=0;
+            dispatch_async(engine.work,^{
+                atomic_store(&axs_cachekeeper_runtime_home_resolutions,0);
+                atomic_store(&axs_cachekeeper_runtime_count_only_home,true);
+                NSUInteger event=[engine axs_cachekeeper_begin_event:@"configuration" context:[engine axs_cachekeeper_operation_context] current:YES];
+                [engine axs_cachekeeper_refresh_event:event];
+                axs_cachekeeper_operation_finish(engine.operationHistory,event);
+                resolutions=atomic_load(&axs_cachekeeper_runtime_home_resolutions);
+                atomic_store(&axs_cachekeeper_runtime_count_only_home,false);
+                dispatch_semaphore_signal(measured);
+            });
+            axs_cachekeeper_runtime_require(dispatch_semaphore_wait(measured,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"64-owner refresh finishes within unchanged 5s");
+            axs_cachekeeper_runtime_require(resolutions<=65,"64-owner refresh resolves home at most once plus 64 FD identity probes");
+            axs_cachekeeper_runtime_require(resolutions>=64,"refresh retains each owner filesystem identity probe");
+            axs_cachekeeper_runtime_require([engine.receipt[@"restricted"] unsignedIntegerValue]==64,"all 64 real fixture owners are restricted");
+            SDImageCache *overflow=[[SDImageCache alloc] initWithNamespace:@"owner-0" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+            [owners addObject:overflow];axs_cachekeeper_runtime_refresh(engine);
+            axs_cachekeeper_runtime_require([engine.receipt[@"reason"] isEqual:@"observationLimit"] &&
+                ![engine.receipt[@"restricted"] unsignedIntegerValue] && ![engine.receipt[@"eligible"] unsignedIntegerValue],"overflow revokes all owners and still completes refresh");
+            axs_cachekeeper_runtime_require([NSFileManager.defaultManager removeItemAtPath:home error:nil],"refresh fixture root is removed");
+            printf("PASS: image-runtime-source fixture refresh\n");return 0;
+        }
         NSString *source=axs_cachekeeper_runtime_fingerprinted ? @"imageFingerprint" : @"testPinned";
         axs_cachekeeper_runtime_require([engine.receipt[@"discoveryCheck"][@"source"] isEqual:source],"selected source is published");
         SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"images" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];

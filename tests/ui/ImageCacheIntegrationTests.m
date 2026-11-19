@@ -73,6 +73,7 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
 @property(nonatomic,strong) NSMutableArray<SDImageCache *> *owners;
 @property(atomic) NSUInteger contextReads;
 @property(atomic,copy) void (^contextBarrier)(void);
+@property(nonatomic) NSUInteger refreshSequence;
 @end
 @implementation ImageCacheIntegrationTests
 - (void)setUp {
@@ -102,8 +103,13 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     [AxsCacheKeeperCleanupRules removeAllRulesForTesting];[super tearDown];
 }
 - (void)axs_cachekeeper_refresh {
-    XCTestExpectation *done=[self expectationWithDescription:@"image configuration refresh"];
-    [self.engine refreshWithCompletion:^{[done fulfill];}];
+    NSUInteger sequence=++self.refreshSequence,owners=self.owners.count;
+    NSTimeInterval began=NSProcessInfo.processInfo.systemUptime;
+    XCTestExpectation *done=[self expectationWithDescription:[NSString stringWithFormat:@"image configuration refresh #%lu owners=%lu",(unsigned long)sequence,(unsigned long)owners]];
+    [self.engine refreshWithCompletion:^{
+        NSLog(@"CK_IMAGE_REFRESH_DONE sequence=%lu owners=%lu elapsed=%.3f",(unsigned long)sequence,(unsigned long)owners,NSProcessInfo.processInfo.systemUptime-began);
+        [done fulfill];
+    }];
     [self waitForExpectations:@[done] timeout:5];
     XCTAssertNotNil(axs_cachekeeper_image_cache_projection(self.engine.receipt));
 }

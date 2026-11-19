@@ -93,14 +93,64 @@ jobs:
             tmp/feedback-1792/capacity-page-*/**/Results.xcresult
           if-no-files-found: warn
 
+  uikit:
+    name: UIKit 全套断言与 SDK 兼容回归
+    needs: native
+    if: inputs.native_only != true
+    runs-on: macos-15-intel
+    # Runner command maxima total 9180s; <=28 owned-group stops add <=168s.
+    # Runner deadline 9500s < step 160m. Checkout3 + tools8 + checks2 + run160
+    # + immutable archive3 + upload5 = 181m, within the 190m job budget.
+    timeout-minutes: 190
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: '1'
+    steps:
+      - name: 获取源码
+        timeout-minutes: 3
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 准备 UIKit 工具
+        timeout-minutes: 8
+        run: brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+
+      - name: 验证 UIKit 编排与进程收尾
+        timeout-minutes: 2
+        run: |
+          python3 tests/test_ui_orchestration.py
+          python3 tests/test_ui_process_lifecycle.py
+
+      - name: UIKit 点按与键盘回归
+        timeout-minutes: 160
+        run: exec python3 tests/run_ui_tests.py
+
+      - name: 固化 UIKit 回归产物
+        if: always()
+        timeout-minutes: 3
+        run: exec python3 tests/run_ui_tests.py --archive-only
+
+      - name: 保存 UIKit 回归结果
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: UIKit-input-results
+          # Upload closed files only; never traverse a live/incomplete xcresult/Staging.
+          path: |
+            tmp/ui-artifacts/UIKit-results.tar.gz
+            tmp/ui-artifacts/archive-summary.json
+            tmp/input-ui-tests/run-summary.json
+          if-no-files-found: warn
+
   build:
     name: 测试、编译与检查 deb
-    needs: native
+    needs: [native, uikit]
     if: inputs.native_only != true
     # macos-15 的 arm64 池连续未分配 runner；宿主改为 Intel，设备目标仍由 Makefile 定义。
     runs-on: macos-15-intel
-    # Run 153 used 32 minutes. The additional SDK build and two isolated suites need
-    # their own bounded time; per-test assertions and runner deadlines stay unchanged.
+    # UIKit has its own complete budget; package/release still require its success.
     timeout-minutes: 60
     env:
       THEOS: ${{ github.workspace }}/tmp/theos
@@ -113,41 +163,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: UIKit 点按与键盘回归
-        run: |
-          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
-          python3 tests/test_ui_orchestration.py
-          python3 tests/run_ui_tests.py
-
-      - name: 保存 UIKit 回归结果
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: UIKit-input-results
-          path: |
-            tmp/search-editing-red/RedResults.xcresult
-            tmp/search-editing-red/red-summary.json
-            tmp/search-editing-red/red.log
-            tmp/input-ui-tests/Results.xcresult
-            tmp/input-ui-tests/ScanPageTests.xcresult
-            tmp/input-ui-tests/ScanPageScreenshots
-            tmp/input-ui-tests/Screenshots
-            tmp/input-ui-tests/WebKitResults.xcresult
-            tmp/input-ui-tests/WebKitScreenshots
-            tmp/input-ui-tests/ImageCacheResults.xcresult
-            tmp/input-ui-tests/ImageCacheScreenshots
-            tmp/input-ui-tests/ImageCache515Results.xcresult
-            tmp/input-ui-tests/ImageCache515Screenshots
-            tmp/input-ui-tests/ImageCache510Results.xcresult
-            tmp/input-ui-tests/ImageCache510Screenshots
-            tmp/input-ui-tests/ImageCache510AbsentResults.xcresult
-            tmp/input-ui-tests/ImageCache510AbsentScreenshots
-            tmp/image-legacy-red/RedResults.xcresult
-            tmp/image-legacy-red/red-summary.json
-            tmp/image-legacy-red/red.log
-            tmp/image-legacy-red/source-manifest.json
-          if-no-files-found: ignore
 
       - name: 获取 RootHide Theos
         uses: actions/checkout@v4
