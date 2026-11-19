@@ -121,7 +121,6 @@ NSDictionary *axs_cachekeeper_scan_allocation_test_stats(const struct stat *samp
     _allocation=allocation;_allocationBaseline=[allocation snapshotComplete:NO baseline:nil];
     _root=root;_limit=limit;_depth=MIN(MAX(depth,(NSUInteger)1),AxsCacheKeeperScanDepth);
     _stack=[NSMutableArray new];_diagnostics=axs_cachekeeper_scan_diagnostics_new();_state=@"running";
-    if([(id)observer isKindOfClass:NSNull.class]) {[self axs_cachekeeper_fail:@"readError" code:EINVAL stat:NO];return self;}
     _metadataObserver=[observer copy];
     struct stat original,opened;
     if (!root.isFileURL || lstat(root.fileSystemRepresentation,&original)) { [self axs_cachekeeper_fail:@"readError" code:errno ?: EINVAL stat:YES];return self; }

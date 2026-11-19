@@ -4,6 +4,9 @@
 
 // Synchronous, serial-queue-confined observation; info is borrowed for this call.
 // Components are raw relative name bytes without NUL, root is an empty array.
+// Internal typed callback: pass nil or a valid block with this exact signature.
+// Arbitrary Objective-C objects cast to this type do not satisfy the block ABI.
+// The cursor copies a nonnil block so captures outlive the calling scope.
 typedef void (^AxsCacheKeeperScanMetadataObserver)(const struct stat *info, NSArray<NSData *> *components);
 
 // Confined to one serial queue. Cursors are intentionally process-local.

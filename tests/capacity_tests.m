@@ -16,6 +16,9 @@
 static void AxsCacheKeeperCapacityCheck(BOOL value,const char *message) {
     if(!value) {fprintf(stderr,"FAIL: capacity: %s\n",message);exit(1);}
 }
+static void AxsCacheKeeperCapacityMarker(const char *stage) {
+    printf("MARK: capacity: %s\n",stage);fflush(stdout);
+}
 static void AxsCacheKeeperCapacitySetupCheck(BOOL value,int code,const char *operation) {
     if(!value) {fprintf(stderr,"SETUP-FAIL: capacity: %s errno=%d (%s)\n",operation,code,strerror(code));exit(2);}
 }
@@ -200,10 +203,13 @@ static void AxsCacheKeeperCapacityRawSetup(NSString *base) {(void)AxsCacheKeeper
 static void AxsCacheKeeperCapacityObserver(NSString *base) {
     NSString *path=AxsCacheKeeperCapacityRawFixture(base);
     NSMutableArray *observations=[NSMutableArray new];
+    AxsCacheKeeperCapacityMarker("observer valid block init begin");
     AxsCacheKeeperScanCursor *cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:[NSURL fileURLWithPath:path] entryLimit:100 depthLimit:64 metadataObserver:^(const struct stat *info,NSArray<NSData *> *components) {
         [observations addObject:@{ @"components":components,@"mode":@(info->st_mode),@"blocks":@(info->st_blocks) }];
     }];
+    AxsCacheKeeperCapacityMarker("observer valid block init end; enumeration begin");
     for(NSUInteger i=0;i<1000 && [cursor.state isEqual:@"running"];i++) [cursor advanceEntries:1 seconds:1];
+    AxsCacheKeeperCapacityMarker("observer enumeration end");
     NSArray *rawDirectory=@[[NSData dataWithBytes:AxsCacheKeeperCapacityRawDirectory length:sizeof(AxsCacheKeeperCapacityRawDirectory)-1]],
         *rawFile=@[rawDirectory[0],[NSData dataWithBytes:AxsCacheKeeperCapacityRawFile length:sizeof(AxsCacheKeeperCapacityRawFile)-1]];
     BOOL foundDirectory=NO,foundFile=NO,foundLink=NO,foundFIFO=NO;
@@ -215,10 +221,53 @@ static void AxsCacheKeeperCapacityObserver(NSString *base) {
     }
     AxsCacheKeeperCapacityCheck([cursor.state isEqual:@"complete"] && observations.count==5 && [observations[0][@"components"] count]==0 && foundDirectory && foundFile && foundLink && foundFIFO,"observer receives root and every raw-byte entry without following links");
     AxsCacheKeeperCapacityCheck([cursor.result[@"allocationObservation"] count]==0,"observer mode retains no unrelated legacy inode observations");
+    AxsCacheKeeperCapacityMarker("observer capacity init begin");
     AxsCacheKeeperCapacityRoot *root=[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:[NSURL fileURLWithPath:path]];
+    AxsCacheKeeperCapacityMarker("observer capacity init end; measurement begin");
     AxsCacheKeeperCapacityFinish(root,1);AxsCacheKeeperCapacityCheck([root.state isEqual:@"complete"] && [root.result[@"entries"] isEqual:@5] && [root.result[@"logicalBytes"] isEqual:@3],"raw UTF8/control components need no string decoding to measure");AxsCacheKeeperCapacityClosedResult(root.result);
-    cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:[NSURL fileURLWithPath:path] entryLimit:100 depthLimit:64 metadataObserver:(id)NSNull.null];
-    AxsCacheKeeperCapacityCheck([cursor.state isEqual:@"readError"] && cursor.openDirectoryCount==0,"NSNull observer is rejected without a block invocation");
+    AxsCacheKeeperCapacityMarker("observer measurement and closed result end");
+}
+static NSUInteger AxsCacheKeeperCapacityGlobalObserverCalls;
+static void AxsCacheKeeperCapacityObserverOwnership(NSString *base) {
+    NSString *path=AxsCacheKeeperCapacityDirectory(base,@"observer-ownership"),*file=[path stringByAppendingPathComponent:@"data"];
+    AxsCacheKeeperCapacityFile(file,7);NSURL *url=[NSURL fileURLWithPath:path];
+    AxsCacheKeeperCapacityGlobalObserverCalls=0;
+    AxsCacheKeeperScanMetadataObserver global=^(const struct stat *info,NSArray<NSData *> *components) {
+        if(info && components) AxsCacheKeeperCapacityGlobalObserverCalls++;
+    };
+    AxsCacheKeeperCapacityMarker("observer ownership global init begin");
+    AxsCacheKeeperScanCursor *cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:url entryLimit:100 depthLimit:64 metadataObserver:global];
+    for(NSUInteger i=0;i<1000 && [cursor.state isEqual:@"running"];i++) [cursor advanceEntries:1 seconds:1];
+    AxsCacheKeeperCapacityCheck([cursor.state isEqual:@"complete"] && AxsCacheKeeperCapacityGlobalObserverCalls==2,"global observer receives the opened root and file");
+    AxsCacheKeeperCapacityMarker("observer ownership global end");cursor=nil;
+    for(NSNumber *copyBefore in @[@NO,@YES]) {
+        __block NSUInteger calls=0;__weak NSObject *weakCapture=nil;
+        @autoreleasepool {
+            NSObject *capture=[NSObject new];weakCapture=capture;
+            // The direct capturing literal starts on the stack. The cursor must
+            // own a copy; the second variant supplies an explicit heap copy.
+            __unsafe_unretained AxsCacheKeeperScanMetadataObserver stack=^(const struct stat *info,NSArray<NSData *> *components) {
+                if(capture && info && components) calls++;
+            };
+            AxsCacheKeeperCapacityMarker(copyBefore.boolValue ? "observer ownership heap init begin" : "observer ownership stack init begin");
+            if(copyBefore.boolValue) {
+                AxsCacheKeeperScanMetadataObserver heap=[stack copy];
+                cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:url entryLimit:100 depthLimit:64 metadataObserver:heap];
+            } else cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:url entryLimit:100 depthLimit:64 metadataObserver:stack];
+        }
+        AxsCacheKeeperCapacityCheck(weakCapture!=nil && calls==1,"captured observer survives its source autorelease scope");
+        AxsCacheKeeperCapacityMarker("observer ownership source scope drained; enumeration begin");
+        for(NSUInteger i=0;i<1000 && [cursor.state isEqual:@"running"];i++) [cursor advanceEntries:1 seconds:1];
+        AxsCacheKeeperCapacityCheck([cursor.state isEqual:@"complete"] && calls==2,"retained captured observer receives later file metadata");
+        cursor=nil;AxsCacheKeeperCapacityCheck(weakCapture==nil,"releasing cursor releases the observer capture");
+        AxsCacheKeeperCapacityMarker("observer ownership enumeration and release end");
+    }
+    AxsCacheKeeperCapacityMarker("observer ownership nil init begin");
+    cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:url entryLimit:100 depthLimit:64 metadataObserver:nil];
+    for(NSUInteger i=0;i<1000 && [cursor.state isEqual:@"running"];i++) [cursor advanceEntries:1 seconds:1];
+    AxsCacheKeeperCapacityCheck([cursor.state isEqual:@"complete"] && [cursor.result[@"bytes"] isEqual:@7] &&
+        [cursor.result[@"allocationObservation"][@"allocatedBytes"] unsignedLongLongValue]==AxsCacheKeeperCapacityBlocks(file),"nil observer preserves legacy regular-file allocation");
+    AxsCacheKeeperCapacityMarker("observer ownership nil end");
 }
 @interface AxsCacheKeeperCapacityRoot (AxsCacheKeeperCapacityObserverBoundary)
 - (void)axs_cachekeeper_observe:(const struct stat *)info components:(NSArray<NSData *> *)components;
@@ -385,10 +434,13 @@ static void AxsCacheKeeperCapacityBudgets(NSString *base) {
 int main(int argc,const char **argv) { @autoreleasepool {
     AxsCacheKeeperCapacityCheck(argc==2 || argc==3,"unique fixture root and optional case");
     NSString *base=[NSString stringWithUTF8String:argv[1]],*selection=argc==3 ? [NSString stringWithUTF8String:argv[2]] : @"all";
-    NSArray *names=@[@"totals",@"empty",@"observer",@"categories",@"slices",@"cancellation",@"identity",@"metadata",@"budgets",@"expected-identity",@"invalid-observer"];
-    void (*cases[])(NSString *)={AxsCacheKeeperCapacityTotals,AxsCacheKeeperCapacityEmpty,AxsCacheKeeperCapacityObserver,AxsCacheKeeperCapacityCategories,AxsCacheKeeperCapacitySlices,AxsCacheKeeperCapacityCancellation,AxsCacheKeeperCapacityIdentity,AxsCacheKeeperCapacityMetadata,AxsCacheKeeperCapacityBudgets,AxsCacheKeeperCapacityExpectedIdentity,AxsCacheKeeperCapacityInvalidObserver};
+    NSArray *names=@[@"totals",@"empty",@"observer",@"categories",@"slices",@"cancellation",@"identity",@"metadata",@"budgets",@"expected-identity",@"invalid-observer",@"observer-ownership"];
+    void (*cases[])(NSString *)={AxsCacheKeeperCapacityTotals,AxsCacheKeeperCapacityEmpty,AxsCacheKeeperCapacityObserver,AxsCacheKeeperCapacityCategories,AxsCacheKeeperCapacitySlices,AxsCacheKeeperCapacityCancellation,AxsCacheKeeperCapacityIdentity,AxsCacheKeeperCapacityMetadata,AxsCacheKeeperCapacityBudgets,AxsCacheKeeperCapacityExpectedIdentity,AxsCacheKeeperCapacityInvalidObserver,AxsCacheKeeperCapacityObserverOwnership};
     AxsCacheKeeperCapacityCheck([selection isEqual:@"all"] || [selection isEqual:@"raw-setup"] || [names containsObject:selection],"known case selection");
-    if([selection isEqual:@"raw-setup"]) {AxsCacheKeeperCapacityRawSetup(base);printf("PASS: capacity: raw-setup\n");return 0;}
-    for(NSUInteger i=0;i<names.count;i++) if([selection isEqual:@"all"] || [selection isEqual:names[i]]) {cases[i](base);printf("PASS: capacity: %s\n",[names[i] UTF8String]);}
+    if([selection isEqual:@"raw-setup"]) {AxsCacheKeeperCapacityMarker("raw-setup begin");AxsCacheKeeperCapacityRawSetup(base);printf("PASS: capacity: raw-setup\n");fflush(stdout);return 0;}
+    for(NSUInteger i=0;i<names.count;i++) if([selection isEqual:@"all"] || [selection isEqual:names[i]]) {
+        printf("BEGIN: capacity: %s\n",[names[i] UTF8String]);fflush(stdout);
+        cases[i](base);printf("PASS: capacity: %s\nEND: capacity: %s\n",[names[i] UTF8String],[names[i] UTF8String]);fflush(stdout);
+    }
     return 0;
 } }
