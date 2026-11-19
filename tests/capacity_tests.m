@@ -5,6 +5,9 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/mount.h>
+#include <dirent.h>
+#include <errno.h>
 #import <objc/runtime.h>
 
 // Expected totals come only from explicit fixture paths and independent OS lstat.
@@ -12,6 +15,12 @@
 // observation, fail-closed budgets or cancellation must break these behaviors.
 static void AxsCacheKeeperCapacityCheck(BOOL value,const char *message) {
     if(!value) {fprintf(stderr,"FAIL: capacity: %s\n",message);exit(1);}
+}
+static void AxsCacheKeeperCapacitySetupCheck(BOOL value,int code,const char *operation) {
+    if(!value) {fprintf(stderr,"SETUP-FAIL: capacity: %s errno=%d (%s)\n",operation,code,strerror(code));exit(2);}
+}
+static void AxsCacheKeeperCapacitySetupRequire(BOOL value,const char *message) {
+    if(!value) {fprintf(stderr,"SETUP-FAIL: capacity: %s\n",message);exit(2);}
 }
 static NSString *AxsCacheKeeperCapacityDirectory(NSString *base,NSString *relative) {
     NSString *path=[base stringByAppendingPathComponent:relative];
@@ -143,19 +152,60 @@ static void AxsCacheKeeperCapacityEmpty(NSString *base) {
     AxsCacheKeeperCapacityFinish(root,1);NSDictionary *result=root.result,*node=[result[@"nodes"] firstObject];
     AxsCacheKeeperCapacityCheck([result[@"state"] isEqual:@"complete"] && [result[@"allocatedBytes"] unsignedLongLongValue]==blocks && [result[@"logicalBytes"] isEqual:@0] && [result[@"entries"] isEqual:@1] && [result[@"uniqueInodes"] isEqual:@1] && [result[@"nodes"] count]==1 && [node[@"allocatedBytes"] unsignedLongLongValue]==blocks && [node[@"entries"] isEqual:@1],"empty root is observed once and has real directory allocation");
 }
+// APFS accepts valid UTF-8 and preserves its normalization. Use decomposed UTF-8,
+// multibyte characters and controls, never require ff/fe filenames on APFS:
+// https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/APFS_Guide/FAQ/FAQ.html
+static const char AxsCacheKeeperCapacityRawDirectory[]={'d','-','e',(char)0xcc,(char)0x81,'-',(char)0xe4,(char)0xb8,(char)0xad,'\t','\n',0};
+static const char AxsCacheKeeperCapacityRawFile[]={'f','-',(char)0xf0,(char)0x9f,(char)0x93,(char)0xa6,'\t','\n',0};
+static void AxsCacheKeeperCapacityRawEntry(int fd,const char *name) {
+    int copy=dup(fd);AxsCacheKeeperCapacitySetupCheck(copy>=0,errno,"dup raw fixture directory");
+    DIR *directory=fdopendir(copy);AxsCacheKeeperCapacitySetupCheck(directory!=NULL,errno,"fdopendir raw fixture directory");
+    BOOL found=NO;
+    for(;;) {
+        errno=0;struct dirent *entry=readdir(directory);int code=errno;
+        if(!entry) {AxsCacheKeeperCapacitySetupCheck(!code,code,"readdir raw fixture directory");break;}
+        if(!strcmp(entry->d_name,name)) found=YES;
+    }
+    int result=closedir(directory);AxsCacheKeeperCapacitySetupCheck(!result,errno,"closedir raw fixture directory");
+    AxsCacheKeeperCapacitySetupRequire(found,"filesystem must preserve raw fixture name bytes");
+}
+static NSString *AxsCacheKeeperCapacityRawFixture(NSString *base) {
+    NSString *path=AxsCacheKeeperCapacityDirectory(base,@"raw-observer");
+    int fd=open(path.fileSystemRepresentation,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    AxsCacheKeeperCapacitySetupCheck(fd>=0,errno,"open raw fixture root");
+    struct statfs filesystem;int result=fstatfs(fd,&filesystem);
+    AxsCacheKeeperCapacitySetupCheck(!result,errno,"fstatfs raw fixture root");
+    fprintf(stdout,"FIXTURE: capacity: filesystem=%s directoryBytes=%zu fileBytes=%zu valid UTF8/decomposed/tab/newline\n",
+        filesystem.f_fstypename,sizeof(AxsCacheKeeperCapacityRawDirectory)-1,sizeof(AxsCacheKeeperCapacityRawFile)-1);fflush(stdout);
+    result=mkdirat(fd,AxsCacheKeeperCapacityRawDirectory,0700);
+    AxsCacheKeeperCapacitySetupCheck(!result,errno,"mkdirat raw-byte directory fixture");
+    int child=openat(fd,AxsCacheKeeperCapacityRawDirectory,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    AxsCacheKeeperCapacitySetupCheck(child>=0,errno,"openat raw-byte directory fixture");
+    int data=openat(child,AxsCacheKeeperCapacityRawFile,O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW|O_CLOEXEC,0600);
+    AxsCacheKeeperCapacitySetupCheck(data>=0,errno,"openat raw-byte file fixture");
+    ssize_t count=write(data,"abc",3);int code=errno;
+    AxsCacheKeeperCapacitySetupCheck(count>=0,code,"write raw-byte file fixture");
+    AxsCacheKeeperCapacitySetupRequire(count==3,"raw-byte file fixture writes all three bytes");
+    result=close(data);AxsCacheKeeperCapacitySetupCheck(!result,errno,"close raw-byte file fixture");
+    AxsCacheKeeperCapacityRawEntry(fd,AxsCacheKeeperCapacityRawDirectory);AxsCacheKeeperCapacityRawEntry(child,AxsCacheKeeperCapacityRawFile);
+    struct stat info;result=fstatat(child,AxsCacheKeeperCapacityRawFile,&info,AT_SYMLINK_NOFOLLOW);
+    AxsCacheKeeperCapacitySetupCheck(!result,errno,"fstatat raw-byte file fixture");
+    AxsCacheKeeperCapacitySetupRequire(S_ISREG(info.st_mode) && info.st_size==3,"raw fixture OS metadata");
+    result=close(child);AxsCacheKeeperCapacitySetupCheck(!result,errno,"close raw-byte directory fixture");
+    result=symlinkat(base.fileSystemRepresentation,fd,"link");AxsCacheKeeperCapacitySetupCheck(!result,errno,"symlinkat fixture");
+    result=mkfifoat(fd,"fifo",0600);AxsCacheKeeperCapacitySetupCheck(!result,errno,"mkfifoat fixture");
+    result=close(fd);AxsCacheKeeperCapacitySetupCheck(!result,errno,"close raw fixture root");return path;
+}
+static void AxsCacheKeeperCapacityRawSetup(NSString *base) {(void)AxsCacheKeeperCapacityRawFixture(base);}
 static void AxsCacheKeeperCapacityObserver(NSString *base) {
-    NSString *path=AxsCacheKeeperCapacityDirectory(base,@"raw-observer");int fd=open(path.fileSystemRepresentation,O_RDONLY|O_DIRECTORY);
-    const char directory[]={'d',(char)0xff,0},file[]={'f',(char)0xfe,0};
-    AxsCacheKeeperCapacityCheck(fd>=0 && !mkdirat(fd,directory,0700),"raw-byte directory fixture");
-    int child=openat(fd,directory,O_RDONLY|O_DIRECTORY),data=openat(child,file,O_CREAT|O_EXCL|O_WRONLY,0600);
-    AxsCacheKeeperCapacityCheck(child>=0 && data>=0 && write(data,"abc",3)==3 && !close(data),"raw-byte file fixture");close(child);
-    AxsCacheKeeperCapacityCheck(!symlinkat(base.fileSystemRepresentation,fd,"link") && !mkfifoat(fd,"fifo",0600),"nonregular fixture");close(fd);
+    NSString *path=AxsCacheKeeperCapacityRawFixture(base);
     NSMutableArray *observations=[NSMutableArray new];
     AxsCacheKeeperScanCursor *cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:[NSURL fileURLWithPath:path] entryLimit:100 depthLimit:64 metadataObserver:^(const struct stat *info,NSArray<NSData *> *components) {
         [observations addObject:@{ @"components":components,@"mode":@(info->st_mode),@"blocks":@(info->st_blocks) }];
     }];
     for(NSUInteger i=0;i<1000 && [cursor.state isEqual:@"running"];i++) [cursor advanceEntries:1 seconds:1];
-    NSArray *rawDirectory=@[[NSData dataWithBytes:directory length:2]],*rawFile=@[rawDirectory[0],[NSData dataWithBytes:file length:2]];
+    NSArray *rawDirectory=@[[NSData dataWithBytes:AxsCacheKeeperCapacityRawDirectory length:sizeof(AxsCacheKeeperCapacityRawDirectory)-1]],
+        *rawFile=@[rawDirectory[0],[NSData dataWithBytes:AxsCacheKeeperCapacityRawFile length:sizeof(AxsCacheKeeperCapacityRawFile)-1]];
     BOOL foundDirectory=NO,foundFile=NO,foundLink=NO,foundFIFO=NO;
     for(NSDictionary *observation in observations) {
         mode_t mode=[observation[@"mode"] unsignedIntValue];NSArray *components=observation[@"components"];
@@ -166,9 +216,31 @@ static void AxsCacheKeeperCapacityObserver(NSString *base) {
     AxsCacheKeeperCapacityCheck([cursor.state isEqual:@"complete"] && observations.count==5 && [observations[0][@"components"] count]==0 && foundDirectory && foundFile && foundLink && foundFIFO,"observer receives root and every raw-byte entry without following links");
     AxsCacheKeeperCapacityCheck([cursor.result[@"allocationObservation"] count]==0,"observer mode retains no unrelated legacy inode observations");
     AxsCacheKeeperCapacityRoot *root=[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:[NSURL fileURLWithPath:path]];
-    AxsCacheKeeperCapacityFinish(root,1);AxsCacheKeeperCapacityCheck([root.state isEqual:@"complete"] && [root.result[@"entries"] isEqual:@5] && [root.result[@"logicalBytes"] isEqual:@3],"non-UTF8 components need no string decoding to measure");AxsCacheKeeperCapacityClosedResult(root.result);
+    AxsCacheKeeperCapacityFinish(root,1);AxsCacheKeeperCapacityCheck([root.state isEqual:@"complete"] && [root.result[@"entries"] isEqual:@5] && [root.result[@"logicalBytes"] isEqual:@3],"raw UTF8/control components need no string decoding to measure");AxsCacheKeeperCapacityClosedResult(root.result);
     cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:[NSURL fileURLWithPath:path] entryLimit:100 depthLimit:64 metadataObserver:(id)NSNull.null];
     AxsCacheKeeperCapacityCheck([cursor.state isEqual:@"readError"] && cursor.openDirectoryCount==0,"NSNull observer is rejected without a block invocation");
+}
+@interface AxsCacheKeeperCapacityRoot (AxsCacheKeeperCapacityObserverBoundary)
+- (void)axs_cachekeeper_observe:(const struct stat *)info components:(NSArray<NSData *> *)components;
+@end
+static void AxsCacheKeeperCapacityInvalidObserver(NSString *base) {
+    // APFS cannot create invalid UTF-8 names. This is only the byte-key observer
+    // input boundary, using real OS metadata; it does NOT claim such files exist.
+    NSString *path=AxsCacheKeeperCapacityDirectory(base,@"invalid-observer-input");
+    NSString *first=AxsCacheKeeperCapacityDirectory(path,@"first"),*second=AxsCacheKeeperCapacityDirectory(path,@"second");
+    NSString *file=[first stringByAppendingPathComponent:@"data"];AxsCacheKeeperCapacityFile(file,3);
+    struct stat a=AxsCacheKeeperCapacityStat(first),b=AxsCacheKeeperCapacityStat(second),c=AxsCacheKeeperCapacityStat(file);
+    const unsigned char firstBytes[]={'d',0xff},secondBytes[]={'d',0xfe},fileBytes[]={'f',0xfd};
+    NSData *one=[NSData dataWithBytes:firstBytes length:sizeof(firstBytes)],*two=[NSData dataWithBytes:secondBytes length:sizeof(secondBytes)];
+    AxsCacheKeeperCapacityRoot *root=[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:[NSURL fileURLWithPath:path]];
+    [root axs_cachekeeper_observe:&a components:@[one]];[root axs_cachekeeper_observe:&b components:@[two]];
+    [root axs_cachekeeper_observe:&c components:@[one,[NSData dataWithBytes:fileBytes length:sizeof(fileBytes)]]];
+    uint64_t allocated=AxsCacheKeeperCapacityBlocks(path)+AxsCacheKeeperCapacityBlocks(first)+AxsCacheKeeperCapacityBlocks(second)+AxsCacheKeeperCapacityBlocks(file);
+    AxsCacheKeeperCapacityCheck([root.state isEqual:@"running"] && [root.result[@"entries"] isEqual:@4] &&
+        [root.result[@"nodes"] count]==3 && [root.result[@"logicalBytes"] isEqual:@3] &&
+        [root.result[@"allocatedBytes"] unsignedLongLongValue]==allocated,
+        "invalid UTF8 observer byte keys stay distinct without filesystem creation");
+    [root stopWithState:@"cancelled"];AxsCacheKeeperCapacityClosedResult(root.result);
 }
 static void AxsCacheKeeperCapacityCategories(NSString *base) {
     NSString *path=AxsCacheKeeperCapacityDirectory(base,@"categories");
@@ -313,9 +385,10 @@ static void AxsCacheKeeperCapacityBudgets(NSString *base) {
 int main(int argc,const char **argv) { @autoreleasepool {
     AxsCacheKeeperCapacityCheck(argc==2 || argc==3,"unique fixture root and optional case");
     NSString *base=[NSString stringWithUTF8String:argv[1]],*selection=argc==3 ? [NSString stringWithUTF8String:argv[2]] : @"all";
-    NSArray *names=@[@"totals",@"empty",@"observer",@"categories",@"slices",@"cancellation",@"identity",@"metadata",@"budgets",@"expected-identity"];
-    void (*cases[])(NSString *)={AxsCacheKeeperCapacityTotals,AxsCacheKeeperCapacityEmpty,AxsCacheKeeperCapacityObserver,AxsCacheKeeperCapacityCategories,AxsCacheKeeperCapacitySlices,AxsCacheKeeperCapacityCancellation,AxsCacheKeeperCapacityIdentity,AxsCacheKeeperCapacityMetadata,AxsCacheKeeperCapacityBudgets,AxsCacheKeeperCapacityExpectedIdentity};
-    AxsCacheKeeperCapacityCheck([selection isEqual:@"all"] || [names containsObject:selection],"known case selection");
+    NSArray *names=@[@"totals",@"empty",@"observer",@"categories",@"slices",@"cancellation",@"identity",@"metadata",@"budgets",@"expected-identity",@"invalid-observer"];
+    void (*cases[])(NSString *)={AxsCacheKeeperCapacityTotals,AxsCacheKeeperCapacityEmpty,AxsCacheKeeperCapacityObserver,AxsCacheKeeperCapacityCategories,AxsCacheKeeperCapacitySlices,AxsCacheKeeperCapacityCancellation,AxsCacheKeeperCapacityIdentity,AxsCacheKeeperCapacityMetadata,AxsCacheKeeperCapacityBudgets,AxsCacheKeeperCapacityExpectedIdentity,AxsCacheKeeperCapacityInvalidObserver};
+    AxsCacheKeeperCapacityCheck([selection isEqual:@"all"] || [selection isEqual:@"raw-setup"] || [names containsObject:selection],"known case selection");
+    if([selection isEqual:@"raw-setup"]) {AxsCacheKeeperCapacityRawSetup(base);printf("PASS: capacity: raw-setup\n");return 0;}
     for(NSUInteger i=0;i<names.count;i++) if([selection isEqual:@"all"] || [selection isEqual:names[i]]) {cases[i](base);printf("PASS: capacity: %s\n",[names[i] UTF8String]);}
     return 0;
 } }

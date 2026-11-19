@@ -323,13 +323,22 @@ static void cknodeProjection(NSString *base) {
     for (NSString *key in @[@"logicalBytes",@"allocatedBytes",@"entries"]) {
         ckbadTree(record,^(NSMutableDictionary *m){m[@"nodes"][[children[0] unsignedIntegerValue]][key]=@([m[key] unsignedLongLongValue]+1);},"child cannot exceed parent aggregate");
         ckbadTree(record,^(NSMutableDictionary *m){
-            uint64_t each=[m[key] unsignedLongLongValue]/2+1;
+            // Raise both children to the individual bound: descendants remain
+            // valid, and only the sibling sum exceeds their parent's budget.
+            uint64_t each=[m[key] unsignedLongLongValue]-([key isEqual:@"entries"] ? 1 : 0);
+            ckcheck(each>0,"sibling fixture has a positive individual bound");
             m[@"nodes"][[children[0] unsignedIntegerValue]][key]=@(each);m[@"nodes"][[children[1] unsignedIntegerValue]][key]=@(each);
         },"direct sibling sums cannot exceed parent aggregate");
     }
     ckbadTree(record,^(NSMutableDictionary *m){
-        for (NSNumber *index in children) m[@"nodes"][index.unsignedIntegerValue][@"entries"]=@1;
-        m[@"nodes"][children[0].unsignedIntegerValue][@"entries"]=@([m[@"entries"] unsignedLongLongValue]-(children.count-1));
+        uint64_t sum=0;
+        for (NSNumber *index in children) sum+=[m[@"nodes"][[index unsignedIntegerValue]][@"entries"] unsignedLongLongValue];
+        uint64_t total=[m[@"entries"] unsignedLongLongValue];
+        ckcheck(sum<total,"parent entry fixture retains a real direct-file remainder");
+        NSMutableDictionary *child=m[@"nodes"][[children[0] unsignedIntegerValue]];
+        // Preserve every descendant and raise one child so direct children sum
+        // to total exactly. Dropping maximum-- would now accept this bad tree.
+        child[@"entries"]=@([child[@"entries"] unsignedLongLongValue]+total-sum);
     },"directory entries must retain the parent's own entry");
     ckbadTree(record,^(NSMutableDictionary *m){m[@"nodes"][leafIndex][@"entries"]=@0;},"directory node cannot have zero entries");
     ckbadTree(record,^(NSMutableDictionary *m){m[@"nodeLimit"]=@1;},"anonymous node budget is enforced");

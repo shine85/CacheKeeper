@@ -80,6 +80,8 @@ def main():
              'if (! [node[@"entries"] unsignedLongLongValue]) return nil;', "anonymous directory depth four is invalid"),
             ("node-sibling-totals", 'if (amount>maximum || sum>maximum-amount) return nil;',
              'if (amount>maximum) return nil;', "direct sibling sums cannot exceed parent aggregate"),
+            ("node-parent-entry", 'if ([key isEqual:@"entries"]) maximum--;',
+             'if (NO && [key isEqual:@"entries"]) maximum--;', "directory entries must retain the parent's own entry"),
         )
         for name, before, after, failure in protocol_mutations:
             if status.count(before) != 1:

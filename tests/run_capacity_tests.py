@@ -1,6 +1,6 @@
 """Compile the real production cursor/capacity against real macOS filesystem fixtures.
 
-REDs are isolated behavioral regressions. Compiler errors, signals, timeouts and
+REDs are isolated behavioral regressions. Fixture errors, compiler errors, signals, timeouts and
 unrelated assertions never qualify as a verified RED. Windows is UNAVAILABLE.
 """
 from __future__ import annotations
@@ -45,7 +45,11 @@ def main() -> int:
                                     capture_output=True, text=True, timeout=60)
             print(result.stdout, end="", flush=True)
             print(result.stderr, end="", file=sys.stderr, flush=True)
-            failures = [line for line in result.stderr.splitlines() if line.startswith("FAIL:")]
+            lines = (result.stdout + result.stderr).splitlines()
+            setup_failures = [line for line in lines if line.startswith("SETUP-FAIL:")]
+            if setup_failures:
+                raise RuntimeError(f"capacity fixture setup failed for {name}; never a behavior RED: {setup_failures}")
+            failures = [line for line in lines if line.startswith("FAIL:")]
             if failure is None:
                 if result.returncode != 0 or failures:
                     raise RuntimeError(f"capacity GREEN failed: exit={result.returncode}")
@@ -54,6 +58,9 @@ def main() -> int:
             else:
                 print(f"Verified capacity RED: {name}", flush=True)
 
+        # Validate the actual filesystem contract before any behavioral mutation.
+        # This setup-only pass does not call production or count as a GREEN.
+        run("raw-setup", cursor, capacity, "raw-setup")
         # Run RED before GREEN on the same commit. Replace one precise branch;
         # these anchors locate a mutation, they are NOT source-text assertions.
         variants = (
@@ -69,6 +76,12 @@ def main() -> int:
             ("legacy-table", "cursor", "allocation:observer ? nil : [[AxsCacheKeeperScanAllocation alloc] initWithLimit:65536] metadataObserver:observer];",
              "allocation:[[AxsCacheKeeperScanAllocation alloc] initWithLimit:65536] metadataObserver:observer];", "observer",
              "observer mode retains no unrelated legacy inode observations"),
+            ("raw-name-normalization", "cursor", "NSData *name=[NSData dataWithBytes:entry->d_name length:strlen(entry->d_name)];",
+             "NSData *name=[[[[NSString alloc] initWithUTF8String:entry->d_name] precomposedStringWithCanonicalMapping] dataUsingEncoding:NSUTF8StringEncoding];", "observer",
+             "observer receives root and every raw-byte entry without following links"),
+            ("invalid-byte-decoding", "capacity", "[key appendBytes:&length length:sizeof(length)];[key appendData:part];",
+             "[key appendBytes:&length length:sizeof(length)];[key appendData:[[[NSString alloc] initWithData:part encoding:NSUTF8StringEncoding] dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data]];", "invalid-observer",
+             "invalid UTF8 observer byte keys stay distinct without filesystem creation"),
             ("block-unit", "capacity", "uint64_t allocated=duplicate ? 0 : (uint64_t)info->st_blocks*512;",
              "uint64_t allocated=duplicate ? 0 : (uint64_t)info->st_blocks*256;", "totals",
              "all-entry allocation includes root directories and links once"),
