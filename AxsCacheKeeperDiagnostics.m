@@ -8,6 +8,7 @@
 #import "AxsCacheKeeperWebKitStatus.h"
 #import "AxsCacheKeeperImageCacheStatus.h"
 #import "AxsCacheKeeperStorageInventory.h"
+#import "AxsCacheKeeperCapacityStatus.h"
 #import "AxsCacheKeeperAllocation.h"
 #import "AxsCacheKeeperHostEvidence.h"
 #import "AxsCacheKeeperInjectionConditions.h"
@@ -323,6 +324,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
     return @{@"schemaVersion":@2,@"generatedAt":@(finished),@"environment":env,@"apps":exported,
         @"diagnosticChannel":AxsCacheKeeperDiagnosticChannelProjection(environment[@"diagnosticChannel"]),
         @"containerCoverage":axs_cachekeeper_container_coverage_projection(environment[@"containerCoverage"]),
+        @"capacityMeasurement":axs_cachekeeper_capacity_projection(environment[@"capacityMeasurement"]),
         @"storageInventory":axs_cachekeeper_storage_inventory(environment[@"registryInventory"],states,directories,snapshots,savedSDKApps,
             ^NSString *(NSString *path){return [redactor axs_cachekeeper_path:path];}),
         @"searchUI":axs_cachekeeper_search_diagnostics_projection(environment[@"searchUI"]),

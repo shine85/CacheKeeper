@@ -3,6 +3,7 @@
 #include <dlfcn.h>
 #include <string.h>
 #import "../AxsCacheKeeperNetworkCache.h"
+#import "../AxsCacheKeeperPolicy.h"
 
 // 在生产 Hook 捕获原 IMP 前加透明观察层；每次仍调用 Foundation 的真实初始化器。
 static id (*axs_cachekeeper_test_real_path)(id __attribute__((ns_consumed)), SEL, NSUInteger, NSUInteger, NSString *) __attribute__((ns_returns_retained));
@@ -121,6 +122,57 @@ static void axs_cachekeeper_test_assert_boundary(NSString *kind, NSUInteger disk
         [NSString stringWithFormat:@"%@ 原初始化器 disk 期望 %lu，实际 %@",kind,(unsigned long)disk,entry[@"disk"]]);
     if (!disk) for (NSDictionary *call in axs_cachekeeper_test_network_calls)
         axs_cachekeeper_network_require([call[@"disk"] unsignedIntegerValue]==0,@"构造器内部委托同样不能收到非零磁盘容量");
+}
+
+// Real response IO is separate from the initializer/ABI observations above. A zero
+// disk budget must not disable memory caching or turn an equal refresh into a purge.
+void axs_cachekeeper_run_network_mode_tests(NSString *fixture) {
+    axs_cachekeeper_prepare_network_cache_tests();
+    axs_cachekeeper_test_observe_network=NO;
+    NSDictionary *clean=@{@"enabled":@YES,@"mode":@"clean",@"urlCache":@YES};
+    NSDictionary *prevent=@{@"enabled":@YES,@"mode":@"prevent",@"urlCache":@YES};
+    NSDictionary *off=@{@"enabled":@NO,@"mode":@"prevent",@"urlCache":@YES};
+    NSData *payload=[@"synthetic network response; no device or user data" dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *canary=[fixture stringByAppendingPathComponent:@"network-mode-private-canary.plist"];
+    NSData *canaryBytes=[@"synthetic necessary APP configuration; keep unchanged" dataUsingEncoding:NSUTF8StringEncoding];
+    axs_cachekeeper_network_require([canaryBytes writeToFile:canary atomically:YES],@"write isolated necessary-data sentinel");
+    for (NSNumber *useURL in (axs_cachekeeper_test_real_url ? @[@NO,@YES] : @[@NO])) {
+        BOOL url=useURL.boolValue;
+        NSString *kind=url ? @"url" : @"path";
+        axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(axs_cachekeeper_should_prevent(clean)),@"clean mode configuration");
+        NSURLCache *cache=axs_cachekeeper_test_create_cache(fixture,[kind stringByAppendingString:@"-response-modes"],url);
+        NSURLRequest *request=[NSURLRequest requestWithURL:[NSURL URLWithString:@"https://cachekeeper-fixture.invalid/memory"]];
+        NSHTTPURLResponse *response=[[NSHTTPURLResponse alloc] initWithURL:request.URL statusCode:200 HTTPVersion:@"HTTP/1.1"
+            headerFields:@{@"Cache-Control":@"public, max-age=3600",@"Content-Type":@"text/plain"}];
+        NSCachedURLResponse *entry=[[NSCachedURLResponse alloc] initWithResponse:response data:payload userInfo:nil storagePolicy:NSURLCacheStorageAllowedInMemoryOnly];
+        [cache storeCachedResponse:entry forRequest:request];
+        axs_cachekeeper_network_require([[cache cachedResponseForRequest:request].data isEqual:payload],@"clean mode stores and reads a real response");
+        axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(axs_cachekeeper_should_prevent(prevent)),@"prevent mode configuration");
+        axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(axs_cachekeeper_should_prevent(prevent)),@"equal prevent refresh");
+        axs_cachekeeper_network_require([[cache cachedResponseForRequest:request].data isEqual:payload],@"memory response survives restriction and equal refresh");
+        NSURLCache *bornLimited=axs_cachekeeper_test_create_cache(fixture,[kind stringByAppendingString:@"-response-born-limited"],url);
+        [bornLimited storeCachedResponse:entry forRequest:request];
+        axs_cachekeeper_network_require([[bornLimited cachedResponseForRequest:request].data isEqual:payload],@"limited initializer still stores a real memory response");
+        // Only the scheduling boundary is controlled: the late work uses the real
+        // production setter and real Foundation store after the disabled state wins.
+        dispatch_semaphore_t release=dispatch_semaphore_create(0),done=dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^{
+            dispatch_semaphore_wait(release,DISPATCH_TIME_FOREVER);
+            cache.diskCapacity=16777216;
+            [cache storeCachedResponse:entry forRequest:request];
+            dispatch_semaphore_signal(done);
+        });
+        axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(axs_cachekeeper_should_prevent(off)),@"disable before late response");
+        dispatch_semaphore_signal(release);
+        axs_cachekeeper_network_require(dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,@"late response work finishes");
+        axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(axs_cachekeeper_should_prevent(off)),@"equal disabled refresh after late response");
+        axs_cachekeeper_network_require([[cache cachedResponseForRequest:request].data isEqual:payload],@"late response remains readable after disable");
+        [cache removeCachedResponseForRequest:request];
+        axs_cachekeeper_network_require([cache cachedResponseForRequest:request]==nil,@"APP response removal remains functional after disable");
+    }
+    axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(NO),@"response mode test leaves restriction disabled");
+    axs_cachekeeper_network_require([[NSData dataWithContentsOfFile:canary] isEqual:canaryBytes],@"network modes preserve necessary APP fixture data byte for byte");
+    puts("PASS: network mode real response IO, retained memory, equal refresh and late response after disable");
 }
 
 void axs_cachekeeper_run_network_cache_tests(NSString *fixture) {
@@ -312,5 +364,6 @@ void axs_cachekeeper_run_network_cache_tests(NSString *fixture) {
     axs_cachekeeper_test_before_init=nil;
     [axs_cachekeeper_test_network_calls removeAllObjects];
     axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(NO),@"测试退出关闭限制");
+    axs_cachekeeper_run_network_mode_tests(fixture);
     puts("PASS: NSURLCache real initializer boundary, restoration, latest requests and concurrent toggle");
 }

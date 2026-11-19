@@ -21,6 +21,7 @@
 #import "AxsCacheKeeperFileAccess.h"
 #import "AxsCacheKeeperScanDiagnostics.h"
 #import "AxsCacheKeeperScanTask.h"
+#import "AxsCacheKeeperCapacityService.h"
 static id SRead(id target,NSString *name) { SEL s=NSSelectorFromString(name);return [target respondsToSelector:s]?((id(*)(id,SEL))objc_msgSend)(target,s):nil; }
 static id AxsCacheKeeperAppProxy(NSString *bundle) {
     Class proxy=NSClassFromString(@"LSApplicationProxy"); SEL selector=NSSelectorFromString(@"applicationProxyForIdentifier:");
@@ -76,7 +77,25 @@ static void AxsCacheKeeperScanPump(AxsCacheKeeperScanService *service,dispatch_q
     if(!active) {*scheduled=NO;return;}
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_MSEC),queue,^{AxsCacheKeeperScanPump(service,queue,scheduled);});
 }
+static void AxsCacheKeeperCapacityPump(AxsCacheKeeperCapacityService *service,dispatch_queue_t queue,BOOL *scheduled) {
+    BOOL active=[service tick];
+    if(!active) {*scheduled=NO;return;}
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_MSEC),queue,^{AxsCacheKeeperCapacityPump(service,queue,scheduled);});
+}
+static void AxsCacheKeeperCapacityRequests(void) {
+    static dispatch_queue_t queue;static AxsCacheKeeperCapacityService *service;static NSMutableDictionary *cache;
+    static BOOL scheduled;static dispatch_once_t once;
+    dispatch_once(&once,^{
+        queue=dispatch_queue_create("dev.local.cachekeeper.capacity",DISPATCH_QUEUE_SERIAL);cache=[NSMutableDictionary new];
+        service=[[AxsCacheKeeperCapacityService alloc] initWithFolder:jbroot(@"/var/mobile/Library/CacheKeeper") provider:^NSDictionary *(NSError **error) {
+            NSDictionary *plan=nil;
+            axs_cachekeeper_installed_applications_with_capacity_plan(cache,NULL,NULL,&plan,error);return plan;
+        } writer:nil];
+    });
+    dispatch_async(queue,^{if(!scheduled) {scheduled=YES;AxsCacheKeeperCapacityPump(service,queue,&scheduled);}});
+}
 void CKScanRequests(void) {
+    AxsCacheKeeperCapacityRequests();
     static dispatch_queue_t queue;static AxsCacheKeeperScanService *service;static BOOL scheduled;static dispatch_once_t once;
     dispatch_once(&once,^{
         queue=dispatch_queue_create("dev.local.cachekeeper.scan",DISPATCH_QUEUE_SERIAL);

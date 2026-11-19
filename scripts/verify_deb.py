@@ -47,6 +47,7 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
             '/CacheKeeper.dylib': (b'AxsCacheKeeperImageCache', b'AxsCacheKeeperWebKitCache',
                                     b'AxsCacheKeeperScanService', b'AxsCacheKeeperScanCursor',
                                     b'AxsCacheKeeperScanAllocation', b'AxsCacheKeeperWebKitCoordinator',
+                                    b'AxsCacheKeeperCapacityRoot', b'AxsCacheKeeperCapacityService',
                                     b'AxsCacheKeeperHostEvidenceServer'),
             '/CacheKeeperPrefs': (b'AxsCacheKeeperSearchHitRouting', b'AxsCacheKeeperSearchInput',
                                     b'AxsCacheKeeperHostEvidenceClient'),
@@ -74,6 +75,9 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
                 if ((suffix == '/CacheKeeper.dylib' and b'AxsCacheKeeperHostEvidenceClient' in payload) or
                         (suffix == '/CacheKeeperPrefs' and b'AxsCacheKeeperHostEvidenceServer' in payload)):
                     raise SystemExit(f'Host runtime class leaked across target boundary: {suffix}')
+                if suffix == '/CacheKeeperPrefs' and any(marker in payload for marker in
+                        (b'AxsCacheKeeperCapacityRoot', b'AxsCacheKeeperCapacityService')):
+                    raise SystemExit('Read-only traversal implementation leaked into preferences target')
                 if suffix == '/CacheKeeper.dylib':
                     runtime_markers = (version.encode('ascii') + b'\0', b'runtimeInfo\0',
                                        b'packageVersion\0', b'firstObserved\0')
@@ -87,6 +91,8 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
                         b'axs_cachekeeper_installation_test_read', b'axs_cachekeeper_scan_allocation_test_stats',
                         b'axs_cachekeeper_didReadHistory', b'allocationLimit:', b'ImageCacheIntegrationTests',
                         b'AxsCacheKeeperRegrowingWindow', b'axs_cachekeeper_clock', b'ScanPageTests',
+                        b'AxsCacheKeeperCapacityPageFixture', b'AxsCacheKeeperCapacityFinalValidationCursor',
+                        b'CapacityPageTests',
                         b'AxsCacheKeeperScanHostClient', b'axs_cachekeeper_scan_host_fail')):
                     raise SystemExit(f'Test implementation leaked into binary: {suffix}')
             if architectures != {(0x100000c, 0), (0x100000c, 2)}:

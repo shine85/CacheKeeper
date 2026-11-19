@@ -55,13 +55,14 @@ static void sicheck(BOOL condition, NSString *message) {
 @implementation AxsCacheKeeperStorageTestProxy
 @end
 static id siregistrations;
+static NSUInteger siRegistryReads;
 @interface AxsCacheKeeperStorageTestWorkspace : NSObject
 + (instancetype)defaultWorkspace;
 - (id)allInstalledApplications;
 @end
 @implementation AxsCacheKeeperStorageTestWorkspace
 + (instancetype)defaultWorkspace {return [self new];}
-- (id)allInstalledApplications {return siregistrations;}
+- (id)allInstalledApplications {siRegistryReads++;return siregistrations;}
 @end
 Class axs_cachekeeper_storage_test_class_lookup(NSString *name) {
     return [name isEqual:@"LSApplicationWorkspace"] ? AxsCacheKeeperStorageTestWorkspace.class : NSClassFromString(name);
@@ -85,6 +86,26 @@ static NSArray *siprovider(NSMutableDictionary *cache, NSDictionary **registry) 
     return axs_cachekeeper_installed_applications_with_registry_inventory(cache,&coverage,registry,nil);
 #endif
 }
+#if !AXS_CACHEKEEPER_STORAGE_INVENTORY_RED
+static NSArray *siPlanProvider(NSMutableDictionary *cache,NSDictionary **registry,NSDictionary **plan) {
+    NSUInteger before=siRegistryReads;
+    NSArray *apps=axs_cachekeeper_installed_applications_with_capacity_plan(cache,NULL,registry,plan,nil);
+    sicheck(siRegistryReads==before+1,@"boundary plan and registry still use one system enumeration");
+    if (*plan) sicheck([(*plan)[@"registry"] isEqual:*registry],@"boundary plan is bound to this registry projection");
+    return apps;
+}
+static void siPrivatePlan(NSMutableDictionary *cache,NSURL *shared) {
+    NSDictionary *coverage=nil,*registry=nil,*plan=nil;NSUInteger before=siRegistryReads;
+    axs_cachekeeper_installed_applications_with_capacity_plan(cache,&coverage,&registry,&plan,nil);
+    sicheck(siRegistryReads==before+1,@"capacity plan and registry share exactly one system enumeration");
+    sicheck([plan[@"roots"] count]==1 && [plan[@"roots"][0][@"url"] isEqual:shared],@"capacity plan preserves one private URL across home group and extension aliases");
+    NSDictionary *root=plan[@"roots"][0];
+    sicheck([root[@"owners"] isEqual:@[@"com.apple.inventory.system",@"test.inventory.alpha",@"test.inventory.beta"]],@"capacity plan includes non-display owner and every validated role");
+    sicheck([root[@"roles"] isEqual:@[@"extension",@"group",@"home"]],@"capacity plan retains all registered role associations");
+    NSString *json=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:registry options:0 error:nil] encoding:NSUTF8StringEncoding];
+    sicheck(![json containsString:shared.absoluteString] && ![json containsString:@"private-plugin-id-canary"],@"private capacity URLs and association identities never enter public registry");
+}
+#endif
 static NSDictionary *siapp(NSDictionary *inventory,NSString *bundle) {
     for (NSDictionary *entry in inventory[@"entries"]) if ([entry[@"bundle"] isEqual:bundle]) return entry;
     return nil;
@@ -191,6 +212,9 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
     alpha.plugInKitPlugins=@[siplugin(@"private-plugin-id-canary",alpha.applicationIdentifier,shared),siplugin(@"private-plugin-id-canary",alpha.applicationIdentifier,shared)];
     siregistrations=@[beta,system,alpha];NSMutableDictionary *cache=[NSMutableDictionary new];NSDictionary *registry=nil;
     NSArray *apps=siprovider(cache,&registry);
+#if !AXS_CACHEKEEPER_STORAGE_INVENTORY_RED
+    siPrivatePlan(cache,shared);
+#endif
     NSDate *date=[NSDate dateWithTimeIntervalSince1970:120];
     NSDictionary *states=@{@"test.inventory.alpha":@{@"enabled":@YES,@"autoDiscover":@YES,@"excludedPaths":@[@"Library/Caches/retained"]},@"test.inventory.beta":@NO,@"test.inventory.configured":@YES};
     siput(folder,@"appEnabled.plist",states);siput(folder,@"directories.plist",@{@"test.inventory.alpha":@[@"Library/Caches"],@"test.inventory.beta":@[@"tmp"]});
@@ -277,15 +301,19 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
     siput(folder,@"appEnabled.plist",states);siput(folder,@"directories.plist",@{@"test.inventory.alpha":@[@"Library/Caches"],@"test.inventory.beta":@[@"tmp"]});siput(folder,@"snapshots.plist",scans);
     // Matching SDK/type/name is not a resource contract; membership changes require fresh sampling.
     beta.groupContainerURLs=@{};alpha.dataContainerURL=nil;alpha.plugInKitPlugins=@[];
-    AxsCacheKeeperStorageTestProxy *fresh=siproxy(@"test.inventory.fresh",@"User",nil);siregistrations=@[beta,fresh];apps=siprovider(cache,&registry);
+    NSDictionary *boundaryPlan=nil;
+    AxsCacheKeeperStorageTestProxy *fresh=siproxy(@"test.inventory.fresh",@"User",nil);siregistrations=@[beta,fresh];apps=siPlanProvider(cache,&registry,&boundaryPlan);
+    sicheck([boundaryPlan[@"roots"] count]==0,@"removed owner and changed relationships leave no stale private roots");
     NSDictionary *updated=[session reportWithApps:apps environment:@{@"registryInventory":registry}][@"storageInventory"];
     sicheck(!siapp(updated,@"com.apple.inventory.system") && [siapp(updated,@"test.inventory.alpha")[@"registryState"] isEqual:@"notInRegistrySnapshot"] && [siapp(updated,@"test.inventory.fresh")[@"scanState"] isEqual:@"notScanned"] && [siapp(updated,@"test.inventory.beta")[@"registry"][@"relationships"][@"group"][@"tokens"] count]==0,@"remove/change/new membership uses current registry without stale association reuse");
     alpha.plugInKitPlugins=@[siplugin(@"test.conflict",alpha.applicationIdentifier,shared)];beta.plugInKitPlugins=@[siplugin(@"test.conflict",beta.applicationIdentifier,shared)];
     for (NSArray *order in @[@[alpha,beta],@[beta,alpha],@[alpha,beta,alpha]]) {
-        siregistrations=order;siprovider(cache,&registry);
+        siregistrations=order;siPlanProvider(cache,&registry,&boundaryPlan);
+        sicheck([boundaryPlan[@"roots"] count]==0 && [boundaryPlan[@"state"] isEqual:@"partial"],@"conflicting extension ownership revokes private roots in every sample order");
         for (NSDictionary *entry in registry[@"entries"]) sicheck([entry[@"relationships"][@"extension"][@"tokens"] count]==0 && ![entry[@"relationships"][@"extension"][@"state"] isEqual:@"available"],@"conflicting extension ownership revokes all earlier associations");
     }
-    beta.plugInKitPlugins=nil;beta.groupContainerURLs=@42;siregistrations=@[beta];siprovider(cache,&registry);
+    beta.plugInKitPlugins=nil;beta.groupContainerURLs=@42;siregistrations=@[beta];siPlanProvider(cache,&registry,&boundaryPlan);
+    sicheck([boundaryPlan[@"roots"] count]==0 && [boundaryPlan[@"state"] isEqual:@"partial"],@"missing and malformed metadata do not invent private roots");
     sicheck([registry[@"entries"][0][@"relationships"][@"group"][@"state"] isEqual:@"invalid"] && [registry[@"entries"][0][@"relationships"][@"extension"][@"state"] isEqual:@"unavailable"] && !registry[@"entries"][0][@"relationships"][@"extension"][@"tokens"],@"invalid and nil metadata are not false empty relationships");
     AxsCacheKeeperStorageTestProxy *duplicate=siproxy(beta.applicationIdentifier,@"User",nil);duplicate.groupContainerURLs=nil;duplicate.plugInKitPlugins=nil;
     siregistrations=@[duplicate,beta];siprovider(cache,&registry);
@@ -293,13 +321,17 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
     AxsCacheKeeperStorageTestProxy *pairA=siproxy(@"test.inventory.pair",@"User",nil),*pairB=siproxy(@"test.inventory.pair.part",@"User",nil);
     NSURL *otherURL=[NSURL URLWithString:@"file:///private/var/private-other-url-canary"];
     pairA.groupContainerURLs=@{@"part.asset":shared};pairB.groupContainerURLs=@{@"asset":otherURL};
-    siregistrations=@[pairA,pairB];siprovider(cache,&registry);
+    siregistrations=@[pairA,pairB];siPlanProvider(cache,&registry,&boundaryPlan);
+    sicheck([boundaryPlan[@"roots"] count]==2,@"distinct owner-group tuples preserve both private URLs");
     sicheck([registry[@"group"][@"associationCount"] isEqual:@2] && [registry[@"group"][@"registeredURLCount"] isEqual:@2],
         @"owner and group components cannot collide when their dot-concatenated names match");
     AxsCacheKeeperStorageTestProxy *conflict=siproxy(pairA.applicationIdentifier,@"User",nil);
-    conflict.groupContainerURLs=@{@"part.asset":otherURL};siregistrations=@[pairA,conflict,pairA];siprovider(cache,&registry);
+    conflict.groupContainerURLs=@{@"part.asset":otherURL};siregistrations=@[pairA,conflict,pairA];siPlanProvider(cache,&registry,&boundaryPlan);
+    sicheck([boundaryPlan[@"roots"] count]==0,@"same-owner group URL conflict never leaks revoked private URLs");
     sicheck([registry[@"group"][@"associationCount"] isEqual:@0] && [registry[@"group"][@"invalidAssociationCount"] isEqual:@1],
         @"conflicting same-owner group is revoked and cannot be restored by a repeated earlier sample");
+    pairA.groupContainerURLs=@{@"part.asset":otherURL};siregistrations=@[pairA];siPlanProvider(cache,&registry,&boundaryPlan);
+    sicheck([boundaryPlan[@"roots"] count]==1 && [boundaryPlan[@"roots"][0][@"url"] isEqual:otherURL],@"same-version relationship change uses only the new private URL");
     NSTimeInterval registrationStarted=NSProcessInfo.processInfo.systemUptime;
     NSMutableArray *many=[NSMutableArray new];for (NSUInteger i=0;i<4097;i++) [many addObject:beta];siregistrations=many;siprovider(cache,&registry);
     sicheck([registry[@"observedRegistrations"] isEqual:@4096] && [registry[@"truncatedRegistrationCount"] isEqual:@1] && [registry[@"state"] isEqual:@"partial"],@"registration budget exposes lower-bound coverage");
@@ -310,9 +342,11 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
     sitiming("16385 group associations",registrationStarted);
     beta.applicationIdentifier=@"../private-invalid-id-canary";siregistrations=@[beta];siprovider(cache,&registry);
     sicheck([registry[@"invalidRegistrationCount"] isEqual:@1] && [registry[@"entries"] count]==0,@"invalid registry identities excluded explicitly");
-    siregistrations=nil;siprovider(cache,&registry);
+    siregistrations=nil;boundaryPlan=@{@"privateCanary":shared};siPlanProvider(cache,&registry,&boundaryPlan);
+    sicheck(boundaryPlan==nil,@"unavailable provider clears previously supplied private plan");
     sicheck([registry[@"state"] isEqual:@"unavailable"] && !registry[@"entries"],@"nil registry source is not observed empty");
-    siregistrations=@[];siprovider(cache,&registry);
+    siregistrations=@[];siPlanProvider(cache,&registry,&boundaryPlan);
+    sicheck([boundaryPlan[@"state"] isEqual:@"available"] && [boundaryPlan[@"roots"] count]==0,@"observed empty provider returns an explicit empty current plan");
     sicheck([registry[@"state"] isEqual:@"available"] && [registry[@"entries"] count]==0,@"observed empty registry remains distinct from unavailable");
     puts("PASS: all-app registry, saved logical inventory, queues, boundaries and JSON roundtrip");
 #endif

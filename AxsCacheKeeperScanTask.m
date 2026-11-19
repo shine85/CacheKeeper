@@ -78,12 +78,15 @@ NSDictionary *axs_cachekeeper_scan_allocation_test_stats(const struct stat *samp
 #endif
 @interface AxsCacheKeeperScanCursor ()
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth allocation:(AxsCacheKeeperScanAllocation *)allocation;
+- (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth
+                 allocation:(AxsCacheKeeperScanAllocation *)allocation metadataObserver:(AxsCacheKeeperScanMetadataObserver)observer;
 @end
 
 @interface AxsCacheKeeperScanFrame : NSObject {
 @public DIR *directory;struct stat identity;
 }
 @property(nonatomic,strong) NSData *name;
+@property(nonatomic,copy) NSArray<NSData *> *observerComponents;
 @end
 @implementation AxsCacheKeeperScanFrame
 - (void)dealloc {if(directory) closedir(directory);}
@@ -94,9 +97,16 @@ NSDictionary *axs_cachekeeper_scan_allocation_test_stats(const struct stat *samp
     NSMutableDictionary *_diagnostics;NSString *_state;struct stat _identity;
     unsigned long long _bytes;NSUInteger _limit,_depth;
     AxsCacheKeeperScanAllocation *_allocation;NSDictionary *_allocationBaseline;
+    AxsCacheKeeperScanMetadataObserver _metadataObserver;
 }
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth {
     return [self initWithRoot:root entryLimit:limit depthLimit:depth allocation:[[AxsCacheKeeperScanAllocation alloc] initWithLimit:65536]];
+}
+- (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth metadataObserver:(AxsCacheKeeperScanMetadataObserver)observer {
+    // Observer mode has its own all-entry accumulator; do not retain a second
+    // regular-file inode table. A nil observer preserves the legacy initializer.
+    return [self initWithRoot:root entryLimit:limit depthLimit:depth
+        allocation:observer ? nil : [[AxsCacheKeeperScanAllocation alloc] initWithLimit:65536] metadataObserver:observer];
 }
 #if defined(AXS_CACHEKEEPER_SCAN_TESTING)
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth allocationLimit:(NSUInteger)allocationLimit {
@@ -104,18 +114,27 @@ NSDictionary *axs_cachekeeper_scan_allocation_test_stats(const struct stat *samp
 }
 #endif
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth allocation:(AxsCacheKeeperScanAllocation *)allocation {
+    return [self initWithRoot:root entryLimit:limit depthLimit:depth allocation:allocation metadataObserver:nil];
+}
+- (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth allocation:(AxsCacheKeeperScanAllocation *)allocation metadataObserver:(AxsCacheKeeperScanMetadataObserver)observer {
     if (!(self=[super init])) return nil;
     _allocation=allocation;_allocationBaseline=[allocation snapshotComplete:NO baseline:nil];
     _root=root;_limit=limit;_depth=MIN(MAX(depth,(NSUInteger)1),AxsCacheKeeperScanDepth);
     _stack=[NSMutableArray new];_diagnostics=axs_cachekeeper_scan_diagnostics_new();_state=@"running";
+    if([(id)observer isKindOfClass:NSNull.class]) {[self axs_cachekeeper_fail:@"readError" code:EINVAL stat:NO];return self;}
+    _metadataObserver=[observer copy];
     struct stat original,opened;
     if (!root.isFileURL || lstat(root.fileSystemRepresentation,&original)) { [self axs_cachekeeper_fail:@"readError" code:errno ?: EINVAL stat:YES];return self; }
+    if(_metadataObserver && !S_ISDIR(original.st_mode)) {[self axs_cachekeeper_fail:@"readError" code:ENOTDIR stat:NO];return self;}
     int fd=axs_cachekeeper_open_directory(root.path);
     if(fd<0) { [self axs_cachekeeper_fail:@"readError" code:errno stat:NO];return self; }
     if(fstat(fd,&opened) || !AxsCacheKeeperScanSame(&original,&opened)) {close(fd);[self axs_cachekeeper_fail:@"identityChanged" code:ESTALE stat:NO];return self;}
+    if(_metadataObserver && !AxsCacheKeeperScanUnchanged(&original,&opened)) {close(fd);[self axs_cachekeeper_fail:@"identityChanged" code:ESTALE stat:NO];return self;}
     DIR *directory=fdopendir(fd);
     if(!directory) {int code=errno;close(fd);[self axs_cachekeeper_fail:@"readError" code:code stat:NO];return self;}
     _identity=opened;AxsCacheKeeperScanFrame *frame=[AxsCacheKeeperScanFrame new];frame->directory=directory;frame->identity=opened;[_stack addObject:frame];
+    if(_metadataObserver) frame.observerComponents=@[];
+    if(_metadataObserver) _metadataObserver(&opened,@[]);
     return self;
 }
 - (void)axs_cachekeeper_fail:(NSString *)state code:(int)code stat:(BOOL)statFailure {
@@ -152,18 +171,26 @@ NSDictionary *axs_cachekeeper_scan_allocation_test_stats(const struct stat *samp
         visited++;axs_cachekeeper_scan_count(_diagnostics,@"entriesVisited",1);
         struct stat info;
         if(fstatat(dirfd(frame->directory),entry->d_name,&info,AT_SYMLINK_NOFOLLOW)) {[self axs_cachekeeper_fail:@"readError" code:errno stat:YES];break;}
+        NSArray<NSData *> *components=nil;
+        if(_metadataObserver) {
+            NSData *name=[NSData dataWithBytes:entry->d_name length:strlen(entry->d_name)];
+            components=[frame.observerComponents arrayByAddingObject:name];_metadataObserver(&info,components);
+            if(![_state isEqual:@"running"]) break;
+        }
         if(S_ISDIR(info.st_mode)) {
             if(_stack.count>=_depth) {[self stopWithState:@"depthLimit"];break;}
             int fd=openat(dirfd(frame->directory),entry->d_name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
             if(fd<0) {[self axs_cachekeeper_fail:@"readError" code:errno stat:NO];break;}
             struct stat opened;
             if(fstat(fd,&opened) || !AxsCacheKeeperScanSame(&info,&opened)) {close(fd);[self axs_cachekeeper_fail:@"identityChanged" code:ESTALE stat:NO];break;}
+            if(_metadataObserver && !AxsCacheKeeperScanUnchanged(&info,&opened)) {close(fd);[self axs_cachekeeper_fail:@"identityChanged" code:ESTALE stat:NO];break;}
             DIR *directory=fdopendir(fd);
             if(!directory) {int code=errno;close(fd);[self axs_cachekeeper_fail:@"readError" code:code stat:NO];break;}
             AxsCacheKeeperScanFrame *child=[AxsCacheKeeperScanFrame new];child->directory=directory;child->identity=opened;
             child.name=[NSData dataWithBytes:entry->d_name length:strlen(entry->d_name)+1];[_stack addObject:child];
+            if(_metadataObserver) child.observerComponents=components;
         } else if(S_ISREG(info.st_mode)) {
-            [_allocation observe:&info];
+            if(!_metadataObserver) [_allocation observe:&info];
             if(info.st_size<0 || UINT64_MAX-_bytes<(uint64_t)info.st_size) {[self axs_cachekeeper_fail:@"readError" code:EOVERFLOW stat:YES];break;}
             _bytes+=(uint64_t)info.st_size;
         }
@@ -186,7 +213,7 @@ NSDictionary *axs_cachekeeper_scan_allocation_test_stats(const struct stat *samp
 - (NSDictionary *)result {
     NSMutableDictionary *diagnostics=[_diagnostics mutableCopy];diagnostics[@"measurementComplete"]=@([_state isEqual:@"complete"]);
     return @{@"bytes":@(_bytes),@"complete":diagnostics[@"measurementComplete"],@"scanDiagnostics":diagnostics,
-        @"allocationObservation":[_allocation snapshotComplete:[_state isEqual:@"complete"] baseline:_allocationBaseline]};
+        @"allocationObservation":[_allocation snapshotComplete:[_state isEqual:@"complete"] baseline:_allocationBaseline] ?: @{}};
 }
 @end
 

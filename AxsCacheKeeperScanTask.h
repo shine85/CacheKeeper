@@ -1,9 +1,16 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#include <sys/stat.h>
+
+// Synchronous, serial-queue-confined observation; info is borrowed for this call.
+// Components are raw relative name bytes without NUL, root is an empty array.
+typedef void (^AxsCacheKeeperScanMetadataObserver)(const struct stat *info, NSArray<NSData *> *components);
 
 // Confined to one serial queue. Cursors are intentionally process-local.
 @interface AxsCacheKeeperScanCursor : NSObject
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth;
+- (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth
+           metadataObserver:(AxsCacheKeeperScanMetadataObserver)observer;
 #if defined(AXS_CACHEKEEPER_SCAN_TESTING)
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth allocationLimit:(NSUInteger)allocationLimit;
 #endif

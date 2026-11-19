@@ -5,6 +5,7 @@
 #import "../AxsCacheKeeperSearchDiagnostics.h"
 #import "../AxsCacheKeeperPDFSession.h"
 #import "../AxsCacheKeeperFilza.h"
+#import "../AxsCacheKeeperCapacityStatus.h"
 #include <dlfcn.h>
 #include <roothide.h>
 
@@ -14,6 +15,15 @@
 @property(nonatomic,strong) UITextView *text;
 @property(nonatomic,strong) UIButton *collectButton;
 @property(nonatomic,strong) UIButton *exportButton;
+@property(nonatomic,strong) UIButton *axs_cachekeeper_capacityButton;
+@property(nonatomic,strong) NSTimer *axs_cachekeeper_capacityTimer;
+@property(nonatomic,copy) NSString *axs_cachekeeper_capacityEpoch;
+@property(nonatomic,copy) NSDictionary *axs_cachekeeper_capacitySnapshot;
+@property(nonatomic) NSTimeInterval axs_cachekeeper_capacityStarted;
+@property(nonatomic) BOOL axs_cachekeeper_capacityReading;
+@property(nonatomic) BOOL axs_cachekeeper_capacityStopping;
+@property(nonatomic) NSTimeInterval axs_cachekeeper_capacityStopStarted;
+@property(nonatomic,copy) NSString *axs_cachekeeper_capacityError;
 @property(nonatomic,strong) UIProgressView *progressView;
 @property(nonatomic,strong) UILabel *progressLabel;
 @property(nonatomic,strong) NSData *reportData;
@@ -69,13 +79,14 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     self.text=[UITextView new];self.text.editable=NO;self.text.backgroundColor=UIColor.clearColor;
     self.text.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody];self.text.adjustsFontForContentSizeCategory=YES;
     self.text.text=@"快速汇总安装快照与当前配置中 APP 的现有记录，包含新装未配置和已关闭的 APP。新装未配置 APP 保持禁用。每轮总数固定；不会自动检测目录或深度扫描。\n\n报告包含实际提供的 APP 名称、版本与构建号、插件版本、开关、目录统计、清理回执、网络状态、宿主自动／面板只读观察、按原始记录派生的统一能力摘要和已有深度档案。不会主动唤醒或探测全机 APP，也不会改变模式。宿主信号未经认证，不证明清理、写入限制或关闭恢复效果。每条记录保留原时间，缺失、损坏和覆盖不完整会明确标注。每次采集重新获取安装列表；安装信息仅反映本轮快照；未在快照中出现不代表已卸载，来源缺失或损坏会标记不可用。\n\n未知路径、账号和私人文件名会匿名化；不导出文件内容、原始日志或设备标识。搜索状态附带本次主页面最近 16 条几何、命中与编辑事件；不含输入文字。进入诊断前已冻结，不把切页收起键盘计为搜索异常。\n\n采集后只保留内存报告，不自动保存。手动点“导出报告”后，才生成临时分享文件；分享结束清理副本。只有你主动“存储到文件”的报告会保留。离开本页会释放内存报告。\n\n需要新数据时，在具体 APP 的目录页执行检测，再回来采集即可。";
-    self.collectButton=[self axs_cachekeeper_button:@"采集诊断" action:@selector(axs_cachekeeper_collect)];
+    self.collectButton=[self axs_cachekeeper_button:@"汇总已保存诊断" action:@selector(axs_cachekeeper_collect)];
+    self.axs_cachekeeper_capacityButton=[self axs_cachekeeper_button:@"重新测量全容器占用 · 只读" action:@selector(axs_cachekeeper_capacity_action)];
     self.exportButton=[self axs_cachekeeper_button:@"导出报告" action:@selector(axs_cachekeeper_export)];
     self.progressLabel=[UILabel new];self.progressLabel.numberOfLines=0;
     self.progressLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody];self.progressLabel.adjustsFontForContentSizeCategory=YES;
     self.progressView=[[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
     self.progressView.accessibilityLabel=@"已读取的 APP 记录";
-    UIStackView *buttons=[[UIStackView alloc] initWithArrangedSubviews:@[self.progressLabel,self.progressView,self.collectButton,self.exportButton]];
+    UIStackView *buttons=[[UIStackView alloc] initWithArrangedSubviews:@[self.progressLabel,self.progressView,self.axs_cachekeeper_capacityButton,self.collectButton,self.exportButton]];
     buttons.axis=UILayoutConstraintAxisVertical;buttons.spacing=8;
     for (UIView *view in @[self.text,buttons]) {view.translatesAutoresizingMaskIntoConstraints=NO;[self.view addSubview:view];}
     UILayoutGuide *safe=self.view.safeAreaLayoutGuide;
@@ -88,7 +99,12 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
         [buttons.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-16],
         [buttons.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-12]]];
     [self axs_cachekeeper_refresh];
+    if (!self.axs_cachekeeper_pdfSession) {
+        self.text.text=[self.text.text stringByAppendingString:@"\n\n“重新测量全容器占用”是独立的实际只读测量：从系统登记容器覆盖 Documents、Library、Group 和扩展，不改变清理范围。全程只读文件元数据；未知目录匿名展示并保留，不读取文稿内容、不清理或唤醒 APP。风起云涌不参与。没有登记容器、读取失败与不完整分别报告，不能把缺失当 0。逻辑大小与已分配字节不是可释放空间，也不覆盖安装资源或孤立容器。可随时停止，离开本页停止；取消后用新的测量重新开始。\n测量结束后点击“汇总已保存诊断”，再导出同一份报告；汇总和导出不会再次测量磁盘。"];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(axs_cachekeeper_capacity_background:) name:UIApplicationDidEnterBackgroundNotification object:nil];
+    }
     if (self.axs_cachekeeper_pdfSession) {
+        [buttons removeArrangedSubview:self.axs_cachekeeper_capacityButton];[self.axs_cachekeeper_capacityButton removeFromSuperview];
         self.title=@"定位 PDF · 只读";self.text.delegate=self;
         UIButton *cancel=[self axs_cachekeeper_button:@"停止并释放本次定位" action:@selector(axs_cachekeeper_pdf_cancel)];
         [buttons insertArrangedSubview:cancel atIndex:3];
@@ -118,11 +134,121 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
 - (void)axs_cachekeeper_refresh {
     self.progressLabel.text=self.status;
     self.progressView.progress=self.total ? (float)self.completed/self.total : 0;
-    self.collectButton.enabled=!self.collecting && !self.sharing && (!self.axs_cachekeeper_pdfSession || self.axs_cachekeeper_pdfReady);
-    self.exportButton.enabled=self.reportData && !self.collecting && !self.sharing;
+    self.collectButton.enabled=!self.collecting && !self.sharing && !self.axs_cachekeeper_capacityEpoch && (!self.axs_cachekeeper_pdfSession || self.axs_cachekeeper_pdfReady);
+    self.exportButton.enabled=self.reportData && !self.collecting && !self.sharing && !self.axs_cachekeeper_capacityEpoch;
+    BOOL unconfirmedStop=self.axs_cachekeeper_capacityStopping && NSProcessInfo.processInfo.systemUptime-self.axs_cachekeeper_capacityStopStarted>=10;
+    self.axs_cachekeeper_capacityButton.enabled=!self.collecting && !self.sharing && (!self.axs_cachekeeper_capacityStopping || unconfirmedStop);
+    [self.axs_cachekeeper_capacityButton setTitle:unconfirmedStop ? @"放弃等待 · 停止尚未确认" : self.axs_cachekeeper_capacityEpoch ? @"停止全容器测量" : @"重新测量全容器占用 · 只读" forState:UIControlStateNormal];
+}
+- (NSString *)axs_cachekeeper_capacity_file:(NSString *)name {
+    return [jbroot(@"/var/mobile/Library/CacheKeeper") stringByAppendingPathComponent:name];
+}
+- (void)axs_cachekeeper_capacity_action {
+    if (self.collecting || self.sharing || self.axs_cachekeeper_pdfSession) return;
+    if (self.axs_cachekeeper_capacityStopping) {
+        if (NSProcessInfo.processInfo.systemUptime-self.axs_cachekeeper_capacityStopStarted<10) return;
+        [self axs_cachekeeper_capacity_stop];self.axs_cachekeeper_capacityError=@"cancelNotConfirmed";
+        self.status=@"已放弃本页等待并重发停止请求，服务是否停止仍未确认。可汇总最后保存观测（不会称为完成）或以新轮重新测量。";
+        [self axs_cachekeeper_refresh];return;
+    }
+    NSError *error=nil;
+    if (self.axs_cachekeeper_capacityEpoch) {
+        if (!axs_cachekeeper_capacity_write_request([self axs_cachekeeper_capacity_file:@"capacityRequest.plist"],self.axs_cachekeeper_capacityEpoch,YES,&error)) {
+            self.status=[NSString stringWithFormat:@"停止请求未保存（代码 %ld），测量可能仍在继续；可重试停止。",(long)error.code];
+        } else {self.axs_cachekeeper_capacityStopping=YES;self.axs_cachekeeper_capacityStopStarted=NSProcessInfo.processInfo.systemUptime;self.status=@"已请求停止；等待服务关闭本轮读取并保存实际终态…";}
+        [self axs_cachekeeper_refresh];return;
+    }
+    NSString *epoch=NSUUID.UUID.UUIDString;
+    if (!axs_cachekeeper_capacity_write_request([self axs_cachekeeper_capacity_file:@"capacityRequest.plist"],epoch,NO,&error)) {
+        self.status=[NSString stringWithFormat:@"测量请求保存失败（代码 %ld），没有开始测量。",(long)error.code];[self axs_cachekeeper_refresh];return;
+    }
+    self.axs_cachekeeper_capacityEpoch=epoch;self.axs_cachekeeper_capacitySnapshot=nil;self.axs_cachekeeper_capacityError=nil;
+    self.axs_cachekeeper_capacityStarted=NSProcessInfo.processInfo.systemUptime;self.axs_cachekeeper_capacityStopping=NO;
+    self.generation++;self.reportData=nil;self.total=0;self.completed=0;
+    self.status=@"请求已保存，正在等待服务获取本轮全登记容器并开始只读测量…";
+    self.progressView.accessibilityLabel=@"已完成测量的登记容器根";
+    __weak typeof(self) weak=self;
+    self.axs_cachekeeper_capacityTimer=[NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer) {
+        AxsCacheKeeperDiagnosticsPage *page=weak;if (!page) {[timer invalidate];return;}[page axs_cachekeeper_capacity_poll];
+    }];
+    [self axs_cachekeeper_refresh];[self axs_cachekeeper_capacity_poll];
+}
+- (void)axs_cachekeeper_capacity_poll {
+    if (!self.axs_cachekeeper_capacityEpoch || self.axs_cachekeeper_capacityReading) return;
+    self.axs_cachekeeper_capacityReading=YES;
+    NSString *epoch=self.axs_cachekeeper_capacityEpoch,*path=[self axs_cachekeeper_capacity_file:@"capacityResult.plist"];
+    NSUInteger generation=self.generation;__weak typeof(self) weak=self;
+    dispatch_async(self.collectionQueue,^{
+        NSError *error=nil;NSDictionary *result=axs_cachekeeper_capacity_read_result(path,&error);
+        dispatch_async(dispatch_get_main_queue(),^{
+            AxsCacheKeeperDiagnosticsPage *page=weak;if (!page) return;
+            page.axs_cachekeeper_capacityReading=NO;
+            if (page.generation!=generation || ![page.axs_cachekeeper_capacityEpoch isEqual:epoch]) return;
+            if (!result || ![result[@"epoch"] isEqual:epoch]) {
+                if (error) page.status=[NSString stringWithFormat:@"测量结果暂不可读（代码 %ld）；尚未确认完成，可停止或继续等待。",(long)error.code];
+                else if (NSProcessInfo.processInfo.systemUptime-page.axs_cachekeeper_capacityStarted>20)
+                    page.status=@"尚未收到本轮服务结果；旧测量未混入。本轮未确认开始，可停止后重试。";
+                [page axs_cachekeeper_refresh];return;
+            }
+            page.axs_cachekeeper_capacitySnapshot=result;page.total=[result[@"totalRoots"] unsignedIntegerValue];page.completed=[result[@"completedRoots"] unsignedIntegerValue];
+            NSString *state=result[@"state"];
+            page.status=[NSString stringWithFormat:@"全容器测量 %@：完整 %lu/%lu 根，失败 %@；未知用途数据保持不动。",state,(unsigned long)page.completed,(unsigned long)page.total,result[@"failedRoots"] ?: @0];
+            if (![state isEqual:@"running"]) {
+                [page.axs_cachekeeper_capacityTimer invalidate];page.axs_cachekeeper_capacityTimer=nil;
+                page.axs_cachekeeper_capacityEpoch=nil;page.axs_cachekeeper_capacityStopping=NO;
+                page.status=[page.status stringByAppendingString:@" 已保留本轮原始时间；点“汇总已保存诊断”后导出。"];
+                [page axs_cachekeeper_capacity_text:result];
+            }
+            [page axs_cachekeeper_refresh];
+        });
+    });
+}
+- (void)axs_cachekeeper_capacity_text:(NSDictionary *)result {
+    NSMutableString *text=[NSMutableString stringWithFormat:@"本轮全容器只读测量：%@\n源登记时间：%@；开始：%@；最后观测：%@\n结束根 %@/%@，失败 %@。\n\n每根单独计量；共享容器只测一次，关联多个 APP 不重复求全机总量。无登记容器不表示占用 0。风起云涌已排除。\n逻辑字节 / 已分配字节均非可清理量；用途未验证的资源保持不动，APFS 唯一 extents 和实际可释放空间未测量。\n\n已分配量最大的 50 个登记根（全部根和匿名层次见导出报告）：\n",result[@"state"],result[@"sourceSampledAt"],result[@"startedAt"],result[@"updatedAt"],result[@"completedRoots"],result[@"totalRoots"],result[@"failedRoots"]];
+    NSArray *roots=[result[@"roots"] sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b) {
+        NSComparisonResult order=[b[@"measurement"][@"allocatedBytes"] compare:a[@"measurement"][@"allocatedBytes"]];
+        return order==NSOrderedSame ? [a[@"id"] compare:b[@"id"]] : order;
+    }];
+    NSUInteger index=0;
+    for (NSDictionary *root in roots) {
+        if (index++>=50) break;
+        NSDictionary *measurement=root[@"measurement"];
+        [text appendFormat:@"\n根 %@ · %@\n%@\n状态 %@；",root[@"id"],[root[@"roles"] componentsJoinedByString:@" / "],[root[@"owners"] componentsJoinedByString:@", "],measurement[@"state"]];
+        if (![measurement[@"entries"] unsignedLongLongValue] && ![measurement[@"state"] isEqual:@"complete"])
+            [text appendString:@"尚未取得有效容量，不能填 0。\n"];
+        else [text appendFormat:@"%@逻辑 %.3f GB / 分配 %.3f GB\n",[measurement[@"state"] isEqual:@"complete"] ? @"" : @"不完整观测：",[measurement[@"logicalBytes"] doubleValue]/1e9,[measurement[@"allocatedBytes"] doubleValue]/1e9];
+        NSArray *nodes=[measurement[@"nodes"] sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b) {return [b[@"allocatedBytes"] compare:a[@"allocatedBytes"]];}];
+        NSUInteger shown=0;
+        for (NSDictionary *node in nodes) {
+            if (![node[@"parent"] unsignedIntegerValue]) continue;
+            if (shown++>=3) break;
+            [text appendFormat:@"  匿名节点 %@ · %@：逻辑 %.3f GB / 分配 %.3f GB\n",node[@"id"],node[@"category"],[node[@"logicalBytes"] doubleValue]/1e9,[node[@"allocatedBytes"] doubleValue]/1e9];
+        }
+    }
+    NSMutableArray *noRoots=[NSMutableArray new];
+    for (NSDictionary *entry in result[@"entries"]) if ([entry[@"state"] isEqual:@"noRegisteredRoots"]) [noRoots addObject:entry[@"bundle"]];
+    [text appendFormat:@"\n没有登记数据根的 APP（不能补 0）：%@\n\n点击“汇总已保存诊断”，再“导出报告”。汇总不会重复测量；保存观测的时间不表示导出时仍是相同占用。",[noRoots componentsJoinedByString:@", "]];
+    self.text.text=text;
+}
+- (void)axs_cachekeeper_capacity_stop {
+    NSString *epoch=self.axs_cachekeeper_capacityEpoch;
+    if (epoch) {
+        NSError *error=nil;
+        if (!axs_cachekeeper_capacity_write_request([self axs_cachekeeper_capacity_file:@"capacityRequest.plist"],epoch,YES,&error)) {
+            self.axs_cachekeeper_capacityError=@"cancelRequestWriteFailed";
+            NSLog(@"[CacheKeeper] 容量测量停止请求保存失败：%ld",(long)error.code);
+        }
+    }
+    [self.axs_cachekeeper_capacityTimer invalidate];self.axs_cachekeeper_capacityTimer=nil;
+    self.axs_cachekeeper_capacityEpoch=nil;self.axs_cachekeeper_capacityStopping=NO;
+}
+- (void)axs_cachekeeper_capacity_background:(NSNotification *)notification {
+    (void)notification;if (!self.axs_cachekeeper_capacityEpoch) return;
+    [self axs_cachekeeper_capacity_stop];self.status=self.axs_cachekeeper_capacityError ? @"进入后台时停止请求保存失败；尚未确认服务停止。" : @"进入后台已请求停止测量；回到本页后可汇总已保存实际终态或重新测量。";
+    [self axs_cachekeeper_refresh];
 }
 - (void)axs_cachekeeper_collect {
-    if (self.collecting || self.sharing) return;
+    if (self.collecting || self.sharing || self.axs_cachekeeper_capacityEpoch) return;
     if (self.axs_cachekeeper_pdfSession && self.axs_cachekeeper_pdfReady) {
         self.axs_cachekeeper_pdfReady=NO;self.collecting=YES;self.reportData=nil;
         self.status=@"正在复核安装与目录身份并开始有界定位…";[self axs_cachekeeper_refresh];[self.axs_cachekeeper_pdfSession start];return;
@@ -130,6 +256,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     if (self.axs_cachekeeper_pdfSession && !self.axs_cachekeeper_pdfReportable) return;
     self.collecting=YES;self.reportData=nil;self.completed=0;self.total=0;
     self.status=@"正在获取当前安装列表、配置和已有记录…";[self axs_cachekeeper_refresh];
+    self.progressView.accessibilityLabel=@"已读取的 APP 保存记录";
     NSUInteger generation=++self.generation;
     NSBundle *bundle=[NSBundle bundleForClass:self.class];
 #if defined(__arm64e__)
@@ -143,9 +270,14 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
         NSMutableDictionary *pdf=[self.axs_cachekeeper_pdfSnapshot mutableCopy];pdf[@"bundle"]=self.axs_cachekeeper_pdfBundle;pdf[@"path"]=self.axs_cachekeeper_pdfRelative;
         environment[@"pdfLocate"]=pdf;
     }
+    NSString *capacityPath=[self axs_cachekeeper_capacity_file:@"capacityResult.plist"];
+    NSDictionary *capacitySnapshot=self.axs_cachekeeper_capacitySnapshot;
     NSMutableDictionary *installationCache=self.installationCache;__weak typeof(self) weak=self;
     dispatch_async(self.collectionQueue,^{
         NSMutableDictionary *collectionEnvironment=[environment mutableCopy];
+        NSError *capacityError=nil;
+        NSDictionary *capacity=capacitySnapshot ?: axs_cachekeeper_capacity_read_result(capacityPath,&capacityError);
+        collectionEnvironment[@"capacityMeasurement"]=capacity ?: @{@"schemaVersion":@1,@"state":capacityError ? @"invalid" : @"notMeasured"};
         collectionEnvironment[@"diagnosticChannel"]=axs_cachekeeper_diagnostic_channel_hello();
         // Reuse unchanged package metadata, but obtain current membership on every collection.
         NSError *installationError=nil;
@@ -182,7 +314,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     [self presentViewController:alert animated:YES completion:nil];
 }
 - (void)axs_cachekeeper_export {
-    if (self.collecting || self.sharing || !self.reportData) return;
+    if (self.collecting || self.sharing || !self.reportData || self.axs_cachekeeper_capacityEpoch) return;
     self.sharing=YES;[self axs_cachekeeper_refresh];
     NSData *data=self.reportData;NSUInteger generation=self.generation;__weak typeof(self) weak=self;
     // 只有用户明确点击导出才落盘，采集阶段只保留 NSData。
@@ -216,6 +348,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     __weak typeof(self) weak=self;
     void (^releaseReport)(void)=^{
         AxsCacheKeeperDiagnosticsPage *page=weak;if (!page) return;
+        [page axs_cachekeeper_capacity_stop];page.axs_cachekeeper_capacitySnapshot=nil;
         page.generation++;page.reportData=nil;page.collecting=NO;page.sharing=NO;
         page.axs_cachekeeper_searchSnapshot=nil;
         [page.axs_cachekeeper_pdfSession cancel];page.axs_cachekeeper_pdfSnapshot=nil;page.axs_cachekeeper_pdfReady=NO;page.axs_cachekeeper_pdfFinished=NO;page.axs_cachekeeper_pdfReportable=NO;
@@ -229,7 +362,18 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     }];
     else releaseReport();
 }
-- (void)dealloc {[NSNotificationCenter.defaultCenter removeObserver:self];[self.axs_cachekeeper_pdfSession cancel];}
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    // Capacity-only completion handling leaves PDF/share and cancelled transitions unchanged.
+    if (!self.axs_cachekeeper_capacityEpoch || self.sharing) return;
+    BOOL pushed=self.navigationController && self.navigationController.topViewController!=self;
+    BOOL covered=self.presentedViewController && !self.view.window;
+    if (!pushed && !covered && self.view.window) return;
+    [self axs_cachekeeper_capacity_stop];self.generation++;self.reportData=nil;self.axs_cachekeeper_capacitySnapshot=nil;
+    self.status=@"实际离页已请求停止测量；服务终态以保存记录为准。";
+    [self axs_cachekeeper_refresh];
+}
+- (void)dealloc {[NSNotificationCenter.defaultCenter removeObserver:self];[self.axs_cachekeeper_pdfSession cancel];[self axs_cachekeeper_capacity_stop];}
 - (void)axs_cachekeeper_pdf_background:(NSNotification *)notification {(void)notification;[self axs_cachekeeper_pdf_cancel];}
 - (void)axs_cachekeeper_pdf_cancel {
     [self.axs_cachekeeper_pdfSession cancel];self.generation++;self.reportData=nil;self.collecting=NO;

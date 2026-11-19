@@ -852,13 +852,13 @@ static NSDictionary *axs_cachekeeper_registry_scope_sample(NSDictionary *tokens,
     return @{@"schemaVersion":@1,@"state":complete ? @"complete" : @"partial",@"identityBasis":@"rootDeviceInodeAtObservation",@"scopeLifetime":@"thisInventoryOnly",@"deletionAuthorization":@"notGranted",@"accesses":accesses,@"scopes":closed};
 }
 static NSDictionary *axs_cachekeeper_registry_inventory_finish(NSDictionary *coverage,NSDictionary *registry,NSDictionary *apps,
-    NSMutableDictionary *home,NSMutableDictionary *group,NSMutableDictionary *extension,NSNumber *sampledAt,NSDictionary *incremental,NSUInteger removed) {
+    NSMutableDictionary *home,NSMutableDictionary *group,NSMutableDictionary *extension,NSNumber *sampledAt,NSDictionary *incremental,NSUInteger removed,NSDictionary **privatePlan) {
     NSMutableDictionary *out=[coverage mutableCopy];out[@"sourceSampledAt"]=sampledAt;
     NSMutableSet *urls=[NSMutableSet new];for (NSDictionary *role in @[home,group,extension]) [urls addObjectsFromArray:[role[@"_associations"] allValues]];
     NSMutableDictionary *tokens=[NSMutableDictionary new];
     for (NSString *url in [urls.allObjects sortedArrayUsingSelector:@selector(compare:)]) tokens[url]=[NSString stringWithFormat:@"resource-%lu",(unsigned long)tokens.count+1];
     // Index each validated association once; rebuilding it for every registration is quadratic.
-    NSMutableDictionary *ownersByRole=[NSMutableDictionary new],*ownersByToken=[NSMutableDictionary new];
+    NSMutableDictionary *ownersByRole=[NSMutableDictionary new],*ownersByToken=[NSMutableDictionary new],*rolesByToken=[NSMutableDictionary new];
     for (NSString *name in @[@"home",@"group",@"extension"]) {
         NSDictionary *role=[name isEqual:@"home"] ? home : [name isEqual:@"group"] ? group : extension;
         NSMutableDictionary *owners=[NSMutableDictionary new];
@@ -869,6 +869,7 @@ static NSDictionary *axs_cachekeeper_registry_inventory_finish(NSDictionary *cov
             NSMutableSet *related=owners[owner];if (!related) owners[owner]=related=[NSMutableSet new];
             [related addObject:tokens[role[@"_associations"][identity]]];
             NSString *token=tokens[role[@"_associations"][identity]];NSMutableSet *allOwners=ownersByToken[token];if (!allOwners) ownersByToken[token]=allOwners=[NSMutableSet new];[allOwners addObject:owner];
+            if (privatePlan) {NSMutableSet *roles=rolesByToken[token];if (!roles) rolesByToken[token]=roles=[NSMutableSet new];[roles addObject:name];}
         }
         ownersByRole[name]=owners;
     }
@@ -889,10 +890,25 @@ static NSDictionary *axs_cachekeeper_registry_inventory_finish(NSDictionary *cov
         [entries addObject:@{@"bundle":bundle,@"displayEligible":@(eligible),@"sourceClassification":[type isEqual:@"System"] ? (eligible ? @"thirdPartySystem" : @"system") : [type isEqual:@"User"] ? @"user" : @"unknown",@"relationships":relations,@"incrementalState":incremental[bundle] ?: @"notVerified"}];
     }
     out[@"entries"]=entries;out[@"scopeObservation"]=axs_cachekeeper_registry_scope_sample(tokens,ownersByToken);out[@"removedFromProviderCacheCount"]=@(removed);
-    return axs_cachekeeper_registry_inventory_projection(out);
+    NSDictionary *projection=axs_cachekeeper_registry_inventory_projection(out);
+    if (privatePlan) {
+        NSMutableArray *roots=[NSMutableArray new];
+        // Derive the private plan from the same validated/revocable association tables.
+        // Public tokens retain only this observation's relation, never the raw URL or plugin ID.
+        for (NSString *urlText in [tokens.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+            NSString *token=tokens[urlText];NSSet *roles=rolesByToken[token];
+            NSURL *url=[NSURL URLWithString:urlText];
+            if (url.isFileURL && [ownersByToken[token] count])
+                [roots addObject:@{@"token":token,@"url":url,@"owners":[[ownersByToken[token] allObjects] sortedArrayUsingSelector:@selector(compare:)],
+                    @"roles":[roles.allObjects sortedArrayUsingSelector:@selector(compare:)]}];
+        }
+        *privatePlan=@{@"state":projection[@"state"],@"sourceSampledAt":sampledAt,@"registry":projection,@"roots":[roots copy]};
+    }
+    return projection;
 }
-NSArray *axs_cachekeeper_installed_applications_with_registry_inventory(NSMutableDictionary *cache, NSDictionary **coverage, NSDictionary **registryInventory, NSError **error) {
+NSArray *axs_cachekeeper_installed_applications_with_capacity_plan(NSMutableDictionary *cache, NSDictionary **coverage, NSDictionary **registryInventory, NSDictionary **privatePlan, NSError **error) {
     if (error) *error=nil;
+    if (privatePlan) *privatePlan=nil;
     NSNumber *sampledAt=@((unsigned long long)NSDate.date.timeIntervalSince1970);
     NSString *sourceState=nil;
     id manager=axs_cachekeeper_coverage_property(NSClassFromString(@"LSApplicationWorkspace"),@"defaultWorkspace",&sourceState);
@@ -903,7 +919,7 @@ NSArray *axs_cachekeeper_installed_applications_with_registry_inventory(NSMutabl
         if (registryInventory) {NSMutableDictionary *failure=axs_cachekeeper_registry_inventory_base(@"unavailable");failure[@"sourceState"]=sourceState ?: @"unavailable";failure[@"sourceSampledAt"]=sampledAt;*registryInventory=[failure copy];}
         axs_cachekeeper_installation_error(error,7,@"系统应用列表不可用",@"registry",@"enumerate",0);return nil;
     }
-    BOOL sample=coverage || registryInventory;
+    BOOL sample=coverage || registryInventory || privatePlan;
     NSMutableDictionary *home=sample ? axs_cachekeeper_coverage_role() : nil,*group=sample ? axs_cachekeeper_coverage_role() : nil,
         *extension=sample ? axs_cachekeeper_coverage_role() : nil,*registry=[NSMutableDictionary new];
     NSUInteger registrations=0,invalidRegistrations=0,groupUsed=0,extensionUsed=0;
@@ -975,10 +991,16 @@ NSArray *axs_cachekeeper_installed_applications_with_registry_inventory(NSMutabl
             @"truncatedRegistrationCount":@(truncated),@"allRolesUniqueRegisteredURLCount":@(allURLs.count),@"countsAreLowerBounds":@(partial),@"home":h,@"group":g,@"extension":e}];
         if (coverage) *coverage=[result copy];
         NSUInteger removed=0;for (NSString *bundle in cache) if (!nextCache[bundle]) removed++;
-        if (registryInventory) *registryInventory=axs_cachekeeper_registry_inventory_finish(result,registry,apps,home,group,extension,sampledAt,incremental,removed);
+        if (registryInventory || privatePlan) {
+            NSDictionary *inventory=axs_cachekeeper_registry_inventory_finish(result,registry,apps,home,group,extension,sampledAt,incremental,removed,privatePlan);
+            if (registryInventory) *registryInventory=inventory;
+        }
     }
     [cache setDictionary:nextCache];
     return [apps.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b){return [a[@"id"] compare:b[@"id"]];}];
+}
+NSArray *axs_cachekeeper_installed_applications_with_registry_inventory(NSMutableDictionary *cache, NSDictionary **coverage, NSDictionary **registryInventory, NSError **error) {
+    return axs_cachekeeper_installed_applications_with_capacity_plan(cache,coverage,registryInventory,NULL,error);
 }
 NSArray *axs_cachekeeper_installed_applications_with_container_coverage(NSMutableDictionary *cache, NSDictionary **coverage, NSError **error) {
     return axs_cachekeeper_installed_applications_with_registry_inventory(cache,coverage,NULL,error);

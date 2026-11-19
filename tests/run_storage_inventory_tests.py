@@ -23,7 +23,7 @@ def run() -> int:
     (ROOT / "tmp").mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="storage-inventory-", dir=ROOT / "tmp") as temporary:
         output = pathlib.Path(temporary)
-        for role in ("red", "green"):
+        for role in ("red", "plan-red", "green"):
             sources = [ROOT / "tests/storage_inventory_tests.m", ROOT / "AxsCacheKeeperPDFInspection.m",
                        ROOT / "AxsCacheKeeperOperationInfo.m"]
             if role == "red":
@@ -44,6 +44,13 @@ def run() -> int:
                 sources.append(ROOT / "AxsCacheKeeperHostEvidence.m")
                 sources.append(ROOT / "AxsCacheKeeperInjectionConditions.m")
                 installation_source = ROOT / "AxsCacheKeeperInstallation.m"
+                if role == "plan-red":
+                    source = installation_source.read_text(encoding="utf-8-sig")
+                    anchor = '    if (privatePlan) {\n'
+                    if source.count(anchor) != 1:
+                        raise SystemExit("FAIL: ambiguous private capacity plan RED mutation")
+                    installation_source = output / "plan-red-source.m"
+                    installation_source.write_text(source.replace(anchor, '    if (NO && privatePlan) {\n'), encoding="utf-8")
             # Only the system-class lookup boundary is substituted, identically
             # for pinned RED and current GREEN. The included source stays intact.
             wrapper = output / (role + "-installation.m")
@@ -69,6 +76,12 @@ def run() -> int:
                 if result.returncode != 1 or result.stderr.strip() != EXPECTED_RED or result.stdout.strip():
                     raise SystemExit("FAIL: incorrect all-app inventory behavior RED\n" + result.stdout + result.stderr)
                 print("PASS: exact old-source all-app inventory RED:", result.stderr.strip(), flush=True)
+            elif role == "plan-red":
+                failures = [line for line in result.stderr.splitlines() if line.startswith("FAIL:")]
+                expected = "FAIL: storage inventory: capacity plan preserves one private URL across home group and extension aliases"
+                if result.returncode != 1 or failures != [expected]:
+                    raise SystemExit("FAIL: incorrect private capacity plan behavior RED\n" + result.stdout + result.stderr)
+                print("PASS: exact private capacity plan RED:", expected, flush=True)
             else:
                 if result.returncode:
                     raise SystemExit("FAIL: all-app inventory GREEN\n" + result.stdout + result.stderr)

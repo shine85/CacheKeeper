@@ -13,6 +13,7 @@
 #import "../AxsCacheKeeperInjectionConditions.h"
 #import "../AxsCacheKeeperWebKitStatus.h"
 #import "../AxsCacheKeeperImageCacheStatus.h"
+#import "DiagnosticsPage.h"
 #include <dlfcn.h>
 
 @interface CKScanPage : UITableViewController
@@ -110,7 +111,12 @@
     self.enableAllButton=[[UIBarButtonItem alloc] initWithTitle:@"一键开启" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_enable_all)];
     self.enableAllButton.accessibilityLabel=@"开启自动模式、网络磁盘缓存限制与新增缓存自动发现";
     self.navigationItem.rightBarButtonItems=@[self.enableAllButton,self.scanButton];
+    self.navigationItem.leftBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"全容器 · 只读" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_capacity_page)];
+    self.navigationItem.leftItemsSupplementBackButton=YES;
     [self axs_cachekeeper_reload];
+}
+- (void)axs_cachekeeper_capacity_page {
+    [self.navigationController pushViewController:[AxsCacheKeeperDiagnosticsPage new] animated:YES];
 }
 - (void)scan {
     if (self.timer) {

@@ -86,6 +86,7 @@ targets:
         CFBundleShortVersionString: "0.7.2"
     sources:
       - path: ../../tests/ui/ScanPageTests.m
+      - path: ../../tests/ui/CapacityPageTests.m
       - path: ../../tests/ui/ScanHostEvidenceBoundary.m
       - path: ../../Prefs/InspectionPage.m
     dependencies:

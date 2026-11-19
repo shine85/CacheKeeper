@@ -1,6 +1,7 @@
 #import <XCTest/XCTest.h>
 #import "ScanHostEvidenceBoundary.h"
 #import "../../AxsCacheKeeperDiagnostics.h"
+#import "../../Prefs/DiagnosticsPage.h"
 // The visual harness already owns a CKScanPage navigation substitute. Compile the
 // actual product implementation under an isolated class name, unchanged behavior.
 #define CKScanPage AxsCacheKeeperActualScanPage
@@ -208,6 +209,14 @@
     [navigation pushViewController:detail animated:NO];[self waitForExpectations:@[shown] timeout:5];
     XCTAssertEqual(navigation.viewControllers.firstObject,self.page);
     XCTAssertEqual(self.page.axs_cachekeeper_hostClient.axs_cachekeeper_activeTokenCount,0u);
+}
+- (void)testWholeContainerEntryOpensSeparateReadOnlyPage {
+    UIBarButtonItem *entry=self.page.navigationItem.leftBarButtonItem;
+    XCTAssertNotNil(entry);XCTAssertNotEqual(entry.target,nil);
+    [UIApplication.sharedApplication sendAction:entry.action to:entry.target from:entry forEvent:nil];
+    XCTAssertTrue([self.page.navigationController.topViewController isKindOfClass:AxsCacheKeeperDiagnosticsPage.class]);
+    XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:[self.page file:@"request.plist"]]);
+    XCTAssertEqualObjects([NSDictionary dictionaryWithContentsOfFile:[self.page file:@"appEnabled.plist"]][self.page.bundle][@"enabled"],@NO);
 }
 - (void)testCompletedPopReleasesHostRequest {
     UINavigationController *navigation=self.page.navigationController;UIViewController *root=[UIViewController new];

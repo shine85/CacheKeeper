@@ -44,6 +44,10 @@ NSArray *axs_cachekeeper_installed_applications_with_container_coverage(NSMutabl
 // Scope IDs merge observed device/inode aliases for this inventory and grant no deletion permission.
 NSArray *axs_cachekeeper_installed_applications_with_registry_inventory(NSMutableDictionary *cache,
     NSDictionary **coverage, NSDictionary **registryInventory, NSError **error);
+// Same provider read. Private plan contains validated NSURL roots plus public role/owner tokens.
+// Keep in the service's serial-queue memory only; never persist or pass to UI/export.
+NSArray *axs_cachekeeper_installed_applications_with_capacity_plan(NSMutableDictionary *cache,
+    NSDictionary **coverage, NSDictionary **registryInventory, NSDictionary **privatePlan, NSError **error);
 // Closed public projection; unknown keys are dropped. Invalid/nil sources remain explicit.
 NSDictionary *axs_cachekeeper_registry_inventory_projection(id registryInventory);
 // Fixed, count-only schema; invalid values return an explicit invalid state. Never exports raw identities.

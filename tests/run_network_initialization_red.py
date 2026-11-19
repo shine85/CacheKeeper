@@ -1,6 +1,8 @@
 """Prove both historical NSURLCache initialization and restoration failures."""
 import pathlib
+import shutil
 import subprocess
+import sys
 import tempfile
 
 root = pathlib.Path(__file__).resolve().parents[1]
@@ -11,7 +13,7 @@ def verify_failure(baseline, expected):
         (target / "tests").mkdir()
         (target / "AxsCacheKeeperNetworkCache.m").write_bytes(subprocess.check_output(
             ["git", "show", f"{baseline}:AxsCacheKeeperNetworkCache.m"], cwd=root, timeout=15))
-        for name in ("AxsCacheKeeperNetworkCache.h", "tests/network_cache_tests.m"):
+        for name in ("AxsCacheKeeperNetworkCache.h", "AxsCacheKeeperPolicy.h", "tests/network_cache_tests.m"):
             (target / name).write_bytes((root / name).read_bytes())
         (target / "main.m").write_text(
             '#import <Foundation/Foundation.h>\n'
@@ -29,9 +31,14 @@ def verify_failure(baseline, expected):
                        check=True, timeout=60)
         result = subprocess.run([str(binary), str(fixture)], capture_output=True,
                                 text=True, encoding="utf-8", timeout=60)
-        if result.returncode != 1 or expected not in result.stderr:
+        failures = [line for line in (result.stdout + result.stderr).splitlines() if line.startswith("FAIL:")]
+        if result.returncode != 1 or failures != [expected]:
             raise SystemExit(f"Expected initialization budget failure; got {result.returncode}: {result.stderr}")
         print("Verified network initialization baseline red:", result.stderr.strip())
+
+if sys.platform != "darwin" or not shutil.which("xcrun"):
+    print("UNAVAILABLE: historical network RED requires macOS Foundation and xcrun; no native RED ran.")
+    raise SystemExit(2)
 
 verify_failure("897259fcd3e846662379fbce97896ed8abfd76ff",
                "FAIL: network initialization: path 原初始化器 disk 期望 0，实际 8388608")
