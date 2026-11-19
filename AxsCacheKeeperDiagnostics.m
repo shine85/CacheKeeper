@@ -1,5 +1,6 @@
 #import "AxsCacheKeeperPDFInspection.h"
 #import "AxsCacheKeeperDiagnostics.h"
+#import "AxsCacheKeeperReleaseEvidenceStatus.h"
 #import "AxsCacheKeeperInstallation.h"
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperSearchDiagnostics.h"
@@ -114,6 +115,8 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
 - (NSDictionary *)axs_cachekeeper_record:(NSDictionary *)record {
     if (![record isKindOfClass:NSDictionary.class]) return @{@"invalidRecord":@YES};
     NSMutableDictionary *out=[NSMutableDictionary new];
+    if (record[@"releaseEvidence"]) out[@"releaseEvidence"]=axs_cachekeeper_release_evidence_projection(record[@"releaseEvidence"],record[@"confirmedRoundID"]) ?: @{@"state":@"invalid"};
+    else if (record[@"confirmedRoundID"]) out[@"releaseEvidence"]=@{@"state":@"notRecorded"};
     if (record[@"scanProgress"]) out[@"scanProgress"]=axs_cachekeeper_scan_progress_projection(record[@"scanProgress"]) ?: @{@"state":@"invalid"};
     if (record[@"scanState"]) out[@"scanState"]=[@[@"running",@"complete",@"partial",@"cancelled",@"interrupted",@"saveFailed"] containsObject:record[@"scanState"]] ? record[@"scanState"] : @"invalid";
     if (axs_cachekeeper_scan_integer(record[@"partialCount"],UINT32_MAX)) out[@"partialCount"]=record[@"partialCount"];

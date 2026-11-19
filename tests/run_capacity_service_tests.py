@@ -16,10 +16,11 @@ def main():
         print("UNAVAILABLE: capacity service requires macOS Foundation and xcrun; no native RED/GREEN ran.")
         return 2
     root = pathlib.Path(__file__).resolve().parents[1]
-    (root / "tmp").mkdir(exist_ok=True)
+    workspace = root / "tmp" / "feedback-1792"
+    workspace.mkdir(parents=True, exist_ok=True)
     flags = [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format",
              "-Werror=implicit-function-declaration", "-I" + str(root), "-I" + str(root / "tests/include"), "-framework", "Foundation"]
-    with tempfile.TemporaryDirectory(prefix="capacity-service-", dir=root / "tmp") as directory:
+    with tempfile.TemporaryDirectory(prefix="capacity-service-", dir=workspace) as directory:
         output = pathlib.Path(directory)
         product = (root / "AxsCacheKeeperCapacityService.m").read_text(encoding="utf-8")
         status = (root / "AxsCacheKeeperCapacityStatus.h").read_text(encoding="utf-8")
@@ -54,21 +55,44 @@ def main():
                 print("Verified precise service behavior RED:", name)
 
         mutations = (
+            ("cursor-closure", 'if (_root) _allCursorsClosed &= _root.openDirectoryCount==0;',
+             'if (_root) _allCursorsClosed=NO;', "history",
+             "history links consecutive observations with real cursor closure evidence"),
+            ("cold-closure", '_record[@"lifecycle"]=@{@"acceptedOperation":@"recovered",@"acceptedAt":AxsCacheKeeperCapacityNow(),@"cursorClosure":@"notObserved"};',
+             '_record[@"lifecycle"]=@{@"acceptedOperation":@"recovered",@"acceptedAt":AxsCacheKeeperCapacityNow(),@"cursorClosure":@"observedZero",@"cursorClosedAt":AxsCacheKeeperCapacityNow()};',
+             "history-failure", "restart never invents old process descriptor closure"),
+            ("terminal-history", '[self axs_cachekeeper_remember:_record saved:YES supersededBy:nil];',
+             '/* precise RED: omit successful terminal from next epoch */', "history",
+             "saved cancellation remains in next epoch terminal history"),
+            ("failed-terminal-history", '[self axs_cachekeeper_remember:_record saved:NO supersededBy:request[@"epoch"]];',
+             '[self axs_cachekeeper_remember:_record saved:YES supersededBy:request[@"epoch"]];', "history-failure",
+             "superseded failed cancel never claims a saved full result"),
             ("request-fields", "if (![keys isEqual:required]) return nil;", "if (NO && ![keys isEqual:required]) return nil;", "gates",
              "unknown request field cannot access provider or containers"),
             ("alias-identity", "NSMutableDictionary *existing=identities[identity];", "NSMutableDictionary *existing=nil;", "shared",
              "alias/shared root measured once with union owners"),
             ("cancel", 'return !request || ([request[@"operation"] isEqual:@"cancel"] && [request[@"epoch"] isEqual:_record[@"epoch"]]);', 'return NO;', "cancel",
              "cancel closes active measurement before completion"),
-            ("alias-replacement", 'if (![expected isEqual:[NSData dataWithBytes:pair length:sizeof(pair)]]) return NO;',
-             'if (NO && ![expected isEqual:[NSData dataWithBytes:pair length:sizeof(pair)]]) return NO;', "alias-replace",
+            ("alias-replacement", 'if (![expected isEqual:[NSData dataWithBytes:pair length:sizeof(pair)]]) {',
+             'if (NO && ![expected isEqual:[NSData dataWithBytes:pair length:sizeof(pair)]]) {', "alias-replace",
              "changed alias cannot attribute old measurement to union owners as complete"),
             ("publication-epoch", 'return !request || [request[@"operation"] isEqual:@"cancel"] || [request[@"epoch"] isEqual:_record[@"epoch"]];',
              'return YES;', "replace",
              "provider-time replacement never publishes old epoch"),
             ("late-cancel", 'return !request || ([request[@"operation"] isEqual:@"cancel"] && [request[@"epoch"] isEqual:_record[@"epoch"]]);',
              'return !request || [request[@"operation"] isEqual:@"cancel"];', "late-cancel", "late cancel A must not terminate active B"),
-            ("unobserved-root", '[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:nil]', '[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:plan[@"url"]]', "unobserved",
+            ("source-stat-errno", 'sourceFailure=@{@"stage":@"sourceStat",@"reason":@"statFailed",@"errorDomain":@"posix",@"errorCode":@(code)};',
+             'sourceFailure=@{@"stage":@"sourceStat",@"reason":@"statFailed",@"errorDomain":@"posix",@"errorCode":@(EACCES)};', "source-errors",
+             "missing source preserves actual lstat errno without a synthetic cursor"),
+            ("source-cursor-closure", '_cursorObserved |= _root.cursorCreated;', '_cursorObserved=YES;', "source-errors",
+             "source failure without cursor never claims observed cursor closure"),
+            ("source-alias-cursor", '_root=observed && !_aliasChanged ?', '_root=observed ?', "source-alias",
+             "alias mismatch before open has source evidence without opening replacement or cursor errno"),
+            ("source-alias-errno", '*failure=@{@"stage":@"aliasRecheck",@"reason":@"statFailed",@"errorDomain":@"posix",@"errorCode":@(code)};',
+             '*failure=@{@"stage":@"aliasRecheck",@"reason":@"statFailed",@"errorDomain":@"posix",@"errorCode":@(EACCES)};', "source-alias",
+             "alias mismatch before open has source evidence without opening replacement or cursor errno"),
+            ("unobserved-root", '[[AxsCacheKeeperCapacityRoot alloc] initWithSourceFailure:observed ? _aliasFailure : plan[@"sourceFailure"]]',
+             '[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:plan[@"url"]]', "unobserved",
              "unobserved source root cannot measure a later created directory as complete"),
         )
         for name, before, after, case, failure in mutations:
@@ -76,17 +100,30 @@ def main():
                 raise RuntimeError("ambiguous service RED anchor: " + name)
             run(name, product.replace(before, after), case, failure)
         protocol_mutations = (
+            ("cursor-error-projection", 'out[@"cursorErrors"]=errors;', '/* precise RED: discard real cursor errors */',
+             "cursor-errors", "real cursor error survives service schema and saved result"),
+            ("cursor-error-counts", 'if (enumerated!=enumeration || statted!=stat) return nil;',
+             'if (NO && (enumerated!=enumeration || statted!=stat)) return nil;', "error-schema",
+             "contradictory cursor counts and detail fail closed"),
+            ("cursor-error-truncation", 'if ((!omitted && !saturated) || (omitted<UINT32_MAX ? omitted<missing || (!saturated && omitted!=missing) : !saturated && missing<UINT32_MAX)) return nil;',
+             '/* precise RED: accept contradictory truncated counts */', "error-schema",
+             "contradictory cursor counts and detail fail closed"),
+            ("complete-cursor-errors", 'if ([value[@"state"] isEqual:@"complete"] && ([errors[@"enumerationErrors"] unsignedLongLongValue] ||',
+             'if (NO && [value[@"state"] isEqual:@"complete"] && ([errors[@"enumerationErrors"] unsignedLongLongValue] ||', "error-schema",
+             "complete measurement cannot carry cursor errors"),
+            ("complete-source-failure", 'if (!failure || [@[@"running",@"complete"] containsObject:value[@"state"]]) return nil;',
+             'if (!failure) return nil;', "error-schema", "complete measurement cannot carry source failure"),
             ("node-depth", 'if (depth>3 || ![node[@"entries"] unsignedLongLongValue]) return nil;',
-             'if (! [node[@"entries"] unsignedLongLongValue]) return nil;', "anonymous directory depth four is invalid"),
+             'if (! [node[@"entries"] unsignedLongLongValue]) return nil;', "nodes", "anonymous directory depth four is invalid"),
             ("node-sibling-totals", 'if (amount>maximum || sum>maximum-amount) return nil;',
-             'if (amount>maximum) return nil;', "direct sibling sums cannot exceed parent aggregate"),
+             'if (amount>maximum) return nil;', "nodes", "direct sibling sums cannot exceed parent aggregate"),
             ("node-parent-entry", 'if ([key isEqual:@"entries"]) maximum--;',
-             'if (NO && [key isEqual:@"entries"]) maximum--;', "directory entries must retain the parent's own entry"),
+             'if (NO && [key isEqual:@"entries"]) maximum--;', "nodes", "directory entries must retain the parent's own entry"),
         )
-        for name, before, after, failure in protocol_mutations:
+        for name, before, after, case, failure in protocol_mutations:
             if status.count(before) != 1:
                 raise RuntimeError("ambiguous protocol RED anchor: " + name)
-            run(name, product, "nodes", failure, status.replace(before, after))
+            run(name, product, case, failure, status.replace(before, after))
         run("green", product, "all")
     return 0
 

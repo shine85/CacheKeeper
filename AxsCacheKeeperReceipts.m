@@ -1,4 +1,5 @@
 #import "AxsCacheKeeperReceipts.h"
+#import "AxsCacheKeeperReleaseEvidenceStatus.h"
 
 static dispatch_queue_t AxsCacheKeeperReceiptsQueue(void) {
     static dispatch_queue_t queue;
@@ -22,7 +23,17 @@ static NSDictionary *AxsCacheKeeperReadReceipt(NSString *path) {
     for (NSString *key in @[@"removed",@"bytes",@"confirmedRemoved",@"confirmedBytes",@"failed",@"lastRemoved",@"lastBytes"])
         if (record[key] && (![record[key] isKindOfClass:NSNumber.class] || [record[key] doubleValue]<0)) return nil;
     if (record[@"updated"] && ![record[@"updated"] isKindOfClass:NSDate.class]) return nil;
+    if (record[@"releaseEvidence"] && !axs_cachekeeper_release_evidence_projection(record[@"releaseEvidence"],record[@"confirmedRoundID"])) return nil;
     return record;
+}
+
+static BOOL AxsCacheKeeperReleaseEvidenceStale(NSDictionary *incoming, NSDictionary *previous) {
+    if (!previous) return NO;
+    if (!incoming) return YES;
+    uint64_t oldRevision=[previous[@"revision"] unsignedLongLongValue],newRevision=[incoming[@"revision"] unsignedLongLongValue];
+    if (newRevision<oldRevision || (newRevision==oldRevision && ![incoming isEqual:previous])) return YES;
+    BOOL terminal=[@[@"finished",@"cancelled"] containsObject:previous[@"state"]];
+    return terminal && ![incoming isEqual:previous];
 }
 
 @interface AxsCacheKeeperReceipts ()
@@ -69,8 +80,17 @@ static NSDictionary *AxsCacheKeeperReadReceipt(NSString *path) {
 }
 
 + (BOOL)submitRoundForBundle:(NSString *)bundle roundID:(NSString *)roundID removed:(NSUInteger)removed bytes:(unsigned long long)bytes endReason:(NSInteger)endReason phase:(NSString *)phase message:(NSString *)message failed:(NSUInteger)failed effectivePaths:(NSArray *)effectivePaths discoveredPaths:(NSArray *)discoveredPaths directories:(NSDictionary *)directories round:(NSDictionary *)round coverageComplete:(BOOL)coverageComplete {
+    return [self submitRoundForBundle:bundle roundID:roundID removed:removed bytes:bytes endReason:endReason phase:phase message:message
+        failed:failed effectivePaths:effectivePaths discoveredPaths:discoveredPaths directories:directories round:round
+        coverageComplete:coverageComplete releaseEvidence:nil];
+}
+
++ (BOOL)submitRoundForBundle:(NSString *)bundle roundID:(NSString *)roundID removed:(NSUInteger)removed bytes:(unsigned long long)bytes endReason:(NSInteger)endReason phase:(NSString *)phase message:(NSString *)message failed:(NSUInteger)failed effectivePaths:(NSArray *)effectivePaths discoveredPaths:(NSArray *)discoveredPaths directories:(NSDictionary *)directories round:(NSDictionary *)round coverageComplete:(BOOL)coverageComplete releaseEvidence:(NSDictionary *)releaseEvidence {
     if (!bundle.length || !roundID.length) return NO;
+    NSDictionary *evidence=releaseEvidence ? axs_cachekeeper_release_evidence_projection(releaseEvidence,roundID) : nil;
+    if (releaseEvidence && (!evidence || [evidence[@"succeeded"] unsignedLongLongValue]!=removed)) return NO;
     NSMutableDictionary *snapshot = [NSMutableDictionary dictionaryWithDictionary:@{@"roundID":roundID, @"removed":@(removed), @"bytes":@(bytes), @"endReason":@(endReason), @"phase":phase ?: @"", @"message":message ?: @"", @"failed":@(failed), @"effectivePaths":effectivePaths ?: @[], @"coverageComplete":@(coverageComplete)}];
+    if (evidence) snapshot[@"releaseEvidence"]=evidence;
     if (discoveredPaths) snapshot[@"discoveredPaths"] = discoveredPaths;
     if (directories) snapshot[@"directories"] = directories;
     if (round) snapshot[@"round"] = round;
@@ -85,7 +105,8 @@ static NSDictionary *AxsCacheKeeperReadReceipt(NSString *path) {
         for (NSUInteger i = 0; i < queue.count; i++) if ([queue[i][@"roundID"] isEqual:roundID]) { existing = i; break; }
         if (existing != NSNotFound) {
             NSDictionary *pending=queue[existing];
-            BOOL stale=removed<[pending[@"removed"] unsignedIntegerValue] || bytes<[pending[@"bytes"] unsignedLongLongValue] || (pending[@"round"] && !round);
+            BOOL stale=removed<[pending[@"removed"] unsignedIntegerValue] || bytes<[pending[@"bytes"] unsignedLongLongValue] || (pending[@"round"] && !round) ||
+                AxsCacheKeeperReleaseEvidenceStale(evidence,pending[@"releaseEvidence"]);
             if (!stale) queue[existing] = [snapshot copy];
         } else [queue addObject:[snapshot copy]];
         done = [self flushQueueForBundle:bundle];
@@ -131,7 +152,8 @@ static NSDictionary *AxsCacheKeeperReadReceipt(NSString *path) {
     unsigned long long submittedBytes = [snapshot[@"bytes"] unsignedLongLongValue];
     BOOL sameRound=[previous[@"confirmedRoundID"] isEqual:roundID];
     if (sameRound && (submittedRemoved<[previous[@"confirmedRemoved"] unsignedIntegerValue] ||
-        submittedBytes<[previous[@"confirmedBytes"] unsignedLongLongValue])) return YES;
+        submittedBytes<[previous[@"confirmedBytes"] unsignedLongLongValue] ||
+        AxsCacheKeeperReleaseEvidenceStale(snapshot[@"releaseEvidence"],previous[@"releaseEvidence"]))) return YES;
     NSUInteger prevRemoved = [previous[@"removed"] unsignedIntegerValue];
     unsigned long long prevBytes = [previous[@"bytes"] unsignedLongLongValue];
     NSUInteger incrementRemoved;
@@ -152,8 +174,10 @@ static NSDictionary *AxsCacheKeeperReadReceipt(NSString *path) {
     // 覆盖完整性变化同样打破去重（任务 5/6：发现不完整时面板须如实展示，不得沿用旧的完整标记）。
     if (sameRound && !round && !incrementRemoved && !incrementBytes && [previous[@"phase"] isEqual:snapshot[@"phase"]] && [previous[@"message"] isEqual:snapshot[@"message"]] &&
         [previous[@"failed"] unsignedIntegerValue] == [snapshot[@"failed"] unsignedIntegerValue] && [previous[@"effectivePaths"] isEqual:snapshot[@"effectivePaths"]] &&
-        [previous[@"discoveredPaths"] isEqual:known] && [previous[@"coverageComplete"] isEqual:snapshot[@"coverageComplete"]] && !directories && -[previous[@"updated"] timeIntervalSinceNow] < 30) return YES;
-    NSDictionary *report = @{@"updated":NSDate.date, @"phase":snapshot[@"phase"], @"message":snapshot[@"message"],
+        [previous[@"discoveredPaths"] isEqual:known] && [previous[@"coverageComplete"] isEqual:snapshot[@"coverageComplete"]] &&
+        ((!previous[@"releaseEvidence"] && !snapshot[@"releaseEvidence"]) || [previous[@"releaseEvidence"] isEqual:snapshot[@"releaseEvidence"]]) &&
+        !directories && -[previous[@"updated"] timeIntervalSinceNow] < 30) return YES;
+    NSMutableDictionary *report = [@{@"updated":NSDate.date, @"phase":snapshot[@"phase"], @"message":snapshot[@"message"],
         @"removed":@(prevRemoved + incrementRemoved),
         @"bytes":@(prevBytes + incrementBytes), @"failed":snapshot[@"failed"],
         @"lastRemoved":round ? round[@"removed"] : (previous[@"lastRemoved"] ?: @0),
@@ -161,7 +185,8 @@ static NSDictionary *AxsCacheKeeperReadReceipt(NSString *path) {
         @"endReason":round ? snapshot[@"endReason"] : (previous[@"endReason"] ?: @0),
         @"confirmedRoundID":roundID, @"confirmedRemoved":@(submittedRemoved), @"confirmedBytes":@(submittedBytes),
         @"coverageComplete":snapshot[@"coverageComplete"] ?: (previous[@"coverageComplete"] ?: @NO),
-        @"effectivePaths":snapshot[@"effectivePaths"], @"discoveredPaths":known, @"directories":directories ?: previous[@"directories"] ?: @{}};
+        @"effectivePaths":snapshot[@"effectivePaths"], @"discoveredPaths":known, @"directories":directories ?: previous[@"directories"] ?: @{}} mutableCopy];
+    if (snapshot[@"releaseEvidence"]) report[@"releaseEvidence"]=snapshot[@"releaseEvidence"];
     if (![report writeToFile:path atomically:YES]) { NSLog(@"[CacheKeeper] 无法保存 %@ 清理状态", bundle); return NO; }
     return YES;
 }
@@ -179,13 +204,14 @@ static NSDictionary *AxsCacheKeeperReadReceipt(NSString *path) {
     if ([previous[@"phase"] isEqual:phase] && [previous[@"message"] isEqual:message] &&
         [previous[@"failed"] unsignedIntegerValue] == failed && [previous[@"effectivePaths"] isEqual:(effectivePaths ?: @[])] &&
         [previous[@"discoveredPaths"] isEqual:known] && !directories && -[previous[@"updated"] timeIntervalSinceNow] < 30) return YES;
-    NSDictionary *report = @{@"updated":NSDate.date, @"phase":phase ?: @"", @"message":message ?: @"",
+    NSMutableDictionary *report = [@{@"updated":NSDate.date, @"phase":phase ?: @"", @"message":message ?: @"",
         @"removed":previous[@"removed"] ?: @0, @"bytes":previous[@"bytes"] ?: @0, @"failed":@(failed),
         @"lastRemoved":previous[@"lastRemoved"] ?: @0, @"lastBytes":previous[@"lastBytes"] ?: @0,
         @"endReason":previous[@"endReason"] ?: @0,
         @"confirmedRoundID":previous[@"confirmedRoundID"] ?: @"", @"confirmedRemoved":previous[@"confirmedRemoved"] ?: @0, @"confirmedBytes":previous[@"confirmedBytes"] ?: @0,
         @"coverageComplete":previous[@"coverageComplete"] ?: @NO,
-        @"effectivePaths":effectivePaths ?: @[], @"discoveredPaths":known, @"directories":directories ?: previous[@"directories"] ?: @{}};
+        @"effectivePaths":effectivePaths ?: @[], @"discoveredPaths":known, @"directories":directories ?: previous[@"directories"] ?: @{}} mutableCopy];
+    if (previous[@"releaseEvidence"]) report[@"releaseEvidence"]=previous[@"releaseEvidence"];
     if (![report writeToFile:path atomically:YES]) { NSLog(@"[CacheKeeper] 无法保存 %@ 清理状态", bundle); return NO; }
     return YES;
 }

@@ -1,5 +1,6 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#include "AxsCacheKeeperReleaseEvidence.h"
 
 // A closed group performs several unlinks, not an atomic filesystem transaction. Counts and
 // bytes describe successfully removed paths and their logical sizes, never physical space freed.
@@ -16,6 +17,11 @@
 + (NSArray<AxsCacheKeeperHardLinkGroup *> *)closedHardLinkGroupsForSweeps:(NSArray<AxsCacheKeeperSweep *> *)sweeps;
 // Job 将自己成功的删除广播给同轮其他范围，推进共同依赖的基线。
 @property(nonatomic,copy) void (^removalObserver)(NSString *path);
+// Optional evidence only. Preparation precedes final identity/time gates; callbacks are synchronous.
+// The FD is borrowed for this call only. Observation never changes authorization or delete counters.
+@property(nonatomic,copy) void (^releaseEvidencePrepare)(int parentFD, uint64_t device);
+@property(nonatomic,copy) void (^releaseEvidenceObserver)(AxsCacheKeeperReleaseKind kind, int result, int code,
+    AxsCacheKeeperReleaseStat pre, AxsCacheKeeperReleaseStat post);
 - (void)updateDependenciesAfterRemovingPath:(NSString *)path;
 @property(nonatomic, readonly, copy) NSString *root;
 @property(nonatomic, readonly, copy) NSString *bundle;

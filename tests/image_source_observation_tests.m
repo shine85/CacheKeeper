@@ -86,6 +86,27 @@ static void ckclosure(void) {
     ckcheck(!axs_cachekeeper_image_runtime_observation_projection(value),"module matches cannot exceed the observed loader table");
     value=ckclosed();value[@"observedDyldImages"]=@2;module=[value[@"modules"][0] mutableCopy];module[@"dyldIndex"]=@1;value[@"modules"]=@[module];
     ckcheck(!axs_cachekeeper_image_runtime_observation_projection(value),"main module must refer to loader index zero");
+    value[@"schemaVersion"]=@2;
+    ckcheck(axs_cachekeeper_image_runtime_observation_projection(value)!=nil,"v2 executable may follow a launcher dylib");
+    module=[module mutableCopy];NSMutableDictionary *metadata=[module[@"metadata"] mutableCopy];
+    metadata[@"fileType"]=@(MH_DYLIB);module[@"metadata"]=metadata;value[@"modules"]=@[module];
+    ckcheck(!axs_cachekeeper_image_runtime_observation_projection(value),"v2 main module cannot be a launcher dylib");
+    for (NSString *failure in @[@"unreadable",@"invalid",@"changed"]) {
+        value=ckclosed();value[@"schemaVersion"]=@2;value[@"state"]=@"partial";value[@"mainModule"]=@0;
+        module=[value[@"modules"][0] mutableCopy];module[@"metadata"]=@{@"state":failure};module[@"contractUUIDRelation"]=@"notResolved";value[@"modules"]=@[module];
+        ckcheck(axs_cachekeeper_image_runtime_observation_projection(value)!=nil,"v2 unresolved main retains explicit partial metadata failures");
+        value[@"mainModule"]=@1;ckcheck(!axs_cachekeeper_image_runtime_observation_projection(value),"v2 metadata failure never authenticates executable identity");
+    }
+    for (NSUInteger unreadable=0;unreadable<2;unreadable++) {
+        struct mach_header_64 invalid={0};const void *base=unreadable ? (const void *)(uintptr_t)1 : &invalid;
+        NSMutableArray *collected=[NSMutableArray new];
+        AxsCacheKeeperImageObservationContext context={.modules=collected,.deadline=NSProcessInfo.processInfo.systemUptime+1,.dyldCount=1};
+        context.dyldHeaders[0]=base;
+        ckcheck(!axs_cachekeeper_image_observation_main_module(&context,base) && context.partial && collected.count==1,
+            "collector retains failed main metadata without authenticating it");
+        value=ckclosed();value[@"schemaVersion"]=@2;value[@"state"]=@"partial";value[@"mainModule"]=@0;value[@"modules"]=collected;
+        ckcheck(axs_cachekeeper_image_runtime_observation_projection(value)!=nil,"collector failures survive runtime projection");
+    }
     value=ckclosed();rows=[value[@"methods"] mutableCopy];row=[rows[1] mutableCopy];row[@"state"]=@"own";row[@"module"]=@1;row[@"wrapper"]=@"matches";rows[1]=row;value[@"methods"]=rows;
     ckcheck(!axs_cachekeeper_image_runtime_observation_projection(value),"wrapper comparison is limited to four installed hook slots");
     value=ckclosed();rows=[value[@"originals"] mutableCopy];row=[rows[0] mutableCopy];row[@"present"]=@YES;row[@"module"]=@1;row[@"currentRelation"]=@"same";rows[0]=row;value[@"originals"]=rows;

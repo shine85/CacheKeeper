@@ -1,4 +1,5 @@
 #import "AxsCacheKeeperCapacity.h"
+#import "AxsCacheKeeperCapacityStatus.h"
 #import "AxsCacheKeeperScanTask.h"
 #include <string.h>
 
@@ -61,6 +62,7 @@ static NSString *AxsCacheKeeperCapacityCategory(NSArray<NSData *> *components) {
     NSMutableDictionary<NSData *,NSNumber *> *_nodeIDs;
     NSMutableArray<NSMutableDictionary *> *_nodes;
     NSString *_failure;
+    NSDictionary *_sourceFailure;
     uint64_t _logical,_allocated;
     NSUInteger _entries,_duplicates,_entryLimit,_depthLimit,_inodeLimit,_nodeLimit;
     BOOL _requiresExpectedIdentity;
@@ -70,6 +72,14 @@ static NSString *AxsCacheKeeperCapacityCategory(NSArray<NSData *> *components) {
 - (instancetype)initWithRoot:(NSURL *)root {
     return [self initWithRoot:root entryLimit:AxsCacheKeeperCapacityEntryLimit depthLimit:AxsCacheKeeperCapacityDepthLimit
         inodeLimit:AxsCacheKeeperCapacityInodeLimit nodeLimit:AxsCacheKeeperCapacityNodeLimit];
+}
+- (instancetype)initWithSourceFailure:(NSDictionary *)failure {
+    NSDictionary *closed=axs_cachekeeper_capacity_source_failure(failure);
+    if (!closed) return nil;
+    if ((self=[self initWithRoot:nil])) {
+        _sourceFailure=closed;_failure=[closed[@"reason"] isEqual:@"identityChanged"] ? @"identityChanged" : @"readError";
+    }
+    return self;
 }
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)entries depthLimit:(NSUInteger)depth
                  inodeLimit:(NSUInteger)inodes nodeLimit:(NSUInteger)nodes {
@@ -91,6 +101,10 @@ static NSString *AxsCacheKeeperCapacityCategory(NSArray<NSData *> *components) {
     _inodeLimit=MIN(MAX(inodes,(NSUInteger)1),AxsCacheKeeperCapacityInodeLimit);
     _nodeLimit=MIN(MAX(nodes,(NSUInteger)1),AxsCacheKeeperCapacityNodeLimit);
     _inodes=[NSMutableDictionary new];_nodeIDs=[NSMutableDictionary new];_nodes=[NSMutableArray new];
+    // Invalid input did not execute lstat; thread-local errno is not evidence.
+    if (!root.isFileURL) {
+        _failure=@"readError";_sourceFailure=@{@"stage":@"inputValidation",@"reason":@"invalidRoot",@"errorDomain":@"none"};return self;
+    }
     __weak AxsCacheKeeperCapacityRoot *weakSelf=self;
     // Root counts as an entry here, but the legacy cursor counts descendants.
     _cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:root entryLimit:_entryLimit-1 depthLimit:_depthLimit
@@ -148,17 +162,22 @@ static NSString *AxsCacheKeeperCapacityCategory(NSArray<NSData *> *components) {
 }
 - (void)stopWithState:(NSString *)state {
     if(![self.state isEqual:@"running"]) return;
-    BOOL accepted=[@[@"cancelled",@"readError",@"identityChanged",@"entryLimit",@"depthLimit",@"timeLimit",@"inodeLimit",@"invalidMetadata",@"nodeLimit"] containsObject:state ?: @""];
+    BOOL accepted=[@[@"cancelled",@"interrupted",@"readError",@"identityChanged",@"entryLimit",@"depthLimit",@"timeLimit",@"inodeLimit",@"invalidMetadata",@"nodeLimit"] containsObject:state ?: @""];
     // Only actual traversal can declare success, never an external stop request.
     [_cursor stopWithState:accepted ? state : @"readError"];
 }
 - (NSString *)state {return _failure ?: _cursor.state;}
+- (NSUInteger)openDirectoryCount {return _cursor.openDirectoryCount;}
+- (BOOL)cursorCreated {return _cursor!=nil;}
 - (NSDictionary *)result {
     NSMutableArray *nodes=[NSMutableArray arrayWithCapacity:_nodes.count];
     for(NSDictionary *node in _nodes) [nodes addObject:[node copy]];
-    return @{@"schemaVersion":@1,@"state":self.state,@"logicalBytes":@(_logical),@"allocatedBytes":@(_allocated),
+    NSMutableDictionary *out=[@{@"schemaVersion":@1,@"state":self.state,@"logicalBytes":@(_logical),@"allocatedBytes":@(_allocated),
         @"entries":@(_entries),@"uniqueInodes":@(_inodes.count),@"duplicateInodes":@(_duplicates),@"nodes":[nodes copy],
         @"entryLimit":@(_entryLimit),@"depthLimit":@(_depthLimit),@"inodeLimit":@(_inodeLimit),@"nodeLimit":@(_nodeLimit),
-        @"deletionAuthorization":@"notGranted",@"physicalUniqueBytes":@"notMeasured",@"reclaimableBytes":@"notMeasured"};
+        @"deletionAuthorization":@"notGranted",@"physicalUniqueBytes":@"notMeasured",@"reclaimableBytes":@"notMeasured"} mutableCopy];
+    if (_cursor) out[@"cursorErrors"]=axs_cachekeeper_capacity_cursor_errors(_cursor.result[@"scanDiagnostics"]);
+    if (_sourceFailure) out[@"sourceFailure"]=_sourceFailure;
+    return [out copy];
 }
 @end

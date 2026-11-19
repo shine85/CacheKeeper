@@ -136,6 +136,7 @@ static void axs_cachekeeper_legacy_check_cases(const AxsCacheKeeperImageLegacyLa
     axs_cachekeeper_legacy_protect(axs_cachekeeper_legacy_page,axs_cachekeeper_legacy_page,PROT_READ|PROT_EXEC);
 }
 int main(void) {
+    AxsCacheKeeperImageRefreshExecutable();
     @autoreleasepool {
         axs_cachekeeper_legacy_page=(size_t)getpagesize();
         axs_cachekeeper_legacy_mapping=mmap(NULL,3*axs_cachekeeper_legacy_page,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);

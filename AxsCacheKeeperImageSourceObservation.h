@@ -29,7 +29,7 @@ static inline NSDictionary *axs_cachekeeper_image_macho_observation_projection(i
 static inline NSDictionary *axs_cachekeeper_image_runtime_observation_projection(id value) {
     NSArray *keys=@[@"schemaVersion",@"state",@"dyldState",@"observedDyldImages",@"observedMethods",@"modules",@"classes",@"methods",@"originals",@"mainModule",@"candidateModule",@"initializerUsesSavedOriginal",@"mappingBackingIdentity"];
     if (!axs_cachekeeper_image_observation_keys(value,keys) ||
-        !axs_cachekeeper_image_discovery_integer(value[@"schemaVersion"],1) || [value[@"schemaVersion"] unsignedIntegerValue]!=1 ||
+        !axs_cachekeeper_image_discovery_integer(value[@"schemaVersion"],2) || [value[@"schemaVersion"] unsignedIntegerValue]<1 ||
         ![@[@"complete",@"partial"] containsObject:value[@"state"]] || ![@[@"complete",@"partial",@"changed"] containsObject:value[@"dyldState"]] ||
         ![value[@"mappingBackingIdentity"] isEqual:@"notVerified"] || !axs_cachekeeper_image_discovery_bool(value[@"initializerUsesSavedOriginal"]) ||
         !axs_cachekeeper_image_discovery_integer(value[@"observedDyldImages"],4096) || !axs_cachekeeper_image_discovery_integer(value[@"observedMethods"],32768)) return nil;
@@ -57,7 +57,11 @@ static inline NSDictionary *axs_cachekeeper_image_runtime_observation_projection
     if (complete && ![value[@"mainModule"] unsignedIntegerValue]) return nil;
     if ([value[@"mainModule"] unsignedIntegerValue]) {
         NSDictionary *main=modules[[value[@"mainModule"] unsignedIntegerValue]-1];
-        if ([main[@"dyldMatches"] unsignedIntegerValue]!=1 || [main[@"dyldIndex"] unsignedIntegerValue]!=0) return nil;
+        if ([main[@"dyldMatches"] unsignedIntegerValue]!=1) return nil;
+        // Preserve saved v1 observations; v2 identifies the executable independently of loader order.
+        if ([value[@"schemaVersion"] unsignedIntegerValue]==1) {
+            if ([main[@"dyldIndex"] unsignedIntegerValue]!=0) return nil;
+        } else if ([main[@"metadata"][@"fileType"] unsignedIntegerValue]!=2) return nil;
     }
     for (NSUInteger i=0;i<5;i++) {
         NSDictionary *row=value[@"classes"][i];

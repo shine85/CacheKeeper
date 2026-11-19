@@ -14,6 +14,107 @@ static inline BOOL axs_cachekeeper_capacity_epoch(id value) {
     return [value isKindOfClass:NSString.class] && [value length]==36 &&
         [[[NSUUID alloc] initWithUUIDString:value].UUIDString isEqual:value];
 }
+// Cursor scope is deliberately absent: the enclosing root carries the actual
+// home/group/extension roles. Never export the cursor default home as evidence.
+static inline NSDictionary *axs_cachekeeper_capacity_cursor_errors(id value) {
+    if (![value isKindOfClass:NSDictionary.class]) return nil;
+    NSMutableDictionary *out=[NSMutableDictionary new];
+    for (NSString *key in @[@"enumerationErrors",@"statErrors",@"omittedErrorCount"]) {
+        if (!axs_cachekeeper_capacity_number(value[key]) || [value[key] unsignedLongLongValue]>UINT32_MAX) return nil;out[key]=value[key];
+    }
+    id truncated=value[@"errorsTruncated"];
+    if (![truncated isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)truncated)!=CFBooleanGetTypeID() ||
+        (![truncated boolValue] && [out[@"omittedErrorCount"] unsignedLongLongValue]) ||
+        ![value[@"errors"] isKindOfClass:NSArray.class] || [value[@"errors"] count]>16) return nil;
+    NSMutableArray *errors=[NSMutableArray new];uint64_t enumerated=0,statted=0;
+    for (id item in value[@"errors"]) {
+        if (![item isKindOfClass:NSDictionary.class] || ![@[@"entryStat",@"enumerate"] containsObject:item[@"stage"]] ||
+            ![@[@"identityChanged",@"permissionDenied",@"readFailure"] containsObject:item[@"reason"]] || ![item[@"errorDomain"] isEqual:@"posix"] ||
+            !axs_cachekeeper_capacity_number(item[@"errorCode"]) || [item[@"errorCode"] unsignedLongLongValue]>255 ||
+            !axs_cachekeeper_capacity_number(item[@"count"]) || ![item[@"count"] unsignedLongLongValue] || [item[@"count"] unsignedLongLongValue]>UINT32_MAX) return nil;
+        [errors addObject:@{@"stage":item[@"stage"],@"reason":item[@"reason"],@"errorDomain":@"posix",@"errorCode":item[@"errorCode"],@"count":item[@"count"]}];
+        if ([item[@"stage"] isEqual:@"enumerate"]) enumerated+=[item[@"count"] unsignedLongLongValue];
+        else statted+=[item[@"count"] unsignedLongLongValue];
+    }
+    uint64_t enumeration=[out[@"enumerationErrors"] unsignedLongLongValue],stat=[out[@"statErrors"] unsignedLongLongValue],omitted=[out[@"omittedErrorCount"] unsignedLongLongValue];
+    if (![truncated boolValue]) {
+        if (enumerated!=enumeration || statted!=stat) return nil;
+    } else {
+        // Saturated stage totals are lower bounds. Detail sums can exceed them;
+        // omissions have no stage, and their own counter may also saturate.
+        BOOL saturated=enumeration==UINT32_MAX || stat==UINT32_MAX;
+        if ((enumeration<UINT32_MAX && enumerated>enumeration) || (stat<UINT32_MAX && statted>stat)) return nil;
+        uint64_t missing=(enumeration>enumerated ? enumeration-enumerated : 0)+(stat>statted ? stat-statted : 0);
+        if ((!omitted && !saturated) || (omitted<UINT32_MAX ? omitted<missing || (!saturated && omitted!=missing) : !saturated && missing<UINT32_MAX)) return nil;
+    }
+    out[@"errorsTruncated"]=truncated;out[@"errors"]=errors;return [out copy];
+}
+static inline NSDictionary *axs_cachekeeper_capacity_source_failure(id value) {
+    if (![value isKindOfClass:NSDictionary.class]) return nil;
+    NSString *stage=value[@"stage"],*reason=value[@"reason"];
+    BOOL input=[stage isEqual:@"inputValidation"] && [reason isEqual:@"invalidRoot"];
+    BOOL source=[stage isEqual:@"sourceStat"] && [@[@"statFailed",@"notDirectory"] containsObject:reason];
+    BOOL alias=[stage isEqual:@"aliasRecheck"] && [@[@"statFailed",@"notDirectory",@"identityChanged"] containsObject:reason];
+    if (!input && !source && !alias) return nil;
+    NSMutableDictionary *out=[@{@"stage":stage,@"reason":reason} mutableCopy];
+    if ([reason isEqual:@"statFailed"]) {
+        if (![value[@"errorDomain"] isEqual:@"posix"] || !axs_cachekeeper_capacity_number(value[@"errorCode"]) ||
+            ![value[@"errorCode"] unsignedLongLongValue] || [value[@"errorCode"] unsignedLongLongValue]>INT32_MAX) return nil;
+        out[@"errorDomain"]=@"posix";out[@"errorCode"]=value[@"errorCode"];
+    } else {
+        if (![value[@"errorDomain"] isEqual:@"none"] || value[@"errorCode"]) return nil;out[@"errorDomain"]=@"none";
+    }
+    return [out copy];
+}
+static inline NSDictionary *axs_cachekeeper_capacity_failure(id value) {
+    if (![value isKindOfClass:NSDictionary.class] ||
+        ![@[@"provider",@"source",@"root",@"publication"] containsObject:value[@"stage"]] ||
+        ![@[@"unavailable",@"invalidPlan",@"sourceBudget",@"rootBudget",@"nodeBudget",@"resultBudget",@"resultSchema",@"identityChanged",@"writeFailed"] containsObject:value[@"code"]]) return nil;
+    return @{@"stage":value[@"stage"],@"code":value[@"code"]};
+}
+static inline NSDictionary *axs_cachekeeper_capacity_lifecycle(id value) {
+    if (![value isKindOfClass:NSDictionary.class] || ![@[@"start",@"cancel",@"recovered"] containsObject:value[@"acceptedOperation"]] ||
+        !axs_cachekeeper_capacity_number(value[@"acceptedAt"]) || ![@[@"notObserved",@"observedZero"] containsObject:value[@"cursorClosure"]]) return nil;
+    NSMutableDictionary *out=[@{@"acceptedOperation":value[@"acceptedOperation"],@"acceptedAt":value[@"acceptedAt"],@"cursorClosure":value[@"cursorClosure"]} mutableCopy];
+    for (NSString *key in @[@"cancelObservedAt",@"cursorClosedAt"]) if (value[key]) {
+        if (!axs_cachekeeper_capacity_number(value[key])) return nil;out[key]=value[key];
+    }
+    if ([value[@"cursorClosure"] isEqual:@"observedZero"] != (value[@"cursorClosedAt"]!=nil)) return nil;
+    if (value[@"previousObservedEpoch"]) {if (!axs_cachekeeper_capacity_epoch(value[@"previousObservedEpoch"])) return nil;out[@"previousObservedEpoch"]=value[@"previousObservedEpoch"];}
+    return [out copy];
+}
+static inline NSDictionary *axs_cachekeeper_capacity_terminal(id value) {
+    if (![value isKindOfClass:NSDictionary.class] || !axs_cachekeeper_capacity_epoch(value[@"epoch"]) ||
+        ![@[@"complete",@"partial",@"cancelled",@"interrupted",@"unavailable"] containsObject:value[@"state"]] ||
+        ![@[@"saved",@"notSaved"] containsObject:value[@"resultPublication"]]) return nil;
+    NSMutableDictionary *out=[@{@"epoch":value[@"epoch"],@"state":value[@"state"],@"resultPublication":value[@"resultPublication"]} mutableCopy];
+    for (NSString *key in @[@"startedAt",@"finishedAt"]) {if (!axs_cachekeeper_capacity_number(value[key])) return nil;out[key]=value[key];}
+    BOOL saved=[value[@"resultPublication"] isEqual:@"saved"];
+    if (saved != (value[@"publicationObservedAt"]!=nil)) return nil;
+    if (saved) {if (!axs_cachekeeper_capacity_number(value[@"publicationObservedAt"])) return nil;out[@"publicationObservedAt"]=value[@"publicationObservedAt"];}
+    if (value[@"supersededBy"]) {if (!axs_cachekeeper_capacity_epoch(value[@"supersededBy"]) || [value[@"supersededBy"] isEqual:value[@"epoch"]]) return nil;out[@"supersededBy"]=value[@"supersededBy"];}
+    if (value[@"lifecycle"]) {NSDictionary *closed=axs_cachekeeper_capacity_lifecycle(value[@"lifecycle"]);if (!closed) return nil;out[@"lifecycle"]=closed;}
+    if (value[@"failure"]) {NSDictionary *closed=axs_cachekeeper_capacity_failure(value[@"failure"]);if (!closed) return nil;out[@"failure"]=closed;}
+    return [out copy];
+}
+static inline NSDictionary *axs_cachekeeper_capacity_history(id value) {
+    if (![value isKindOfClass:NSDictionary.class] || ![value[@"limit"] isEqual:@16] || !axs_cachekeeper_capacity_number(value[@"limit"]) ||
+        !axs_cachekeeper_capacity_number(value[@"omittedCount"]) || ![value[@"records"] isKindOfClass:NSArray.class] || [value[@"records"] count]>16) return nil;
+    NSMutableSet *epochs=[NSMutableSet new];NSMutableArray *rows=[NSMutableArray new];
+    for (id item in value[@"records"]) {NSDictionary *closed=axs_cachekeeper_capacity_terminal(item);
+        if (!closed || [epochs containsObject:closed[@"epoch"]]) return nil;[epochs addObject:closed[@"epoch"]];[rows addObject:closed];}
+    return @{@"limit":@16,@"omittedCount":value[@"omittedCount"],@"records":rows};
+}
+static inline NSDictionary *axs_cachekeeper_capacity_client_stop(id value) {
+    if (![value isKindOfClass:NSDictionary.class] || !axs_cachekeeper_capacity_epoch(value[@"epoch"]) ||
+        !axs_cachekeeper_capacity_number(value[@"attemptedAt"]) || ![@[@"saved",@"failed"] containsObject:value[@"requestWrite"]] ||
+        ![@[@"unconfirmed",@"terminalObserved",@"terminalHistoryObserved"] containsObject:value[@"confirmation"]]) return nil;
+    NSMutableDictionary *out=[@{@"epoch":value[@"epoch"],@"attemptedAt":value[@"attemptedAt"],@"requestWrite":value[@"requestWrite"],@"confirmation":value[@"confirmation"]} mutableCopy];
+    if (value[@"terminal"]) {NSDictionary *terminal=axs_cachekeeper_capacity_terminal(value[@"terminal"]);
+        if (!terminal || ![terminal[@"epoch"] isEqual:value[@"epoch"]] || ![value[@"confirmation"] isEqual:@"terminalHistoryObserved"]) return nil;out[@"terminal"]=terminal;
+    } else if ([value[@"confirmation"] isEqual:@"terminalHistoryObserved"]) return nil;
+    return [out copy];
+}
 static inline BOOL axs_cachekeeper_capacity_token(id value) {
     if (![value isKindOfClass:NSString.class] || ![value hasPrefix:@"resource-"]) return NO;
     NSString *suffix=[value substringFromIndex:9];
@@ -80,19 +181,44 @@ static inline NSDictionary *axs_cachekeeper_capacity_measurement(id value) {
         for (NSString *key in @[@"logicalBytes",@"allocatedBytes",@"entries"]) if (![nodes[0][key] isEqual:value[key]]) return nil;
     } else if ([value[@"entries"] unsignedLongLongValue] || [value[@"logicalBytes"] unsignedLongLongValue] || [value[@"allocatedBytes"] unsignedLongLongValue] || [value[@"state"] isEqual:@"complete"]) return nil;
     for (NSString *key in @[@"state",@"deletionAuthorization",@"physicalUniqueBytes",@"reclaimableBytes"]) out[key]=value[key];
+    if (value[@"cursorErrors"]) {
+        NSDictionary *errors=axs_cachekeeper_capacity_cursor_errors(value[@"cursorErrors"]);if (!errors) return nil;
+        if ([value[@"state"] isEqual:@"complete"] && ([errors[@"enumerationErrors"] unsignedLongLongValue] ||
+            [errors[@"statErrors"] unsignedLongLongValue] || [errors[@"errors"] count] || [errors[@"errorsTruncated"] boolValue])) return nil;
+        out[@"cursorErrors"]=errors;
+    }
+    if (value[@"sourceFailure"]) {
+        NSDictionary *failure=axs_cachekeeper_capacity_source_failure(value[@"sourceFailure"]);
+        if (!failure || [@[@"running",@"complete"] containsObject:value[@"state"]]) return nil;
+        out[@"sourceFailure"]=failure;
+    }
     out[@"nodes"]=nodes;return [out copy];
 }
 static inline NSDictionary *axs_cachekeeper_capacity_projection(id value) {
     NSDictionary *invalid=@{@"schemaVersion":@1,@"state":value ? @"invalid" : @"notMeasured"};
     if (![value isKindOfClass:NSDictionary.class] || !axs_cachekeeper_capacity_number(value[@"schemaVersion"]) || ![value[@"schemaVersion"] isEqual:@1]) return invalid;
     NSString *state=value[@"state"];
-    if ([@[@"invalid",@"notMeasured"] containsObject:state]) return @{@"schemaVersion":@1,@"state":state};
+    NSDictionary *clientStop=value[@"clientStop"] ? axs_cachekeeper_capacity_client_stop(value[@"clientStop"]) : nil;
+    if (value[@"clientStop"] && !clientStop) return invalid;
+    if ([@[@"invalid",@"notMeasured"] containsObject:state]) {
+        if ([clientStop[@"confirmation"] isEqual:@"terminalObserved"]) return invalid;
+        return clientStop ? @{@"schemaVersion":@1,@"state":state,@"clientStop":clientStop} : @{@"schemaVersion":@1,@"state":state};
+    }
     if (![@[@"running",@"complete",@"partial",@"cancelled",@"interrupted",@"unavailable"] containsObject:state] || !axs_cachekeeper_capacity_epoch(value[@"epoch"])) return invalid;
     NSMutableDictionary *out=[NSMutableDictionary new];
+    if (clientStop) {
+        if ([clientStop[@"confirmation"] isEqual:@"terminalObserved"] &&
+            (![clientStop[@"epoch"] isEqual:value[@"epoch"]] || [state isEqual:@"running"])) return invalid;
+        out[@"clientStop"]=clientStop;
+    }
+    if (value[@"lifecycle"]) {NSDictionary *closed=axs_cachekeeper_capacity_lifecycle(value[@"lifecycle"]);if (!closed) return invalid;out[@"lifecycle"]=closed;}
+    if (value[@"terminalHistory"]) {NSDictionary *closed=axs_cachekeeper_capacity_history(value[@"terminalHistory"]);if (!closed) return invalid;out[@"terminalHistory"]=closed;}
     for (NSString *key in @[@"schemaVersion",@"sourceSampledAt",@"startedAt",@"updatedAt",@"totalRoots",@"completedRoots",@"failedRoots"]) {
         if (!axs_cachekeeper_capacity_number(value[key])) return invalid;out[key]=value[key];
     }
     BOOL running=[state isEqual:@"running"];
+    if ((running && [out[@"lifecycle"][@"cursorClosure"] isEqual:@"observedZero"]) ||
+        [out[@"lifecycle"][@"previousObservedEpoch"] isEqual:value[@"epoch"]]) return invalid;
     if (running ? value[@"finishedAt"]!=nil : !axs_cachekeeper_capacity_number(value[@"finishedAt"])) return invalid;
     if (!running) out[@"finishedAt"]=value[@"finishedAt"];
     // Wall-clock jumps do not change the monotonic traversal budget or validity.
@@ -105,10 +231,7 @@ static inline NSDictionary *axs_cachekeeper_capacity_projection(id value) {
         ![value[@"measurementWindow"] isEqual:@"nonAtomicTraversal"] || ![value[@"installationMatch"] isEqual:@"notRevalidatedAtExport"]) return invalid;
     if (value[@"failure"]) {
         id failure=value[@"failure"];
-        if (![failure isKindOfClass:NSDictionary.class] ||
-            ![@[@"provider",@"source",@"root",@"publication"] containsObject:failure[@"stage"]] ||
-            ![@[@"unavailable",@"invalidPlan",@"sourceBudget",@"rootBudget",@"nodeBudget",@"resultBudget",@"resultSchema",@"identityChanged",@"writeFailed"] containsObject:failure[@"code"]]) return invalid;
-        out[@"failure"]=@{@"stage":failure[@"stage"],@"code":failure[@"code"]};
+        NSDictionary *closed=axs_cachekeeper_capacity_failure(failure);if (!closed) return invalid;out[@"failure"]=closed;
     }
     NSDictionary *registry=[value[@"registry"] isEqual:axs_cachekeeper_registry_inventory_projection(nil)] ? axs_cachekeeper_registry_inventory_projection(nil) : axs_cachekeeper_registry_inventory_projection(value[@"registry"]);
     BOOL unobserved=[registry isEqual:axs_cachekeeper_registry_inventory_projection(nil)];

@@ -163,7 +163,8 @@ static BOOL AxsCacheKeeperImageObservedIMP(const void *implementation,const void
     return YES;
 }
 static NSDictionary *AxsCacheKeeperImageLoadedRelation(Class __unsafe_unretained classes[4]) {
-    const void *main=_dyld_get_image_header(0);const char *mainName=_dyld_get_image_name(0);
+    AxsCacheKeeperExecutableImage executable=AxsCacheKeeperImageExecutable();const void *main=executable.header;
+    const char *mainName=main ? _dyld_get_image_name(executable.index) : NULL;
     unsigned char mainUUID[16];BOOL mainResolved=AxsCacheKeeperImageReadObservedUUID(main,mainUUID);
     static const unsigned char contractUUID[16]={0xb2,0xb9,0xd3,0x0a,0x1c,0xaf,0x31,0xb4,0x82,0xca,0xc7,0x76,0xe7,0xeb,0x2b,0xa1};
     NSUInteger present=0,known=0,names=0;
@@ -243,7 +244,8 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
     Class image=classes[0];const char *imageName=image ? class_getImageName(image) : NULL;
     NSString *kind=@"unknown";NSBundle *bundle=image ? [NSBundle bundleForClass:image] : nil;
     if (imageName) {
-        const char *mainImage=_dyld_get_image_name(0);
+        AxsCacheKeeperExecutableImage executable=AxsCacheKeeperImageExecutable();
+        const char *mainImage=executable.header ? _dyld_get_image_name(executable.index) : NULL;
         kind=mainImage && !strcmp(imageName,mainImage) ? @"main" :
             ([bundle.bundlePath.pathExtension isEqual:@"framework"] ? @"framework" : @"other");
     }
@@ -447,6 +449,9 @@ static BOOL AxsCacheKeeperImageInstanceUnchanged(AxsCacheKeeperImageBinding *bin
 }
 static BOOL AxsCacheKeeperImageBlocksWrite(id disk) {
     AxsCacheKeeperImageBinding *binding=objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey);
+    if (binding.restricted && binding.contract==AxsCacheKeeperImageContractFixedSerialLegacy && !AxsCacheKeeperImageExecutable().header) {
+        [binding.engine requestDiscoveryRefresh];return NO;
+    }
     if (!binding.restricted || !binding.engine || binding.disk!=disk || !AxsCacheKeeperImageInstanceUnchanged(binding)) return NO;
     @synchronized(binding) { if (!binding.restricted) return NO;binding.blockedWrites++; }
     return YES;
@@ -639,6 +644,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     return @{@"initialReason":@"notObserved",@"currentReason":@"notObserved",@"configKind":@"unsupported"};
 }
 - (NSDictionary *)discoveryDiagnosticsForIntegrationTests {
+    AxsCacheKeeperImageRefreshExecutable();
     @synchronized(AxsCacheKeeperImageCache.class) {
         Class __unsafe_unretained classes[4]={Nil,Nil,Nil,Nil};
         return AxsCacheKeeperImageDiscover(self.pinnedTestContract,classes,NULL,NULL,NULL);
@@ -666,6 +672,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
 }
 - (void)startObserving {
     @try {
+    AxsCacheKeeperImageRefreshExecutable();
     @synchronized(AxsCacheKeeperImageCache.class) {
         Class __unsafe_unretained classes[4]={Nil,Nil,Nil,Nil};NSMutableArray *methods=nil;
         AxsCacheKeeperImageContract contract=AxsCacheKeeperImageContractUnknown;const void *legacyBase=NULL;

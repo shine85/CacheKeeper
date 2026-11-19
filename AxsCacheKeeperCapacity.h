@@ -20,6 +20,8 @@
 // would double-count, and allocation is neither extent uniqueness nor reclaimable.
 @interface AxsCacheKeeperCapacityRoot : NSObject
 - (instancetype)initWithRoot:(NSURL *)root;
+// A closed, path-free source failure creates no cursor and performs no IO.
+- (instancetype)initWithSourceFailure:(NSDictionary *)failure;
 // Bind the provider's observed identity to the root's actual opened FD, not a
 // second pathname check. A mismatch returns identityChanged with no observations
 // and closes the cursor before initialization returns. The old initializer is unbound.
@@ -28,6 +30,10 @@
 - (void)stopWithState:(NSString *)state;
 @property(nonatomic,readonly) NSDictionary *result;
 @property(nonatomic,readonly) NSString *state;
+// Actual live cursor stack size, never inferred from a terminal state.
+@property(nonatomic,readonly) NSUInteger openDirectoryCount;
+// Distinguishes no cursor from an actual cursor observed with an empty stack.
+@property(nonatomic,readonly) BOOL cursorCreated;
 #if defined(AXS_CACHEKEEPER_CAPACITY_TESTING)
 // Reduced budgets exercise production failure branches on small real fixtures.
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)entries depthLimit:(NSUInteger)depth

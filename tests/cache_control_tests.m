@@ -1097,6 +1097,10 @@ int main(int argc, const char *argv[]) {
         AxsCacheKeeperSweep *jobSweepE = makeSweep(jobRootE, @{});
         AxsCacheKeeperSweep *jobSweepF = makeSweep(jobRootF, @{});
         jobNow=2000;
+        NSDictionary *jobEvidence=job.releaseEvidence;
+        require([jobEvidence[@"roundID"] isEqual:job.roundID] && [jobEvidence[@"attempts"] unsignedIntegerValue]==job.removed &&
+            [jobEvidence[@"succeeded"] unsignedIntegerValue]==job.removed && [jobEvidence[@"reclaimedPhysicalBytes"] isEqual:@"notMeasured"],
+            @"真实清理证据复用本轮身份和成功计数且不冒认物理释放");
         AxsCacheKeeperCleanupJob *jobEF=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[jobSweepE,jobSweepF] signature:@"job-ef" instance:@"1:100" clock:jobClock];
         for (NSUInteger pass=0;jobEF.phase==AxsCacheKeeperCleanupPhaseChecking && pass<100;pass++) [jobEF advanceCycleWithPerRootLimit:64 gate:jobGate];
         require(jobEF.phase==AxsCacheKeeperCleanupPhaseReady && jobEF.deleteDeadline==0 && jobSweepE.inspected==0, @"空根预检 0 项，不启动计时");

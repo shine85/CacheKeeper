@@ -33,6 +33,22 @@
                        round:(NSDictionary *)round
             coverageComplete:(BOOL)coverageComplete;
 
+// Same accounting source; evidence revisions may advance without a new deletion.
++ (BOOL)submitRoundForBundle:(NSString *)bundle
+                     roundID:(NSString *)roundID
+                     removed:(NSUInteger)removed
+                       bytes:(unsigned long long)bytes
+                   endReason:(NSInteger)endReason
+                       phase:(NSString *)phase
+                     message:(NSString *)message
+                      failed:(NSUInteger)failed
+              effectivePaths:(NSArray *)effectivePaths
+             discoveredPaths:(NSArray *)discoveredPaths
+                 directories:(NSDictionary *)directories
+                       round:(NSDictionary *)round
+            coverageComplete:(BOOL)coverageComplete
+             releaseEvidence:(NSDictionary *)releaseEvidence;
+
 // 仅更新展示状态（等待/错误等非轮次报告），不改动累计量与已确认轮次。
 // 与提交共用同一串行写入器；损坏回执同样明确失败、不覆盖。
 + (BOOL)updateStatusForBundle:(NSString *)bundle

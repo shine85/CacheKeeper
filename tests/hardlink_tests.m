@@ -2,6 +2,7 @@
 #import "../AxsCacheKeeperSweep.h"
 #import "../AxsCacheKeeperCleanupJob.h"
 #import "../AxsCacheKeeperCleanupSchedule.h"
+#import "../AxsCacheKeeperReleaseEvidenceStatus.h"
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -61,6 +62,18 @@ void axs_cachekeeper_run_hardlink_tests(NSString *fixture) {
         AxsCacheKeeperCleanupJob *job=hljob(sweeps,nil);hlready(job);hlfinish(job);
         hlcheck(job.removed==2 && job.bytes==32 && job.failed==0 && job.changedCount==0 && job.hardLinkRetainedCount==0 &&
             ![fm fileExistsAtPath:first] && ![fm fileExistsAtPath:alias],@"closed group is reclaimed once across roots and overlapping observations");
+        NSDictionary *evidence=job.releaseEvidence;
+        hlcheck(axs_cachekeeper_release_evidence_projection(evidence,job.roundID)!=nil,@"actual closed-group evidence satisfies persisted schema");
+        NSArray *details=evidence[@"details"];
+        hlcheck([evidence[@"roundID"] isEqual:job.roundID] && [evidence[@"state"] isEqual:@"finished"] &&
+            [evidence[@"attempts"] unsignedIntegerValue]==2 && [evidence[@"succeeded"] unsignedIntegerValue]==2 && details.count==2,
+            @"release evidence follows the real closed-group syscall count and round");
+        hlcheck([details[0][@"objectID"] isEqual:details[1][@"objectID"]] && [details[0][@"objectID"] unsignedIntegerValue]>0 &&
+            [details[0][@"pre"][@"nlink"] unsignedIntegerValue]==2 && [details[0][@"post"][@"nlink"] unsignedIntegerValue]==1 &&
+            [details[1][@"post"][@"nlink"] unsignedIntegerValue]==0 && [evidence[@"uniqueExtents"] isEqual:@"notMeasured"],
+            @"release evidence observes two to one to zero without claiming unique extents");
+        hlcheck([evidence[@"volumes"] count]==1 && [evidence[@"volumes"][0][@"state"] isEqual:@"observed"],
+            @"release evidence samples the same real volume after file descriptors close");
         for (AxsCacheKeeperSweep *sweep in sweeps) hlcheck(sweep.remainingCandidates==0 && sweep.remainingBytes==0,@"successful group leaves no duplicate residuals");
         NSUInteger before=job.removed;[job advanceCycleWithPerRootLimit:16 gate:^BOOL{return YES;}];
         hlcheck(job.removed==before,@"terminal job cannot double count a group");
@@ -215,5 +228,34 @@ void axs_cachekeeper_run_hardlink_tests(NSString *fixture) {
         @"a group that exceeds remaining budget cannot starve a later ordinary file or be partially started");
     hlcheck([fm contentsOfDirectoryAtPath:root error:nil].count+[fm contentsOfDirectoryAtPath:second error:nil].count==1999,
         @"all large-group names remain after the small group and ordinary file are reclaimed");
+    // The observer sees actual ordinary syscalls, including cancellation inside the injected syscall.
+    for (NSString *variant in @[@"evidence-ordinary",@"evidence-failure",@"evidence-cancel"]) {
+        NSString *eHome=hldir(base,variant),*eRoot=hldir(eHome,@"Library/Caches");
+        hlput([eRoot stringByAppendingPathComponent:@"payload"]);
+        if ([variant isEqual:@"evidence-cancel"]) hlput([eRoot stringByAppendingPathComponent:@"remaining"]);
+        __block __weak AxsCacheKeeperCleanupJob *weakEvidenceJob=nil;
+        __block NSDictionary *during=nil;
+        AxsCacheKeeperSweep *eSweep=hlsweep(eHome,eRoot,@{},^int(int fd,const char *name) {
+            if ([variant isEqual:@"evidence-failure"]) {errno=EACCES;return -1;}
+            int result=unlinkat(fd,name,0);
+            if ([variant isEqual:@"evidence-cancel"]) {[weakEvidenceJob cancel];during=weakEvidenceJob.releaseEvidence;}
+            errno=EACCES;return result;
+        });
+        AxsCacheKeeperCleanupJob *eJob=hljob(@[eSweep],nil);weakEvidenceJob=eJob;NSUInteger fdCount=hlopenfds();hlfinish(eJob);
+        NSDictionary *ev=eJob.releaseEvidence,*detail=[ev[@"details"] firstObject];
+        hlcheck(axs_cachekeeper_release_evidence_projection(ev,eJob.roundID)!=nil,@"actual ordinary evidence satisfies persisted schema");
+        BOOL failure=[variant isEqual:@"evidence-failure"];
+        hlcheck([ev[@"attempts"] unsignedIntegerValue]==1 && [ev[@"succeeded"] unsignedIntegerValue]==(failure?0:1) &&
+            [ev[@"failed"] unsignedIntegerValue]==(failure?1:0) && [detail[@"errno"] intValue]==(failure?EACCES:0) &&
+            [detail[@"pre"][@"nlink"] unsignedIntegerValue]==1 && [detail[@"post"][@"nlink"] unsignedIntegerValue]==(failure?1:0),
+            @"ordinary evidence keeps syscall errno separate from post-stat and stale errno");
+        hlcheck(hlopenfds()==fdCount,@"release evidence closes all extra volume descriptors");
+        if (during) hlcheck([fm contentsOfDirectoryAtPath:eRoot error:nil].count==1 && ![during[@"state"] isEqual:@"cancelled"] &&
+            [during[@"volumes"][0][@"after"][@"state"] isEqual:@"notRecorded"] && [ev[@"state"] isEqual:@"cancelled"],
+            @"cancellation inside unlink cannot sample terminal volume until the stack returns");
+        uint64_t revision=[ev[@"revision"] unsignedLongLongValue];[eJob cancel];
+        hlcheck([eJob.releaseEvidence isEqual:ev] && [eJob.releaseEvidence[@"revision"] unsignedLongLongValue]==revision,
+            @"terminal getters and repeated cancellation leave evidence frozen");
+    }
     fprintf(stderr,"PASS: closed hardlink authorization, identity, budget, partial outcomes and retries\n");
 }

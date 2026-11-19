@@ -491,5 +491,24 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     NSDictionary *retained=[session reportWithApps:@[@{@"id":@"test.active"}] environment:@{}][@"apps"][0][@"cleanup"][@"data"][@"directories"][0];
     dxcheck([retained[@"hardLinkRetained"] isEqual:@2] && [retained[@"hardLinkRetainedBytes"] isEqual:@26] &&
         [retained[@"changed"] isEqual:@0] && [retained[@"hardLinkRetentionReason"] isEqual:@"multipleLinks"],@"硬链接保留计数、逻辑字节和固定原因由已有诊断导出保留");
+    NSString *releaseRound=@"A0274912-2134-4AD8-8E0A-C91B9DCB104F";
+    NSDictionary *release=@{@"schemaVersion":@1,@"roundID":releaseRound,@"revision":@1,@"state":@"finished",
+        @"attempts":@1,@"succeeded":@1,@"failed":@0,@"postMissing":@0,@"detailsOmitted":@0,@"identitiesOmitted":@0,
+        @"volumesOmitted":@0,@"overflow":@NO,@"uniqueExtents":@"notMeasured",@"reclaimedPhysicalBytes":@"notMeasured",@"volumes":@[],
+        @"details":@[@{@"attemptID":@1,@"rootID":@1,@"objectID":@1,@"kind":@"ordinary",@"result":@0,@"errno":@0,
+            @"pre":@{@"state":@"observed",@"errno":@0,@"size":@12,@"blocks":@8,@"nlink":@1},
+            @"post":@{@"state":@"observed",@"errno":@0,@"size":@12,@"blocks":@8,@"nlink":@0},
+            @"identityMatch":@"same",@"linkTransition":@"decremented"}]};
+    dxwrite(folder,@"Status/test.active.auto.plist",@{@"confirmedRoundID":releaseRound,@"releaseEvidence":release});
+    NSDictionary *releaseExport=[session reportWithApps:@[@{@"id":@"test.active"}] environment:@{}][@"apps"][0][@"cleanup"][@"data"][@"releaseEvidence"];
+    dxcheck([releaseExport isEqual:release],@"真实诊断导出保留同轮匿名删除证据及未测物理量");
+    NSMutableDictionary *badRelease=[release mutableCopy];badRelease[@"rawPath"]=@"private-release-path-canary";
+    dxwrite(folder,@"Status/test.active.auto.plist",@{@"confirmedRoundID":releaseRound,@"releaseEvidence":badRelease});
+    NSDictionary *badReleaseReport=[session reportWithApps:@[@{@"id":@"test.active"}] environment:@{}];
+    NSString *encoded=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:badReleaseReport options:0 error:nil] encoding:NSUTF8StringEncoding];
+    dxcheck([badReleaseReport[@"apps"][0][@"cleanup"][@"data"][@"releaseEvidence"] isEqual:@{@"state":@"invalid"}] &&
+        ![encoded containsString:@"private-release-path-canary"],@"额外路径拒绝且不进入诊断JSON");
+    dxwrite(folder,@"Status/test.active.auto.plist",@{@"confirmedRoundID":@"old-round",@"removed":@1});
+    dxcheck([[session reportWithApps:@[@{@"id":@"test.active"}] environment:@{}][@"apps"][0][@"cleanup"][@"data"][@"releaseEvidence"] isEqual:@{@"state":@"notRecorded"}],@"旧清理回执没有释放证据时明确未记录");
     printf("PASS: diagnostic saved-record aggregation, privacy, fixed progress, missing records and zero filesystem writes\n");
 }

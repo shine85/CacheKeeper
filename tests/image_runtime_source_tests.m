@@ -6,7 +6,16 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <mach-o/dyld.h>
+#include <stdlib.h>
+static atomic_uint axs_cachekeeper_runtime_paths,axs_cachekeeper_runtime_headers;
+static char *axs_cachekeeper_runtime_realpath(const char *path,char *out) {atomic_fetch_add(&axs_cachekeeper_runtime_paths,1);return realpath(path,out);}
+static const struct mach_header *axs_cachekeeper_runtime_header(uint32_t index) {atomic_fetch_add(&axs_cachekeeper_runtime_headers,1);return _dyld_get_image_header(index);}
+#define realpath axs_cachekeeper_runtime_realpath
+#define _dyld_get_image_header axs_cachekeeper_runtime_header
 #import "AxsCacheKeeperImageLegacySource.h"
+#undef realpath
+#undef _dyld_get_image_header
 
 static atomic_uint axs_cachekeeper_runtime_writes,axs_cachekeeper_runtime_metadata,axs_cachekeeper_runtime_clears;
 static atomic_uint axs_cachekeeper_runtime_source_checks,axs_cachekeeper_runtime_helper_checks;
@@ -133,6 +142,23 @@ int main(int argc,const char *argv[]) {
         [owner.diskCache setData:[NSData data] forKey:@"initial"];
         [owner.diskCache setExtendedData:[NSData data] forKey:@"initial"];
         axs_cachekeeper_runtime_require(atomic_load(&axs_cachekeeper_runtime_writes)==0 && atomic_load(&axs_cachekeeper_runtime_metadata)==0,"both write hooks initially block");
+        dispatch_semaphore_t workerEntered=dispatch_semaphore_create(0),workerRelease=dispatch_semaphore_create(0);
+        dispatch_async(engine.work,^{dispatch_semaphore_signal(workerEntered);dispatch_semaphore_wait(workerRelease,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC));});
+        axs_cachekeeper_runtime_require(dispatch_semaphore_wait(workerEntered,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC))==0,"discovery worker is held");
+        axs_cachekeeper_image_runtime_view_changed();
+        atomic_store(&axs_cachekeeper_runtime_paths,0);atomic_store(&axs_cachekeeper_runtime_headers,0);
+        [owner.diskCache setData:[NSData data] forKey:@"stale"];
+        [owner.diskCache setExtendedData:[NSData data] forKey:@"stale"];
+        axs_cachekeeper_runtime_require(atomic_load(&axs_cachekeeper_runtime_writes)==1 && atomic_load(&axs_cachekeeper_runtime_metadata)==1,
+            "stale executable identity restores both original writes before discovery");
+        axs_cachekeeper_runtime_require(!atomic_load(&axs_cachekeeper_runtime_paths) && !atomic_load(&axs_cachekeeper_runtime_headers),
+            "both write hooks avoid path resolution and loader enumeration while discovery is held");
+        dispatch_semaphore_signal(workerRelease);axs_cachekeeper_runtime_refresh(engine);
+        atomic_store(&axs_cachekeeper_runtime_writes,0);atomic_store(&axs_cachekeeper_runtime_metadata,0);
+        [owner.diskCache setData:[NSData data] forKey:@"refreshed"];
+        [owner.diskCache setExtendedData:[NSData data] forKey:@"refreshed"];
+        axs_cachekeeper_runtime_require(!atomic_load(&axs_cachekeeper_runtime_writes) && !atomic_load(&axs_cachekeeper_runtime_metadata),
+            "discovery restores both write restrictions after executable validation");
 
         dispatch_semaphore_t entered=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0);
         dispatch_async(owner.ioQueue,^{dispatch_semaphore_signal(entered);dispatch_semaphore_wait(release,dispatch_time(DISPATCH_TIME_NOW,20*NSEC_PER_SEC));});

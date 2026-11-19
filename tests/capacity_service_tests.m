@@ -4,6 +4,7 @@
 #import "../AxsCacheKeeperCapacity.h"
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/time.h>
 
 static void ckcheck(BOOL value,const char *message) {
     if (!value) {fprintf(stderr,"FAIL: capacity service: %s\n",message);exit(1);}
@@ -264,6 +265,12 @@ static void ckactualMissingRoot(NSString *base) {
     ckrequest(folder,NSUUID.UUID.UUIDString,NO);ckfinish(service);NSDictionary *result=ckresult(folder);
     ckcheck([result[@"state"] isEqual:@"partial"] && [result[@"failedRoots"] isEqual:@1] &&
         [result[@"roots"][0][@"measurement"][@"state"] isEqual:@"readError"],"actual missing root is failed coverage not empty successful storage");
+    NSDictionary *measurement=result[@"roots"][0][@"measurement"],*failure=measurement[@"sourceFailure"];
+    ckcheck([failure[@"stage"] isEqual:@"sourceStat"] && [failure[@"reason"] isEqual:@"statFailed"] &&
+        [failure[@"errorDomain"] isEqual:@"posix"] && [failure[@"errorCode"] isEqual:@(ENOENT)] && !measurement[@"cursorErrors"],
+        "missing source preserves actual lstat errno without a synthetic cursor");
+    ckcheck([result[@"lifecycle"][@"cursorClosure"] isEqual:@"notObserved"] && !result[@"lifecycle"][@"cursorClosedAt"],
+        "source failure without cursor never claims observed cursor closure");
 }
 static void ckunobservedRoot(NSString *base) {
     for (NSNumber *wasFile in @[@NO,@YES]) {
@@ -282,11 +289,100 @@ static void ckunobservedRoot(NSString *base) {
         ckcheck([result[@"state"] isEqual:@"partial"] && [result[@"completedRoots"] isEqual:@1] && [result[@"failedRoots"] isEqual:@1] &&
             [row[@"measurement"][@"state"] isEqual:@"readError"] && [row[@"measurement"][@"entries"] isEqual:@0],
             "unobserved source root cannot measure a later created directory as complete");
+        NSDictionary *failure=row[@"measurement"][@"sourceFailure"];
+        ckcheck([failure[@"stage"] isEqual:@"sourceStat"] &&
+            [failure[@"reason"] isEqual:(wasFile.boolValue ? @"notDirectory" : @"statFailed")] &&
+            [failure[@"errorDomain"] isEqual:(wasFile.boolValue ? @"none" : @"posix")] &&
+            (wasFile.boolValue ? !failure[@"errorCode"] : [failure[@"errorCode"] isEqual:@(ENOENT)]) &&
+            !row[@"measurement"][@"cursorErrors"],
+            "source missing and non-directory evidence survives later replacement without cursor errno");
     }
 }
 static NSMutableDictionary *ckmutablePlist(NSDictionary *value) {
     NSData *data=[NSPropertyListSerialization dataWithPropertyList:value format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
     return [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListMutableContainersAndLeaves format:nil error:nil];
+}
+static void cksourceAliasBeforeOpen(NSString *base) {
+    for (NSString *mode in @[@"identity",@"missing",@"file"]) {
+        NSString *fixture=ckdirectory(base,[@"source-alias-" stringByAppendingString:mode]);
+        NSString *folder=ckdirectory(fixture,@"status"),*first=ckdirectory(fixture,@"first");
+        for (NSUInteger i=0;i<800;i++) ckfile([first stringByAppendingPathComponent:[NSString stringWithFormat:@"f%lu",(unsigned long)i]],1);
+        NSString *second=ckdirectory(fixture,@"second"),*moved=[fixture stringByAppendingPathComponent:@"moved"];
+        NSDictionary *plan=ckplan(@[ckroot(first,@"resource-1",@[@"test.a"]),ckroot(second,@"resource-2",@[@"test.b"])],@[@"test.a",@"test.b"],NO);
+        __block BOOL replaced=NO;
+        AxsCacheKeeperCapacityService *service=[[AxsCacheKeeperCapacityService alloc] initWithFolder:folder provider:^NSDictionary *(NSError **e) {(void)e;return plan;}
+            writer:^BOOL(NSDictionary *record,NSString *path) {
+                BOOL ok=axs_cachekeeper_capacity_atomic_write(record,path.stringByDeletingLastPathComponent,path.lastPathComponent,32*1024*1024,nil);
+                if (!replaced) {replaced=YES;ckcheck(!rename(second.fileSystemRepresentation,moved.fileSystemRepresentation),"move source alias fixture");
+                    if ([mode isEqual:@"identity"]) {ckdirectory(fixture,@"second");ckfile([second stringByAppendingPathComponent:@"must-not-open"],8192);}
+                    else if ([mode isEqual:@"file"]) ckfile(second,8192);}
+                return ok;
+            }];
+        ckrequest(folder,NSUUID.UUID.UUIDString,NO);ckfinish(service);NSDictionary *result=ckresult(folder),*m=result[@"roots"][1][@"measurement"];
+        NSString *reason=[mode isEqual:@"identity"] ? @"identityChanged" : [mode isEqual:@"missing"] ? @"statFailed" : @"notDirectory";
+        NSDictionary *failure=m[@"sourceFailure"];
+        ckcheck([result[@"state"] isEqual:@"partial"] && [m[@"state"] isEqual:@"identityChanged"] && [m[@"entries"] isEqual:@0] &&
+            [failure[@"stage"] isEqual:@"aliasRecheck"] && [failure[@"reason"] isEqual:reason] &&
+            [failure[@"errorDomain"] isEqual:([mode isEqual:@"missing"] ? @"posix" : @"none")] &&
+            ([mode isEqual:@"missing"] ? [failure[@"errorCode"] isEqual:@(ENOENT)] : !failure[@"errorCode"]) && !m[@"cursorErrors"],
+            "alias mismatch before open has source evidence without opening replacement or cursor errno");
+    }
+}
+static NSDictionary *ckerrorSummary(NSUInteger enumeration,NSUInteger stat,BOOL truncated,NSUInteger omitted,NSArray *errors) {
+    return @{@"enumerationErrors":@(enumeration),@"statErrors":@(stat),@"errorsTruncated":@(truncated),@"omittedErrorCount":@(omitted),@"errors":errors};
+}
+static NSDictionary *ckerrorRow(NSString *stage,NSUInteger count) {
+    return @{@"stage":stage,@"reason":@"readFailure",@"errorDomain":@"posix",@"errorCode":@(EIO),@"count":@(count)};
+}
+static void ckerrorSchema(NSString *base) {
+    // Removing count reconciliation or complete/error exclusion must fail here.
+    NSString *folder=ckdirectory(base,@"error-schema-status"),*root=ckdirectory(base,@"error-schema-root");ckfile([root stringByAppendingPathComponent:@"file"],1);
+    NSDictionary *plan=ckplan(@[ckroot(root,@"resource-1",@[@"test.a"])],@[@"test.a"],NO);
+    AxsCacheKeeperCapacityService *service=[[AxsCacheKeeperCapacityService alloc] initWithFolder:folder provider:^NSDictionary *(NSError **e) {(void)e;return plan;} writer:nil];
+    ckrequest(folder,NSUUID.UUID.UUIDString,NO);ckfinish(service);NSDictionary *original=ckresult(folder);
+    ckcheck([original[@"state"] isEqual:@"complete"],"schema fixture is an actual complete measurement");
+    NSDictionary *enumOne=ckerrorRow(@"enumerate",1),*statOne=ckerrorRow(@"entryStat",1);
+    NSArray *invalid=@[ckerrorSummary(0,0,NO,0,@[enumOne]),ckerrorSummary(1,0,NO,0,@[]),
+        ckerrorSummary(0,1,NO,0,@[enumOne]),ckerrorSummary(1,0,YES,2,@[enumOne]),
+        ckerrorSummary(0,0,YES,0,@[]),ckerrorSummary(1,0,NO,1,@[enumOne]),
+        ckerrorSummary(1,0,NO,0,@[ckerrorRow(@"enumerate",2)])];
+    for (NSDictionary *errors in invalid) {
+        NSMutableDictionary *bad=ckmutablePlist(original);bad[@"state"]=@"partial";bad[@"completedRoots"]=@0;bad[@"failedRoots"]=@1;
+        bad[@"roots"][0][@"measurement"][@"state"]=@"readError";bad[@"roots"][0][@"measurement"][@"cursorErrors"]=errors;
+        ckcheck([axs_cachekeeper_capacity_projection(bad)[@"state"] isEqual:@"invalid"],"contradictory cursor counts and detail fail closed");
+    }
+    NSMutableDictionary *bad=ckmutablePlist(original);bad[@"roots"][0][@"measurement"][@"cursorErrors"]=ckerrorSummary(1,0,NO,0,@[enumOne]);
+    ckcheck([axs_cachekeeper_capacity_projection(bad)[@"state"] isEqual:@"invalid"],"complete measurement cannot carry cursor errors");
+    bad=ckmutablePlist(original);bad[@"roots"][0][@"measurement"][@"sourceFailure"]=@{@"stage":@"sourceStat",@"reason":@"notDirectory",@"errorDomain":@"none"};
+    ckcheck([axs_cachekeeper_capacity_projection(bad)[@"state"] isEqual:@"invalid"],"complete measurement cannot carry source failure");
+    NSArray *badSources=@[
+        @{@"stage":@"inputValidation",@"reason":@"statFailed",@"errorDomain":@"posix",@"errorCode":@(ENOENT)},
+        @{@"stage":@"sourceStat",@"reason":@"identityChanged",@"errorDomain":@"none"},
+        @{@"stage":@"sourceStat",@"reason":@"statFailed",@"errorDomain":@"posix",@"errorCode":@YES},
+        @{@"stage":@"sourceStat",@"reason":@"statFailed",@"errorDomain":@"posix",@"errorCode":@0},
+        @{@"stage":@"sourceStat",@"reason":@"notDirectory",@"errorDomain":@"none",@"errorCode":@(ENOTDIR)}];
+    for (NSDictionary *failure in badSources) {
+        bad=ckmutablePlist(original);bad[@"state"]=@"partial";bad[@"completedRoots"]=@0;bad[@"failedRoots"]=@1;
+        bad[@"roots"][0][@"measurement"][@"state"]=@"readError";bad[@"roots"][0][@"measurement"][@"sourceFailure"]=failure;
+        ckcheck([axs_cachekeeper_capacity_projection(bad)[@"state"] isEqual:@"invalid"],"source failure rejects invented domain errno and stage combinations");
+    }
+    NSArray *valid=@[ckerrorSummary(1,1,NO,0,@[enumOne,statOne]),ckerrorSummary(3,1,YES,2,@[enumOne,statOne]),
+        ckerrorSummary(UINT32_MAX,0,YES,0,@[ckerrorRow(@"enumerate",UINT32_MAX)]),
+        ckerrorSummary(UINT32_MAX,1,YES,1,@[ckerrorRow(@"enumerate",UINT32_MAX)]),
+        ckerrorSummary(UINT32_MAX,UINT32_MAX,YES,UINT32_MAX,@[enumOne,statOne]),
+        ckerrorSummary(UINT32_MAX,0,YES,0,@[ckerrorRow(@"enumerate",UINT32_MAX),
+            @{@"stage":@"enumerate",@"reason":@"permissionDenied",@"errorDomain":@"posix",@"errorCode":@(EACCES),@"count":@1}])];
+    for (NSDictionary *errors in valid) {
+        NSMutableDictionary *record=ckmutablePlist(original);record[@"state"]=@"partial";record[@"completedRoots"]=@0;record[@"failedRoots"]=@1;
+        record[@"roots"][0][@"measurement"][@"state"]=@"readError";record[@"roots"][0][@"measurement"][@"cursorErrors"]=errors;
+        ckcheck(axs_cachekeeper_capacity_atomic_write(record,folder,@"capacityResult.plist",32*1024*1024,nil),"write valid error schema fixture");
+        NSDictionary *closed=ckresult(folder);NSData *json=[NSJSONSerialization dataWithJSONObject:closed options:0 error:nil];
+        NSDictionary *decoded=json ? [NSJSONSerialization JSONObjectWithData:json options:0 error:nil] : nil;
+        ckcheck([closed[@"state"] isEqual:@"partial"] && [decoded[@"roots"][0][@"measurement"][@"cursorErrors"] isEqual:errors],
+            "valid truncated and saturated errors survive saved result and JSON");
+    }
+    NSMutableDictionary *legacy=ckmutablePlist(original);[legacy[@"roots"][0][@"measurement"] removeObjectForKey:@"cursorErrors"];
+    ckcheck([axs_cachekeeper_capacity_projection(legacy)[@"state"] isEqual:@"complete"],"legacy measurement without errors stays optional");
 }
 static void ckbadTree(NSDictionary *record,void (^change)(NSMutableDictionary *),const char *message) {
     NSMutableDictionary *copy=ckmutablePlist(record),*measurement=copy[@"roots"][0][@"measurement"];change(measurement);
@@ -366,6 +462,111 @@ static void ckprojection(NSString *base) {
     ckcheck(!symlink([folder stringByAppendingPathComponent:@"capacityResult.plist"].fileSystemRepresentation,missing.fileSystemRepresentation),"result symlink fixture");
     ckcheck([axs_cachekeeper_capacity_read_result(missing,&error)[@"state"] isEqual:@"invalid"] && error!=nil,"result read rejects symlink without following it");
 }
+static NSDictionary *ckhistory(NSDictionary *record,NSString *epoch) {
+    for (NSDictionary *item in record[@"terminalHistory"][@"records"]) if ([item[@"epoch"] isEqual:epoch]) return item;
+    return nil;
+}
+static void ckhistoryBehavior(NSString *base) {
+    NSString *folder=ckdirectory(base,@"history-status"),*root=ckdirectory(base,@"history-root");
+    for (NSUInteger i=0;i<800;i++) ckfile([root stringByAppendingPathComponent:[NSString stringWithFormat:@"private-%lu",(unsigned long)i]],1);
+    NSDictionary *plan=ckplan(@[ckroot(root,@"resource-1",@[@"test.a"])],@[@"test.a"],NO);
+    AxsCacheKeeperCapacityService *service=[[AxsCacheKeeperCapacityService alloc] initWithFolder:folder provider:^NSDictionary *(NSError **e) {(void)e;return plan;} writer:nil];
+    NSString *a=NSUUID.UUID.UUIDString,*b=NSUUID.UUID.UUIDString;ckrequest(folder,a,NO);[service tick];ckrequest(folder,a,YES);ckfinish(service);
+    ckrequest(folder,b,NO);ckfinish(service);NSDictionary *result=ckresult(folder),*item=ckhistory(result,a);
+    ckcheck([item[@"state"] isEqual:@"cancelled"] && [item[@"resultPublication"] isEqual:@"saved"] &&
+        item[@"publicationObservedAt"] && item[@"lifecycle"][@"cancelObservedAt"],
+        "saved cancellation remains in next epoch terminal history");
+    ckcheck([item[@"lifecycle"][@"cursorClosure"] isEqual:@"observedZero"] && item[@"lifecycle"][@"cursorClosedAt"] &&
+        [result[@"lifecycle"][@"previousObservedEpoch"] isEqual:a],"history links consecutive observations with real cursor closure evidence");
+    NSString *json=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:result[@"terminalHistory"] options:0 error:nil] encoding:NSUTF8StringEncoding];
+    ckcheck(![json containsString:root] && ![json containsString:@"private-"] && ![json containsString:@"resource-"],"terminal history contains no paths names or root identities");
+    service=nil;service=[[AxsCacheKeeperCapacityService alloc] initWithFolder:folder provider:^NSDictionary *(NSError **e) {(void)e;return plan;} writer:nil];
+    for (NSUInteger i=0;i<18;i++) {ckrequest(folder,NSUUID.UUID.UUIDString,NO);ckfinish(service);}
+    result=ckresult(folder);NSArray *records=result[@"terminalHistory"][@"records"];
+    ckcheck(records.count==16 && [result[@"terminalHistory"][@"omittedCount"] unsignedIntegerValue]==3 && !ckhistory(result,a),
+        "history has a fixed bound and visible omissions after restart");
+    NSMutableSet *epochs=[NSMutableSet new];for (NSDictionary *row in records) [epochs addObject:row[@"epoch"]];
+    ckcheck(epochs.count==records.count,"history retry and recovery never duplicate epochs");
+    NSMutableDictionary *legacy=[result mutableCopy];[legacy removeObjectForKey:@"terminalHistory"];[legacy removeObjectForKey:@"lifecycle"];
+    ckcheck([axs_cachekeeper_capacity_projection(legacy)[@"state"] isEqual:@"complete"],"old schema one records remain readable without new evidence");
+    NSMutableDictionary *bad=ckmutablePlist(result);bad[@"terminalHistory"][@"records"][0][@"resultPublication"]=@"durable";
+    ckcheck([axs_cachekeeper_capacity_projection(bad)[@"state"] isEqual:@"invalid"],"unknown publication evidence fails closed");
+    bad=ckmutablePlist(result);[bad[@"terminalHistory"][@"records"] addObject:bad[@"terminalHistory"][@"records"][0]];
+    ckcheck([axs_cachekeeper_capacity_projection(bad)[@"state"] isEqual:@"invalid"],"history exceeding fixed limit is invalid");
+    bad=ckmutablePlist(result);[bad[@"terminalHistory"][@"records"] removeLastObject];
+    bad[@"terminalHistory"][@"records"][1]=bad[@"terminalHistory"][@"records"][0];
+    ckcheck([axs_cachekeeper_capacity_projection(bad)[@"state"] isEqual:@"invalid"],"duplicate history epochs are invalid");
+    bad=ckmutablePlist(result);bad[@"terminalHistory"][@"records"][0][@"privatePath"]=root;
+    NSDictionary *projected=axs_cachekeeper_capacity_projection(bad);
+    ckcheck(!projected[@"terminalHistory"][@"records"][0][@"privatePath"],"history projection strips unknown private fields");
+    bad=ckmutablePlist(result);bad[@"lifecycle"][@"cursorClosure"]=@"notObserved";
+    ckcheck([axs_cachekeeper_capacity_projection(bad)[@"state"] isEqual:@"invalid"],"closure timestamp without zero observation is invalid");
+}
+static void ckhistoryFailure(NSString *base) {
+    NSString *folder=ckdirectory(base,@"history-failure-status"),*root=ckdirectory(base,@"history-failure-root");
+    for (NSUInteger i=0;i<800;i++) ckfile([root stringByAppendingPathComponent:[NSString stringWithFormat:@"f%lu",(unsigned long)i]],1);
+    NSDictionary *plan=ckplan(@[ckroot(root,@"resource-1",@[@"test.a"])],@[@"test.a"],NO);__block BOOL blockCancel=YES;
+    AxsCacheKeeperCapacityService *service=[[AxsCacheKeeperCapacityService alloc] initWithFolder:folder provider:^NSDictionary *(NSError **e) {(void)e;return plan;}
+        writer:^BOOL(NSDictionary *record,NSString *path) {
+            if (blockCancel && [record[@"state"] isEqual:@"cancelled"]) {
+                ckcheck([NSFileManager.defaultManager removeItemAtPath:path error:nil],"remove own running fixture before failed cancellation");
+                ckcheck([NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:NO attributes:nil error:nil],"actual cancellation write failure target");
+            }
+            return axs_cachekeeper_capacity_atomic_write(record,path.stringByDeletingLastPathComponent,path.lastPathComponent,32*1024*1024,nil);
+        }];
+    NSString *a=NSUUID.UUID.UUIDString,*b=NSUUID.UUID.UUIDString;ckrequest(folder,a,NO);[service tick];ckrequest(folder,a,YES);[service tick];
+    ckcheck([ckresult(folder)[@"state"] isEqual:@"invalid"],"failed cancellation has no readable saved terminal");
+    ckcheck([NSFileManager.defaultManager removeItemAtPath:[folder stringByAppendingPathComponent:@"capacityResult.plist"] error:nil],"remove own cancellation failure target");
+    blockCancel=NO;ckrequest(folder,b,NO);ckfinish(service);NSDictionary *item=ckhistory(ckresult(folder),a);
+    ckcheck([item[@"resultPublication"] isEqual:@"notSaved"] && !item[@"publicationObservedAt"] && [item[@"supersededBy"] isEqual:b] &&
+        [item[@"failure"][@"code"] isEqual:@"writeFailed"],"superseded failed cancel never claims a saved full result");
+    ckrequest(folder,a,YES);ckfinish(service);ckcheck([ckresult(folder)[@"epoch"] isEqual:b],"late cancel cannot replace B with historical A");
+    NSString *coldFolder=ckdirectory(base,@"history-cold-status"),*c=NSUUID.UUID.UUIDString;
+    @autoreleasepool {AxsCacheKeeperCapacityService *first=[[AxsCacheKeeperCapacityService alloc] initWithFolder:coldFolder provider:^NSDictionary *(NSError **e) {(void)e;return plan;} writer:nil];ckrequest(coldFolder,c,NO);[first tick];}
+    AxsCacheKeeperCapacityService *cold=[[AxsCacheKeeperCapacityService alloc] initWithFolder:coldFolder provider:nil writer:nil];ckfinish(cold);
+    NSDictionary *receipt=ckresult(coldFolder)[@"lifecycle"];
+    ckcheck([receipt[@"cursorClosure"] isEqual:@"notObserved"] && !receipt[@"cursorClosedAt"],"restart never invents old process descriptor closure");
+    NSString *retryFolder=ckdirectory(base,@"history-retry-status"),*r=NSUUID.UUID.UUIDString;__block BOOL fail=YES;
+    AxsCacheKeeperCapacityService *retry=[[AxsCacheKeeperCapacityService alloc] initWithFolder:retryFolder provider:^NSDictionary *(NSError **e) {(void)e;return plan;}
+        writer:^BOOL(NSDictionary *record,NSString *path) {
+            if (fail && [record[@"state"] isEqual:@"cancelled"]) {
+                ckcheck([NSFileManager.defaultManager removeItemAtPath:path error:nil],"remove running retry fixture");
+                ckcheck([NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:NO attributes:nil error:nil],"real cancelled retry failure");
+            }
+            return axs_cachekeeper_capacity_atomic_write(record,path.stringByDeletingLastPathComponent,path.lastPathComponent,32*1024*1024,nil);
+        }];
+    ckrequest(retryFolder,r,NO);[retry tick];ckrequest(retryFolder,r,YES);[retry tick];
+    NSNumber *finished=[[retry valueForKey:@"record"] objectForKey:@"finishedAt"];
+    ckcheck([NSFileManager.defaultManager removeItemAtPath:[retryFolder stringByAppendingPathComponent:@"capacityResult.plist"] error:nil],"remove retry failure target");
+    fail=NO;[NSThread sleepForTimeInterval:1.05];ckfinish(retry);
+    ckcheck([ckresult(retryFolder)[@"finishedAt"] isEqual:finished],"cancel publication retry preserves terminal observation time");
+    ckrequest(retryFolder,NSUUID.UUID.UUIDString,NO);ckfinish(retry);
+    item=ckhistory(ckresult(retryFolder),r);
+    ckcheck([item[@"resultPublication"] isEqual:@"saved"] && item[@"publicationObservedAt"],"successful cancellation retry is saved only after writer success");
+}
+static void ckcursorErrors(NSString *base) {
+    // Change real metadata after the FD opens, leaving dev/ino untouched so the
+    // service alias check passes and the production cursor detects the change.
+    NSString *second=ckdirectory(base,@"cursor-metadata-root"),*status=ckdirectory(base,@"cursor-metadata-status");
+    NSDictionary *plan=ckplan(@[ckroot(second,@"resource-1",@[@"test.a"])],@[@"test.a"],NO);__block BOOL replaced=NO;
+    AxsCacheKeeperCapacityService *service=[[AxsCacheKeeperCapacityService alloc] initWithFolder:status provider:^NSDictionary *(NSError **e) {(void)e;return plan;}
+        writer:^BOOL(NSDictionary *record,NSString *path) {
+            BOOL ok=axs_cachekeeper_capacity_atomic_write(record,path.stringByDeletingLastPathComponent,path.lastPathComponent,32*1024*1024,nil);
+            if (!replaced) {replaced=YES;ckfile([second stringByAppendingPathComponent:@"private-error-canary"],1);
+                struct stat info;ckcheck(!lstat(second.fileSystemRepresentation,&info),"read actual root time for error fixture");
+                struct timeval times[2]={{info.st_atimespec.tv_sec,0},{info.st_mtimespec.tv_sec+5,0}};
+                ckcheck(!utimes(second.fileSystemRepresentation,times),"force real root metadata change independently of timestamp granularity");
+            }return ok;
+        }];
+    ckrequest(status,NSUUID.UUID.UUIDString,NO);ckfinish(service);NSDictionary *result=ckresult(status);
+    NSDictionary *errors=result[@"roots"][0][@"measurement"][@"cursorErrors"],*error=[errors[@"errors"] firstObject];
+    ckcheck([result[@"state"] isEqual:@"partial"] && [error[@"errorCode"] isEqual:@(ESTALE)] && [error[@"stage"] isEqual:@"enumerate"] &&
+        [error[@"count"] isEqual:@1] && !error[@"scope"],"real cursor error survives service schema and saved result");
+    NSMutableDictionary *legacy=ckmutablePlist(result);[legacy[@"roots"][0][@"measurement"] removeObjectForKey:@"cursorErrors"];
+    ckcheck([axs_cachekeeper_capacity_projection(legacy)[@"state"] isEqual:@"partial"],"old measurement without cursor errors is valid");
+    NSMutableDictionary *bad=ckmutablePlist(result);bad[@"roots"][0][@"measurement"][@"cursorErrors"][@"errors"][0][@"errorCode"]=@YES;
+    ckcheck([axs_cachekeeper_capacity_projection(bad)[@"state"] isEqual:@"invalid"],"cursor error numeric fields reject booleans");
+}
 int main(int argc,const char **argv) {
     @autoreleasepool {
         ckcheck(argc==3,"expected fixture directory and case");NSString *base=[NSString stringWithUTF8String:argv[1]],*name=[NSString stringWithUTF8String:argv[2]];
@@ -379,9 +580,15 @@ int main(int argc,const char **argv) {
         if ([name isEqual:@"all"] || [name isEqual:@"excluded"]) ckexcluded(base);
         if ([name isEqual:@"all"] || [name isEqual:@"partial"]) ckpartial(base);
         if ([name isEqual:@"all"] || [name isEqual:@"alias-replace"]) ckaliasReplacement(base);
-        if ([name isEqual:@"all"] || [name isEqual:@"unobserved"]) ckunobservedRoot(base);
+        if ([name isEqual:@"unobserved"]) ckunobservedRoot(base);
         if ([name isEqual:@"all"] || [name isEqual:@"nodes"]) cknodeProjection(base);
-        if ([name isEqual:@"all"]) {ckremovedRequest(base);ckrootBudget(base);ckproviderFailure(base);ckactualMissingRoot(base);}
+        if ([name isEqual:@"all"] || [name isEqual:@"history"]) ckhistoryBehavior(base);
+        if ([name isEqual:@"all"] || [name isEqual:@"history-failure"]) ckhistoryFailure(base);
+        if ([name isEqual:@"all"] || [name isEqual:@"cursor-errors"]) ckcursorErrors(base);
+        if ([name isEqual:@"all"] || [name isEqual:@"source-errors"]) {ckactualMissingRoot(base);ckunobservedRoot(base);cksourceAliasBeforeOpen(base);}
+        if ([name isEqual:@"source-alias"]) cksourceAliasBeforeOpen(base);
+        if ([name isEqual:@"all"] || [name isEqual:@"error-schema"]) ckerrorSchema(base);
+        if ([name isEqual:@"all"]) {ckremovedRequest(base);ckrootBudget(base);ckproviderFailure(base);}
         if ([name isEqual:@"all"]) ckprojection(base);
         puts("PASS: capacity service real metadata, request gates, shared aliases, cancellation, persistence and restart");
     }return 0;

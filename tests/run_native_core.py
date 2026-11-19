@@ -227,6 +227,9 @@ def pdf_lifecycle(output, compiler):
 
 
 def cache_control(output, compiler):
+    evidence_object = output / "release-evidence.o"
+    run_command([compiler, "clang", "-std=c11", "-Wall", "-Wextra", "-Werror", "-c",
+                 str(root / "AxsCacheKeeperReleaseEvidence.c"), "-o", str(evidence_object)], check=True, timeout=60)
     run_command([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-Werror=implicit-function-declaration",
                     "-DAXS_CACHEKEEPER_INSTALLATION_TESTING=1",
                     "-I" + str(root / "tests" / "include"), "-framework", "Foundation",
@@ -240,6 +243,7 @@ def cache_control(output, compiler):
                     str(root / "tests" / "pdf_session_tests.m"),
                     str(root / "AxsCacheKeeperProcessObservation.m"),
                     str(root / "AxsCacheKeeperCleanupJob.m"),
+                    str(evidence_object),
                     str(root / "AxsCacheKeeperCleanupRules.m"),
                     str(root / "AxsCacheKeeperReceipts.m"),
                     str(root / "AxsCacheKeeperCleanupSchedule.m"),

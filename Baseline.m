@@ -10,6 +10,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+static AxsCacheKeeperReleaseStat axs_cachekeeper_release_stat(struct stat info, int result, int code) {
+    AxsCacheKeeperReleaseStat value={0};
+    value.state=result ? AxsCacheKeeperReleaseUnavailable : AxsCacheKeeperReleaseObserved;
+    value.error=result ? code : 0;
+    if (!result) {
+        value.device=(uint64_t)info.st_dev;value.inode=(uint64_t)info.st_ino;
+        value.size=info.st_size;value.blocks=info.st_blocks;value.nlink=info.st_nlink;
+        value.birthSeconds=info.st_birthtimespec.tv_sec;value.birthNanos=info.st_birthtimespec.tv_nsec;
+    }
+    return value;
+}
+
 @interface AxsCacheKeeperHardLinkMember : NSObject
 @property(nonatomic,weak) AxsCacheKeeperSweep *sweep;
 @property(nonatomic,copy) NSString *path;
@@ -521,6 +533,9 @@
     BOOL removed = NO;
     int file = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
     if (file<0) { int code=errno;close(fd);[self axs_cachekeeper_failure:@"openat-file" code:code path:entry detail:@""];return NO; }
+    if (self.releaseEvidencePrepare) {
+        int saved=errno;self.releaseEvidencePrepare(fd,(uint64_t)expected.st_dev);errno=saved;
+    }
     if (fstat(file,&current)) { int code=errno;close(file);close(fd);[self axs_cachekeeper_failure:@"fstat-file" code:code path:entry detail:@""];return NO; }
     if (![[self axs_cachekeeper_snapshot:current] isEqual:record]) {
         self.changedCount++;self.changedBytes += [self axs_cachekeeper_snapshot_bytes:entry];
@@ -546,6 +561,13 @@
         } else if (final.st_ino == current.st_ino && final.st_dev == current.st_dev && axs_cachekeeper_old_enough(final, self.clock())) {
             if (!willDelete()) { self.cancelled=YES; close(file); close(fd); errno=ECANCELED; return NO; }
             int result=self.unlinkFile(fd,name);int code=result ? errno : 0;
+            int syscallError=errno;
+            if (self.releaseEvidenceObserver) {
+                struct stat post={0};int postResult=fstat(file,&post);int postError=postResult ? errno : 0;
+                self.releaseEvidenceObserver(AxsCacheKeeperReleaseOrdinary,result,code,
+                    axs_cachekeeper_release_stat(current,0,0),axs_cachekeeper_release_stat(post,postResult,postError));
+                errno=syscallError;
+            }
             removed=result==0;
             if (!removed) [self axs_cachekeeper_failure:@"unlinkat" code:code path:entry detail:@"flags=0"];
         } else [self axs_cachekeeper_failure:@"删除前身份/时间核对" code:ESTALE path:entry detail:@""];
@@ -795,6 +817,9 @@ static BOOL axs_cachekeeper_hardlink_stat_matches(struct stat current, struct st
                 if (!shouldContinue() || !beforeMember()) return;
                 AxsCacheKeeperHardLinkMember *member=self.members[cursor];AxsCacheKeeperSweep *sweep=member.sweep;
                 if (!sweep || sweep.cancelled) return;
+                if (sweep.releaseEvidencePrepare) {
+                    int saved=errno;sweep.releaseEvidencePrepare([[memberFDs objectForKey:member] intValue],(uint64_t)expected.st_dev);errno=saved;
+                }
                 // Reopen each distinct directory through the original root chain on every step:
                 // a pinned FD alone would still allow a renamed parent outside the approved root.
                 for (AxsCacheKeeperHardLinkMember *representative in parentRepresentatives) {
@@ -823,6 +848,7 @@ static BOOL axs_cachekeeper_hardlink_stat_matches(struct stat current, struct st
                 if (!axs_cachekeeper_hardlink_stat_matches(current,expected,NO)) {
                     [self axs_cachekeeper_changed_from:cursor reason:@"硬链接组 inode 或链接数变化，剩余路径保留"];return;
                 }
+                struct stat evidencePre=current;
                 for (NSUInteger pending=cursor;pending<self.members.count;pending++) {
                     if (!shouldContinue()) return;
                     AxsCacheKeeperHardLinkMember *alias=self.members[pending];
@@ -836,12 +862,24 @@ static BOOL axs_cachekeeper_hardlink_stat_matches(struct stat current, struct st
                 if (!shouldContinue() || !willDelete()) return;
                 int parentFD=[[memberFDs objectForKey:member] intValue];
                 int result=sweep.unlinkFile(parentFD,member.path.lastPathComponent.fileSystemRepresentation);
-                if (result) {[self axs_cachekeeper_failed_from:cursor member:member code:errno stage:@"hardlink-unlinkat"];return;}
+                int unlinkError=result ? errno : 0;
+                if (result) {
+                    if (sweep.releaseEvidenceObserver) {
+                        struct stat post={0};int postResult=fstat(file,&post);int postError=postResult ? errno : 0;
+                        sweep.releaseEvidenceObserver(AxsCacheKeeperReleaseHardlink,result,unlinkError,
+                            axs_cachekeeper_release_stat(evidencePre,0,0),axs_cachekeeper_release_stat(post,postResult,postError));
+                    }
+                    errno=unlinkError;[self axs_cachekeeper_failed_from:cursor member:member code:unlinkError stage:@"hardlink-unlinkat"];return;
+                }
                 // Count the successful syscall before cancellation or any later validation can return.
                 [sweep.handledHardLinkCandidates addObject:member.path];sweep.removed++;
                 sweep.bytes+=expected.st_size>0 ? (unsigned long long)expected.st_size : 0;
                 [sweep axs_cachekeeper_did_remove:member.path parentFD:parentFD];
-                if (fstat(file,&current)) {[self axs_cachekeeper_failed_from:cursor+1 member:member code:errno stage:@"hardlink-post-unlink-stat"];return;}
+                int postResult=fstat(file,&current);int postError=postResult ? errno : 0;int savedPostError=errno;
+                if (sweep.releaseEvidenceObserver) sweep.releaseEvidenceObserver(AxsCacheKeeperReleaseHardlink,0,0,
+                    axs_cachekeeper_release_stat(evidencePre,0,0),axs_cachekeeper_release_stat(current,postResult,postError));
+                errno=savedPostError;
+                if (postResult) {[self axs_cachekeeper_failed_from:cursor+1 member:member code:postError stage:@"hardlink-post-unlink-stat"];return;}
                 if (!axs_cachekeeper_hardlink_stat_matches(current,expected,YES)) {
                     [self axs_cachekeeper_changed_from:cursor+1 reason:@"本次 unlink 后的 inode 变化超出预期，剩余路径保留"];return;
                 }

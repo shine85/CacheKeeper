@@ -18,8 +18,9 @@ def main() -> int:
         print("UNAVAILABLE: capacity tests require macOS and xcrun; no tests ran.")
         return 2
     root = pathlib.Path(__file__).resolve().parents[1]
-    (root / "tmp").mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="capacity-", dir=root / "tmp") as directory:
+    workspace = root / "tmp" / "feedback-1792"
+    workspace.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="capacity-", dir=workspace) as directory:
         temporary = pathlib.Path(directory)
         flags = [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
                  "-Werror=format", "-Werror=implicit-function-declaration",
@@ -64,6 +65,12 @@ def main() -> int:
         # Run RED before GREEN on the same commit. Replace one precise branch;
         # these anchors locate a mutation, they are NOT source-text assertions.
         variants = (
+            ("invalid-root-errno", "capacity", 'if (!root.isFileURL) {',
+             'if (NO && !root.isFileURL) {', "invalid-root",
+             "invalid root never exports seeded errno as observed cursor IO"),
+            ("cursor-errors", "capacity", 'out[@"cursorErrors"]=axs_cachekeeper_capacity_cursor_errors(_cursor.result[@"scanDiagnostics"]);',
+             'out[@"discardedErrors"]=axs_cachekeeper_capacity_cursor_errors(_cursor.result[@"scanDiagnostics"]);', "cursor-errors",
+             "real cursor errno and stage survive capacity wrapper"),
             ("expected-opened-root", "capacity", "if(!components.count && _requiresExpectedIdentity &&",
              "if(NO && !components.count && _requiresExpectedIdentity &&", "expected-identity",
              "opened root expected identity rejects ABA before any metadata accumulation"),

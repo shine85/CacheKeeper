@@ -50,6 +50,45 @@ jobs:
             tmp/native-results/summary.json
           if-no-files-found: warn
 
+  capacity-page:
+    name: 容量页面精确反例与行为回归
+    needs: native
+    if: inputs.native_only != true
+    runs-on: macos-15-intel
+    # Runner subprocess budgets total 66 minutes; setup and upload have their
+    # own bounded steps within this separate job's 85 minute envelope.
+    timeout-minutes: 85
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: '1'
+    steps:
+      - name: 获取源码
+        timeout-minutes: 3
+        uses: actions/checkout@v4
+
+      - name: 准备容量页面工具
+        timeout-minutes: 8
+        run: brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+
+      - name: 运行容量页面回归
+        timeout-minutes: 68
+        run: |
+          python3 tests/run_capacity_page_tests.py
+
+      - name: 保存容量页面回归结果
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: capacity-page-results
+          path: |
+            tmp/feedback-1792/capacity-page-*.log
+            tmp/feedback-1792/capacity-page-*-summary.json
+            tmp/feedback-1792/capacity-page-*/**/build.log
+            tmp/feedback-1792/capacity-page-*/**/test.log
+            tmp/feedback-1792/capacity-page-*/**/Results.xcresult
+          if-no-files-found: warn
+
   build:
     name: 测试、编译与检查 deb
     needs: native
@@ -175,7 +214,7 @@ jobs:
 
   release:
     name: 发布可下载测试包
-    needs: build
+    needs: [build, capacity-page]
     if: inputs.native_only != true && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
     timeout-minutes: 5

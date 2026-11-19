@@ -22,6 +22,9 @@ int main(int argc, const char **argv) { @autoreleasepool {
     axs_cachekeeper_run_hardlink_tests([NSString stringWithUTF8String:argv[1]]);
 } return 0; }
 ''', encoding="utf-8")
+    evidence_object = output / "release-evidence.o"
+    subprocess.run([compiler, "clang", "-std=c11", "-Wall", "-Wextra", "-Werror", "-c",
+                    str(root / "AxsCacheKeeperReleaseEvidence.c"), "-o", str(evidence_object)], check=True, timeout=60)
     baseline_source = (root / "Baseline.m").read_text(encoding="utf-8-sig")
     job_source = (root / "AxsCacheKeeperCleanupJob.m").read_text(encoding="utf-8-sig")
     cases = [
@@ -40,6 +43,14 @@ int main(int argc, const char **argv) { @autoreleasepool {
          "[self finishWithReason:AxsCacheKeeperCleanupEndReasonLimitReached];return;",
          "oversized closed group remains pending without starving an independent ordinary file"),
     ]
+    controls += [
+        ("no-release-observation", "job", "axs_cachekeeper_release_record(_releaseCore,rootID,kind,result,code,pre,post);",
+         "(void)rootID;(void)kind;(void)result;(void)code;(void)pre;(void)post;",
+         "release evidence follows the real closed-group syscall count and round"),
+        ("early-release-finalize", "job", "if (_releaseDepth || self.phase!=AxsCacheKeeperCleanupPhaseFinished || !_releaseCore || _releaseCore->finished) return;",
+         "if (self.phase!=AxsCacheKeeperCleanupPhaseFinished || !_releaseCore || _releaseCore->finished) return;",
+         "ordinary evidence keeps syscall errno separate from post-stat and stale errno"),
+    ]
     for name, target, before, after, expected in controls:
         source = job_source if target == "job" else baseline_source
         if source.count(before) != 1:
@@ -57,7 +68,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
                         "-I" + str(root), "-I" + str(root / "tests" / "include"),
                         "-framework", "Foundation", str(main), str(root / "tests" / "hardlink_tests.m"),
                         str(baseline_path), str(job_path), str(root / "AxsCacheKeeperCleanupRules.m"),
-                        str(root / "AxsCacheKeeperDependencySnapshot.m"), "-o", str(binary)],
+                        str(root / "AxsCacheKeeperDependencySnapshot.m"), str(evidence_object), "-o", str(binary)],
                        check=True, timeout=60)
         result = subprocess.run([str(binary), str(output / (name + "-fixtures"))],
                                 capture_output=True, text=True, encoding="utf-8", timeout=60)

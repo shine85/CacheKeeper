@@ -101,7 +101,7 @@ static void AxsCacheKeeperCapacityFinish(AxsCacheKeeperCapacityRoot *root,NSUInt
     AxsCacheKeeperCapacityCheck(![root.state isEqual:@"running"],"bounded fixture completes");
 }
 static void AxsCacheKeeperCapacityClosedResult(NSDictionary *result) {
-    NSSet *keys=[NSSet setWithArray:@[@"schemaVersion",@"state",@"logicalBytes",@"allocatedBytes",@"entries",@"uniqueInodes",@"duplicateInodes",@"nodes",@"entryLimit",@"depthLimit",@"inodeLimit",@"nodeLimit",@"deletionAuthorization",@"physicalUniqueBytes",@"reclaimableBytes"]];
+    NSSet *keys=[NSSet setWithArray:@[@"schemaVersion",@"state",@"logicalBytes",@"allocatedBytes",@"entries",@"uniqueInodes",@"duplicateInodes",@"nodes",@"entryLimit",@"depthLimit",@"inodeLimit",@"nodeLimit",@"deletionAuthorization",@"physicalUniqueBytes",@"reclaimableBytes",@"cursorErrors"]];
     AxsCacheKeeperCapacityCheck([[NSSet setWithArray:result.allKeys] isEqual:keys],"closed result has no identity or path fields");
     NSSet *nodeKeys=[NSSet setWithArray:@[@"id",@"parent",@"category",@"logicalBytes",@"allocatedBytes",@"entries"]];
     NSSet *categories=[NSSet setWithArray:@[@"unknown",@"Documents",@"Library",@"Caches",@"Application Support",@"tmp"]];
@@ -431,9 +431,40 @@ static void AxsCacheKeeperCapacityBudgets(NSString *base) {
     root=[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:[NSURL fileURLWithPath:exact] entryLimit:2 depthLimit:64 inodeLimit:2 nodeLimit:1];
     AxsCacheKeeperCapacityFinish(root,1);AxsCacheKeeperCapacityCheck([root.state isEqual:@"complete"] && [root.result[@"entries"] isEqual:@2] && [root.result[@"uniqueInodes"] isEqual:@2] && [root.result[@"nodes"] count]==1,"exact entry inode and node limits can complete without overflow");
 }
+static void AxsCacheKeeperCapacityErrors(NSString *base) {
+    NSString *path=[base stringByAppendingPathComponent:@"real-missing-root"];
+    AxsCacheKeeperCapacityRoot *root=[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:[NSURL fileURLWithPath:path]];
+    NSDictionary *errors=root.result[@"cursorErrors"],*error=[errors[@"errors"] firstObject];
+    AxsCacheKeeperCapacityCheck([root.state isEqual:@"readError"] && [error[@"errorCode"] isEqual:@(ENOENT)] &&
+        [error[@"stage"] isEqual:@"entryStat"] && [error[@"errorDomain"] isEqual:@"posix"] && [error[@"count"] isEqual:@1],
+        "real cursor errno and stage survive capacity wrapper");
+    AxsCacheKeeperCapacityCheck(!error[@"scope"] && root.openDirectoryCount==0 && [errors[@"statErrors"] isEqual:@1],
+        "wrapper exposes real zero descriptors without inventing a home scope");
+    AxsCacheKeeperCapacityFile(path,1);
+    root=[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:[NSURL fileURLWithPath:path]];
+    error=[root.result[@"cursorErrors"][@"errors"] firstObject];
+    AxsCacheKeeperCapacityCheck([error[@"errorCode"] isEqual:@(ENOTDIR)] && [error[@"stage"] isEqual:@"enumerate"],
+        "real non-directory cursor error remains distinct");
+}
+static void AxsCacheKeeperCapacityInvalidRoot(void) {
+    // Removing the invalid-input gate must expose the seeded errno and fail.
+    for (NSNumber *seed in @[@(EACCES),@(ENOENT)]) {
+        errno=seed.intValue;AxsCacheKeeperCapacityRoot *root=[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:nil];
+        NSDictionary *result=root.result,*failure=result[@"sourceFailure"];
+        AxsCacheKeeperCapacityCheck([root.state isEqual:@"readError"] && !result[@"cursorErrors"] &&
+            [failure[@"stage"] isEqual:@"inputValidation"] && [failure[@"reason"] isEqual:@"invalidRoot"] &&
+            [failure[@"errorDomain"] isEqual:@"none"] && !failure[@"errorCode"] && !root.cursorCreated && root.openDirectoryCount==0 &&
+            [result[@"entries"] isEqual:@0],
+            "invalid root never exports seeded errno as observed cursor IO");
+    }
+}
 int main(int argc,const char **argv) { @autoreleasepool {
     AxsCacheKeeperCapacityCheck(argc==2 || argc==3,"unique fixture root and optional case");
     NSString *base=[NSString stringWithUTF8String:argv[1]],*selection=argc==3 ? [NSString stringWithUTF8String:argv[2]] : @"all";
+    if([selection isEqual:@"all"] || [selection isEqual:@"invalid-root"]) AxsCacheKeeperCapacityInvalidRoot();
+    if([selection isEqual:@"invalid-root"]) return 0;
+    if([selection isEqual:@"all"] || [selection isEqual:@"cursor-errors"]) AxsCacheKeeperCapacityErrors(base);
+    if([selection isEqual:@"cursor-errors"]) return 0;
     NSArray *names=@[@"totals",@"empty",@"observer",@"categories",@"slices",@"cancellation",@"identity",@"metadata",@"budgets",@"expected-identity",@"invalid-observer",@"observer-ownership"];
     void (*cases[])(NSString *)={AxsCacheKeeperCapacityTotals,AxsCacheKeeperCapacityEmpty,AxsCacheKeeperCapacityObserver,AxsCacheKeeperCapacityCategories,AxsCacheKeeperCapacitySlices,AxsCacheKeeperCapacityCancellation,AxsCacheKeeperCapacityIdentity,AxsCacheKeeperCapacityMetadata,AxsCacheKeeperCapacityBudgets,AxsCacheKeeperCapacityExpectedIdentity,AxsCacheKeeperCapacityInvalidObserver,AxsCacheKeeperCapacityObserverOwnership};
     AxsCacheKeeperCapacityCheck([selection isEqual:@"all"] || [selection isEqual:@"raw-setup"] || [names containsObject:selection],"known case selection");

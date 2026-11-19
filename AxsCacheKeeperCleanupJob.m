@@ -1,5 +1,8 @@
 #import "AxsCacheKeeperCleanupJob.h"
 #import "AxsCacheKeeperSweep.h"
+#include <sys/mount.h>
+#include <unistd.h>
+#include <errno.h>
 
 const NSUInteger AxsCacheKeeperCleanupRoundItemCap = 2000;
 const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
@@ -12,9 +15,20 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
 @property(nonatomic,copy) NSArray<AxsCacheKeeperHardLinkGroup *> *hardLinkGroups;
 @property(nonatomic) NSUInteger hardLinkCursor;
 @property(nonatomic) BOOL hardLinkBudgetLimited;
+- (void)axs_cachekeeper_release_prepare:(int)parentFD device:(uint64_t)device;
+- (void)axs_cachekeeper_release_record:(uint64_t)rootID kind:(AxsCacheKeeperReleaseKind)kind result:(int)result code:(int)code
+    pre:(AxsCacheKeeperReleaseStat)pre post:(AxsCacheKeeperReleaseStat)post;
+- (void)axs_cachekeeper_release_finalize;
+- (void)axs_cachekeeper_advance_cycle:(NSUInteger)limit gate:(BOOL (^)(void))gate;
 @end
 
-@implementation AxsCacheKeeperCleanupJob
+@implementation AxsCacheKeeperCleanupJob {
+    NSMutableData *_releaseStorage;
+    AxsCacheKeeperReleaseEvidence *_releaseCore;
+    int _releaseVolumeFDs[AXS_CACHEKEEPER_RELEASE_VOLUME_CAP];
+    uint64_t _releaseVolumeDevices[AXS_CACHEKEEPER_RELEASE_VOLUME_CAP];
+    NSUInteger _releaseDepth;
+}
 
 - (instancetype)initWithSweeps:(NSArray<AxsCacheKeeperSweep *> *)sweeps
                       signature:(NSString *)signature
@@ -29,8 +43,18 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
         _phase = AxsCacheKeeperCleanupPhaseChecking;
         _endReason = AxsCacheKeeperCleanupEndReasonNone;
         _deleteDeadline = 0;
+        for (NSUInteger i=0;i<AXS_CACHEKEEPER_RELEASE_VOLUME_CAP;i++) _releaseVolumeFDs[i]=-1;
         __weak typeof(self) weak=self;
+        NSUInteger rootIndex=0;
         for (AxsCacheKeeperSweep *source in _sweeps) {
+            uint64_t rootID=++rootIndex;
+            source.releaseEvidencePrepare=^(int parentFD,uint64_t device) {
+                [weak axs_cachekeeper_release_prepare:parentFD device:device];
+            };
+            source.releaseEvidenceObserver=^(AxsCacheKeeperReleaseKind kind,int result,int code,
+                AxsCacheKeeperReleaseStat pre,AxsCacheKeeperReleaseStat post) {
+                [weak axs_cachekeeper_release_record:rootID kind:kind result:result code:code pre:pre post:post];
+            };
             __weak AxsCacheKeeperSweep *weakSource=source;
             source.removalObserver=^(NSString *path) {
                 for (AxsCacheKeeperSweep *other in weak.sweeps)
@@ -74,11 +98,17 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
 }
 - (void)cancel {
     if (self.phase != AxsCacheKeeperCleanupPhaseFinished) [self cancelJob];
+    [self axs_cachekeeper_release_finalize];
 }
 
 #pragma mark - 周期推进
 
 - (void)advanceCycleWithPerRootLimit:(NSUInteger)perRootLimit gate:(BOOL (^)(void))gate {
+    _releaseDepth++;
+    @try { [self axs_cachekeeper_advance_cycle:perRootLimit gate:gate]; }
+    @finally { _releaseDepth--;[self axs_cachekeeper_release_finalize]; }
+}
+- (void)axs_cachekeeper_advance_cycle:(NSUInteger)perRootLimit gate:(BOOL (^)(void))gate {
     if (!perRootLimit || self.phase == AxsCacheKeeperCleanupPhaseFinished) return;
     if (self.phase == AxsCacheKeeperCleanupPhaseChecking) {
         for (AxsCacheKeeperSweep *sweep in self.sweeps) {
@@ -155,11 +185,11 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
         // （与旧 Scanner 逐根采样一致；逐文件 FrontBoard 查询曾把单周期拖到约 10 秒，见 #42）。
         // 期限到达时不再开始新的 unlink；配额用尽时同样停手。
         [sweep advanceDeletion:limit shouldContinue:^BOOL {
-            return ![self deadlineHit] && self.removed < AxsCacheKeeperCleanupRoundItemCap;
+            return self.phase!=AxsCacheKeeperCleanupPhaseFinished && ![self deadlineHit] && self.removed < AxsCacheKeeperCleanupRoundItemCap;
         } willDelete:^BOOL {
             NSTimeInterval now = self.clock();
             if (self.deleteDeadline == 0) self.deleteDeadline = now + AxsCacheKeeperCleanupDeleteTimeLimit;
-            return now < self.deleteDeadline && self.removed < AxsCacheKeeperCleanupRoundItemCap;
+            return self.phase!=AxsCacheKeeperCleanupPhaseFinished && now < self.deleteDeadline && self.removed < AxsCacheKeeperCleanupRoundItemCap;
         }];
         if (sweep.cancelled) {
             // 停手原因由作业判定：期限/配额→触顶；其余（门控已在本根采样前判定，不应到此）→取消。
@@ -178,6 +208,99 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
     // 失败/变化的范围不阻塞其他已备好的范围，但轮次只报部分完成（见 partial）。
     if (allComplete) [self finishWithReason:self.hardLinkBudgetLimited ? AxsCacheKeeperCleanupEndReasonLimitReached :
         self.unresolvedCount > 0 ? AxsCacheKeeperCleanupEndReasonUnresolved : AxsCacheKeeperCleanupEndReasonCompleted];
+}
+
+#pragma mark - Bounded unlink evidence
+
+- (void)axs_cachekeeper_release_ensure {
+    if (_releaseCore) return;
+    _releaseStorage=[NSMutableData dataWithLength:sizeof(AxsCacheKeeperReleaseEvidence)];
+    _releaseCore=_releaseStorage.mutableBytes;
+    axs_cachekeeper_release_init(_releaseCore);
+}
+static AxsCacheKeeperReleaseVolumeSample axs_cachekeeper_job_volume_sample(int fd) {
+    AxsCacheKeeperReleaseVolumeSample sample={0};struct statfs info;
+    if (fstatfs(fd,&info)) {sample.state=AxsCacheKeeperReleaseUnavailable;sample.error=errno;return sample;}
+    sample.state=AxsCacheKeeperReleaseObserved;sample.blockSize=info.f_bsize;
+    sample.freeBlocks=info.f_bfree;sample.availableBlocks=info.f_bavail;
+    sample.uptime=NSProcessInfo.processInfo.systemUptime;return sample;
+}
+- (void)axs_cachekeeper_release_prepare:(int)parentFD device:(uint64_t)device {
+    [self axs_cachekeeper_release_ensure];
+    if (_releaseCore->finished) return;
+    for (NSUInteger i=0;i<_releaseCore->volumeCount;i++) if (_releaseVolumeDevices[i]==device) return;
+    if (_releaseCore->volumeCount==AXS_CACHEKEEPER_RELEASE_VOLUME_CAP) {
+        axs_cachekeeper_release_begin_volume(_releaseCore,(AxsCacheKeeperReleaseVolumeSample){0});return;
+    }
+    int fd=dup(parentFD);AxsCacheKeeperReleaseVolumeSample sample={0};
+    if (fd<0) {sample.state=AxsCacheKeeperReleaseUnavailable;sample.error=errno;}
+    else sample=axs_cachekeeper_job_volume_sample(fd);
+    size_t volumeID=axs_cachekeeper_release_begin_volume(_releaseCore,sample);
+    _releaseVolumeFDs[volumeID-1]=fd;_releaseVolumeDevices[volumeID-1]=device;
+}
+- (void)axs_cachekeeper_release_record:(uint64_t)rootID kind:(AxsCacheKeeperReleaseKind)kind result:(int)result code:(int)code
+    pre:(AxsCacheKeeperReleaseStat)pre post:(AxsCacheKeeperReleaseStat)post {
+    [self axs_cachekeeper_release_ensure];
+    axs_cachekeeper_release_record(_releaseCore,rootID,kind,result,code,pre,post);
+}
+- (void)axs_cachekeeper_release_finalize {
+    if (_releaseDepth || self.phase!=AxsCacheKeeperCleanupPhaseFinished || !_releaseCore || _releaseCore->finished) return;
+    int saved=errno;
+    for (NSUInteger i=0;i<_releaseCore->volumeCount;i++) {
+        int fd=_releaseVolumeFDs[i];AxsCacheKeeperReleaseVolumeSample after={0};int closeError=0;
+        if (fd>=0) {
+            after=axs_cachekeeper_job_volume_sample(fd);
+            if (close(fd)) closeError=errno;
+            _releaseVolumeFDs[i]=-1; // Never retry close: the descriptor number may have been reused.
+        } else {
+            // No post syscall was possible after dup failed: do not copy a prior errno into it.
+            after.state=AxsCacheKeeperReleaseNotRecorded;
+        }
+        axs_cachekeeper_release_end_volume(_releaseCore,i+1,after,closeError);
+    }
+    axs_cachekeeper_release_finish(_releaseCore,self.endReason==AxsCacheKeeperCleanupEndReasonCancelled);
+    errno=saved;
+}
+- (void)dealloc {
+    for (NSUInteger i=0;i<AXS_CACHEKEEPER_RELEASE_VOLUME_CAP;i++) if (_releaseVolumeFDs[i]>=0) close(_releaseVolumeFDs[i]);
+}
+static NSDictionary *axs_cachekeeper_job_metadata(AxsCacheKeeperReleaseMetadata m) {
+    if (m.state==AxsCacheKeeperReleaseObserved) return @{@"state":@"observed",@"errno":@0,@"size":@(m.size),@"blocks":@(m.blocks),@"nlink":@(m.nlink)};
+    return @{@"state":m.state==AxsCacheKeeperReleaseInvalid ? @"invalidMetadata" : @"unavailable",@"errno":@(m.error)};
+}
+static NSDictionary *axs_cachekeeper_job_volume_metadata(AxsCacheKeeperReleaseVolumeSample m) {
+    if (m.state==AxsCacheKeeperReleaseObserved) return @{@"state":@"observed",@"errno":@0,@"blockSize":@(m.blockSize),
+        @"freeBlocks":@(m.freeBlocks),@"availableBlocks":@(m.availableBlocks),@"uptime":@(m.uptime)};
+    NSString *state=m.state==AxsCacheKeeperReleaseNotRecorded ? @"notRecorded" : m.state==AxsCacheKeeperReleaseInvalid ? @"invalidMetadata" : @"unavailable";
+    return @{@"state":state,@"errno":@(m.error)};
+}
+- (NSDictionary *)releaseEvidence {
+    static const AxsCacheKeeperReleaseEvidence empty={0};
+    const AxsCacheKeeperReleaseEvidence *e=_releaseCore ?: &empty;
+    NSMutableArray *details=[NSMutableArray new],*volumes=[NSMutableArray new];
+    for (NSUInteger i=0;i<e->detailCount;i++) {
+        const AxsCacheKeeperReleaseDetail *d=&e->details[i];
+        NSString *match=d->identityMatch==AxsCacheKeeperReleaseSame ? @"same" : d->identityMatch==AxsCacheKeeperReleaseDifferent ? @"different" : @"notObserved";
+        NSString *transition=d->linkTransition==AxsCacheKeeperReleaseLinkDecremented ? @"decremented" :
+            d->linkTransition==AxsCacheKeeperReleaseLinkUnchanged ? @"unchanged" : d->linkTransition==AxsCacheKeeperReleaseLinkOther ? @"other" : @"notObserved";
+        [details addObject:@{@"attemptID":@(d->attemptID),@"rootID":@(d->rootID),@"objectID":@(d->objectID),
+            @"kind":d->kind==AxsCacheKeeperReleaseHardlink ? @"closedHardlink" : @"ordinary",@"result":@(d->result),@"errno":@(d->error),
+            @"pre":axs_cachekeeper_job_metadata(d->pre),@"post":axs_cachekeeper_job_metadata(d->post),@"identityMatch":match,@"linkTransition":transition}];
+    }
+    for (NSUInteger i=0;i<e->volumeCount;i++) {
+        const AxsCacheKeeperReleaseVolume *v=&e->volumes[i];
+        NSString *state=v->overflow ? @"overflow" : v->paired ? @"observed" :
+            v->after.state==AxsCacheKeeperReleaseNotRecorded && !e->finished ? @"recording" : @"unavailable";
+        NSMutableDictionary *row=[@{@"volumeID":@(i+1),@"state":state,@"before":axs_cachekeeper_job_volume_metadata(v->before),
+            @"after":axs_cachekeeper_job_volume_metadata(v->after),@"closeErrno":@(v->closeError)} mutableCopy];
+        if (v->paired) {row[@"freeBytesDelta"]=@(v->freeBytesDelta);row[@"availableBytesDelta"]=@(v->availableBytesDelta);row[@"elapsedSeconds"]=@(v->elapsedSeconds);}
+        [volumes addObject:[row copy]];
+    }
+    NSString *state=!e->attempts ? @"notRecorded" : !e->finished ? @"recording" : e->cancelled ? @"cancelled" : @"finished";
+    return @{@"schemaVersion":@1,@"roundID":self.roundID,@"revision":@(e->revision),@"state":state,@"attempts":@(e->attempts),
+        @"succeeded":@(e->succeeded),@"failed":@(e->failed),@"postMissing":@(e->postMissing),@"detailsOmitted":@(e->detailsOmitted),
+        @"identitiesOmitted":@(e->identitiesOmitted),@"volumesOmitted":@(e->volumesOmitted),@"overflow":@((BOOL)e->overflow),
+        @"details":[details copy],@"volumes":[volumes copy],@"uniqueExtents":@"notMeasured",@"reclaimedPhysicalBytes":@"notMeasured"};
 }
 
 @end

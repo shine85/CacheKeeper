@@ -37,6 +37,7 @@ CacheKeeper_FILES += AxsCacheKeeperImageCache.m AxsCacheKeeperImageCacheRuntime.
 CacheKeeper_FILES += AxsCacheKeeperOperationInfo.m AxsCacheKeeperHostEvidence.m
 CacheKeeper_FILES += AxsCacheKeeperScanTask.m
 CacheKeeper_FILES += AxsCacheKeeperCapacity.m AxsCacheKeeperCapacityService.m
+CacheKeeper_FILES += AxsCacheKeeperReleaseEvidence.c
 CacheKeeper_FRAMEWORKS = UIKit Foundation WebKit
 CacheKeeper_LIBRARIES = roothide sandy substrate
 CacheKeeper_LDFLAGS = -LVendor

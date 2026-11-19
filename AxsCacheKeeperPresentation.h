@@ -1,6 +1,22 @@
 #pragma once
 #import <Foundation/Foundation.h>
 #import "AxsCacheKeeperAllocation.h"
+#import "AxsCacheKeeperReleaseEvidenceStatus.h"
+
+static inline NSString *axs_cachekeeper_presentation_release_evidence(id value) {
+    if (!value) return @"本轮删除证据未记录；物理释放量未测定";
+    NSDictionary *evidence=axs_cachekeeper_release_evidence_projection(value,nil);
+    if (!evidence) return @"本轮删除证据无效；物理释放量未测定";
+    if ([evidence[@"state"] isEqual:@"notRecorded"]) return @"本轮尚无实际删除调用；物理释放量未测定";
+    NSString *state=[evidence[@"state"] isEqual:@"recording"] ? @"采集中" : [evidence[@"state"] isEqual:@"cancelled"] ? @"已停止" : @"已结束";
+    NSMutableString *text=[NSMutableString stringWithFormat:@"本轮删除证据（%@）：成功 %@ 次，失败 %@ 次；物理释放量未测定",state,evidence[@"succeeded"],evidence[@"failed"]];
+    if ([evidence[@"postMissing"] unsignedLongLongValue]) [text appendFormat:@"；%@ 次缺少删除后对象观测",evidence[@"postMissing"]];
+    if ([evidence[@"detailsOmitted"] unsignedLongLongValue]) [text appendFormat:@"；%@ 条明细因上限省略",evidence[@"detailsOmitted"]];
+    if ([evidence[@"overflow"] boolValue]) [text appendString:@"；观测计数或换算超限"];
+    NSUInteger observed=0;for (NSDictionary *volume in evidence[@"volumes"]) if ([volume[@"state"] isEqual:@"observed"]) observed++;
+    if (observed) [text appendFormat:@"；%lu 个卷有前后空闲空间观测，含其他进程影响，不能归为本次释放",(unsigned long)observed];
+    return text;
+}
 
 // A compact link to the last record, never a claim that cleanup is live or the app is empty.
 static inline NSString *axs_cachekeeper_presentation_app_record(NSDictionary *report) {
@@ -84,6 +100,9 @@ static inline NSString *axs_cachekeeper_presentation_receipt(NSDictionary *recei
     if (appReport[@"coverageComplete"] && ![appReport[@"coverageComplete"] boolValue])
         [text appendFormat:@"\nAPP 汇总覆盖未完整（APP 回执时间：%@）；本目录状态按本目录回执判断。",axs_cachekeeper_presentation_time(appReport[@"updated"])];
     if ([receipt[@"error"] length]) [text appendFormat:@"\n%@",receipt[@"error"]];
+    if (appReport[@"confirmedRoundID"] || appReport[@"releaseEvidence"])
+        [text appendFormat:@"\nAPP 本轮全部清理范围（APP 回执时间：%@；非本目录统计）\n%@",
+            axs_cachekeeper_presentation_time(appReport[@"updated"]),axs_cachekeeper_presentation_release_evidence(appReport[@"releaseEvidence"])];
     return text;
 }
 static inline NSString *axs_cachekeeper_presentation_inspection(NSDictionary *report) {

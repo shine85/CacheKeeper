@@ -8,8 +8,11 @@
 #include <mach-o/loader.h>
 #include <objc/runtime.h>
 #include <stdint.h>
+#include <limits.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <os/lock.h>
 #if __has_feature(ptrauth_calls)
 #include <ptrauth.h>
 #endif
@@ -98,6 +101,88 @@ static inline BOOL AxsCacheKeeperImageLegacyRead(uintptr_t address,void *destina
 static inline BOOL AxsCacheKeeperImageLegacyName(const char name[16],const char *expected) {
     size_t length=strlen(expected);
     return length<16 && !memcmp(name,expected,length) && name[length]=='\0';
+}
+typedef struct {const void *header;const char *name;intptr_t slide;} AxsCacheKeeperExecutableImageRow;
+typedef struct {const void *header;intptr_t slide;uint32_t index;} AxsCacheKeeperExecutableImage;
+static atomic_ulong axs_cachekeeper_image_observation_generation;
+// RootHide can register a launcher dylib before the application executable. Its order
+// is not identity: require the bundle's exact executable path and an MH_EXECUTE header.
+static inline BOOL AxsCacheKeeperExecutableImageSelect(uint32_t count,const char *path,
+    AxsCacheKeeperExecutableImageRow (^row)(uint32_t),AxsCacheKeeperExecutableImage *result) {
+    if (!result) return NO;*result=(AxsCacheKeeperExecutableImage){0};
+    if (!count || count>4096 || !path || !*path || !row) return NO;
+    AxsCacheKeeperExecutableImage selected={0};
+    for (uint32_t index=0;index<count;index++) {
+        AxsCacheKeeperExecutableImageRow value=row(index);
+        if (!value.name || strcmp(path,value.name)) continue;
+        struct mach_header_64 header;
+        if (selected.header || !AxsCacheKeeperImageLegacyRead((uintptr_t)value.header,&header,sizeof(header),VM_PROT_READ) ||
+            header.magic!=MH_MAGIC_64 || header.filetype!=MH_EXECUTE) return NO;
+        selected=(AxsCacheKeeperExecutableImage){value.header,value.slide,index};
+    }
+    if (!selected.header) return NO;
+    AxsCacheKeeperExecutableImageRow after=row(selected.index);struct mach_header_64 header;
+    if (after.header!=selected.header || after.slide!=selected.slide || !after.name || strcmp(path,after.name) ||
+        !AxsCacheKeeperImageLegacyRead((uintptr_t)after.header,&header,sizeof(header),VM_PROT_READ) ||
+        header.magic!=MH_MAGIC_64 || header.filetype!=MH_EXECUTE) return NO;
+    *result=selected;return YES;
+}
+static os_unfair_lock axs_cachekeeper_executable_lock=OS_UNFAIR_LOCK_INIT;
+static AxsCacheKeeperExecutableImage axs_cachekeeper_executable_cached;
+static NSString *axs_cachekeeper_executable_loader_name;
+static uint32_t axs_cachekeeper_executable_count;
+static unsigned long axs_cachekeeper_executable_generation;
+// Read only: a loader change revokes the cache until discovery refreshes it.
+// Never resolve paths or enumerate the loader table from a write hook.
+static inline AxsCacheKeeperExecutableImage AxsCacheKeeperImageExecutable(void) {
+    os_unfair_lock_lock(&axs_cachekeeper_executable_lock);
+    AxsCacheKeeperExecutableImage cached=axs_cachekeeper_executable_cached;
+    NSString *name=axs_cachekeeper_executable_loader_name;
+    uint32_t count=axs_cachekeeper_executable_count;
+    unsigned long generation=axs_cachekeeper_executable_generation;
+    os_unfair_lock_unlock(&axs_cachekeeper_executable_lock);
+    AxsCacheKeeperExecutableImage absent={0},selected={0};
+    if (!cached.header || count!=_dyld_image_count() || generation!=atomic_load(&axs_cachekeeper_image_observation_generation)) return absent;
+    if (!AxsCacheKeeperExecutableImageSelect(1,name.fileSystemRepresentation,
+        ^AxsCacheKeeperExecutableImageRow(uint32_t index) {
+            (void)index;return (AxsCacheKeeperExecutableImageRow){_dyld_get_image_header(cached.index),
+                _dyld_get_image_name(cached.index),_dyld_get_image_vmaddr_slide(cached.index)};
+        },&selected) || selected.header!=cached.header || selected.slide!=cached.slide ||
+        count!=_dyld_image_count() || generation!=atomic_load(&axs_cachekeeper_image_observation_generation)) return absent;
+    return cached;
+}
+// Call only from discovery/diagnostic work, before entering the SDK registry lock.
+static inline void AxsCacheKeeperImageRefreshExecutable(void) {
+    if (AxsCacheKeeperImageExecutable().header) return;
+    NSBundle *bundle=NSBundle.mainBundle;
+    @synchronized(bundle) {
+        unsigned long generation=atomic_load(&axs_cachekeeper_image_observation_generation);
+        NSString *raw=bundle.executablePath;uint32_t count=_dyld_image_count();
+        AxsCacheKeeperExecutableImage absent={0};
+        os_unfair_lock_lock(&axs_cachekeeper_executable_lock);
+        axs_cachekeeper_executable_cached=absent;axs_cachekeeper_executable_loader_name=nil;
+        os_unfair_lock_unlock(&axs_cachekeeper_executable_lock);
+        if (!raw.length || !count || count>4096) return;
+        char resolved[PATH_MAX];
+        if (!realpath(raw.fileSystemRepresentation,resolved)) return;
+        const char *path=resolved;const char *leaf=strrchr(path,'/');
+        AxsCacheKeeperExecutableImage selected={0};
+        __block struct {char bytes[PATH_MAX];} canonical;
+        AxsCacheKeeperExecutableImageRow (^row)(uint32_t)=^AxsCacheKeeperExecutableImageRow(uint32_t index) {
+            const char *name=_dyld_get_image_name(index);const char *last=name ? strrchr(name,'/') : NULL;
+            if (name && path && strcmp(name,path) && leaf && last && !strcmp(leaf,last) && realpath(name,canonical.bytes)) name=canonical.bytes;
+            return (AxsCacheKeeperExecutableImageRow){_dyld_get_image_header(index),name,_dyld_get_image_vmaddr_slide(index)};
+        };
+        if (!AxsCacheKeeperExecutableImageSelect(count,path,row,&selected) || count!=_dyld_image_count() ||
+            generation!=atomic_load(&axs_cachekeeper_image_observation_generation)) return;
+        const char *loaderName=_dyld_get_image_name(selected.index);
+        NSString *name=loaderName ? [[NSString alloc] initWithUTF8String:loaderName] : nil;
+        if (!name.length) return;
+        os_unfair_lock_lock(&axs_cachekeeper_executable_lock);
+        axs_cachekeeper_executable_loader_name=name;axs_cachekeeper_executable_cached=selected;
+        axs_cachekeeper_executable_count=count;axs_cachekeeper_executable_generation=generation;
+        os_unfair_lock_unlock(&axs_cachekeeper_executable_lock);
+    }
 }
 static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyLayoutCheck(const void *base,intptr_t slide,AxsCacheKeeperImageLegacyLayout *layout) {
     if (!base || !layout) return AxsCacheKeeperImageLegacyResult("layout","read",0,0);
@@ -208,8 +293,9 @@ static inline BOOL AxsCacheKeeperImageLegacySlotsPresent(const void *implementat
     return AxsCacheKeeperImageLegacySlotsCheck(implementations).accepted;
 }
 static inline BOOL AxsCacheKeeperImageLegacyClassFromMainImage(Class owner,const void *base) {
-    if (!owner || class_isMetaClass(owner) || !base || base!=(const void *)_dyld_get_image_header(0)) return NO;
-    const char *imageName=class_getImageName(owner),*mainName=_dyld_get_image_name(0);
+    AxsCacheKeeperExecutableImage main=AxsCacheKeeperImageExecutable();
+    if (!owner || class_isMetaClass(owner) || !base || base!=main.header) return NO;
+    const char *imageName=class_getImageName(owner),*mainName=_dyld_get_image_name(main.index);
     return imageName && mainName && !strcmp(imageName,mainName);
 }
 static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyMethodCheck(const AxsCacheKeeperImageLegacyLayout *layout,Class owner,const char *selector,const char *encoding,const AxsCacheKeeperImageLegacyWindow *window,NSUInteger helper) {
@@ -253,14 +339,14 @@ static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyMainIdenti
     });
 }
 static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyMainLayoutCheck(const void *base,AxsCacheKeeperImageLegacyLayout *layout) {
-    const void *main=_dyld_get_image_header(0);
+    AxsCacheKeeperExecutableImage executable=AxsCacheKeeperImageExecutable();const void *main=executable.header;
     if (!base || base!=main) return AxsCacheKeeperImageLegacyMainIdentityCheck(base,main,nil,nil,nil);
     AxsCacheKeeperImageLegacyCheck check=AxsCacheKeeperImageLegacyMainIdentityWithProvider(base,main,^id(NSUInteger index) {
         NSBundle *bundle=NSBundle.mainBundle;
         return index==0 ? bundle.bundleIdentifier : bundle.infoDictionary[index==1 ? @"CFBundleShortVersionString" : @"CFBundleVersion"];
     });
     if (!check.accepted) return check;
-    return AxsCacheKeeperImageLegacyLayoutCheck(base,_dyld_get_image_vmaddr_slide(0),layout);
+    return AxsCacheKeeperImageLegacyLayoutCheck(base,executable.slide,layout);
 }
 static inline BOOL AxsCacheKeeperImageLegacyReadMainLayout(const void *base,AxsCacheKeeperImageLegacyLayout *layout) {
     return AxsCacheKeeperImageLegacyMainLayoutCheck(base,layout).accepted;

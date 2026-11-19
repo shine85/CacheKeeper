@@ -19,6 +19,7 @@
 @property(nonatomic,strong) NSTimer *axs_cachekeeper_capacityTimer;
 @property(nonatomic,copy) NSString *axs_cachekeeper_capacityEpoch;
 @property(nonatomic,copy) NSDictionary *axs_cachekeeper_capacitySnapshot;
+@property(nonatomic,copy) NSDictionary *axs_cachekeeper_capacityPendingStop;
 @property(nonatomic) NSTimeInterval axs_cachekeeper_capacityStarted;
 @property(nonatomic) BOOL axs_cachekeeper_capacityReading;
 @property(nonatomic) BOOL axs_cachekeeper_capacityStopping;
@@ -143,6 +144,9 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
 - (NSString *)axs_cachekeeper_capacity_file:(NSString *)name {
     return [jbroot(@"/var/mobile/Library/CacheKeeper") stringByAppendingPathComponent:name];
 }
+- (BOOL)axs_cachekeeper_capacity_write_stop:(NSString *)epoch error:(NSError **)error {
+    return axs_cachekeeper_capacity_write_request([self axs_cachekeeper_capacity_file:@"capacityRequest.plist"],epoch,YES,error);
+}
 - (void)axs_cachekeeper_capacity_action {
     if (self.collecting || self.sharing || self.axs_cachekeeper_pdfSession) return;
     if (self.axs_cachekeeper_capacityStopping) {
@@ -153,9 +157,16 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     }
     NSError *error=nil;
     if (self.axs_cachekeeper_capacityEpoch) {
-        if (!axs_cachekeeper_capacity_write_request([self axs_cachekeeper_capacity_file:@"capacityRequest.plist"],self.axs_cachekeeper_capacityEpoch,YES,&error)) {
+        BOOL saved=[self axs_cachekeeper_capacity_write_stop:self.axs_cachekeeper_capacityEpoch error:&error];
+        if (!saved) {
+            self.axs_cachekeeper_capacityError=@"cancelRequestWriteFailed";
+            self.axs_cachekeeper_capacityPendingStop=@{@"epoch":self.axs_cachekeeper_capacityEpoch,@"attemptedAt":@((uint64_t)NSDate.date.timeIntervalSince1970),@"requestWrite":@"failed",@"confirmation":@"unconfirmed"};
             self.status=[NSString stringWithFormat:@"停止请求未保存（代码 %ld），测量可能仍在继续；可重试停止。",(long)error.code];
-        } else {self.axs_cachekeeper_capacityStopping=YES;self.axs_cachekeeper_capacityStopStarted=NSProcessInfo.processInfo.systemUptime;self.status=@"已请求停止；等待服务关闭本轮读取并保存实际终态…";}
+        } else {
+            self.axs_cachekeeper_capacityError=nil;
+            self.axs_cachekeeper_capacityPendingStop=@{@"epoch":self.axs_cachekeeper_capacityEpoch,@"attemptedAt":@((uint64_t)NSDate.date.timeIntervalSince1970),@"requestWrite":@"saved",@"confirmation":@"unconfirmed"};
+            self.axs_cachekeeper_capacityStopping=YES;self.axs_cachekeeper_capacityStopStarted=NSProcessInfo.processInfo.systemUptime;self.status=@"已请求停止；等待服务关闭本轮读取并保存实际终态…";
+        }
         [self axs_cachekeeper_refresh];return;
     }
     NSString *epoch=NSUUID.UUID.UUIDString;
@@ -194,6 +205,10 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
             NSString *state=result[@"state"];
             page.status=[NSString stringWithFormat:@"全容器测量 %@：完整 %lu/%lu 根，失败 %@；未知用途数据保持不动。",state,(unsigned long)page.completed,(unsigned long)page.total,result[@"failedRoots"] ?: @0];
             if (![state isEqual:@"running"]) {
+                if (page.axs_cachekeeper_capacityPendingStop) {
+                    NSDictionary *exported=[page axs_cachekeeper_capacity_export:result saved:result stop:page.axs_cachekeeper_capacityPendingStop];
+                    page.axs_cachekeeper_capacitySnapshot=exported;page.axs_cachekeeper_capacityPendingStop=nil;
+                }
                 [page.axs_cachekeeper_capacityTimer invalidate];page.axs_cachekeeper_capacityTimer=nil;
                 page.axs_cachekeeper_capacityEpoch=nil;page.axs_cachekeeper_capacityStopping=NO;
                 page.status=[page.status stringByAppendingString:@" 已保留本轮原始时间；点“汇总已保存诊断”后导出。"];
@@ -234,13 +249,37 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     NSString *epoch=self.axs_cachekeeper_capacityEpoch;
     if (epoch) {
         NSError *error=nil;
-        if (!axs_cachekeeper_capacity_write_request([self axs_cachekeeper_capacity_file:@"capacityRequest.plist"],epoch,YES,&error)) {
+        BOOL saved=[self axs_cachekeeper_capacity_write_stop:epoch error:&error];
+        if (!saved) {
             self.axs_cachekeeper_capacityError=@"cancelRequestWriteFailed";
             NSLog(@"[CacheKeeper] 容量测量停止请求保存失败：%ld",(long)error.code);
-        }
+        } else self.axs_cachekeeper_capacityError=nil;
+        self.axs_cachekeeper_capacityPendingStop=@{@"epoch":epoch,@"attemptedAt":@((uint64_t)NSDate.date.timeIntervalSince1970),
+            @"requestWrite":saved ? @"saved" : @"failed",@"confirmation":@"unconfirmed"};
     }
     [self.axs_cachekeeper_capacityTimer invalidate];self.axs_cachekeeper_capacityTimer=nil;
     self.axs_cachekeeper_capacityEpoch=nil;self.axs_cachekeeper_capacityStopping=NO;
+}
+- (NSDictionary *)axs_cachekeeper_capacity_export:(NSDictionary *)snapshot saved:(NSDictionary *)saved stop:(NSDictionary *)stop {
+    // Only a full terminal is frozen. A stopped in-flight observation must first
+    // look for its own saved terminal, never take another page's current epoch.
+    BOOL frozen=snapshot[@"epoch"] && ![snapshot[@"state"] isEqual:@"running"];
+    NSString *wanted=snapshot[@"epoch"] ?: stop[@"epoch"];
+    NSDictionary *capacity=frozen ? snapshot : wanted ? ([saved[@"epoch"] isEqual:wanted] ? saved : snapshot) : saved;
+    if (!capacity) capacity=@{@"schemaVersion":@1,@"state":@"notMeasured"};
+    NSMutableDictionary *out=[capacity mutableCopy];
+    if (stop) {
+        NSMutableDictionary *receipt=[stop mutableCopy];
+        if ([capacity[@"epoch"] isEqual:stop[@"epoch"]] && ![capacity[@"state"] isEqual:@"running"]) receipt[@"confirmation"]=@"terminalObserved";
+        else {
+            // Summary-only history must not be represented as a full result.
+            for (NSDictionary *terminal in saved[@"terminalHistory"][@"records"]) if ([terminal[@"epoch"] isEqual:stop[@"epoch"]]) {
+                receipt[@"confirmation"]=@"terminalHistoryObserved";receipt[@"terminal"]=terminal;break;
+            }
+        }
+        out[@"clientStop"]=receipt;
+    }
+    return axs_cachekeeper_capacity_projection(out);
 }
 - (void)axs_cachekeeper_capacity_background:(NSNotification *)notification {
     (void)notification;if (!self.axs_cachekeeper_capacityEpoch) return;
@@ -272,11 +311,13 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     }
     NSString *capacityPath=[self axs_cachekeeper_capacity_file:@"capacityResult.plist"];
     NSDictionary *capacitySnapshot=self.axs_cachekeeper_capacitySnapshot;
+    NSDictionary *capacityStop=self.axs_cachekeeper_capacityPendingStop;
     NSMutableDictionary *installationCache=self.installationCache;__weak typeof(self) weak=self;
     dispatch_async(self.collectionQueue,^{
         NSMutableDictionary *collectionEnvironment=[environment mutableCopy];
         NSError *capacityError=nil;
-        NSDictionary *capacity=capacitySnapshot ?: axs_cachekeeper_capacity_read_result(capacityPath,&capacityError);
+        NSDictionary *saved=axs_cachekeeper_capacity_read_result(capacityPath,&capacityError);
+        NSDictionary *capacity=[weak axs_cachekeeper_capacity_export:capacitySnapshot saved:saved stop:capacityStop];
         collectionEnvironment[@"capacityMeasurement"]=capacity ?: @{@"schemaVersion":@1,@"state":capacityError ? @"invalid" : @"notMeasured"};
         collectionEnvironment[@"diagnosticChannel"]=axs_cachekeeper_diagnostic_channel_hello();
         // Reuse unchanged package metadata, but obtain current membership on every collection.
@@ -300,7 +341,14 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
         dispatch_async(dispatch_get_main_queue(),^{
             AxsCacheKeeperDiagnosticsPage *page=weak;if (!page || page.generation!=generation) return;
             page.collecting=NO;page.reportData=data;
+            if (capacity[@"epoch"] && ![capacity[@"state"] isEqual:@"running"]) {
+                page.axs_cachekeeper_capacitySnapshot=capacity;page.axs_cachekeeper_capacityPendingStop=nil;
+            }
             page.status=data ? [NSString stringWithFormat:@"已汇总 %lu/%lu 个展示或配置 APP；全机清单含 %lu 项，仅汇总元数据与已有记录。点击“导出报告”保存。",(unsigned long)page.completed,(unsigned long)page.total,(unsigned long)[report[@"storageInventory"][@"entries"] count]] : @"报告生成失败，尚未保存；可以重新采集。";
+            if (data && [capacity[@"clientStop"][@"confirmation"] isEqual:@"unconfirmed"])
+                page.status=[page.status stringByAppendingString:@" 容量停止尚未确认；running 仅为最后保存观测，不代表服务当前仍运行。"];
+            else if (data && [capacity[@"clientStop"][@"confirmation"] isEqual:@"terminalHistoryObserved"])
+                page.status=[page.status stringByAppendingString:@" 容量停止仅取得历史终态摘要，完整结果保存状态见回执。"];
             if (data && (![@[@"available",@"missing"] containsObject:report[@"sourceStates"][@"configuration"]] || ![@[@"available",@"missing"] containsObject:report[@"sourceStates"][@"selection"]] || ![report[@"sourceStates"][@"installedApplications"] isEqual:@"available"]))
                 page.status=@"报告已在内存生成，但安装列表或部分配置不可用；可导出查看来源状态。";
             [page axs_cachekeeper_refresh];

@@ -7,7 +7,6 @@
 #include <stdatomic.h>
 
 typedef struct {NSUInteger ownerIndex;BOOL classMethod;const char *selector;} AxsCacheKeeperImageObservationMethod;
-static atomic_ulong axs_cachekeeper_image_observation_generation;
 static inline BOOL axs_cachekeeper_image_observation_vm_read(uintptr_t address,void *buffer,size_t length,void *context) {
     (void)context;return AxsCacheKeeperImageLegacyRead(address,buffer,length,VM_PROT_READ);
 }
@@ -39,6 +38,14 @@ static inline NSUInteger axs_cachekeeper_image_observation_module(AxsCacheKeeper
     if (matches==1) row[@"dyldIndex"]=@(dyldIndex);
     context->bases[index-1]=base;[context->modules addObject:row];return index;
 }
+static inline NSUInteger axs_cachekeeper_image_observation_main_module(AxsCacheKeeperImageObservationContext *context,const void *base) {
+    NSUInteger main=axs_cachekeeper_image_observation_module(context,base);
+    // Retain the failed module row while leaving executable identity unresolved.
+    if (!main || [context->modules[main-1][@"metadata"][@"fileType"] unsignedIntegerValue]!=MH_EXECUTE) {
+        context->partial=YES;return 0;
+    }
+    return main;
+}
 static inline NSUInteger axs_cachekeeper_image_observation_imp(AxsCacheKeeperImageObservationContext *context,const void *implementation) {
     Dl_info info={0};
     if (!implementation) return 0;
@@ -67,6 +74,7 @@ static inline NSDictionary *axs_cachekeeper_image_observation_table(Class owner,
 }
 static inline NSDictionary *AxsCacheKeeperImageRuntimeObservation(Class __unsafe_unretained classes[5],
     const AxsCacheKeeperImageObservationMethod specs[27],const void *originals[4],const void *wrappers[4],BOOL usesSavedOriginal) {
+    AxsCacheKeeperImageRefreshExecutable();
     unsigned long generation=atomic_load(&axs_cachekeeper_image_observation_generation);
     NSMutableArray *modules=[NSMutableArray new],*names=[NSMutableArray new];
     AxsCacheKeeperImageObservationContext context={.modules=modules,.deadline=NSProcessInfo.processInfo.systemUptime+.05};
@@ -79,7 +87,10 @@ static inline NSDictionary *AxsCacheKeeperImageRuntimeObservation(Class __unsafe
     }
     context.names=names;BOOL nameViewComplete=context.dyldCount==count;
     for (id name in names) if (name==NSNull.null) nameViewComplete=NO;
-    NSUInteger main=axs_cachekeeper_image_observation_module(&context,context.dyldCount ? context.dyldHeaders[0] : NULL);
+    AxsCacheKeeperExecutableImage executable=AxsCacheKeeperImageExecutable();
+    BOOL registered=executable.header && executable.index<context.dyldCount && context.dyldHeaders[executable.index]==executable.header;
+    NSUInteger main=registered ? axs_cachekeeper_image_observation_main_module(&context,executable.header) : 0;
+    if (!main) context.partial=YES;
     NSMutableArray *classRows=[NSMutableArray new],*methodRows=[NSMutableArray new],*originalRows=[NSMutableArray new];
     for (NSUInteger i=0;i<5;i++) {
         Class owner=classes[i];
@@ -136,7 +147,7 @@ static inline NSDictionary *AxsCacheKeeperImageRuntimeObservation(Class __unsafe
     }
     for (NSUInteger i=0;!changed && i<27;i++) if (selected[i] && current[i]!=(const void *)method_getImplementation(selected[i])) changed=YES;
     if (changed || !axs_cachekeeper_image_observation_time(&context)) context.partial=YES;
-    NSDictionary *value=@{@"schemaVersion":@1,@"state":context.partial ? @"partial" : @"complete",@"dyldState":changed ? @"changed" : context.partial ? @"partial" : @"complete",
+    NSDictionary *value=@{@"schemaVersion":@2,@"state":context.partial ? @"partial" : @"complete",@"dyldState":changed ? @"changed" : context.partial ? @"partial" : @"complete",
         @"observedDyldImages":@(context.dyldCount),@"observedMethods":@(context.methodCount),@"modules":modules,@"classes":classRows,@"methods":methodRows,@"originals":originalRows,
         @"mainModule":@(main),@"candidateModule":@(candidate),@"initializerUsesSavedOriginal":@(usesSavedOriginal),@"mappingBackingIdentity":@"notVerified"};
     return axs_cachekeeper_image_runtime_observation_projection(value);

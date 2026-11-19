@@ -10,13 +10,22 @@
 - (void)axs_cachekeeper_capacity_poll;
 - (void)axs_cachekeeper_capacity_background:(NSNotification *)notification;
 - (void)axs_cachekeeper_collect;
+- (BOOL)axs_cachekeeper_capacity_write_stop:(NSString *)epoch error:(NSError **)error;
 @end
 @interface AxsCacheKeeperCapacityPageFixture : AxsCacheKeeperDiagnosticsPage
 @property(nonatomic,copy) NSString *fixtureFolder;
 @property(nonatomic,strong) XCTestExpectation *appeared;
+@property(nonatomic) BOOL rejectStopWithoutError;
+@property(nonatomic) BOOL successfulStopWithError;
 @end
 @implementation AxsCacheKeeperCapacityPageFixture
 - (NSString *)axs_cachekeeper_capacity_file:(NSString *)name {return [self.fixtureFolder stringByAppendingPathComponent:name];}
+- (BOOL)axs_cachekeeper_capacity_write_stop:(NSString *)epoch error:(NSError **)error {
+    if (self.rejectStopWithoutError) {if (error) *error=nil;return NO;}
+    BOOL saved=[super axs_cachekeeper_capacity_write_stop:epoch error:error];
+    if (saved && self.successfulStopWithError && error) *error=[NSError errorWithDomain:@"SyntheticStaleError" code:1 userInfo:nil];
+    return saved;
+}
 - (void)viewDidAppear:(BOOL)animated {[super viewDidAppear:animated];[self.appeared fulfill];self.appeared=nil;}
 @end
 @interface AxsCacheKeeperCapacityCancelledPush : NSObject <UIViewControllerAnimatedTransitioning,UINavigationControllerDelegate>
@@ -182,6 +191,106 @@
     XCTAssertEqualObjects(report[@"capacityMeasurement"][@"sourceSampledAt"],@100);XCTAssertEqualObjects(report[@"capacityMeasurement"][@"finishedAt"],@102);
     XCTAssertEqualObjects(report[@"capacityMeasurement"][@"roots"][0][@"measurement"],original);
     XCTAssertEqualObjects(original[@"logicalBytes"],@8192);XCTAssertGreaterThan([original[@"allocatedBytes"] unsignedLongLongValue],0u);
+}
+- (NSString *)cacheRunningMeasurement {
+    [self.page axs_cachekeeper_capacity_action];NSString *epoch=[self request][@"epoch"];
+    NSMutableDictionary *running=[[self savedMeasurement:epoch] mutableCopy];running[@"state"]=@"running";[running removeObjectForKey:@"finishedAt"];
+    XCTAssertTrue([running writeToFile:[self.folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);
+    [self drainCollectionQueue];[self.page axs_cachekeeper_capacity_poll];[self drainCollectionQueue];
+    XCTAssertEqualObjects([self.page valueForKey:@"axs_cachekeeper_capacitySnapshot"][@"state"],@"running");return epoch;
+}
+- (NSDictionary *)collectedCapacity {
+    [self.page axs_cachekeeper_collect];[self drainCollectionQueue];
+    NSDictionary *report=[NSJSONSerialization JSONObjectWithData:[self.page valueForKey:@"reportData"] options:0 error:NULL];
+    return report[@"capacityMeasurement"];
+}
+- (void)testBackgroundReplacesCachedRunningWithSameEpochSavedTerminal {
+    NSString *epoch=[self cacheRunningMeasurement];[self.page axs_cachekeeper_capacity_background:nil];
+    NSMutableDictionary *terminal=[[self savedMeasurement:epoch] mutableCopy];terminal[@"state"]=@"cancelled";terminal[@"updatedAt"]=@200;terminal[@"finishedAt"]=@200;
+    XCTAssertTrue([terminal writeToFile:[self.folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);
+    NSDictionary *capacity=[self collectedCapacity];
+    XCTAssertEqualObjects(capacity[@"state"],@"cancelled",@"D1 stopped page exports saved terminal instead of cached running");
+    if (![capacity[@"state"] isEqual:@"cancelled"]) return;
+    XCTAssertEqualObjects(capacity[@"epoch"],epoch);XCTAssertEqualObjects(capacity[@"updatedAt"],@200);XCTAssertEqualObjects(capacity[@"finishedAt"],@200);
+    XCTAssertEqualObjects(capacity[@"clientStop"][@"confirmation"],@"terminalObserved");
+}
+- (void)testAbandonWaitReplacesRunningWithSavedTerminal {
+    NSString *epoch=[self cacheRunningMeasurement];[self.page axs_cachekeeper_capacity_action];
+    [self.page setValue:@(NSProcessInfo.processInfo.systemUptime-11) forKey:@"axs_cachekeeper_capacityStopStarted"];[self.page axs_cachekeeper_capacity_action];
+    NSMutableDictionary *terminal=[[self savedMeasurement:epoch] mutableCopy];terminal[@"state"]=@"cancelled";
+    XCTAssertTrue([terminal writeToFile:[self.folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);
+    XCTAssertEqualObjects([self collectedCapacity][@"state"],@"cancelled");
+}
+- (void)testStoppedARejectsOtherEpochBAndMarksUnconfirmed {
+    NSString *a=[self cacheRunningMeasurement];[self.page axs_cachekeeper_capacity_background:nil];
+    NSString *b=NSUUID.UUID.UUIDString;XCTAssertTrue([[self savedMeasurement:b] writeToFile:[self.folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);
+    NSDictionary *capacity=[self collectedCapacity];XCTAssertEqualObjects(capacity[@"epoch"],a);
+    XCTAssertEqualObjects(capacity[@"clientStop"][@"confirmation"],@"unconfirmed");
+    XCTAssertEqualObjects(capacity[@"clientStop"][@"requestWrite"],@"saved");XCTAssertNil(capacity[@"finishedAt"]);
+}
+- (void)testFailedBackgroundStopIsExplicitAndDoesNotFreezeRunning {
+    NSString *epoch=[self cacheRunningMeasurement],*path=[self.folder stringByAppendingPathComponent:@"capacityRequest.plist"];
+    XCTAssertTrue([NSFileManager.defaultManager removeItemAtPath:path error:NULL]);
+    XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:NO attributes:nil error:NULL]);
+    [self.page axs_cachekeeper_capacity_background:nil];NSDictionary *capacity=[self collectedCapacity];
+    XCTAssertEqualObjects(capacity[@"epoch"],epoch);XCTAssertEqualObjects(capacity[@"clientStop"][@"requestWrite"],@"failed");
+    XCTAssertEqualObjects(capacity[@"clientStop"][@"confirmation"],@"unconfirmed");
+}
+- (void)testFalseStopReturnWithoutNSErrorCannotClaimSaved {
+    NSString *epoch=[self cacheRunningMeasurement];self.page.rejectStopWithoutError=YES;
+    [self.page axs_cachekeeper_capacity_background:nil];NSDictionary *capacity=[self collectedCapacity];
+    XCTAssertEqualObjects(capacity[@"epoch"],epoch);
+    XCTAssertEqualObjects(capacity[@"clientStop"][@"requestWrite"],@"failed",@"D1 BOOL false cannot become saved when NSError is nil");
+    XCTAssertEqualObjects(capacity[@"clientStop"][@"confirmation"],@"unconfirmed");
+    XCTAssertEqualObjects([self request][@"operation"],@"start");
+}
+- (void)testTrueStopReturnWithStaleNSErrorIsSaved {
+    [self cacheRunningMeasurement];self.page.successfulStopWithError=YES;[self.page axs_cachekeeper_capacity_background:nil];
+    NSDictionary *capacity=[self collectedCapacity];XCTAssertEqualObjects(capacity[@"clientStop"][@"requestWrite"],@"saved");
+    XCTAssertNil([self.page valueForKey:@"axs_cachekeeper_capacityError"]);XCTAssertEqualObjects([self request][@"operation"],@"cancel");
+}
+- (void)testStopBeforeFirstSnapshotDoesNotExportOtherEpoch {
+    [self.page axs_cachekeeper_capacity_action];NSString *a=[self request][@"epoch"];
+    [self.page axs_cachekeeper_capacity_background:nil];
+    XCTAssertTrue([[self savedMeasurement:NSUUID.UUID.UUIDString] writeToFile:[self.folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);
+    NSDictionary *capacity=[self collectedCapacity];XCTAssertEqualObjects(capacity[@"state"],@"notMeasured");
+    XCTAssertEqualObjects(capacity[@"clientStop"][@"epoch"],a);XCTAssertEqualObjects(capacity[@"clientStop"][@"confirmation"],@"unconfirmed");
+}
+- (void)testOtherEpochHistoryIsSummaryOnlyForStoppedPage {
+    NSString *a=[self cacheRunningMeasurement];[self.page axs_cachekeeper_capacity_background:nil];
+    NSMutableDictionary *b=[[self savedMeasurement:NSUUID.UUID.UUIDString] mutableCopy];
+    b[@"terminalHistory"]=@{@"limit":@16,@"omittedCount":@0,@"records":@[@{@"epoch":a,@"state":@"cancelled",@"startedAt":@101,@"finishedAt":@150,
+        @"resultPublication":@"notSaved"}]};
+    XCTAssertTrue([b writeToFile:[self.folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);
+    NSDictionary *capacity=[self collectedCapacity];XCTAssertEqualObjects(capacity[@"epoch"],a);XCTAssertEqualObjects(capacity[@"state"],@"running");
+    XCTAssertNil(capacity[@"finishedAt"]);XCTAssertEqualObjects(capacity[@"clientStop"][@"confirmation"],@"terminalHistoryObserved");
+    XCTAssertEqualObjects(capacity[@"clientStop"][@"terminal"][@"resultPublication"],@"notSaved");
+}
+- (void)testFrozenCompleteCanCarryNewerStopReceiptWithoutChangingItsEpoch {
+    NSString *a=[self cacheRunningMeasurement];[self.page axs_cachekeeper_capacity_background:nil];
+    [self.page axs_cachekeeper_capacity_action];NSString *b=[self request][@"epoch"];
+    XCTAssertTrue([[self savedMeasurement:b] writeToFile:[self.folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);
+    [self drainCollectionQueue];[self.page axs_cachekeeper_capacity_poll];[self drainCollectionQueue];
+    NSDictionary *capacity=[self collectedCapacity];XCTAssertEqualObjects(capacity[@"epoch"],b);XCTAssertEqualObjects(capacity[@"state"],@"complete");
+    XCTAssertEqualObjects(capacity[@"clientStop"][@"epoch"],a);XCTAssertEqualObjects(capacity[@"clientStop"][@"confirmation"],@"unconfirmed");
+}
+- (void)testCursorErrorsSurviveSavedCapacityAndActualJSONExport {
+    NSString *epoch=[self cacheRunningMeasurement];[self.page axs_cachekeeper_capacity_background:nil];
+    NSMutableDictionary *saved=[[self savedMeasurement:epoch] mutableCopy],*root=[saved[@"roots"][0] mutableCopy],*measurement=[root[@"measurement"] mutableCopy];
+    saved[@"state"]=@"partial";saved[@"completedRoots"]=@0;saved[@"failedRoots"]=@1;measurement[@"state"]=@"readError";
+    measurement[@"cursorErrors"]=@{@"enumerationErrors":@1,@"statErrors":@0,@"errorsTruncated":@NO,@"omittedErrorCount":@0,
+        @"errors":@[@{@"stage":@"enumerate",@"reason":@"readFailure",@"errorDomain":@"posix",@"errorCode":@5,@"count":@1,@"scope":@"home",@"path":@"private-canary"}]};
+    root[@"measurement"]=measurement;saved[@"roots"]=@[root];
+    XCTAssertTrue([saved writeToFile:[self.folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);
+    NSDictionary *capacity=[self collectedCapacity],*error=[capacity[@"roots"][0][@"measurement"][@"cursorErrors"][@"errors"] firstObject];
+    XCTAssertEqualObjects(error[@"errorCode"],@5);XCTAssertEqualObjects(error[@"stage"],@"enumerate");XCTAssertNil(error[@"scope"]);XCTAssertNil(error[@"path"]);
+}
+- (void)testLatePollReplyCannotRestoreStoppedRunningSnapshot {
+    NSString *epoch=[self cacheRunningMeasurement];[self.page axs_cachekeeper_capacity_poll];
+    [self.page axs_cachekeeper_capacity_background:nil];[self drainCollectionQueue];
+    NSMutableDictionary *terminal=[[self savedMeasurement:epoch] mutableCopy];terminal[@"state"]=@"cancelled";
+    XCTAssertTrue([terminal writeToFile:[self.folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);
+    XCTAssertEqualObjects([self collectedCapacity][@"state"],@"cancelled");
 }
 - (void)testCompletedPushCancelsMeasurement {
     UINavigationController *navigation=[self showPage];[self.page axs_cachekeeper_capacity_action];
