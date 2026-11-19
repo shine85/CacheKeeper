@@ -4,31 +4,112 @@ No image sources/dependencies. Build/setup/timeouts never count as behavior RED.
 All generated files remain under tmp/feedback-1792.
 """
 import contextlib
+from datetime import datetime, timezone
 import json
 import pathlib
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+
+
+DISCOVERY_TIMEOUT = 300
+BOOT_TIMEOUT = 60
+BOOTSTATUS_TIMEOUT = 420
+
+
+def prepare_simulator(output):
+    """One bounded cold discovery, then boot/readiness; persist before every command."""
+    started = time.monotonic()
+    summary = {"state": "preparing", "startedAt": datetime.now(timezone.utc).isoformat(),
+               "elapsedSeconds": 0, "budgetSeconds": DISCOVERY_TIMEOUT + BOOT_TIMEOUT + BOOTSTATUS_TIMEOUT,
+               "steps": []}
+
+    def save():
+        summary["elapsedSeconds"] = time.monotonic() - started
+        (output / "prepare-summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    def command(stage, args, timeout):
+        step_start = time.monotonic()
+        row = {"stage": stage, "command": args, "timeoutSeconds": timeout, "state": "running",
+               "elapsedSeconds": 0, "returncode": None,
+               "stdout": "prepare-" + stage + ".stdout.log", "stderr": "prepare-" + stage + ".stderr.log"}
+        summary["steps"].append(row)
+        save()
+        print(f"Capacity preparation: {stage} started (timeout {timeout}s); artifacts: {output}", flush=True)
+        try:
+            with (output / row["stdout"]).open("w", encoding="utf-8") as stdout, \
+                    (output / row["stderr"]).open("w", encoding="utf-8") as stderr:
+                result = subprocess.run(args, stdout=stdout, stderr=stderr, text=True, check=True, timeout=timeout)
+            row.update(state="passed", returncode=result.returncode)
+        except subprocess.TimeoutExpired as error:
+            row.update(state="timeout", error=str(error))
+            raise
+        except subprocess.CalledProcessError as error:
+            row.update(state="failed", returncode=error.returncode, error=str(error))
+            raise
+        except OSError as error:
+            row.update(state="launchError", error=str(error))
+            raise
+        finally:
+            row["elapsedSeconds"] = time.monotonic() - step_start
+            save()
+            print(f"Capacity preparation: {stage} {row['state']} after {row['elapsedSeconds']:.3f}s", flush=True)
+        return (output / row["stdout"]).read_text(encoding="utf-8")
+
+    save()
+    try:
+        if sys.platform != "darwin" or not shutil.which("xcrun") or not shutil.which("xcodegen"):
+            summary.update(state="unavailable", reason="macOS Xcode/xcodegen and iPhone Simulator required")
+            return None
+        raw = command("discovery", ["xcrun", "simctl", "list", "devices", "available", "-j"], DISCOVERY_TIMEOUT)
+        devices = json.loads(raw)
+        if not isinstance(devices, dict) or not isinstance(devices.get("devices"), dict):
+            raise ValueError("simctl discovery did not return a devices dictionary")
+        candidates = []
+        for runtime, items in devices["devices"].items():
+            if not isinstance(items, list) or any(not isinstance(device, dict) for device in items):
+                raise ValueError("simctl discovery returned invalid device entries")
+            if ".iOS-" not in runtime:
+                continue
+            for device in items:
+                if device.get("isAvailable") is True and isinstance(device.get("name"), str) and device["name"].startswith("iPhone"):
+                    if not isinstance(device.get("udid"), str) or not device["udid"]:
+                        raise ValueError("simctl discovery returned an iPhone without a UDID")
+                    candidates.append(device)
+        if not candidates:
+            summary.update(state="unavailable", reason="no installed available iPhone Simulator")
+            return None
+        device = candidates[0]
+        summary["device"] = {key: device.get(key) for key in ("name", "udid", "state")}
+        save()
+        if device.get("state") != "Booted":
+            command("boot", ["xcrun", "simctl", "boot", device["udid"]], BOOT_TIMEOUT)
+        command("bootstatus", ["xcrun", "simctl", "bootstatus", device["udid"], "-b"], BOOTSTATUS_TIMEOUT)
+        summary["state"] = "ready"
+        return device["udid"]
+    except (subprocess.SubprocessError, OSError, ValueError) as error:
+        summary.update(state="failed", error=str(error))
+        raise
+    finally:
+        save()
 
 
 def main():
-    if sys.platform != "darwin" or not shutil.which("xcrun") or not shutil.which("xcodegen"):
-        print("UNAVAILABLE: capacity page requires macOS Xcode/xcodegen and iPhone Simulator; no UIKit RED/GREEN ran.")
-        return 2
     root = pathlib.Path(__file__).resolve().parents[1]
     workspace = root / "tmp" / "feedback-1792"
     workspace.mkdir(parents=True, exist_ok=True)
-    devices = json.loads(subprocess.check_output(
-        ["xcrun", "simctl", "list", "devices", "available", "-j"], text=True, timeout=60))
-    candidates = [d for runtime, items in devices["devices"].items() if ".iOS-" in runtime
-                  for d in items if d.get("isAvailable") and d["name"].startswith("iPhone")]
-    if not candidates:
-        print("UNAVAILABLE: no installed iPhone Simulator; no UIKit RED/GREEN ran.")
+    output = pathlib.Path(tempfile.mkdtemp(prefix="capacity-page-", dir=workspace))
+    print("Capacity page artifacts:", output, flush=True)
+    try:
+        device = prepare_simulator(output)
+    except (subprocess.SubprocessError, OSError, ValueError) as error:
+        print("FAIL: capacity page preparation; no UIKit RED/GREEN ran:", error, flush=True)
+        return 1
+    if device is None:
+        print("UNAVAILABLE: capacity page preparation; see prepare-summary.json; no UIKit RED/GREEN ran.")
         return 2
-    device = candidates[0]["udid"]
-    subprocess.run(["xcrun", "simctl", "boot", device], check=False, timeout=60)
-    subprocess.run(["xcrun", "simctl", "bootstatus", device, "-b"], check=True, timeout=420)
     source = (root / "Prefs/DiagnosticsPage.m").read_text(encoding="utf-8")
     variants = [
         ("stale-running", 'NSDictionary *capacity=frozen ? snapshot : wanted ? ([saved[@"epoch"] isEqual:wanted] ? saved : snapshot) : saved;',
@@ -42,8 +123,7 @@ def main():
     ]
     # Preserve the actual projects, build logs and xcresults even on setup failure.
     # CI uploads this one isolated directory; a failed build is never a RED.
-    with contextlib.nullcontext(tempfile.mkdtemp(prefix="capacity-page-", dir=workspace)) as directory:
-        output = pathlib.Path(directory)
+    with contextlib.nullcontext():
         host = output / "Host.m"
         host.write_text('''#import <UIKit/UIKit.h>
 #import "Preferences/PSViewController.h"
