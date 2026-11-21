@@ -43,12 +43,12 @@ static unsigned axs_cachekeeper_runtime_constructor_fault;
 static atomic_uint axs_cachekeeper_runtime_getter_calls;
 static BOOL axs_cachekeeper_runtime_forbid_getters;
 static BOOL axs_cachekeeper_runtime_defer_owner;
-extern id objc_retainAutorelease(id object);
+extern void axs_cachekeeper_runtime_enqueue_autorelease(id owner);
 static void axs_cachekeeper_runtime_deferred_owner(id owner) {
     // A legal SDK getter can create an autoreleased temporary that retains its
     // receiver. Force this boundary so the regression does not depend on ARC's
     // optional return-value optimization on a particular CPU or compiler.
-    if (axs_cachekeeper_runtime_defer_owner) (void)objc_retainAutorelease(owner);
+    if (axs_cachekeeper_runtime_defer_owner) axs_cachekeeper_runtime_enqueue_autorelease(owner);
 }
 static void axs_cachekeeper_runtime_getter(void) {
     atomic_fetch_add(&axs_cachekeeper_runtime_getter_calls,1);
@@ -312,6 +312,15 @@ static void axs_cachekeeper_runtime_admission(AxsCacheKeeperImageCache *engine,N
         [engine.receipt[@"instanceAdmission"][@"released"] isEqual:@2],"released owner cannot submit cleanup or double count release");
 }
 static void axs_cachekeeper_runtime_owner_pool(AxsCacheKeeperImageCache *engine,NSString *home) {
+    // Verify the fixture itself really retains until pool exit before exercising
+    // the production refresh boundary. This must hold for every compiler/CPU.
+    __weak NSObject *probe;
+    @autoreleasepool {
+        __attribute__((objc_precise_lifetime)) NSObject *object=[NSObject new];probe=object;
+        axs_cachekeeper_runtime_enqueue_autorelease(object);object=nil;
+        axs_cachekeeper_runtime_require(probe!=nil,"fixture retains its owner until explicit pool exit");
+    }
+    axs_cachekeeper_runtime_require(probe==nil,"fixture releases its owner exactly at pool exit");
     axs_cachekeeper_runtime_defer_owner=YES;
     __weak SDImageCache *weakOwner;
     dispatch_semaphore_t entered=dispatch_semaphore_create(0),check=dispatch_semaphore_create(0),done=dispatch_semaphore_create(0),finish=dispatch_semaphore_create(0);

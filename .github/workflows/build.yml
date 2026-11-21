@@ -31,7 +31,9 @@ jobs:
           fetch-depth: 0
 
       - name: 验证原生测试编排
-        run: python3 tests/test_native_orchestration.py
+        run: |
+          python3 tests/test_native_orchestration.py
+          python3 tests/test_image_runtime_orchestration.py
 
       - name: 原生回归测试
         run: |

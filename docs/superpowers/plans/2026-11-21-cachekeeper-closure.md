@@ -60,3 +60,10 @@ QQ 行的固定上游依据：[SDImageCache.m，SDWebImage 2.7](https://github.c
 - 证据确认的缺口：普通串行worker继承默认释放池频率，刷新completion先于work item返回；同步publish不受队列释放池属性覆盖。iOS ARM64 LLVM显示初始化consumed/retained配对、弱登记、owner=nil与池pop，无确定强引用闭环；不能把本地IR当macOS具体残留引用的证明。
 - 本次集中处理worker逐任务池，以及宿主observe、refresh_event、SDK队列execute、同步publish的局部池；测试使用有界异步FIFO fence证明前一个任务结束，不靠sleep或放宽释放断言。新增实际objc_retainAutorelease的SDK getter反例；同一worker调用栈内显式保留外池和验收任务，pool-red仅取消refresh_event局部池，要求live=1/observed=1/released=0，不依赖线程间的池继承或线程不退出。普通释放、重复发布、重登记和排队owner释放都保留精确计数。
 - Python62项55PASS/7POSIX skip，193.025秒；两源最终iOS ARM64对象实际编译0，5个mutation唯一匹配，独立最终审查继续核验。新macOS反例与完整构建仍待同提交Actions，不宣称真机APP契约通过。手机不连接SSH，未扩大未知路径删除或限写授权。
+
+## 2026-11-21 Actions 185 反例夹具修正
+
+- dc6a417正常推送，run44874349096原生50/51PASS。image-runtime-source在第一个pool-red退出：变异体实际返回PASS，未命中预期保留引用；其余该组场景尚未执行，UIKit/编译/发布跳过。不能据此判产品修复已通过或已失败。
+- 本地Clang IR显示旧夹具的objc_retainAutorelease调用后存在unsafeClaimAutoreleasedReturnValue；显式返回值让ARC介入引用处理，未形成可靠反例。改为单独-fno-objc-arc编译的void辅助函数，执行retain/autorelease；ARC调用者不接收对象。先运行池内保留/池外释放自检，再测试生产refresh_event边界。新IR明确为objc_retain、objc_autorelease、ret void；macOS实际结果仍待下一CI。
+- 独立进程场景现在收集全部失败后统一返回非零，不放宽任何精确RED/GREEN断言。编译失败只跳过依赖它的场景；总预算225秒/外层240秒不变。新增真实进程失败后继续、超时后继续、严格RED校验3项测试，并接入原生编排步骤。
+- 本地Python65项58PASS/7POSIXskip，25.441秒；测试源和非ARC辅助源均实际编成iOS ARM64对象。生产代码保持dc6a417；下一轮需读取完整所有场景、UIKit真实收尾、Theos与deb结果，再交付。原#184具体持有者仍无macOS诊断证据，不能反推为确定根因。
