@@ -42,6 +42,14 @@ static atomic_uint axs_cachekeeper_runtime_source_checks,axs_cachekeeper_runtime
 static unsigned axs_cachekeeper_runtime_constructor_fault;
 static atomic_uint axs_cachekeeper_runtime_getter_calls;
 static BOOL axs_cachekeeper_runtime_forbid_getters;
+static BOOL axs_cachekeeper_runtime_defer_owner;
+extern id objc_retainAutorelease(id object);
+static void axs_cachekeeper_runtime_deferred_owner(id owner) {
+    // A legal SDK getter can create an autoreleased temporary that retains its
+    // receiver. Force this boundary so the regression does not depend on ARC's
+    // optional return-value optimization on a particular CPU or compiler.
+    if (axs_cachekeeper_runtime_defer_owner) (void)objc_retainAutorelease(owner);
+}
 static void axs_cachekeeper_runtime_getter(void) {
     atomic_fetch_add(&axs_cachekeeper_runtime_getter_calls,1);
     if (axs_cachekeeper_runtime_forbid_getters) {fputs("FAIL: image-runtime-source: publication must not call an SDK getter\n",stderr);exit(1);}
@@ -98,7 +106,7 @@ static void axs_cachekeeper_runtime_getter(void) {
 @end
 @implementation SDImageCache
 @synthesize diskCache=_diskCache,diskCachePath=_diskCachePath,config=_config,ioQueue=_ioQueue,memoryCache=_memoryCache;
-- (SDDiskCache *)diskCache {axs_cachekeeper_runtime_getter();return _diskCache;}
+- (SDDiskCache *)diskCache {axs_cachekeeper_runtime_getter();axs_cachekeeper_runtime_deferred_owner(self);return _diskCache;}
 - (NSString *)diskCachePath {axs_cachekeeper_runtime_getter();return _diskCachePath;}
 - (SDImageCacheConfig *)config {axs_cachekeeper_runtime_getter();return _config;}
 - (dispatch_queue_t)ioQueue {axs_cachekeeper_runtime_getter();return _ioQueue;}
@@ -171,15 +179,33 @@ static atomic_bool axs_cachekeeper_runtime_count_only_home;
 static void axs_cachekeeper_runtime_require(BOOL value,const char *message) {
     if (!value) {fprintf(stderr,"FAIL: image-runtime-source: %s\n",message);exit(1);}
 }
+static void axs_cachekeeper_runtime_worker_fence(AxsCacheKeeperImageCache *engine) {
+    // completion executes inside the preceding work item. This async FIFO item
+    // proves that it returned and its per-item autoreleasepool was drained.
+    dispatch_semaphore_t done=dispatch_semaphore_create(0);
+    dispatch_async(engine.work,^{dispatch_semaphore_signal(done);});
+    axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC)),"worker item and its pool finished");
+}
 static void axs_cachekeeper_runtime_refresh(AxsCacheKeeperImageCache *engine) {
     dispatch_semaphore_t done=dispatch_semaphore_create(0);
     [engine refreshWithCompletion:^{dispatch_semaphore_signal(done);}];
     axs_cachekeeper_runtime_require(dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"refresh completes");
+    axs_cachekeeper_runtime_worker_fence(engine);
     axs_cachekeeper_runtime_require(axs_cachekeeper_image_cache_projection(engine.receipt)!=nil,"receipt retains the public schema");
 }
 static void axs_cachekeeper_runtime_wait(AxsCacheKeeperImageCache *engine,BOOL (^condition)(NSDictionary *),const char *message) {
     for (NSUInteger attempt=0;attempt<500;attempt++) {if (condition(engine.receipt)) return;usleep(10000);}
     axs_cachekeeper_runtime_require(NO,message);
+}
+static void axs_cachekeeper_runtime_released(AxsCacheKeeperImageCache *engine,__weak SDImageCache **owner,NSUInteger count) {
+    NSDictionary *r=engine.receipt;
+    BOOL live=*owner!=nil;
+    if (live || ![r[@"observed"] isEqual:@0] || ![r[@"instanceAdmission"][@"released"] isEqual:@(count)]) {
+        fprintf(stderr,"INFO: release live=%d observed=%lu released=%lu expected=%lu\n",live,
+            (unsigned long)[r[@"observed"] unsignedIntegerValue],(unsigned long)[r[@"instanceAdmission"][@"released"] unsignedIntegerValue],(unsigned long)count);
+    }
+    axs_cachekeeper_runtime_require(!live && [r[@"observed"] isEqual:@0] &&
+        [r[@"instanceAdmission"][@"released"] isEqual:@(count)],"weak owner release is recorded once without retention");
 }
 static void axs_cachekeeper_runtime_admission(AxsCacheKeeperImageCache *engine,NSString *home) {
     NSDictionary *initial=engine.receipt[@"instanceAdmission"];
@@ -235,8 +261,7 @@ static void axs_cachekeeper_runtime_admission(AxsCacheKeeperImageCache *engine,N
     weakOwner=owner;owner=nil;
     }
     axs_cachekeeper_runtime_refresh(engine);
-    axs_cachekeeper_runtime_require(!weakOwner && [engine.receipt[@"observed"] isEqual:@0] &&
-        [engine.receipt[@"instanceAdmission"][@"released"] isEqual:@1],"weak owner release is recorded once without retention");
+    axs_cachekeeper_runtime_released(engine,&weakOwner,1);
     axs_cachekeeper_runtime_refresh(engine);
     axs_cachekeeper_runtime_require([engine.receipt[@"instanceAdmission"][@"released"] isEqual:@1],"repeated publication cannot recount release");
     __attribute__((objc_precise_lifetime)) SDImageCache *next=[[SDImageCache alloc] initWithNamespace:@"next" diskCacheDirectory:root config:[SDImageCacheConfig new]];
@@ -276,6 +301,7 @@ static void axs_cachekeeper_runtime_admission(AxsCacheKeeperImageCache *engine,N
     axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(entered,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"pending owner SDK queue is held");
     [engine didEnterBackgroundWithTime:YES];
     axs_cachekeeper_runtime_wait(engine,^BOOL(NSDictionary *r) {return [r[@"pending"] isEqual:@1];},"real cleanup is queued before owner release");
+    axs_cachekeeper_runtime_worker_fence(engine);
     next=nil;
     dispatch_sync(engine.work,^{[engine axs_cachekeeper_publish];});
     axs_cachekeeper_runtime_require([engine.receipt[@"instanceAdmission"][@"released"] isEqual:@2] &&
@@ -285,9 +311,39 @@ static void axs_cachekeeper_runtime_admission(AxsCacheKeeperImageCache *engine,N
     axs_cachekeeper_runtime_require([engine.receipt[@"submitted"] isEqual:@0] && [engine.receipt[@"skipped"] isEqual:@1] &&
         [engine.receipt[@"instanceAdmission"][@"released"] isEqual:@2],"released owner cannot submit cleanup or double count release");
 }
+static void axs_cachekeeper_runtime_owner_pool(AxsCacheKeeperImageCache *engine,NSString *home) {
+    axs_cachekeeper_runtime_defer_owner=YES;
+    __weak SDImageCache *weakOwner;
+    dispatch_semaphore_t entered=dispatch_semaphore_create(0),check=dispatch_semaphore_create(0),done=dispatch_semaphore_create(0),finish=dispatch_semaphore_create(0);
+    @autoreleasepool {
+        __attribute__((objc_precise_lifetime)) SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"pool-owner" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+        axs_cachekeeper_runtime_refresh(engine);
+        dispatch_async(engine.work,^{
+            // Hold an explicit outer pool in this one work item. The refresh
+            // must close its own SDK temporaries before it returns; neither a
+            // thread change nor a libdispatch root drain can satisfy the RED.
+            @autoreleasepool {
+                NSUInteger event=[engine axs_cachekeeper_begin_event:@"configuration" context:[engine axs_cachekeeper_operation_context] current:YES];
+                [engine axs_cachekeeper_refresh_event:event];axs_cachekeeper_operation_finish(engine.operationHistory,event);
+                dispatch_semaphore_signal(entered);
+                axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(check,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC)),"owner release check is permitted");
+                [engine axs_cachekeeper_publish];dispatch_semaphore_signal(done);
+                axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(finish,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC)),"owner pool assertion finished before worker retires");
+            }
+        });
+        axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(entered,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC)),"owner pool fence entered after refresh");
+        axs_cachekeeper_runtime_require([engine.receipt[@"eligible"] isEqual:@1],"SDK getter with deferred owner remains eligible");
+        weakOwner=owner;owner=nil;
+    }
+    dispatch_semaphore_signal(check);
+    axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC)),"owner pool publication finished");
+    axs_cachekeeper_runtime_released(engine,&weakOwner,1);
+    dispatch_semaphore_signal(finish);axs_cachekeeper_runtime_worker_fence(engine);
+    axs_cachekeeper_runtime_defer_owner=NO;
+}
 int main(int argc,const char *argv[]) {
     @autoreleasepool {
-        axs_cachekeeper_runtime_require(argc==2 && (!strcmp(argv[1],"fingerprint") || !strcmp(argv[1],"fingerprint-shifted") || !strcmp(argv[1],"sample") || !strcmp(argv[1],"pinned") || !strcmp(argv[1],"refresh") || !strcmp(argv[1],"admission")),"one isolated scenario is required");
+        axs_cachekeeper_runtime_require(argc==2 && (!strcmp(argv[1],"fingerprint") || !strcmp(argv[1],"fingerprint-shifted") || !strcmp(argv[1],"sample") || !strcmp(argv[1],"pinned") || !strcmp(argv[1],"refresh") || !strcmp(argv[1],"admission") || !strcmp(argv[1],"owner-pool")),"one isolated scenario is required");
         axs_cachekeeper_runtime_shifted=!strcmp(argv[1],"fingerprint-shifted");
         axs_cachekeeper_runtime_fingerprinted=!strcmp(argv[1],"fingerprint") || axs_cachekeeper_runtime_shifted;
         unsigned executables=0;
@@ -329,6 +385,11 @@ int main(int argc,const char *argv[]) {
         AxsCacheKeeperImageCache *engine=[[AxsCacheKeeperImageCache alloc] initWithContextProvider:provider observer:nil];
         if (!axs_cachekeeper_runtime_fingerprinted) [engine usePinnedLegacySDKForIntegrationTests];
         [engine startObserving];axs_cachekeeper_runtime_refresh(engine);
+        if (!strcmp(argv[1],"owner-pool")) {
+            axs_cachekeeper_runtime_owner_pool(engine,home);
+            axs_cachekeeper_runtime_require([NSFileManager.defaultManager removeItemAtPath:home error:nil],"owner pool fixture root removed");
+            puts("PASS: image-runtime-source fixture owner-pool");return 0;
+        }
         if (!strcmp(argv[1],"admission")) {
             axs_cachekeeper_runtime_admission(engine,home);
             axs_cachekeeper_runtime_require([NSFileManager.defaultManager removeItemAtPath:home error:nil],"admission fixture root removed");

@@ -672,7 +672,9 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     if ((self=[super init])) {
         _provider=[provider copy];_bindings=[NSMutableArray new];
         _operationHistory=axs_cachekeeper_operation_history_create(@"image",nil);
-        _work=dispatch_queue_create("dev.local.cachekeeper.images",DISPATCH_QUEUE_SERIAL);
+        // Weak getters and SDK calls may return autoreleased objects. Close their
+        // lifetime at each worker item instead of inheriting the global queue pool.
+        _work=dispatch_queue_create("dev.local.cachekeeper.images",DISPATCH_QUEUE_SERIAL_WITH_AUTORELEASE_POOL);
         _state=@"notObserved";_reason=@"none";_foreground=YES;
         _discoveryCheck=AxsCacheKeeperImageDiscoveryCheck(0,@"unknown",@"unknown",@"notChecked",@"none",0);
         [self axs_cachekeeper_publish];
@@ -828,6 +830,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     });
 }
 - (void)axs_cachekeeper_observe:(id)owner sourceReason:(NSString *)sourceReason attributes:(id)attributes contract:(AxsCacheKeeperImageContract)contract {
+    @autoreleasepool {
     if (!owner) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonInitializerReturnedNil];return;}
     if (self.capacityExceeded) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonObservationLimit];return;}
     if (object_getClass(owner)!=axs_cachekeeper_image_class) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonOwnerClass];return;}
@@ -881,6 +884,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     // A custom backend never receives a binding; its original methods remain untouched.
     if (object_getClass(disk)==axs_cachekeeper_disk_class) objc_setAssociatedObject(disk,AxsCacheKeeperImageBindingKey,binding,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [self axs_cachekeeper_schedule_refresh:@"imageLoad"];
+    }
 }
 - (void)axs_cachekeeper_observeCreatedRoot:(AxsCacheKeeperImageBinding *)binding {
     // 5.15.5 creates the root on first SDK write. Recheck each unbound owner at most once;
@@ -895,6 +899,9 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     [self axs_cachekeeper_schedule_refresh:@"imageLoad"];
 }
 - (void)axs_cachekeeper_refresh_event:(NSUInteger)event {
+    // End SDK getter temporaries before completion or the next state transition,
+    // including direct refreshes within a still-running worker item.
+    @autoreleasepool {
     NSUInteger generation;@synchronized(self) {generation=self.generation;}
     NSDictionary *context=self.provider ? self.provider() : @{};
     @synchronized(self) {if (generation!=self.generation) {axs_cachekeeper_operation_refresh(self.operationHistory,event,@"obsolete");return;}}
@@ -942,6 +949,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     }
     axs_cachekeeper_operation_event_reason(self.operationHistory,event,self.reason);
     [self axs_cachekeeper_publish];
+    }
 }
 - (void)refreshWithCompletion:(void (^)(void))completion {
     [self axs_cachekeeper_cancel];
@@ -993,6 +1001,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     });
 }
 - (void)axs_cachekeeper_execute:(AxsCacheKeeperImageBinding *)binding generation:(NSUInteger)generation event:(NSUInteger)event action:(NSUInteger)action {
+    @autoreleasepool {
     // This block runs on the actual SDK queue. Configuration and the installation snapshot are
     // checked here, not only before dispatch; no second asynchronous SDK clear is submitted.
     __attribute__((objc_precise_lifetime)) id owner=binding.owner;
@@ -1049,8 +1058,11 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         }
         [self axs_cachekeeper_publish];
     });
+    }
 }
 - (void)axs_cachekeeper_publish {
+    // Direct and dispatch_sync calls do not inherit the queue's per-item pool.
+    @autoreleasepool {
     NSDictionary *receipt;
     @synchronized(self) {
         NSUInteger observed=0,eligible=0,restricted=0,writes=0;
@@ -1096,6 +1108,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         self.lastReceipt=receipt;
         // Publish under the snapshot lock so an older callback cannot replace newer cumulative history.
         if (self.observer) self.observer(receipt);
+    }
     }
 }
 - (NSDictionary *)receipt { @synchronized(self) {return self.lastReceipt;} }

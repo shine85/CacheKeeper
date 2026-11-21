@@ -53,3 +53,10 @@ QQ 行的固定上游依据：[SDImageCache.m，SDWebImage 2.7](https://github.c
 - 提交351288f已正常推送，run44868159780实际运行全部51组原生：50 PASS，image-runtime-source失败。容量67.468秒、capacity-service177.865秒，均在480秒预算内；本次不是超时。UIKit/编译/发布因原生失败未执行，无新deb。
 - 精确失败：green/admission 的“released disk member is not misreported as released owner”。登记弱成员不等于owner当前成员；原disk可能因其他引用存活，不能用其弱引用判当前disk缺失。已改为核方法及owner类后读取当前disk/config分类，再校验登记身份；缺失/变化仍拒绝。
 - 测试明确保持owner/旧disk存活，覆盖disk与config移除、恢复、随后owner释放一次及待处理动作收尾；新增独立member-red把当前getter回退旧binding读取，在相同断言必须失败。已有准入/来源/64实例反例保留。Python discover62：55通过、7跳过；iOS对象编译与独立复核进行中，新的真实macOS红绿尚未执行，不把本地对象称为行为通过。
+
+## 2026-11-21 Actions 184 生命周期边界复核
+
+- 01eed57 已正常推送，run44870445565 原生仍为50/51 PASS。member-red精确失败及GREEN成员移除/恢复已通过，随后失败在“weak owner release is recorded once without retention”；UIKit、Theos、发布未执行，无新包。
+- 证据确认的缺口：普通串行worker继承默认释放池频率，刷新completion先于work item返回；同步publish不受队列释放池属性覆盖。iOS ARM64 LLVM显示初始化consumed/retained配对、弱登记、owner=nil与池pop，无确定强引用闭环；不能把本地IR当macOS具体残留引用的证明。
+- 本次集中处理worker逐任务池，以及宿主observe、refresh_event、SDK队列execute、同步publish的局部池；测试使用有界异步FIFO fence证明前一个任务结束，不靠sleep或放宽释放断言。新增实际objc_retainAutorelease的SDK getter反例；同一worker调用栈内显式保留外池和验收任务，pool-red仅取消refresh_event局部池，要求live=1/observed=1/released=0，不依赖线程间的池继承或线程不退出。普通释放、重复发布、重登记和排队owner释放都保留精确计数。
+- Python62项55PASS/7POSIX skip，193.025秒；两源最终iOS ARM64对象实际编译0，5个mutation唯一匹配，独立最终审查继续核验。新macOS反例与完整构建仍待同提交Actions，不宣称真机APP契约通过。手机不连接SSH，未扩大未知路径删除或限写授权。
