@@ -14,9 +14,10 @@ static NSDictionary *axs_cachekeeper_test_rebuild(NSData *original,BOOL complete
     if(!original.length||original.length>16*1024*1024)return @{@"state":@"originalUnavailable"};
     CGImageSourceRef source=CGImageSourceCreateWithData((__bridge CFDataRef)original,NULL);
     if(!source)return @{@"state":@"decoderFailed"};
+    size_t count=CGImageSourceGetCount(source);
+    if(count!=1) {CFRelease(source);return @{@"state":count ? @"unsupportedFrames" : @"decoderFailed"};}
     NSDictionary *metadata=CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(source,0,NULL));
-    size_t count=CGImageSourceGetCount(source);CFRelease(source);
-    if(count!=1)return @{@"state":@"unsupportedFrames"};
+    CFRelease(source);
     NSNumber *orientation=metadata[(__bridge NSString *)kCGImagePropertyOrientation];
     if(orientation && orientation.integerValue!=1)return @{@"state":@"unsupportedOrientation"};
     AxsCacheKeeperTestSize size;

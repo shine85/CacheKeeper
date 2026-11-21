@@ -41,7 +41,9 @@
     NSDictionary *small=axs_cachekeeper_test_rebuild(original,YES,CGSizeMake(128,128),nil,deadline);
     XCTAssertEqualObjects(small[@"width"],@32);XCTAssertEqualObjects(small[@"height"],@16);
     XCTAssertEqualObjects(axs_cachekeeper_test_rebuild(original,NO,CGSizeMake(128,128),nil,deadline)[@"state"],@"incompleteOriginal");
-    XCTAssertEqualObjects(axs_cachekeeper_test_rebuild([@"broken" dataUsingEncoding:NSUTF8StringEncoding],YES,CGSizeMake(128,128),nil,deadline)[@"state"],@"decoderFailed");
+    NSData *broken=[@"broken" dataUsingEncoding:NSUTF8StringEncoding],*preserved=[broken copy];
+    NSDictionary *invalid=axs_cachekeeper_test_rebuild(broken,YES,CGSizeMake(128,128),nil,deadline);
+    XCTAssertEqualObjects(invalid[@"state"],@"decoderFailed");XCTAssertNil(invalid[@"jpeg"]);XCTAssertEqualObjects(broken,preserved);
     XCTAssertEqualObjects(axs_cachekeeper_test_rebuild(original,YES,CGSizeMake(0,128),nil,deadline)[@"state"],@"invalidGeometry");
     XCTAssertEqualObjects(axs_cachekeeper_test_rebuild(original,YES,CGSizeMake(128,128),^BOOL{return YES;},deadline)[@"state"],@"cancelled");
     XCTAssertEqualObjects(axs_cachekeeper_test_rebuild(original,YES,CGSizeMake(128,128),nil,0)[@"state"],@"deadline");
@@ -51,5 +53,22 @@
     __block NSUInteger checkpoints=0;
     NSDictionary *result=axs_cachekeeper_test_rebuild(original,YES,CGSizeMake(128,128),^BOOL{return ++checkpoints==5;},NSProcessInfo.processInfo.systemUptime+5);
     XCTAssertEqualObjects(result[@"state"],@"cancelled");XCTAssertNil(result[@"jpeg"]);XCTAssertEqualObjects(original,preserved);
+}
+- (void)testMultipleFramesRemainUnsupportedAndPreserveOriginal {
+    UIImage *frame=[UIImage imageWithData:[self axs_cachekeeper_original:CGSizeMake(32,16)]];
+    XCTAssertNotEqual(frame.CGImage,NULL);if(!frame.CGImage)return;
+    NSMutableData *animation=[NSMutableData data];
+    CGImageDestinationRef destination=CGImageDestinationCreateWithData((__bridge CFMutableDataRef)animation,CFSTR("com.compuserve.gif"),2,NULL);
+    XCTAssertNotEqual(destination,NULL);if(!destination)return;
+    CGImageDestinationAddImage(destination,frame.CGImage,NULL);
+    CGImageDestinationAddImage(destination,frame.CGImage,NULL);
+    BOOL encoded=CGImageDestinationFinalize(destination);CFRelease(destination);
+    XCTAssertTrue(encoded);if(!encoded)return;
+    CGImageSourceRef source=CGImageSourceCreateWithData((__bridge CFDataRef)animation,NULL);
+    XCTAssertNotEqual(source,NULL);if(!source)return;
+    XCTAssertEqual(CGImageSourceGetCount(source),2u);CFRelease(source);
+    NSData *preserved=[animation copy];
+    NSDictionary *result=axs_cachekeeper_test_rebuild(animation,YES,CGSizeMake(128,128),nil,NSProcessInfo.processInfo.systemUptime+5);
+    XCTAssertEqualObjects(result[@"state"],@"unsupportedFrames");XCTAssertNil(result[@"jpeg"]);XCTAssertEqualObjects(animation,preserved);
 }
 @end

@@ -74,3 +74,9 @@ QQ 行的固定上游依据：[SDImageCache.m，SDWebImage 2.7](https://github.c
 - UIKit在search-editing-red的build-for-testing阶段失败，所有实际UIKit套件notRun。唯一编译错误为ScaledRepresentationRebuildTests.m取消block比较表达式推断int，与BOOL回调不兼容；修复两个取消block显式BOOL，保持最终第5检查点取消。未将此构建失败记为行为测试失败或通过。
 - 同组补齐两个UIKit RED runner的build.log及不可变归档；原先编译失败只留Actions控制台、归档只有摘要。既有归档回归现断言精确保留两份build.log；未通过/未收尾的xcresult依旧排除。Python65项58PASS/7skip(27.992秒)，实际重建helper的修正调用iOS ARM64对象编译0；本地无Simulator SDK/XCTest，完整模拟器编译执行仍待下一Actions。
 - 编译警告中的跨函数输出参数逐项审查，成功路径均赋值、失败路径先退出，无确定未初始化读取，不扩大生产修改。Theos/发布因UIKit失败跳过，无新包。
+
+## 2026-11-21 Actions 187 实际UIKit结果与空图像分类
+
+- 58c84e5/run44891356210：原生51/51PASS、容量页面PASS。UIKit搜索RED、实际工程编译、签名、WebKit、ScanPage、Search/XCUI、5.10.4准入RED及正常/缺API场景全部通过；5.21.7和5.15.5各34项ImageCacheIntegrationTests全部通过，含新owner释放及清理效果。
+- 两个现代SDK作业各只失败同一ScaledRepresentation测试：broken字节经ImageIO得到非空source但帧数为0，helper把所有count!=1归unsupportedFrames，断言要求decoderFailed。取消与实际重建均通过。修正helper先取帧数，0报decoderFailed、多帧报unsupportedFrames，再访问第0帧；增加真实两帧GIF测试和原数据保持/无jpeg断言。仅开发侧helper/测试，不改产品删除或资源契约。
+- UIKit汇总processGroupsSettled=true，归档complete、4588文件、0unavailable；本轮不再丢构建日志。Python65项58PASS/7skip(26.521秒)，实际helper ARM64对象编译0；新ImageIO分类和多帧实际UIKit仍待下一CI。Theos/发布跳过，无新deb。
