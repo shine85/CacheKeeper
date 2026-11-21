@@ -2,6 +2,8 @@
 
 基线：用户手机仍为 0.7.2-179.2，本轮工作树基于 c116c13。当前手机不可 SSH；不探测、不弹窗、不要求重复导出旧报告。风起云涌不纳入。此表只记录当前整改范围，旧报告、原始回执和临时材料留在本地。
 
+最新交付：2026-11-21，源码777afd213d3a186439e9cc4be8df0ac434f4b78d的Actions #188（44895270245）五作业全部成功；0.7.2-188.1已发布并下载验包。手机尚未安装/验证，逐APP契约仍按下表开放。具体步骤见[188.1集中验收](../../2026-11-21-188.1-真机验收.md)。后文各次失败是历史检查点，以本段与末尾交付结果为当前状态。
+
 ## 2026-11-21 离线续修记录
 
 - 已复核 GitHub Actions #182（源码 c116c132）：40/40 编排通过；UIKit 生命周期 test_timeout_and_wrapper_exit_reap_real_descendant_group 在 macOS 15 / Python 3.14 因 os.killpg(pgid, 0) 返回 EPERM 而异常退出；清理步骤覆盖了预期 timeout，造成 UIKit 实测、构建和发布被跳过。失败行和过程在 GitHub 作业 135699510934 日志。
@@ -37,7 +39,7 @@ QQ 行的固定上游依据：[SDImageCache.m，SDWebImage 2.7](https://github.c
 - [x] QQ 方法表、20/4/160 字节有界窗口及旧回执离线校验，当前诊断整包 285/285；手机上的完整表/代码窗仍未补采。
 - [x] 整组 diff 独立复核与 Windows 可执行行为回归；按上述结果记录实际通过与缺环境范围。
 - [ ] 有条件时完成逐 APP 契约补证和产品实现；未知路径未获得删除或限写权限。
-- [ ] 整组产品实现及本地可执行验证完成后统一提交推送，跟同提交 macOS/Foundation/UIKit/POSIX、构建与验包；未通过不交付测试包。
+- [x] 本轮已实现整组修复统一推送，同提交macOS/Foundation/UIKit/POSIX、RootHide构建与验包全部通过，发布0.7.2-188.1；尚缺契约的产品能力仍保持开放。
 - [ ] 真机集中验收：只清理仍可写盘且有明确动作效果；限制并清理确实阻止目标写盘但保留读取和必要数据；关闭恢复成功写入且不再新增插件动作。每阶段都验证同一受控资源，窗口未触发不算通过。
 
 ## 恢复规则
@@ -80,3 +82,10 @@ QQ 行的固定上游依据：[SDImageCache.m，SDWebImage 2.7](https://github.c
 - 58c84e5/run44891356210：原生51/51PASS、容量页面PASS。UIKit搜索RED、实际工程编译、签名、WebKit、ScanPage、Search/XCUI、5.10.4准入RED及正常/缺API场景全部通过；5.21.7和5.15.5各34项ImageCacheIntegrationTests全部通过，含新owner释放及清理效果。
 - 两个现代SDK作业各只失败同一ScaledRepresentation测试：broken字节经ImageIO得到非空source但帧数为0，helper把所有count!=1归unsupportedFrames，断言要求decoderFailed。取消与实际重建均通过。修正helper先取帧数，0报decoderFailed、多帧报unsupportedFrames，再访问第0帧；增加真实两帧GIF测试和原数据保持/无jpeg断言。仅开发侧helper/测试，不改产品删除或资源契约。
 - UIKit汇总processGroupsSettled=true，归档complete、4588文件、0unavailable；本轮不再丢构建日志。Python65项58PASS/7skip(26.521秒)，实际helper ARM64对象编译0；新ImageIO分类和多帧实际UIKit仍待下一CI。Theos/发布跳过，无新deb。
+
+## 2026-11-21 Actions 188成功交付
+
+- 源码777afd2/run44895270245五作业全部success，测试包0.7.2-188.1。原生51/51PASS；容量页面25/25PASS与两个精确反例；UIKit全部8套件状态passed、failedStages空、进程已收尾，归档complete/2600文件/0unavailable。5.21.7与5.15.5各34项图片集成+4项缩略图测试通过，5.10.4准入反例/15项集成/缺API路径通过；真实进程生命周期23PASS/1Windows项skip。
+- RootHide Theos、SDK16.5实际编译打包及云端deb核验成功。本地独立下载复核Release/tag源码SHA、四附件digest/更新日志、18项内容、三个二进制arm64/arm64e切片、RootHide依赖、过滤器、维护脚本权限及测试/本地资料排除全部通过。deb SHA256：027a2ee0d04ca40e05c7f8b2107169fbddbe9feb54e2fa7b0e06fcdf84f28605。
+- 包与验包回执保存在packages/0.7.2-188.1；原生/UIKit/容量/构建原始证据保存在tmp/release-188。Release：https://github.com/shine85/CacheKeeper/releases/tag/v0.7.2-188.1 。真机尚未安装或采集，不能将模拟器或合成缩略图验证扩大为百度/QQ/抖音/Swiftgram安装版本契约。
+- 剩余：安装188.1后集中做扫描停止/重测与三模式数据保持验收；补全各APP私有资源owner/保留引用/重取/消费者writer契约；旧SSH残留独立核查、独占物理释放归因及iOS16/17分别真机验证。未知资源继续保护，不要求用户手工找目录或准备安装包。
