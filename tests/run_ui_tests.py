@@ -193,7 +193,7 @@ def archive_candidates(root):
     candidates += [output / 'run-summary.json']
     for directory in ('search-editing-red', 'image-legacy-red'):
         candidates += [root / 'tmp' / directory / name for name in
-                       ('RedResults.xcresult', 'red-summary.json', 'red.log', 'source-manifest.json')]
+                       ('RedResults.xcresult', 'red-summary.json', 'red.log', 'build.log', 'source-manifest.json')]
     return candidates
 
 

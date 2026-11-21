@@ -43,13 +43,13 @@
     XCTAssertEqualObjects(axs_cachekeeper_test_rebuild(original,NO,CGSizeMake(128,128),nil,deadline)[@"state"],@"incompleteOriginal");
     XCTAssertEqualObjects(axs_cachekeeper_test_rebuild([@"broken" dataUsingEncoding:NSUTF8StringEncoding],YES,CGSizeMake(128,128),nil,deadline)[@"state"],@"decoderFailed");
     XCTAssertEqualObjects(axs_cachekeeper_test_rebuild(original,YES,CGSizeMake(0,128),nil,deadline)[@"state"],@"invalidGeometry");
-    XCTAssertEqualObjects(axs_cachekeeper_test_rebuild(original,YES,CGSizeMake(128,128),^{return YES;},deadline)[@"state"],@"cancelled");
+    XCTAssertEqualObjects(axs_cachekeeper_test_rebuild(original,YES,CGSizeMake(128,128),^BOOL{return YES;},deadline)[@"state"],@"cancelled");
     XCTAssertEqualObjects(axs_cachekeeper_test_rebuild(original,YES,CGSizeMake(128,128),nil,0)[@"state"],@"deadline");
 }
 - (void)testCancellationAtFinalPublicationKeepsOriginalAndReturnsNoReplacement {
     NSData *original=[self axs_cachekeeper_original:CGSizeMake(400,300)],*preserved=[original copy];
     __block NSUInteger checkpoints=0;
-    NSDictionary *result=axs_cachekeeper_test_rebuild(original,YES,CGSizeMake(128,128),^{return ++checkpoints==5;},NSProcessInfo.processInfo.systemUptime+5);
+    NSDictionary *result=axs_cachekeeper_test_rebuild(original,YES,CGSizeMake(128,128),^BOOL{return ++checkpoints==5;},NSProcessInfo.processInfo.systemUptime+5);
     XCTAssertEqualObjects(result[@"state"],@"cancelled");XCTAssertNil(result[@"jpeg"]);XCTAssertEqualObjects(original,preserved);
 }
 @end

@@ -35,7 +35,10 @@ def main():
                "-derivedDataPath", str(output / "DerivedData"),
                "-only-testing:SearchProbeTests/AxsCacheKeeperSearchProbeTests/" + method,
                "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"]
-    subprocess.run(["xcodebuild", "build-for-testing", *options], check=True, timeout=600)
+    # Preserve compile failures even when no xcresult can be created.
+    with (output / "build.log").open("w", encoding="utf-8") as log:
+        subprocess.run(["xcodebuild", "build-for-testing", *options], stdout=log, stderr=subprocess.STDOUT,
+                       check=True, timeout=600)
     result = output / "RedResults.xcresult"
     # Xcode collects diagnostics after an expected failure; #152 finished the test
     # in 10 seconds but exceeded 180 seconds while finalizing its result bundle.

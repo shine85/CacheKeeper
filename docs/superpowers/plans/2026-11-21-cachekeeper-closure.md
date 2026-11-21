@@ -67,3 +67,10 @@ QQ 行的固定上游依据：[SDImageCache.m，SDWebImage 2.7](https://github.c
 - 本地Clang IR显示旧夹具的objc_retainAutorelease调用后存在unsafeClaimAutoreleasedReturnValue；显式返回值让ARC介入引用处理，未形成可靠反例。改为单独-fno-objc-arc编译的void辅助函数，执行retain/autorelease；ARC调用者不接收对象。先运行池内保留/池外释放自检，再测试生产refresh_event边界。新IR明确为objc_retain、objc_autorelease、ret void；macOS实际结果仍待下一CI。
 - 独立进程场景现在收集全部失败后统一返回非零，不放宽任何精确RED/GREEN断言。编译失败只跳过依赖它的场景；总预算225秒/外层240秒不变。新增真实进程失败后继续、超时后继续、严格RED校验3项测试，并接入原生编排步骤。
 - 本地Python65项58PASS/7POSIXskip，25.441秒；测试源和非ARC辅助源均实际编成iOS ARM64对象。生产代码保持dc6a417；下一轮需读取完整所有场景、UIKit真实收尾、Theos与deb结果，再交付。原#184具体持有者仍无macOS诊断证据，不能反推为确定根因。
+
+## 2026-11-21 Actions 186 原生闭环与UIKit编译修正
+
+- caf09a4/run44888792413：原生51/51PASS，图片全部RED/GREEN通过，admission完整包含释放一次、重登记和pending安全跳过。容量页面25/25PASS，两个精确反例通过；UIKit编排40/40，进程生命周期24项23PASS/1Windows项skip，包含真实子进程收尾。
+- UIKit在search-editing-red的build-for-testing阶段失败，所有实际UIKit套件notRun。唯一编译错误为ScaledRepresentationRebuildTests.m取消block比较表达式推断int，与BOOL回调不兼容；修复两个取消block显式BOOL，保持最终第5检查点取消。未将此构建失败记为行为测试失败或通过。
+- 同组补齐两个UIKit RED runner的build.log及不可变归档；原先编译失败只留Actions控制台、归档只有摘要。既有归档回归现断言精确保留两份build.log；未通过/未收尾的xcresult依旧排除。Python65项58PASS/7skip(27.992秒)，实际重建helper的修正调用iOS ARM64对象编译0；本地无Simulator SDK/XCTest，完整模拟器编译执行仍待下一Actions。
+- 编译警告中的跨函数输出参数逐项审查，成功路径均赋值、失败路径先退出，无确定未初始化读取，不扩大生产修改。Theos/发布因UIKit失败跳过，无新包。

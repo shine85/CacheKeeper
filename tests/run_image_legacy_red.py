@@ -44,7 +44,9 @@ def main():
                "-derivedDataPath", str(output / "DerivedData"),
                "-only-testing:ImageCacheLegacyIntegrationTests/ImageCacheLegacyIntegrationTests/" + METHOD,
                "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"]
-    subprocess.run(["xcodebuild", "build-for-testing", *options], check=True, timeout=600)
+    with (output / "build.log").open("w", encoding="utf-8") as log:
+        subprocess.run(["xcodebuild", "build-for-testing", *options], stdout=log, stderr=subprocess.STDOUT,
+                       check=True, timeout=600)
     resolved = output / "CacheKeeperInputTests.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
     package = json.loads(resolved.read_text(encoding="utf-8"))
     pins = package.get("pins") if isinstance(package, dict) else None
