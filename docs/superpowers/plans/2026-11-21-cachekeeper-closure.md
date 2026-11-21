@@ -47,3 +47,9 @@ QQ 行的固定上游依据：[SDImageCache.m，SDWebImage 2.7](https://github.c
 ## 2026-11-21 统一推送检查点
 
 用户明确指示“推送”。本批实现与离线检查已完成，72 个相关源码、测试和方案文件纳入一次提交；既有 AGENTS.md、runtime_image_evidence.js 和根临时日志保留本地，BK/tmp/memory 与设备资料不提交。提交前重新运行 Python discover：62 项，55 通过、7 POSIX 专项跳过；暂存差异检查通过。后续由同一提交 Actions 完成实际 macOS/Foundation/UIKit/POSIX、Theos、deb 检查和发布；此记录不表示云端或真机已经通过。
+
+## 2026-11-21 Actions 183 原生结果与关联修复
+
+- 提交351288f已正常推送，run44868159780实际运行全部51组原生：50 PASS，image-runtime-source失败。容量67.468秒、capacity-service177.865秒，均在480秒预算内；本次不是超时。UIKit/编译/发布因原生失败未执行，无新deb。
+- 精确失败：green/admission 的“released disk member is not misreported as released owner”。登记弱成员不等于owner当前成员；原disk可能因其他引用存活，不能用其弱引用判当前disk缺失。已改为核方法及owner类后读取当前disk/config分类，再校验登记身份；缺失/变化仍拒绝。
+- 测试明确保持owner/旧disk存活，覆盖disk与config移除、恢复、随后owner释放一次及待处理动作收尾；新增独立member-red把当前getter回退旧binding读取，在相同断言必须失败。已有准入/来源/64实例反例保留。Python discover62：55通过、7跳过；iOS对象编译与独立复核进行中，新的真实macOS红绿尚未执行，不把本地对象称为行为通过。

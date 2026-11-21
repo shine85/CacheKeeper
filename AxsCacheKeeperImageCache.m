@@ -438,10 +438,17 @@ static BOOL AxsCacheKeeperImageSerialAttributes(id attributes) {
     return !attributes || attributes==dispatch_queue_attr_make_with_autorelease_frequency(DISPATCH_QUEUE_SERIAL,DISPATCH_AUTORELEASE_FREQUENCY_WORK_ITEM);
 }
 static NSString *AxsCacheKeeperImageInstanceReason(AxsCacheKeeperImageBinding *binding) {
-    id owner=binding.owner,disk=binding.disk,config=binding.config;
+    id owner=binding.owner;
     if (binding.invalidated) return @"invalidated";
     if (binding.initialReason) return binding.initialReason;
+    if (!owner) return @"ownerReleased";
+    if (object_getClass(owner)!=axs_cachekeeper_image_class) return @"ownerClass";
+    if (!AxsCacheKeeperImageMethodsUnchanged()) return @"sdkMethodsChanged";
+    // A replaced member may remain alive through SDK/autorelease references.
+    // Classify the current owner members, then bind them to the admitted identity.
+    id disk=AxsCacheKeeperImageGet(owner,"diskCache"),config=AxsCacheKeeperImageGet(owner,"config");
     NSString *reason=AxsCacheKeeperImageStructureReason(owner,disk,config);if (reason) return reason;
+    if (disk!=binding.disk || config!=binding.config) return @"configurationIdentity";
     if (AxsCacheKeeperImageGet(owner,"memoryCache")!=binding.memory) return @"memoryIdentity";
     if (AxsCacheKeeperImageGet(owner,"ioQueue")!=binding.queue) return @"queueIdentity";
     if (![AxsCacheKeeperImageGet(owner,"diskCachePath") isEqual:binding.path] ||

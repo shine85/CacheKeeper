@@ -187,7 +187,7 @@ static void axs_cachekeeper_runtime_admission(AxsCacheKeeperImageCache *engine,N
     NSString *root=[home stringByAppendingPathComponent:@"Library/Caches"];
     __weak SDImageCache *weakOwner;
     @autoreleasepool {
-    SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"admitted" diskCacheDirectory:root config:[SDImageCacheConfig new]];
+    __attribute__((objc_precise_lifetime)) SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"admitted" diskCacheDirectory:root config:[SDImageCacheConfig new]];
     axs_cachekeeper_runtime_refresh(engine);
     axs_cachekeeper_runtime_require([engine.receipt[@"eligible"] isEqual:@1],"normal fixture owner remains admitted");
     NSMutableArray *rejected=[NSMutableArray new];
@@ -216,10 +216,22 @@ static void axs_cachekeeper_runtime_admission(AxsCacheKeeperImageCache *engine,N
     owner.ioQueue=queue;axs_cachekeeper_runtime_refresh(engine);
     axs_cachekeeper_runtime_require([engine.receipt[@"restricted"] isEqual:@1] &&
         [engine.receipt[@"instanceAdmission"][@"liveReasons"][@"none"] isEqual:@1],"restoring original identity restores original admission");
+    // Hold the old member alive: a weak registry member can outlive its owner's
+    // property, so the current getter must determine missing-member diagnostics.
+    __attribute__((objc_precise_lifetime)) SDDiskCache *detachedDisk=owner.diskCache;
     owner.diskCache=nil;
+    axs_cachekeeper_runtime_require(detachedDisk && !owner.diskCache,"current disk is nil while registered disk remains live");
     axs_cachekeeper_runtime_refresh(engine);
     axs_cachekeeper_runtime_require([engine.receipt[@"instanceAdmission"][@"liveReasons"][@"diskMissing"] isEqual:@1] &&
         [engine.receipt[@"eligible"] isEqual:@0],"released disk member is not misreported as released owner");
+    owner.diskCache=detachedDisk;axs_cachekeeper_runtime_refresh(engine);
+    axs_cachekeeper_runtime_require([engine.receipt[@"restricted"] isEqual:@1],"restored disk identity is admitted again");
+    owner.config=nil;axs_cachekeeper_runtime_refresh(engine);
+    axs_cachekeeper_runtime_require(config && [engine.receipt[@"instanceAdmission"][@"liveReasons"][@"configurationMissing"] isEqual:@1] &&
+        [engine.receipt[@"eligible"] isEqual:@0],"current configuration is missing while registered configuration remains live");
+    owner.config=config;axs_cachekeeper_runtime_refresh(engine);
+    axs_cachekeeper_runtime_require([engine.receipt[@"restricted"] isEqual:@1],"restored configuration identity is admitted again");
+    detachedDisk=nil;
     weakOwner=owner;owner=nil;
     }
     axs_cachekeeper_runtime_refresh(engine);

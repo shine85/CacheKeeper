@@ -18,6 +18,8 @@ REFRESH_GATE = "NSString *otherRelative=relativePaths[otherIndex]==NSNull.null ?
 REFRESH_RED = "FAIL: image-runtime-source: 64-owner refresh resolves home at most once plus 64 FD identity probes"
 ADMISSION_GATE = "        AxsCacheKeeperImageAdmissionRecord(&_admission,reason);"
 ADMISSION_RED = "FAIL: image-runtime-source: early returns retain prior live admission and exact counters"
+MEMBER_GATE = "    id disk=AxsCacheKeeperImageGet(owner,\"diskCache\"),config=AxsCacheKeeperImageGet(owner,\"config\");\n    NSString *reason=AxsCacheKeeperImageStructureReason(owner,disk,config);if (reason) return reason;"
+MEMBER_RED = "FAIL: image-runtime-source: released disk member is not misreported as released owner"
 
 
 def run() -> int:
@@ -34,15 +36,17 @@ def run() -> int:
             raise SystemExit("FAIL: image-runtime-source aggregate budget exhausted")
         return min(maximum, seconds)
     source = (ROOT / "AxsCacheKeeperImageCache.m").read_text(encoding="utf-8-sig")
-    if source.count(GATE) != 1 or source.count(REFRESH_GATE) != 1 or source.count(ADMISSION_GATE) != 1:
+    if source.count(GATE) != 1 or source.count(REFRESH_GATE) != 1 or source.count(ADMISSION_GATE) != 1 or source.count(MEMBER_GATE) != 1:
         raise SystemExit("FAIL: ambiguous runtime helper gate mutation")
     workspace = ROOT / "tmp/feedback-1792"
     workspace.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="image-runtime-source-", dir=workspace) as directory:
-        for role in ("red", "green"):
+        for role in ("member-red", "red", "green"):
             folder = Path(directory) / role
             folder.mkdir()
             candidate = source.replace(GATE, "") if role == "red" else source
+            if role == "member-red":
+                candidate = candidate.replace(MEMBER_GATE, '    id disk=binding.disk,config=binding.config;\n    NSString *reason=AxsCacheKeeperImageStructureReason(owner,disk,config);if (reason) return reason;')
             if role == "red":
                 candidate = candidate.replace(REFRESH_GATE, 'NSString *otherRelative=AxsCacheKeeperImageRelative(context[@"home"],other.path);')
                 candidate = candidate.replace(ADMISSION_GATE, "        (void)reason;")
@@ -55,9 +59,14 @@ def run() -> int:
                             str(ROOT / "AxsCacheKeeperCleanupRules.m"),
                             str(ROOT / "AxsCacheKeeperOperationInfo.m"), "-o", str(binary)],
                            cwd=ROOT, check=True, timeout=remaining(60))
-            for scenario in ("fingerprint", "fingerprint-shifted", "pinned", "refresh", "sample", "admission"):
+            scenarios = ("admission",) if role == "member-red" else ("fingerprint", "fingerprint-shifted", "pinned", "refresh", "sample", "admission")
+            for scenario in scenarios:
                 result = subprocess.run([str(binary), scenario], capture_output=True, text=True, encoding="utf-8", timeout=remaining(30))
-                if role == "red" and scenario == "admission":
+                if role == "member-red":
+                    if result.returncode != 1 or result.stderr.strip() != MEMBER_RED or result.stdout.strip():
+                        raise SystemExit(f"FAIL: stale member RED missed its exact missing-member assertion\n{result.stdout}{result.stderr}")
+                    print("PASS: stale member RED at actual owner getter and retained old member", flush=True)
+                elif role == "red" and scenario == "admission":
                     if result.returncode != 1 or result.stderr.strip() != ADMISSION_RED or result.stdout.strip():
                         raise SystemExit(f"FAIL: admission RED missed its exact early-return assertion\n{result.stdout}{result.stderr}")
                     print("PASS: admission RED at actual initializer observation", flush=True)
