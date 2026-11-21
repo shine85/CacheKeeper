@@ -65,6 +65,9 @@ def main() -> int:
         # Run RED before GREEN on the same commit. Replace one precise branch;
         # these anchors locate a mutation, they are NOT source-text assertions.
         variants = (
+            ("private-profile", "capacity", '_layout=layout;',
+             '_layout=AxsCacheKeeperResourceLayoutPlatform;', "private-layout",
+             "private media database and cache use actual independent fixture sizes"),
             ("invalid-root-errno", "capacity", 'if (!root.isFileURL) {',
              'if (NO && !root.isFileURL) {', "invalid-root",
              "invalid root never exports seeded errno as observed cursor IO"),

@@ -1,4 +1,5 @@
 #import "AxsCacheKeeperImageCache.h"
+#import "AxsCacheKeeperImageEffectStatus.h"
 #import "AxsCacheKeeperImageLegacySource.h"
 #import "AxsCacheKeeperImageRuntimeSource.h"
 #import "AxsCacheKeeperPolicy.h"
@@ -339,6 +340,8 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
 @property(nonatomic) AxsCacheKeeperImageContract contract;
 @property(nonatomic,weak) id initialFileManager;
 @property(nonatomic,copy) NSString *initialReason;
+@property(atomic) AxsCacheKeeperImageReason admissionReason;
+@property(nonatomic) BOOL releaseRecorded; // Protected by the owning engine's registry lock.
 @property(nonatomic) BOOL rootRefreshAttempted;
 @property(atomic) BOOL invalidated;
 @property(nonatomic,strong) dispatch_queue_t queue;
@@ -361,7 +364,9 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
 @implementation AxsCacheKeeperImageBinding
 @end
 
-@interface AxsCacheKeeperImageCache ()
+@interface AxsCacheKeeperImageCache () {
+    AxsCacheKeeperImageAdmission _admission;
+}
 @property(nonatomic,strong) dispatch_queue_t work;
 @property(nonatomic,copy) AxsCacheKeeperImageContextProvider provider;
 @property(nonatomic,copy) void (^observer)(NSDictionary *);
@@ -380,12 +385,14 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
 @property(atomic,copy) NSDictionary *runtimeSourceObservation;
 @property(nonatomic) BOOL runtimeObservationPending;
 @property(nonatomic) BOOL discoveryRefreshPending;
+@property(nonatomic) BOOL admissionPublishPending;
 @property(atomic) BOOL capacityExceeded;
 @property(nonatomic) NSUInteger queued,submitted,completed,skipped;
 @property(nonatomic,copy) NSString *state;
 @property(nonatomic,copy) NSString *reason;
 - (void)axs_cachekeeper_observe:(id)owner sourceReason:(NSString *)sourceReason attributes:(id)attributes contract:(AxsCacheKeeperImageContract)contract;
 - (void)axs_cachekeeper_observeCreatedRoot:(AxsCacheKeeperImageBinding *)binding;
+- (void)axs_cachekeeper_unregistered:(AxsCacheKeeperImageReason)reason;
 - (void)axs_cachekeeper_publish;
 @end
 
@@ -412,7 +419,9 @@ static NSString *AxsCacheKeeperImageConfigurationReason(id config) {
     return nil;
 }
 static NSString *AxsCacheKeeperImageStructureReason(id owner,id disk,id config) {
-    if (!owner || !disk || !config) return @"ownerReleased";
+    if (!owner) return @"ownerReleased";
+    if (!disk) return @"diskMissing";
+    if (!config) return @"configurationMissing";
     if (object_getClass(owner)!=axs_cachekeeper_image_class) return @"ownerClass";
     if (object_getClass(disk)!=axs_cachekeeper_disk_class) return @"diskClass";
     NSString *reason=AxsCacheKeeperImageConfigurationReason(config);if (reason) return reason;
@@ -445,7 +454,9 @@ static NSString *AxsCacheKeeperImageInstanceReason(AxsCacheKeeperImageBinding *b
     return nil;
 }
 static BOOL AxsCacheKeeperImageInstanceUnchanged(AxsCacheKeeperImageBinding *binding) {
-    return !AxsCacheKeeperImageInstanceReason(binding);
+    NSString *reason=AxsCacheKeeperImageInstanceReason(binding);
+    binding.admissionReason=reason ? AxsCacheKeeperImageReasonParse(reason.UTF8String) : AxsCacheKeeperImageReasonNone;
+    return !reason;
 }
 static BOOL AxsCacheKeeperImageBlocksWrite(id disk) {
     AxsCacheKeeperImageBinding *binding=objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey);
@@ -556,20 +567,36 @@ static BOOL AxsCacheKeeperImageOverlaps(NSString *left,NSString *right) {
 }
 // Standard SDDiskCache owns a flat directory. A nested/linked/necessary-state entry is not
 // representable by removeAllData; leave this owner to the existing per-file cleanup engine.
-static BOOL AxsCacheKeeperImageFlatScope(int rootFD,NSString *relative) {
-    int copy=dup(rootFD);if (copy<0) return NO;DIR *directory=fdopendir(copy);
-    if (!directory) {close(copy);return NO;}
-    NSUInteger count=0;BOOL valid=YES;NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+0.25;
-    struct dirent *entry;errno=0;
-    while ((entry=readdir(directory))) {
+static AxsCacheKeeperImageSample AxsCacheKeeperImageFlatSample(int rootFD) {
+    AxsCacheKeeperImageSample sample={0};struct stat before,after;
+    if (fstat(rootFD,&before) || !S_ISDIR(before.st_mode)) {sample.state=AxsCacheKeeperImageSampleReadError;return sample;}
+    // A separate open description prevents earlier enumeration from hiding entries.
+    int copy=openat(rootFD,".",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if (copy<0) {sample.state=AxsCacheKeeperImageSampleReadError;return sample;}
+    DIR *directory=fdopendir(copy);
+    if (!directory) {sample.state=close(copy) ? AxsCacheKeeperImageSampleCloseError : AxsCacheKeeperImageSampleReadError;return sample;}
+    NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+0.25;
+    struct dirent *entry;
+    for (;;) {
+        if (NSProcessInfo.processInfo.systemUptime>deadline) {sample.state=AxsCacheKeeperImageSampleTimeLimit;break;}
+        errno=0;entry=readdir(directory);
+        if (!entry) {if (errno) sample.state=AxsCacheKeeperImageSampleReadError;break;}
         if (!strcmp(entry->d_name,".") || !strcmp(entry->d_name,"..")) continue;
-        NSString *name=[NSFileManager.defaultManager stringWithFileSystemRepresentation:entry->d_name length:strlen(entry->d_name)];
+        if (![NSFileManager.defaultManager stringWithFileSystemRepresentation:entry->d_name length:strlen(entry->d_name)]) {sample.state=AxsCacheKeeperImageSampleNonFlat;break;}
         struct stat status;
-        if (!name || ++count>100000 || NSProcessInfo.processInfo.systemUptime>deadline ||
-            fstatat(rootFD,entry->d_name,&status,AT_SYMLINK_NOFOLLOW) || !S_ISREG(status.st_mode)) {valid=NO;break;}
-        errno=0;
+        if (fstatat(rootFD,entry->d_name,&status,AT_SYMLINK_NOFOLLOW) || status.st_size<0 || status.st_blocks<0) {sample.state=AxsCacheKeeperImageSampleReadError;break;}
+        if (!S_ISREG(status.st_mode)) {sample.state=AxsCacheKeeperImageSampleNonFlat;break;}
+        if ((uint64_t)status.st_blocks>AXS_CACHEKEEPER_IMAGE_EXACT_MAX/512) {sample.state=AxsCacheKeeperImageSampleOverflow;break;}
+        if (!axs_cachekeeper_image_sample_add(&sample,(uint64_t)status.st_size,(uint64_t)status.st_blocks*512)) break;
     }
-    (void)relative;if (errno) valid=NO;closedir(directory);return valid;
+    if (sample.state==AxsCacheKeeperImageSampleComplete) {
+        if (fstat(rootFD,&after)) sample.state=AxsCacheKeeperImageSampleReadError;
+        else if (before.st_dev!=after.st_dev || before.st_ino!=after.st_ino || before.st_nlink!=after.st_nlink ||
+            before.st_mtimespec.tv_sec!=after.st_mtimespec.tv_sec || before.st_mtimespec.tv_nsec!=after.st_mtimespec.tv_nsec ||
+            before.st_ctimespec.tv_sec!=after.st_ctimespec.tv_sec || before.st_ctimespec.tv_nsec!=after.st_ctimespec.tv_nsec) sample.state=AxsCacheKeeperImageSampleChanged;
+    }
+    if (closedir(directory)) sample.state=AxsCacheKeeperImageSampleCloseError;
+    return sample;
 }
 static BOOL AxsCacheKeeperImageSameAncestors(NSArray *before,NSArray *after) {
     return before.count>1 && after.count==before.count &&
@@ -780,13 +807,32 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
 - (void)axs_cachekeeper_cancel {
     @synchronized(self) {self.generation++;for (AxsCacheKeeperImageBinding *binding in self.bindings) binding.restricted=NO;}
 }
+- (void)axs_cachekeeper_unregistered:(AxsCacheKeeperImageReason)reason {
+    @synchronized(self) {
+        AxsCacheKeeperImageAdmissionRecord(&_admission,reason);
+        // Early exits update evidence only. They must not replace a live owner's
+        // authorization state or invoke additional SDK getters on publication.
+        if (self.admissionPublishPending) return;
+        self.admissionPublishPending=YES;
+    }
+    dispatch_async(self.work,^{
+        @synchronized(self) {self.admissionPublishPending=NO;}
+        [self axs_cachekeeper_publish];
+    });
+}
 - (void)axs_cachekeeper_observe:(id)owner sourceReason:(NSString *)sourceReason attributes:(id)attributes contract:(AxsCacheKeeperImageContract)contract {
-    if (!owner || self.capacityExceeded || object_getClass(owner)!=axs_cachekeeper_image_class || !AxsCacheKeeperImageMethodsUnchanged()) return;
+    if (!owner) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonInitializerReturnedNil];return;}
+    if (self.capacityExceeded) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonObservationLimit];return;}
+    if (object_getClass(owner)!=axs_cachekeeper_image_class) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonOwnerClass];return;}
+    if (!AxsCacheKeeperImageMethodsUnchanged()) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonSDKMethodsChanged];return;}
     id disk=AxsCacheKeeperImageGet(owner,"diskCache"),config=AxsCacheKeeperImageGet(owner,"config");
-    if (!disk || !config) return;
+    if (!disk || !config) {[self axs_cachekeeper_unregistered:!disk ? AxsCacheKeeperImageReasonDiskMissing : AxsCacheKeeperImageReasonConfigurationMissing];return;}
     AxsCacheKeeperImageBinding *binding=[AxsCacheKeeperImageBinding new];binding.owner=owner;binding.disk=disk;binding.config=config;binding.contract=contract;
-    binding.queue=AxsCacheKeeperImageGet(owner,"ioQueue");binding.path=[AxsCacheKeeperImageGet(owner,"diskCachePath") copy];binding.engine=self;
-    if (!binding.queue || !binding.path.length) return;
+    binding.queue=AxsCacheKeeperImageGet(owner,"ioQueue");id path=AxsCacheKeeperImageGet(owner,"diskCachePath");binding.engine=self;
+    if (!binding.queue) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonQueueMissing];return;}
+    if (path && ![path isKindOfClass:NSString.class]) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonPathType];return;}
+    binding.path=[path copy];
+    if (!binding.path.length) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonPathMissing];return;}
     binding.initialReason=sourceReason ?: AxsCacheKeeperImageStructureReason(owner,disk,config);
     if (!binding.initialReason) {
         binding.memory=AxsCacheKeeperImageGet(owner,"memoryCache");
@@ -797,15 +843,22 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     }
     if (!binding.initialReason)
         dispatch_queue_set_specific(binding.queue,AxsCacheKeeperImageQueueKey,(__bridge void *)binding,NULL);
+    binding.admissionReason=binding.initialReason ? AxsCacheKeeperImageReasonParse(binding.initialReason.UTF8String) : AxsCacheKeeperImageReasonNotChecked;
     binding.home=self.context[@"home"] ?: NSHomeDirectory();
     binding.relative=AxsCacheKeeperImageRelative(binding.home,binding.path);
     @synchronized(self) {
-        [self.bindings filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(AxsCacheKeeperImageBinding *item,NSDictionary *unused) {return item.owner || item.pending;}]];
-        if (self.bindings.count>=64) {
+        [self.bindings filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(AxsCacheKeeperImageBinding *item,NSDictionary *unused) {
+            (void)unused;
+            __attribute__((objc_precise_lifetime)) id liveOwner=item.owner;
+            if (!liveOwner && !item.releaseRecorded) {item.releaseRecorded=YES;AxsCacheKeeperImageAdmissionRelease(&self->_admission);}
+            return liveOwner || item.pending;
+        }]];
+        if (self.capacityExceeded || self.bindings.count>=64) {
             // An untracked owner might share any existing path. Stop all previously admitted
             // instances for this process instead of pretending that discovery is complete.
             self.capacityExceeded=YES;self.generation++;
             for (AxsCacheKeeperImageBinding *item in self.bindings) {item.invalidated=YES;item.restricted=NO;}
+            AxsCacheKeeperImageAdmissionRecord(&_admission,AxsCacheKeeperImageReasonObservationLimit);
             [self axs_cachekeeper_schedule_refresh:@"imageLoad"];return;
         }
         // Registry changes share the same final commit generation as configuration changes.
@@ -816,6 +869,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
             if ((other.owner || other.pending) && AxsCacheKeeperImageOverlaps(binding.relative,other.relative)) other.restricted=NO;
         binding.operationOwner=++self.operationOwner;
         [self.bindings addObject:binding];
+        AxsCacheKeeperImageAdmissionRecord(&_admission,AxsCacheKeeperImageReasonNone);
     }
     // A custom backend never receives a binding; its original methods remain untouched.
     if (object_getClass(disk)==axs_cachekeeper_disk_class) objc_setAssociatedObject(disk,AxsCacheKeeperImageBindingKey,binding,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -849,6 +903,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         NSString *relative=relativePaths[index]==NSNull.null ? nil : relativePaths[index];
         binding.restricted=NO;binding.eligible=NO;
         NSString *reason=AxsCacheKeeperImageScopeReasonWithRelative(context,binding,relative);
+        if (reason) binding.admissionReason=binding.initialReason ? AxsCacheKeeperImageReasonParse(binding.initialReason.UTF8String) : AxsCacheKeeperImageReasonNotChecked;
         if (!reason && !AxsCacheKeeperImageInstanceUnchanged(binding)) reason=@"unsupportedInstance";
         NSArray *identity=!reason && relative ? AxsCacheKeeperImagePathIdentity(context[@"home"],relative,NULL) : nil;
         if (!reason && (!identity || (binding.identity && ![binding.identity isEqual:identity]))) reason=@"pathChanged";
@@ -941,7 +996,8 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     if (!reason && (!owner || !disk || !AxsCacheKeeperImageInstanceUnchanged(binding))) reason=@"ownerChanged";
     NSArray *identity=!reason ? AxsCacheKeeperImagePathIdentity(context[@"home"],binding.relative,&fd) : nil;
     if (!reason && ![identity isEqual:binding.identity]) reason=@"pathChanged";
-    if (!reason && !AxsCacheKeeperImageFlatScope(fd,binding.relative)) reason=@"scopeUnverified";
+    AxsCacheKeeperImageSample before={.state=AxsCacheKeeperImageSampleReadError},after={.state=AxsCacheKeeperImageSamplePathChanged};
+    if (!reason) {before=AxsCacheKeeperImageFlatSample(fd);if (before.state!=AxsCacheKeeperImageSampleComplete) reason=@"scopeUnverified";}
     if (!reason) for (AxsCacheKeeperImageBinding *other in [self axs_cachekeeper_bindings])
         if (other!=binding && (other.owner || other.pending) && AxsCacheKeeperImageOverlaps(binding.relative,AxsCacheKeeperImageRelative(context[@"home"],other.path))) {reason=@"overlappingOwners";break;}
     BOOL submitted=NO;
@@ -958,11 +1014,21 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         binding.pluginRemoving=YES;
         ((void (*)(id,SEL))objc_msgSend)(disk,sel_registerName("removeAllData"));
         binding.pluginRemoving=NO;
+        int afterFD=-1;NSArray *afterIdentity=AxsCacheKeeperImagePathIdentity(context[@"home"],binding.relative,&afterFD);
+        BOOL unchanged=NO;
+        @synchronized(binding) {unchanged=!binding.invalidated && [afterIdentity isEqual:binding.identity];}
+        if (unchanged && AxsCacheKeeperImageSameAncestors(identity,afterIdentity) && AxsCacheKeeperImageInstanceUnchanged(binding))
+            after=AxsCacheKeeperImageFlatSample(afterFD);
+        if (after.state==AxsCacheKeeperImageSampleComplete &&
+            ![afterIdentity isEqual:AxsCacheKeeperImagePathIdentity(context[@"home"],binding.relative,NULL)]) after.state=AxsCacheKeeperImageSamplePathChanged;
+        if (afterFD>=0 && close(afterFD)) after.state=AxsCacheKeeperImageSampleCloseError;
     }
-    (void)owner;if (fd>=0) close(fd);
+    (void)owner;if (fd>=0 && close(fd)) after.state=AxsCacheKeeperImageSampleCloseError;
+    NSDictionary *effect=submitted ? axs_cachekeeper_image_effect_record(before,after) : nil;
     dispatch_async(self.work,^{
         binding.pending=NO;
-        axs_cachekeeper_operation_transition_reason(self.operationHistory,action,submitted ? @"apiCompleted" : @"skipped",reason ?: @"none",NO);
+        if (submitted) axs_cachekeeper_operation_image_effect(self.operationHistory,action,effect);
+        else axs_cachekeeper_operation_transition_reason(self.operationHistory,action,@"skipped",reason ?: @"none",NO);
         @synchronized(self) {
             if (submitted) {
                 self.completed++;
@@ -978,15 +1044,28 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     });
 }
 - (void)axs_cachekeeper_publish {
-    NSUInteger observed=0,eligible=0,restricted=0,writes=0;
-    for (AxsCacheKeeperImageBinding *binding in [self axs_cachekeeper_bindings]) {
-        if (binding.owner) observed++;
-        if (binding.owner && binding.eligible) eligible++;
-        if (binding.owner && binding.restricted) restricted++;
-        @synchronized(binding) {writes+=binding.blockedWrites;}
-    }
     NSDictionary *receipt;
     @synchronized(self) {
+        NSUInteger observed=0,eligible=0,restricted=0,writes=0;
+        NSMutableDictionary *liveReasons=[NSMutableDictionary new],*unregisteredReasons=[NSMutableDictionary new];
+        for (AxsCacheKeeperImageBinding *binding in self.bindings) {
+            // One weak load per owner closes the live/released counts in the same
+            // registry snapshot. No owner is retained by the saved receipt.
+            __attribute__((objc_precise_lifetime)) id owner=binding.owner;
+            if (owner) {
+                observed++;if (binding.eligible) eligible++;if (binding.restricted) restricted++;
+                NSString *reason=@(AxsCacheKeeperImageReasonName(binding.admissionReason));
+                liveReasons[reason]=@([liveReasons[reason] unsignedIntegerValue]+1);
+            } else if (!binding.releaseRecorded) {
+                binding.releaseRecorded=YES;AxsCacheKeeperImageAdmissionRelease(&_admission);
+            }
+            @synchronized(binding) {writes+=binding.blockedWrites;}
+        }
+        for (unsigned i=0;i<AxsCacheKeeperImageReasonCount;i++)
+            if (_admission.unregisteredReasons[i]) unregisteredReasons[@(AxsCacheKeeperImageReasonName(i))]=@(_admission.unregisteredReasons[i]);
+        NSDictionary *admission=@{@"schemaVersion":@1,@"initializerReturns":@(_admission.initializerReturns),
+            @"registered":@(_admission.registered),@"unregistered":@(_admission.unregistered),@"released":@(_admission.released),
+            @"overflow":@(_admission.overflow),@"unregisteredReasons":[unregisteredReasons copy],@"liveReasons":[liveReasons copy]};
         NSString *state=self.state;
         NSUInteger pending=self.queued-self.completed-self.skipped;
         if (!pending && [state isEqual:@"timedOut"]) state=@"ready";
@@ -994,7 +1073,8 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         receipt=@{@"schemaVersion":@1,@"sdk":@"SDWebImage",@"state":state ?: @"notObserved",@"reason":self.reason ?: @"none",
             @"observed":@(observed),@"eligible":@(eligible),@"restricted":@(restricted),@"writesBlocked":@(writes),
             @"queued":@(self.queued),@"submitted":@(self.submitted),@"apiCompleted":@(self.completed),@"skipped":@(self.skipped),
-            @"pending":@(pending),@"updated":NSDate.date,@"bytesState":@"notMeasured",@"discoveryCheck":self.discoveryCheck};
+            @"pending":@(pending),@"updated":NSDate.date,@"bytesState":@"notMeasured",@"discoveryCheck":self.discoveryCheck,
+            @"instanceAdmission":admission};
         if (self.runtimeSourceObservation) {
             NSMutableDictionary *record=[receipt mutableCopy];record[@"runtimeSourceObservation"]=self.runtimeSourceObservation;receipt=record;
         }

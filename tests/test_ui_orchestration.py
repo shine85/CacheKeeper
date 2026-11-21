@@ -196,44 +196,49 @@ cases = [
     ("discovery_exit_stop", {"discovery": "exit"}, None, False, [], [], True, None),
     ("bootstatus_timeout_stop", {"bootstatus": "timeout"}, None, False, [], [], True, None),
 ]
-results = []
-for name, failures, bad_pin, ambiguous, want_suites, want_exports, want_failure, summary_label in cases:
-    result = execute(name, failures, bad_pin, ambiguous)
-    errors = []
-    if result["suites"] != want_suites:
-        errors.append(f"suite schedule: expected {want_suites}, got {result['suites']}")
-    if result["exports"] != want_exports:
-        errors.append(f"attachment schedule: expected {want_exports}, got {result['exports']}")
-    if (result["exit"] != 0) != want_failure:
-        errors.append(f"exit: expected failure={want_failure}, got {result['exit']}")
-    ledger = result['summary']
-    if not ledger or ledger['state'] != ('failed' if want_failure else 'passed'):
-        errors.append('durable summary disagrees with actual exit')
-    if ledger and any(row['state'] == 'running' for row in ledger['stages']):
-        errors.append('finished command remains running in durable ledger')
-    if name.startswith('discovery_') and 'boot' in result['commands']:
-        errors.append('failed discovery must not boot a simulator')
-    if summary_label:
-        if result["exception"]:
-            errors.append("uncaught failure: " + result["exception"])
-        summaries = [line for line in result["stderr"].splitlines() if "failed suites/stages:" in line]
-        if len(summaries) != 1 or summary_label not in summaries[0]:
-            errors.append("missing aggregate failure summary containing " + summary_label)
-    if name.startswith("initial_") and any(stage in result["commands"] for stage in ("generate515", "build515", "generate510", "build510")):
-        errors.append("initial build/sign/pin failure must stop before compatibility generation")
-    if name in ("legacy_generation_fails", "ambiguous_spec") and "build515" in result["commands"]:
-        errors.append("failed compatibility preparation must not build")
-    result["assertion_errors"] = errors
-    result["passed"] = not errors
-    results.append(result)
-    print(("PASS" if not errors else "FAIL") + ": " + name)
-    for error in errors:
-        print("  " + error)
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    results = []
+    for name, failures, bad_pin, ambiguous, want_suites, want_exports, want_failure, summary_label in cases:
+        result = execute(name, failures, bad_pin, ambiguous)
+        errors = []
+        if result["suites"] != want_suites:
+            errors.append(f"suite schedule: expected {want_suites}, got {result['suites']}")
+        if result["exports"] != want_exports:
+            errors.append(f"attachment schedule: expected {want_exports}, got {result['exports']}")
+        if (result["exit"] != 0) != want_failure:
+            errors.append(f"exit: expected failure={want_failure}, got {result['exit']}")
+        ledger = result['summary']
+        if not ledger or ledger['state'] != ('failed' if want_failure else 'passed'):
+            errors.append('durable summary disagrees with actual exit')
+        if ledger and any(row['state'] == 'running' for row in ledger['stages']):
+            errors.append('finished command remains running in durable ledger')
+        if name.startswith('discovery_') and 'boot' in result['commands']:
+            errors.append('failed discovery must not boot a simulator')
+        if summary_label:
+            if result["exception"]:
+                errors.append("uncaught failure: " + result["exception"])
+            summaries = [line for line in result["stderr"].splitlines() if "failed suites/stages:" in line]
+            if len(summaries) != 1 or summary_label not in summaries[0]:
+                errors.append("missing aggregate failure summary containing " + summary_label)
+        if name.startswith("initial_") and any(stage in result["commands"] for stage in ("generate515", "build515", "generate510", "build510")):
+            errors.append("initial build/sign/pin failure must stop before compatibility generation")
+        if name in ("legacy_generation_fails", "ambiguous_spec") and "build515" in result["commands"]:
+            errors.append("failed compatibility preparation must not build")
+        result["assertion_errors"] = errors
+        result["passed"] = not errors
+        results.append(result)
+        print(("PASS" if not errors else "FAIL") + ": " + name)
+        for error in errors:
+            print("  " + error)
+    report = {"scope": "Python orchestration only; external macOS commands simulated; no SDK/UIKit behavior executed",
+              "source_sha256": hashlib.sha256((ROOT / "tests/run_ui_tests.py").read_bytes()).hexdigest(),
+              "total": len(results), "passed": sum(result["passed"] for result in results), "results": results}
+    report_path = Path(argv[0]) if argv else FIXTURES / "results.json"
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"RESULT: {report['passed']}/{report['total']} orchestration scenarios passed; {report_path}")
+    return 0 if report["passed"] == report["total"] else 1
 
-report = {"scope": "Python orchestration only; external macOS commands simulated; no SDK/UIKit behavior executed",
-          "source_sha256": hashlib.sha256((ROOT / "tests/run_ui_tests.py").read_bytes()).hexdigest(),
-          "total": len(results), "passed": sum(result["passed"] for result in results), "results": results}
-report_path = Path(sys.argv[1]) if len(sys.argv) > 1 else FIXTURES / "results.json"
-report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-print(f"RESULT: {report['passed']}/{report['total']} orchestration scenarios passed; {report_path}")
-raise SystemExit(0 if report["passed"] == report["total"] else 1)
+
+if __name__ == "__main__":
+    raise SystemExit(main())

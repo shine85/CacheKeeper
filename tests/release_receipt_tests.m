@@ -48,6 +48,15 @@ int main(int argc, const char **argv) { @autoreleasepool {
         @"freeBytesDelta":@(-8192),@"availableBytesDelta":@4096,@"elapsedSeconds":@3} mutableCopy];
     bad=[finished mutableCopy];bad[@"volumes"]=@[volume];
     ck_release_check(axs_cachekeeper_release_evidence_projection(bad,nil)!=nil,@"negative and positive volume deltas survive unchanged");
+    NSString *volumeText=axs_cachekeeper_presentation_release_evidence(bad);
+    ck_release_check([volumeText containsString:@"空闲空间变化 -8192 B"] && [volumeText containsString:@"可用空间变化 +4096 B"] &&
+        [volumeText containsString:@"观察间隔 3.000 秒"] && [volumeText containsString:@"不能归为本次释放"],@"actual signed volume changes and time are visible without attribution");
+    ck_release_check([volumeText containsString:@"最后一个链接消失 1 次"] && [volumeText containsString:@"仍有链接 0 次"],@"last-link evidence is visible without claiming released blocks");
+    NSMutableDictionary *zeroVolume=[volume mutableCopy];zeroVolume[@"after"]=volume[@"before"];zeroVolume[@"elapsedSeconds"]=@0;
+    zeroVolume[@"freeBytesDelta"]=@0;zeroVolume[@"availableBytesDelta"]=@0;
+    NSMutableDictionary *zero=[finished mutableCopy];zero[@"volumes"]=@[zeroVolume];
+    ck_release_check([axs_cachekeeper_presentation_release_evidence(zero) containsString:@"可用空间变化 +0 B"],@"observed zero change is distinct from missing data");
+    ck_release_check(![axs_cachekeeper_presentation_release_evidence(finished) containsString:@"可用空间变化"],@"missing volume observation never invents a zero delta");
     volume[@"freeBytesDelta"]=@0;ck_release_check(!axs_cachekeeper_release_evidence_projection(bad,nil),@"volume delta cannot be clamped or invented");
     [AxsCacheKeeperReceipts resetForTesting];[AxsCacheKeeperReceipts configureWithStatusFolder:folder];
     NSString *bundle=@"test.release.receipt", *path=[folder stringByAppendingPathComponent:@"test.release.receipt.auto.plist"];

@@ -567,9 +567,34 @@ static void ckcursorErrors(NSString *base) {
     NSMutableDictionary *bad=ckmutablePlist(result);bad[@"roots"][0][@"measurement"][@"cursorErrors"][@"errors"][0][@"errorCode"]=@YES;
     ckcheck([axs_cachekeeper_capacity_projection(bad)[@"state"] isEqual:@"invalid"],"cursor error numeric fields reject booleans");
 }
+static void ckprivateLayout(NSString *base) {
+    NSString *folder=ckdirectory(base,@"layout-status"),*path=ckdirectory(base,@"layout-root");
+    ckfile([ckdirectory(path,@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/media/cache") stringByAppendingPathComponent:@"opaque"],17);
+    ckfile([ckdirectory(path,@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/db") stringByAppendingPathComponent:@"opaque"],31);
+    ckfile([ckdirectory(path,@"PRIVATE_OUTER/logs") stringByAppendingPathComponent:@"opaque"],5);
+    __block NSArray *owners=@[@"app.swiftgram.ios"];
+    AxsCacheKeeperCapacityService *service=[[AxsCacheKeeperCapacityService alloc] initWithFolder:folder provider:^NSDictionary *(NSError **e){(void)e;return ckplan(@[ckroot(path,@"resource-1",owners)],owners,NO);} writer:nil];
+    ckrequest(folder,NSUUID.UUID.UUIDString,NO);ckfinish(service);
+    NSDictionary *result=ckresult(folder),*measurement=result[@"roots"][0][@"measurement"];
+    ckcheck([result[@"state"] isEqual:@"complete"] && [measurement[@"layoutProfile"] isEqual:@"swiftgramGroupStructureV1"],"registered Swiftgram group gets structural profile");
+    NSMutableDictionary *nodes=[NSMutableDictionary new];for (NSDictionary *node in measurement[@"nodes"]) nodes[node[@"category"]]=node;
+    ckcheck([nodes[@"postboxMedia"][@"logicalBytes"] isEqual:@17] && [nodes[@"postboxDatabase"][@"logicalBytes"] isEqual:@31] && [nodes[@"logs"][@"logicalBytes"] isEqual:@5],"service persists independently measured private structure");
+    NSData *data=[NSJSONSerialization dataWithJSONObject:result options:0 error:nil];NSString *text=[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    ckcheck([text rangeOfString:@"PRIVATE_"].location==NSNotFound && [measurement[@"deletionAuthorization"] isEqual:@"notGranted"],"private labels expose no names and grant no deletion");
+    ckbadTree(result,^(NSMutableDictionary *m){[m removeObjectForKey:@"layoutProfile"];},"legacy measurement cannot contain private structure");
+    ckbadTree(result,^(NSMutableDictionary *m){m[@"layoutProfile"]=@"futureUnsupported";},"unknown layout profile is rejected");
+    ckbadTree(result,^(NSMutableDictionary *m){for (NSMutableDictionary *n in m[@"nodes"]) if ([n[@"category"] isEqual:@"postboxMedia"]) n[@"category"]=@"logs";},"private category in wrong depth is rejected");
+    owners=@[@"app.swiftgram.ios",@"test.other"];
+    ckrequest(folder,NSUUID.UUID.UUIDString,NO);ckfinish(service);
+    NSDictionary *shared=ckresult(folder),*sharedMeasurement=shared[@"roots"][0][@"measurement"];
+    ckcheck([shared[@"state"] isEqual:@"complete"] && !sharedMeasurement[@"layoutProfile"] && [sharedMeasurement[@"logicalBytes"] isEqual:@53],"new owner relation revokes specialized labels without changing totals");
+    NSMutableDictionary *forged=[shared mutableCopy],*row=[shared[@"roots"][0] mutableCopy];row[@"measurement"]=measurement;forged[@"roots"]=@[row];
+    ckcheck([axs_cachekeeper_capacity_projection(forged)[@"state"] isEqual:@"invalid"],"shared owners cannot import a specialized measurement profile");
+}
 int main(int argc,const char **argv) {
     @autoreleasepool {
         ckcheck(argc==3,"expected fixture directory and case");NSString *base=[NSString stringWithUTF8String:argv[1]],*name=[NSString stringWithUTF8String:argv[2]];
+        if ([name isEqual:@"all"] || [name isEqual:@"private-layout"]) ckprivateLayout(base);
         if ([name isEqual:@"all"] || [name isEqual:@"shared"]) ckshared(base);
         if ([name isEqual:@"all"] || [name isEqual:@"cancel"]) ckcancel(base);
         if ([name isEqual:@"all"] || [name isEqual:@"save"]) cksave(base);

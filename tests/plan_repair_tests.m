@@ -131,9 +131,12 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     check(alogSuspended.removed==0 && [fm fileExistsAtPath:readyLog],@"用户日志定级不能绕过专属日志的进程退出约束");
     NSDictionary *alogWait=[AxsCacheKeeperCleanupSchedule registrationForSweep:alogSuspended signature:@"alog-wait" now:10];
     check([alogWait[@"appRuleWaitingForExit"] boolValue] && [[AxsCacheKeeperCleanupSchedule carriedReport:alogWait][@"appRuleID"] isEqual:@"douyin-alog"],@"等待退出的规则说明在结转回执中保持可诊断");
+    NSString *genericLog=[alogRoot stringByAppendingPathComponent:@"ready/app.log"];put(genericLog);
+    AxsCacheKeeperSweep *alogUpgraded=[[AxsCacheKeeperSweep alloc] initWithRoot:alogRoot bundle:alogBundle version:@"41.2.0" containerPath:home state:@{@"processExited":@YES,@"logPaths":@[@"Library/alog"]} clock:^NSTimeInterval{return future;}];finish(alogUpgraded);
+    check(alogUpgraded.removed==0 && [fm fileExistsAtPath:readyLog] && [fm fileExistsAtPath:genericLog] && [fm fileExistsAtPath:moduleLog],@"升级后不能由用户日志定级继承专属范围的删除权限");
     AxsCacheKeeperSweep *alogReal=[[AxsCacheKeeperSweep alloc] initWithRoot:alogRoot bundle:alogBundle version:alogVersion containerPath:home state:exited clock:^NSTimeInterval{return future;}];finish(alogReal);
     check(alogReal.removed==2 && alogReal.bytes==26 && ![fm fileExistsAtPath:readyLog] && ![fm fileExistsAtPath:moduleLog],@"成熟普通和模块日志各删1项，回执等于真实删量");
-    for (NSString *kept in @[unknown,database,media,shared,outside,mapped]) check([fm fileExistsAtPath:kept],@"同目录未知、数据库、媒体、prepare映射与根外硬链接保持完整");
+    for (NSString *kept in @[unknown,genericLog,database,media,shared,outside,mapped]) check([fm fileExistsAtPath:kept],@"同目录未知、数据库、媒体、prepare映射与根外硬链接保持完整");
     put(readyLog);
     AxsCacheKeeperSweep *alogAgain=[[AxsCacheKeeperSweep alloc] initWithRoot:alogRoot bundle:alogBundle version:alogVersion containerPath:home state:exited clock:^NSTimeInterval{return future;}];finish(alogAgain);
     check(alogAgain.removed==1 && ![fm fileExistsAtPath:readyLog],@"第二轮新产生日志成熟后仍实际回收");

@@ -23,6 +23,8 @@ void axs_cachekeeper_operation_timeout(NSMutableDictionary *history, NSUInteger 
 NSUInteger axs_cachekeeper_operation_action(NSMutableDictionary *history, NSUInteger event, NSUInteger owner);
 void axs_cachekeeper_operation_transition(NSMutableDictionary *history, NSUInteger action, NSString *state, BOOL timedOut);
 void axs_cachekeeper_operation_transition_reason(NSMutableDictionary *history, NSUInteger action, NSString *state, NSString *reason, BOOL timedOut);
+// Finishes one submitted image action with same-action directory observations.
+void axs_cachekeeper_operation_image_effect(NSMutableDictionary *history, NSUInteger action, NSDictionary *effect);
 void axs_cachekeeper_operation_event_reason(NSMutableDictionary *history, NSUInteger event, NSString *reason);
 void axs_cachekeeper_operation_finish(NSMutableDictionary *history, NSUInteger event);
 // Caller owns a serial component save path. Failure retains the newest cumulative record.

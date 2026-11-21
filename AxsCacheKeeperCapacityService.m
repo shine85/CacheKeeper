@@ -104,7 +104,9 @@ static NSDictionary *AxsCacheKeeperCapacityRequest(NSString *folder) {
     // A source without an observed directory identity must not open a later
     // replacement. Preserve the source check instead of creating a nil cursor.
     uint64_t expected[2]={0,0};if (observed) [plan[@"identity"] getBytes:expected length:sizeof(expected)];
-    _root=observed && !_aliasChanged ? [[AxsCacheKeeperCapacityRoot alloc] initWithRoot:plan[@"url"] expectedDevice:(dev_t)expected[0] expectedInode:(ino_t)expected[1]] :
+    BOOL swiftGroup=[plan[@"owners"] isEqual:@[@"app.swiftgram.ios"]] && [plan[@"roles"] isEqual:@[@"group"]];
+    AxsCacheKeeperResourceLayout layout=swiftGroup ? AxsCacheKeeperResourceLayoutSwiftgramGroup : AxsCacheKeeperResourceLayoutPlatform;
+    _root=observed && !_aliasChanged ? [[AxsCacheKeeperCapacityRoot alloc] initWithRoot:plan[@"url"] expectedDevice:(dev_t)expected[0] expectedInode:(ino_t)expected[1] layout:layout] :
         [[AxsCacheKeeperCapacityRoot alloc] initWithSourceFailure:observed ? _aliasFailure : plan[@"sourceFailure"]];_rootStarted=NSProcessInfo.processInfo.systemUptime;
     _cursorObserved |= _root.cursorCreated;
     if (observed && !_aliasChanged && ![self axs_cachekeeper_aliases_match:plan failure:&aliasFailure]) {_aliasChanged=YES;_aliasFailure=aliasFailure;}

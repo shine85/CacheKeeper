@@ -7,7 +7,6 @@ static const NSUInteger AxsCacheKeeperCapacityEntryLimit=2000000;
 static const NSUInteger AxsCacheKeeperCapacityDepthLimit=64;
 static const NSUInteger AxsCacheKeeperCapacityInodeLimit=262144;
 static const NSUInteger AxsCacheKeeperCapacityNodeLimit=4096;
-static const NSUInteger AxsCacheKeeperCapacityNodeDepth=3;
 static const uint64_t AxsCacheKeeperCapacityMaximum=9007199254740991ULL;
 
 // Byte keys compare the entire identity, not NSNumber/NSArray count hashes.
@@ -33,27 +32,18 @@ static NSData *AxsCacheKeeperCapacityNodeKey(NSArray<NSData *> *components,NSUIn
     }
     return key;
 }
-static BOOL AxsCacheKeeperCapacityName(NSData *part,const char *name) {
-    NSUInteger length=strlen(name);return part.length==length && !memcmp(part.bytes,name,length);
-}
-static NSString *AxsCacheKeeperCapacityCategory(NSArray<NSData *> *components) {
-    if(components.count==1) {
-        if(AxsCacheKeeperCapacityName(components[0],"Documents")) return @"Documents";
-        if(AxsCacheKeeperCapacityName(components[0],"Library")) return @"Library";
-        if(AxsCacheKeeperCapacityName(components[0],"tmp")) return @"tmp";
-    }
-    if(components.count==2 && AxsCacheKeeperCapacityName(components[0],"Library")) {
-        if(AxsCacheKeeperCapacityName(components[1],"Caches")) return @"Caches";
-        if(AxsCacheKeeperCapacityName(components[1],"Application Support")) return @"Application Support";
-    }
-    return @"unknown";
+static AxsCacheKeeperResourceCategory AxsCacheKeeperCapacityCategory(AxsCacheKeeperResourceLayout layout,NSArray<NSData *> *components) {
+    AxsCacheKeeperResourcePart parts[5];
+    if (components.count>5) return AxsCacheKeeperResourceUnknown;
+    for (NSUInteger i=0;i<components.count;i++) parts[i]=(AxsCacheKeeperResourcePart){components[i].bytes,components[i].length};
+    return axs_cachekeeper_resource_category(layout,parts,components.count);
 }
 @interface AxsCacheKeeperCapacityRoot ()
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)entries depthLimit:(NSUInteger)depth
                  inodeLimit:(NSUInteger)inodes nodeLimit:(NSUInteger)nodes;
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)entries depthLimit:(NSUInteger)depth
                  inodeLimit:(NSUInteger)inodes nodeLimit:(NSUInteger)nodes
-      requiresExpectedIdentity:(BOOL)required expectedDevice:(dev_t)device expectedInode:(ino_t)inode;
+      requiresExpectedIdentity:(BOOL)required expectedDevice:(dev_t)device expectedInode:(ino_t)inode layout:(AxsCacheKeeperResourceLayout)layout;
 - (void)axs_cachekeeper_observe:(const struct stat *)info components:(NSArray<NSData *> *)components;
 @end
 @implementation AxsCacheKeeperCapacityRoot {
@@ -68,6 +58,7 @@ static NSString *AxsCacheKeeperCapacityCategory(NSArray<NSData *> *components) {
     BOOL _requiresExpectedIdentity;
     dev_t _expectedDevice;
     ino_t _expectedInode;
+    AxsCacheKeeperResourceLayout _layout;
 }
 - (instancetype)initWithRoot:(NSURL *)root {
     return [self initWithRoot:root entryLimit:AxsCacheKeeperCapacityEntryLimit depthLimit:AxsCacheKeeperCapacityDepthLimit
@@ -84,18 +75,23 @@ static NSString *AxsCacheKeeperCapacityCategory(NSArray<NSData *> *components) {
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)entries depthLimit:(NSUInteger)depth
                  inodeLimit:(NSUInteger)inodes nodeLimit:(NSUInteger)nodes {
     return [self initWithRoot:root entryLimit:entries depthLimit:depth inodeLimit:inodes nodeLimit:nodes
-        requiresExpectedIdentity:NO expectedDevice:0 expectedInode:0];
+        requiresExpectedIdentity:NO expectedDevice:0 expectedInode:0 layout:AxsCacheKeeperResourceLayoutPlatform];
 }
 - (instancetype)initWithRoot:(NSURL *)root expectedDevice:(dev_t)device expectedInode:(ino_t)inode {
+    return [self initWithRoot:root expectedDevice:device expectedInode:inode layout:AxsCacheKeeperResourceLayoutPlatform];
+}
+- (instancetype)initWithRoot:(NSURL *)root expectedDevice:(dev_t)device expectedInode:(ino_t)inode layout:(AxsCacheKeeperResourceLayout)layout {
+    if (layout!=AxsCacheKeeperResourceLayoutPlatform && layout!=AxsCacheKeeperResourceLayoutSwiftgramGroup) return nil;
     return [self initWithRoot:root entryLimit:AxsCacheKeeperCapacityEntryLimit depthLimit:AxsCacheKeeperCapacityDepthLimit
         inodeLimit:AxsCacheKeeperCapacityInodeLimit nodeLimit:AxsCacheKeeperCapacityNodeLimit
-        requiresExpectedIdentity:YES expectedDevice:device expectedInode:inode];
+        requiresExpectedIdentity:YES expectedDevice:device expectedInode:inode layout:layout];
 }
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)entries depthLimit:(NSUInteger)depth
                  inodeLimit:(NSUInteger)inodes nodeLimit:(NSUInteger)nodes
-      requiresExpectedIdentity:(BOOL)required expectedDevice:(dev_t)device expectedInode:(ino_t)inode {
+      requiresExpectedIdentity:(BOOL)required expectedDevice:(dev_t)device expectedInode:(ino_t)inode layout:(AxsCacheKeeperResourceLayout)layout {
     if(!(self=[super init])) return nil;
     _requiresExpectedIdentity=required;_expectedDevice=device;_expectedInode=inode;
+    _layout=layout;
     _entryLimit=MIN(MAX(entries,(NSUInteger)1),AxsCacheKeeperCapacityEntryLimit);
     _depthLimit=MIN(MAX(depth,(NSUInteger)1),AxsCacheKeeperCapacityDepthLimit);
     _inodeLimit=MIN(MAX(inodes,(NSUInteger)1),AxsCacheKeeperCapacityInodeLimit);
@@ -133,17 +129,27 @@ static NSString *AxsCacheKeeperCapacityCategory(NSArray<NSData *> *components) {
     uint64_t allocated=duplicate ? 0 : (uint64_t)info->st_blocks*512;
     if(logical>AxsCacheKeeperCapacityMaximum || _logical>AxsCacheKeeperCapacityMaximum-logical || _allocated>AxsCacheKeeperCapacityMaximum-allocated) {_failure=@"invalidMetadata";return;}
     BOOL directory=S_ISDIR(info->st_mode);
-    if(directory && components.count<=AxsCacheKeeperCapacityNodeDepth) {
+    // Expand only the evidenced Postbox branch, not every private directory.
+    NSUInteger nodeDepth=3;
+    if (_layout==AxsCacheKeeperResourceLayoutSwiftgramGroup && components.count>=4) {
+        AxsCacheKeeperResourcePart parts[5];NSUInteger count=MIN(components.count,(NSUInteger)5);
+        for (NSUInteger i=0;i<count;i++) parts[i]=(AxsCacheKeeperResourcePart){components[i].bytes,components[i].length};
+        AxsCacheKeeperResourceCategory parent=axs_cachekeeper_resource_category(_layout,parts,4);
+        if (parent==AxsCacheKeeperResourcePostboxDatabase || parent==AxsCacheKeeperResourcePostboxMedia) nodeDepth=4;
+        if (count==5 && axs_cachekeeper_resource_category(_layout,parts,5)==AxsCacheKeeperResourcePostboxCache) nodeDepth=5;
+    }
+    if(directory && components.count<=nodeDepth) {
         if(_nodes.count>=_nodeLimit) { _failure=@"nodeLimit";return; }
         NSData *nodeKey=AxsCacheKeeperCapacityNodeKey(components,components.count);
         NSNumber *parent=components.count ? _nodeIDs[AxsCacheKeeperCapacityNodeKey(components,components.count-1)] : @0;
         if(!parent || _nodeIDs[nodeKey]) {_failure=@"invalidMetadata";return;}
         NSNumber *identifier=@(_nodes.count+1);
         _nodeIDs[nodeKey]=identifier;
-        [_nodes addObject:[@{@"id":identifier,@"parent":parent,@"category":AxsCacheKeeperCapacityCategory(components),
+        NSString *category=[NSString stringWithUTF8String:axs_cachekeeper_resource_category_name(AxsCacheKeeperCapacityCategory(_layout,components))];
+        [_nodes addObject:[@{@"id":identifier,@"parent":parent,@"category":category,
             @"logicalBytes":@0,@"allocatedBytes":@0,@"entries":@0} mutableCopy]];
     }
-    NSUInteger depth=MIN(directory ? components.count : (components.count ? components.count-1 : 0),AxsCacheKeeperCapacityNodeDepth);
+    NSUInteger depth=MIN(directory ? components.count : (components.count ? components.count-1 : 0),nodeDepth);
     for(NSUInteger i=0;i<=depth;i++) {
         NSNumber *identifier=_nodeIDs[AxsCacheKeeperCapacityNodeKey(components,i)];
         if(!identifier) {_failure=@"invalidMetadata";return;}
@@ -178,6 +184,7 @@ static NSString *AxsCacheKeeperCapacityCategory(NSArray<NSData *> *components) {
         @"deletionAuthorization":@"notGranted",@"physicalUniqueBytes":@"notMeasured",@"reclaimableBytes":@"notMeasured"} mutableCopy];
     if (_cursor) out[@"cursorErrors"]=axs_cachekeeper_capacity_cursor_errors(_cursor.result[@"scanDiagnostics"]);
     if (_sourceFailure) out[@"sourceFailure"]=_sourceFailure;
+    if (_layout==AxsCacheKeeperResourceLayoutSwiftgramGroup) out[@"layoutProfile"]=@"swiftgramGroupStructureV1";
     return [out copy];
 }
 @end

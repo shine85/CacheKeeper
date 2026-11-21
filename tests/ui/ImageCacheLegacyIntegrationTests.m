@@ -194,6 +194,10 @@
     XCTAssertTrue([NSFileManager.defaultManager fileExistsAtPath:[owner cachePathForKey:@"clear"]]);
     dispatch_semaphore_signal(release);
     [self axs_cachekeeper_legacy_wait:^BOOL(NSDictionary *r) {return [r[@"apiCompleted"] unsignedIntegerValue]==1 && ![r[@"pending"] unsignedIntegerValue];} description:@"actual legacy disk clear"];
+    NSDictionary *effect=[[self.engine.receipt[@"operationHistory"][@"processes"] lastObject][@"actions"] lastObject][@"cacheEffect"];
+    XCTAssertEqualObjects(effect[@"result"],@"empty");XCTAssertEqualObjects(effect[@"before"][@"files"],@1);
+    XCTAssertEqualObjects(effect[@"before"][@"logicalBytes"],@(payload.length));
+    XCTAssertEqualObjects(effect[@"after"][@"files"],@0);XCTAssertEqualObjects(effect[@"physicalRelease"],@"notMeasured");
     XCTAssertNil([owner diskImageDataForKey:@"clear"]);XCTAssertEqual([owner imageFromMemoryCacheForKey:@"memory"],image);
     [owner storeImageDataToDisk:payload forKey:@"again"];[self.engine didEnterBackgroundWithTime:YES];
     [self axs_cachekeeper_legacy_wait:^BOOL(NSDictionary *r) {return [r[@"apiCompleted"] unsignedIntegerValue]==2;} description:@"verified recreated root can clear again"];

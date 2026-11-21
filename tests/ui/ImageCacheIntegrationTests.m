@@ -263,6 +263,7 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     [self axs_cachekeeper_refresh];XCTAssertEqual([self.engine.receipt[@"eligible"] unsignedIntegerValue],1u);
     SDImageCache *custom=[self axs_cachekeeper_owner:@"custom-config" config:[AxsCacheKeeperImageTestCustomConfig new]];
     XCTAssertEqualObjects([self.engine instanceDiagnosticsForIntegrationTests:custom][@"initialReason"],@"configurationClass");
+    XCTAssertEqualObjects(self.engine.receipt[@"instanceAdmission"][@"liveReasons"][@"configurationClass"],@1);
     XCTAssertEqual([self.engine.receipt[@"eligible"] unsignedIntegerValue],1u);
     [self axs_cachekeeper_state:@{@"enabled":@YES,@"mode":@"auto"}];
     [custom storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"custom-kept"];
@@ -289,6 +290,7 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     XCTAssertEqual(object_getClass(substitute.memoryCache),SDMemoryCache.class);
     XCTAssertEqual(substitute.config.memoryCacheClass,SDMemoryCache.class);XCTAssertNil(substitute.config.ioQueueAttributes);
     XCTAssertEqualObjects([self.engine instanceDiagnosticsForIntegrationTests:substitute][@"initialReason"],@"memoryBackend");
+    XCTAssertEqualObjects(self.engine.receipt[@"instanceAdmission"][@"liveReasons"][@"memoryBackend"],@2);
     [self axs_cachekeeper_state:@{@"enabled":@YES,@"mode":@"auto"}];
     XCTAssertEqual([self.engine.receipt[@"eligible"] unsignedIntegerValue],0u);
     XCTAssertEqual([self.engine.receipt[@"restricted"] unsignedIntegerValue],0u);
@@ -392,7 +394,16 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     XCTAssertEqual(actions.count,2u);
     XCTAssertNotEqualObjects(actions[0][@"ownerID"],actions[1][@"ownerID"]);
     XCTAssertEqualObjects(actions[0][@"eventID"],actions[1][@"eventID"]);
-    for (NSDictionary *action in actions) XCTAssertEqualObjects(action[@"state"],@"apiCompleted");
+    for (NSDictionary *action in actions) {
+        XCTAssertEqualObjects(action[@"state"],@"apiCompleted");
+        NSDictionary *effect=action[@"cacheEffect"];
+        XCTAssertEqualObjects(effect[@"result"],@"empty");
+        XCTAssertEqualObjects(effect[@"before"][@"files"],@1);
+        XCTAssertEqualObjects(effect[@"before"][@"logicalBytes"],@(payload.length));
+        XCTAssertEqualObjects(effect[@"after"][@"files"],@0);
+        XCTAssertEqualObjects(effect[@"after"][@"allocatedBytes"],@0);
+        XCTAssertEqualObjects(effect[@"physicalRelease"],@"notMeasured");
+    }
     XCTAssertNil([first diskImageDataForKey:@"one"]);XCTAssertNil([second diskImageDataForKey:@"two"]);
     XCTAssertEqual([first imageFromMemoryCacheForKey:@"memory"],image);
     XCTAssertEqualObjects(self.engine.receipt[@"bytesState"],@"notMeasured");
@@ -403,6 +414,7 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     NSArray *repeated=[self.engine.receipt[@"operationHistory"][@"processes"] lastObject][@"actions"];
     XCTAssertEqual(repeated.count,4u);
     XCTAssertNotEqualObjects(repeated[0][@"eventID"],repeated[2][@"eventID"]);
+    for (NSDictionary *action in [repeated subarrayWithRange:NSMakeRange(2,2)]) XCTAssertEqualObjects(action[@"cacheEffect"][@"result"],@"empty");
     XCTAssertNil([first diskImageDataForKey:@"again"]);
 }
 - (void)testUnchangedImageLoadDuringBackgroundContextReadDoesNotCancelCleanup {
@@ -505,6 +517,7 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     SDImageCacheConfig *config=[SDImageCacheConfig new];config.ioQueueAttributes=DISPATCH_QUEUE_CONCURRENT;
     SDImageCache *owner=[self axs_cachekeeper_owner:@"concurrent" config:config];
     owner.config.ioQueueAttributes=nil;[self axs_cachekeeper_refresh];
+    XCTAssertEqualObjects(self.engine.receipt[@"instanceAdmission"][@"liveReasons"][@"initialQueueAttributes"],@1);
     XCTAssertEqual([self.engine.receipt[@"eligible"] unsignedIntegerValue],0u);
     [self axs_cachekeeper_state:@{@"enabled":@YES,@"mode":@"auto"}];
     [owner storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"ordinary"];XCTAssertNotNil([owner diskImageDataForKey:@"ordinary"]);
@@ -519,6 +532,27 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     [self axs_cachekeeper_owner:@"manager" config:fileManager];
     XCTAssertEqual([self.engine.receipt[@"observed"] unsignedIntegerValue],4u);
     XCTAssertEqual([self.engine.receipt[@"eligible"] unsignedIntegerValue],2u);
+    XCTAssertEqualObjects(self.engine.receipt[@"instanceAdmission"][@"registered"],@4);
+    XCTAssertEqualObjects(self.engine.receipt[@"instanceAdmission"][@"liveReasons"][@"diskBackend"],@1);
+    XCTAssertEqualObjects(self.engine.receipt[@"instanceAdmission"][@"liveReasons"][@"customFileManager"],@1);
+}
+- (void)testReleasedSDKOwnerRemainsDiagnosableAfterReplacement {
+    __weak SDImageCache *weakOwner;
+    @autoreleasepool {
+        SDImageCache *owner=[self axs_cachekeeper_owner:@"released-owner" config:nil];
+        weakOwner=owner;dispatch_sync(owner.ioQueue,^{});
+        [self.owners removeObject:owner];owner=nil;
+    }
+    [self axs_cachekeeper_refresh];
+    XCTAssertNil(weakOwner);
+    XCTAssertEqualObjects(self.engine.receipt[@"observed"],@0);
+    XCTAssertEqualObjects(self.engine.receipt[@"instanceAdmission"][@"released"],@1);
+    [self axs_cachekeeper_refresh];
+    XCTAssertEqualObjects(self.engine.receipt[@"instanceAdmission"][@"released"],@1);
+    [self axs_cachekeeper_owner:@"replacement-owner" config:nil];
+    XCTAssertEqualObjects(self.engine.receipt[@"instanceAdmission"][@"registered"],@2);
+    XCTAssertEqualObjects(self.engine.receipt[@"instanceAdmission"][@"released"],@1);
+    XCTAssertEqualObjects(self.engine.receipt[@"eligible"],@1);
 }
 - (void)testOverlappingOwnersAreRejectedAndParentAndChildExclusionsWin {
     SDImageCache *first=[self axs_cachekeeper_owner:@"overlap" config:nil];

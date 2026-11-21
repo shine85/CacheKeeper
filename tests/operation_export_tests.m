@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import "../AxsCacheKeeperDiagnostics.h"
+#import "../AxsCacheKeeperImageEffectStatus.h"
 
 static void oxcheck(BOOL value, NSString *message) {
     if (!value) { fprintf(stderr,"FAIL: operation export: %s\n",message.UTF8String); exit(1); }
@@ -32,7 +33,16 @@ int main(int argc, char **argv) { @autoreleasepool {
         for (NSString *component in @[@"image",@"webkit"]) {
             BOOL isImage=[component isEqual:@"image"];
             NSMutableDictionary *record=[(isImage ? image : web) mutableCopy];
-            record[@"operationHistory"]=oxhistory(component,(isImage==(index==0)) ? processA : processB);
+            NSDictionary *history=oxhistory(component,(isImage==(index==0)) ? processA : processB);
+            if (isImage && index==0) {
+                record[@"instanceAdmission"]=@{@"schemaVersion":@1,@"initializerReturns":@3,@"registered":@2,@"unregistered":@1,
+                    @"released":@1,@"overflow":@NO,@"unregisteredReasons":@{@"diskMissing":@1},@"liveReasons":@{@"none":@1}};
+                NSData *data=[NSPropertyListSerialization dataWithPropertyList:history format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+                NSMutableDictionary *measured=[NSPropertyListSerialization propertyListWithData:data options:NSPropertyListMutableContainersAndLeaves format:NULL error:nil];
+                AxsCacheKeeperImageSample before={.files=2,.logicalBytes=12,.allocatedBytes=1024},after={0};
+                measured[@"processes"][0][@"actions"][0][@"cacheEffect"]=axs_cachekeeper_image_effect_record(before,after);history=measured;
+            }
+            record[@"operationHistory"]=history;
             NSString *file=[NSString stringWithFormat:@"%@.%@.plist",bundles[index],isImage ? @"imagecache" : @"webkit"];
             records[file]=record;
         }
@@ -60,6 +70,15 @@ int main(int argc, char **argv) { @autoreleasepool {
     NSDictionary *bImage=apps[1][@"imageDiskCache"][@"data"],*bWeb=apps[1][@"webKitDiskCache"][@"data"];
     NSNumber *aliasA=aImage[@"operationHistory"][@"processes"][0][@"processAlias"];
     NSNumber *aliasB=aWeb[@"operationHistory"][@"processes"][0][@"processAlias"];
+    NSDictionary *effect=aImage[@"operationHistory"][@"processes"][0][@"actions"][0][@"cacheEffect"];
+    oxcheck([effect[@"result"] isEqual:@"empty"] && [effect[@"before"][@"logicalBytes"] isEqual:@12] &&
+        [effect[@"physicalRelease"] isEqual:@"notMeasured"],@"saved image effect survives the real diagnostics JSON boundary");
+    oxcheck(!bImage[@"operationHistory"][@"processes"][0][@"actions"][0][@"cacheEffect"],@"legacy image completion is not populated from another app effect");
+    oxcheck([aImage[@"instanceAdmission"][@"initializerReturns"] isEqual:@3] &&
+        [aImage[@"instanceAdmission"][@"released"] isEqual:@1] &&
+        [aImage[@"instanceAdmission"][@"unregisteredReasons"][@"diskMissing"] isEqual:@1],
+        @"saved admission counters survive production diagnostics JSON");
+    oxcheck(!bImage[@"instanceAdmission"],@"legacy app does not inherit another app admission");
     oxcheck(aliasA && aliasB && ![aliasA isEqual:aliasB],@"distinct process instances remain distinct across the report");
     oxcheck([aliasA isEqual:bWeb[@"operationHistory"][@"processes"][0][@"processAlias"]] &&
         [aliasB isEqual:bImage[@"operationHistory"][@"processes"][0][@"processAlias"]],@"shared process relation survives cross-component and cross-app export");
@@ -81,6 +100,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     oxcheck([again[@"apps"] isEqual:apps],@"repeated saved export does not invent a new event or refresh existing records");
     NSString *firstFile=@"test.operation.a.imagecache.plist";
     NSMutableDictionary *first=records[firstFile];
+    NSDictionary *validAdmission=first[@"instanceAdmission"];
+    NSMutableDictionary *badAdmission=[validAdmission mutableCopy];badAdmission[@"path"]=@"operation-private-canary";
+    first[@"instanceAdmission"]=badAdmission;
+    oxcheck([read()[@"apps"][0][@"imageDiskCache"][@"state"] isEqual:@"invalid"],@"private admission field rejects entire saved receipt");
+    first[@"instanceAdmission"]=validAdmission;
     NSMutableDictionary *bad=[first[@"operationHistory"] mutableCopy];bad[@"rawPath"]=@"operation-private-canary";
     first[@"operationHistory"]=bad;
     oxcheck([read()[@"apps"][0][@"imageDiskCache"][@"state"] isEqual:@"invalid"],@"unknown private historical fields reject saved receipt");

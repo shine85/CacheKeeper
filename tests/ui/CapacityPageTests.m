@@ -10,6 +10,7 @@
 - (void)axs_cachekeeper_capacity_poll;
 - (void)axs_cachekeeper_capacity_background:(NSNotification *)notification;
 - (void)axs_cachekeeper_collect;
+- (void)axs_cachekeeper_capacity_text:(NSDictionary *)result;
 - (BOOL)axs_cachekeeper_capacity_write_stop:(NSString *)epoch error:(NSError **)error;
 @end
 @interface AxsCacheKeeperCapacityPageFixture : AxsCacheKeeperDiagnosticsPage
@@ -53,6 +54,28 @@
 @property(nonatomic,weak) UIViewController *expectedPage;
 @end
 @implementation AxsCacheKeeperCapacityPageTests
+- (void)testPrivateStructureDisplayDoesNotTreatParentAndChildAsReclaimable {
+    NSArray *nodes=@[@{@"id":@1,@"parent":@0,@"category":@"unknown",@"logicalBytes":@100,@"allocatedBytes":@4096,@"entries":@10},
+        @{@"id":@2,@"parent":@1,@"category":@"unknown",@"logicalBytes":@100,@"allocatedBytes":@4096,@"entries":@9},
+        @{@"id":@3,@"parent":@2,@"category":@"unknown",@"logicalBytes":@100,@"allocatedBytes":@4096,@"entries":@8},
+        @{@"id":@4,@"parent":@3,@"category":@"postbox",@"logicalBytes":@100,@"allocatedBytes":@3072,@"entries":@7},
+        @{@"id":@5,@"parent":@4,@"category":@"postboxMedia",@"logicalBytes":@80,@"allocatedBytes":@2048,@"entries":@4},
+        @{@"id":@6,@"parent":@5,@"category":@"postboxMediaCache",@"logicalBytes":@20,@"allocatedBytes":@512,@"entries":@2},
+        @{@"id":@7,@"parent":@4,@"category":@"postboxDatabase",@"logicalBytes":@20,@"allocatedBytes":@1024,@"entries":@2}];
+    NSMutableDictionary *measurement=[@{@"schemaVersion":@1,@"layoutProfile":@"swiftgramGroupStructureV1",@"state":@"complete",@"entries":@10,@"uniqueInodes":@10,@"duplicateInodes":@0,@"logicalBytes":@100,@"allocatedBytes":@4096,@"nodes":nodes,
+        @"entryLimit":@2000000,@"depthLimit":@64,@"inodeLimit":@262144,@"nodeLimit":@4096,@"deletionAuthorization":@"notGranted",@"physicalUniqueBytes":@"notMeasured",@"reclaimableBytes":@"notMeasured"} mutableCopy];
+    NSDictionary *closed=axs_cachekeeper_capacity_measurement(measurement);XCTAssertNotNil(closed);
+    if (!closed) return;
+    measurement=[closed mutableCopy];
+    NSDictionary *result=@{@"state":@"complete",@"sourceSampledAt":@100,@"startedAt":@101,@"updatedAt":@102,@"completedRoots":@1,@"totalRoots":@1,@"failedRoots":@0,@"entries":@[],
+        @"roots":@[@{@"id":@1,@"roles":@[@"group"],@"owners":@[@"app.swiftgram.ios"],@"measurement":measurement}]};
+    [self.page axs_cachekeeper_capacity_text:result];NSString *text=((UITextView *)[self.page valueForKey:@"text"]).text;
+    XCTAssertTrue([text containsString:@"Postbox 媒体"]);XCTAssertTrue([text containsString:@"Postbox 数据库"]);
+    XCTAssertTrue([text containsString:@"媒体缓存子目录"]);XCTAssertTrue([text containsString:@"父子容量不要相加"]);
+    XCTAssertTrue([text containsString:@"不授予清理"]);
+    measurement[@"nodes"]=@[nodes[0]];XCTAssertNotNil(axs_cachekeeper_capacity_measurement(measurement));[self.page axs_cachekeeper_capacity_text:result];
+    XCTAssertTrue([((UITextView *)[self.page valueForKey:@"text"]).text containsString:@"未识别出这些结构，不表示占用为 0"]);
+}
 - (void)setUp {
     [super setUp];self.folder=[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
     XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtPath:self.folder withIntermediateDirectories:YES attributes:nil error:NULL]);

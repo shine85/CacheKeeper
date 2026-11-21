@@ -1,10 +1,16 @@
 """Real subprocess checks: fail-fast, swallowed exits, timeout conflation and unsafe dependencies."""
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+
+import run_image_admission_core_tests
+import run_native_tests
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -131,6 +137,78 @@ class NativeOrchestrationTests(unittest.TestCase):
         result, summary = self.run_batch([self.suite("missing", "print('UNAVAILABLE: macOS required'); raise SystemExit(2)")])
         self.assertEqual(result.returncode, 2)
         self.assertEqual(summary["status"], "UNAVAILABLE")
+
+    def test_qq_schema_group_runs_without_macos(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "tests/run_native_tests.py"), "--group", "qq-resource-schema"],
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 9 tests", result.stdout + result.stderr)
+        self.assertNotIn("UNAVAILABLE:", result.stdout + result.stderr)
+
+    def test_diagnostic_assets_group_runs_without_device_support(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "tests/run_native_tests.py"), "--group", "runtime-diagnostic-assets"],
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 3 tests", result.stdout + result.stderr)
+        self.assertNotIn("UNAVAILABLE:", result.stdout + result.stderr)
+
+    def test_qq_code_group_executes_the_repository_probe(self):
+        if not shutil.which("node"):
+            self.skipTest("UNAVAILABLE: QQ code-window regression requires Node.js")
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "tests/run_native_tests.py"), "--group", "qq-resource-code"],
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS QQ bounded code windows", result.stdout)
+
+    def test_portable_c_groups_use_the_available_host_compiler(self):
+        zig = ROOT / "tmp/release-evidence-toolchain/zig-windows-x86_64-0.13.0/zig.exe"
+        environment = os.environ.copy()
+        if zig.is_file():
+            environment["PATH"] = str(zig.parent) + os.pathsep + environment.get("PATH", "")
+        available = any(shutil.which(name, path=environment.get("PATH")) for name in ("clang", "cc", "zig"))
+        budgets = {name: budget for name, _, budget in run_native_tests.SCRIPT_GROUPS}
+        cases = (("resource-layout", "PASS: resource-layout:"),
+                 ("image-effect", "PASS: image effect totals"),
+                 ("image-admission-core", "PASS: image admission core green"),
+                 ("scaled-representation-geometry", "PASS: fixed scaled representation dimensions"))
+        for group, evidence in cases:
+            with self.subTest(group=group):
+                result = subprocess.run(
+                    [sys.executable, str(ROOT / "tests/run_native_tests.py"), "--group", group],
+                    capture_output=True, text=True, env=environment, timeout=budgets[group] + 15)
+                self.assertNotIn("require macOS and xcrun", result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 0 if available else 2, result.stdout + result.stderr)
+                self.assertIn(evidence if available else "UNAVAILABLE:", result.stdout + result.stderr)
+
+    def test_portable_wrapper_allows_all_commands_and_summary_overhead(self):
+        # A successful compiler/test may consume its whole permitted command
+        # budget. The parent must leave time to publish that group's result.
+        required = {"resource-layout": 60 + 60,
+                    "image-effect": 2 * (60 + 30),
+                    "scaled-representation-geometry": 2 * (60 + 30)}
+        budgets = {name: budget for name, _, budget in run_native_tests.SCRIPT_GROUPS}
+        for name, command_seconds in required.items():
+            with self.subTest(group=name):
+                self.assertGreaterEqual(budgets[name], command_seconds + 15,
+                                        "wrapper can truncate a valid group before its summary")
+
+    def test_admission_uses_path_zig_without_the_local_bundle(self):
+        zig = shutil.which("zig")
+        local_zig = ROOT / "tmp/release-evidence-toolchain/zig-windows-x86_64-0.13.0/zig.exe"
+        if not zig and local_zig.is_file():
+            zig = str(local_zig)
+        if not zig:
+            self.skipTest("UNAVAILABLE: isolated PATH Zig regression requires Zig")
+        # Hide the historical bundle and other compilers from discovery only;
+        # the selected Zig still compiles and runs the actual production header.
+        with patch.object(run_image_admission_core_tests.Path, "is_file", return_value=False), \
+                patch.object(run_image_admission_core_tests.shutil, "which",
+                             side_effect=lambda name: zig if name == "zig" else None), \
+                patch.object(sys, "argv", ["run_image_admission_core_tests.py", "--green-only"]):
+            self.assertEqual(run_image_admission_core_tests.run(), 0)
 
 
 if __name__ == "__main__":

@@ -66,6 +66,41 @@ def group_exists(pid):
         return True
     except ProcessLookupError:
         return False
+    except PermissionError:
+        try:
+            result = subprocess.run(['ps', '-Ao', 'pid=,pgid=,stat=,uid='],
+                                    capture_output=True, text=True, timeout=3, check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise GroupCleanupError('cannot inspect owned command process group') from error
+        if result.returncode != 0:
+            raise GroupCleanupError('cannot inspect owned command process group')
+        try:
+            members = []
+            saw_self = False
+            uid = os.geteuid()
+            for line in result.stdout.splitlines():
+                fields = line.split()
+                if len(fields) != 4:
+                    raise ValueError('invalid ps process row')
+                member_pid, member_group, state, owner = fields
+                if not state:
+                    raise ValueError('empty process state')
+                row_pid, row_group, row_uid = int(member_pid), int(member_group), int(owner)
+                if row_pid == os.getpid():
+                    if row_uid != uid:
+                        raise ValueError('current process owner mismatch')
+                    saw_self = True
+                if row_group == pid:
+                    members.append((row_pid, state, row_uid))
+        except ValueError as error:
+            raise GroupCleanupError('invalid process listing while checking owned command group') from error
+        if not saw_self:
+            raise GroupCleanupError('process listing omitted current supervisor')
+        if not members:
+            return False
+        if any(owner != uid for _, _, owner in members):
+            raise GroupCleanupError('owned command process group contains another user')
+        return any(state[0] not in ('Z', 'X') for _, state, _ in members)
 
 
 def stop_group(process):
@@ -140,7 +175,16 @@ def run_command(command, *, timeout, check=True, capture_output=False, text=Fals
 def atomic_json(path, value):
     temporary = path.with_name(path.name + '.partial')
     temporary.write_text(json.dumps(value, indent=2), encoding='utf-8')
-    os.replace(temporary, path)
+    # Windows can briefly deny replacing a closed file. Retry the same atomic
+    # operation within a fixed budget; permanent denial keeps both receipts.
+    for attempt in range(6):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError as error:
+            if os.name != 'nt' or getattr(error, 'winerror', None) not in (5, 32, 33) or attempt == 5:
+                raise
+            time.sleep(.01 * (2 ** attempt))
 
 
 def archive_candidates(root):

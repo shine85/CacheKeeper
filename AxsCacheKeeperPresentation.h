@@ -13,8 +13,25 @@ static inline NSString *axs_cachekeeper_presentation_release_evidence(id value) 
     if ([evidence[@"postMissing"] unsignedLongLongValue]) [text appendFormat:@"；%@ 次缺少删除后对象观测",evidence[@"postMissing"]];
     if ([evidence[@"detailsOmitted"] unsignedLongLongValue]) [text appendFormat:@"；%@ 条明细因上限省略",evidence[@"detailsOmitted"]];
     if ([evidence[@"overflow"] boolValue]) [text appendString:@"；观测计数或换算超限"];
+    NSUInteger lastLink=0,stillLinked=0,unconfirmed=0;
+    for (NSDictionary *detail in evidence[@"details"]) {
+        if ([detail[@"result"] intValue]) continue;
+        if ([detail[@"identityMatch"] isEqual:@"same"] && [detail[@"linkTransition"] isEqual:@"decremented"])
+            {if ([detail[@"post"][@"nlink"] unsignedLongLongValue]) stillLinked++;else lastLink++;}
+        else unconfirmed++;
+    }
+    [text appendFormat:@"\n已记录的成功明细：最后一个链接消失 %lu 次；仍有链接 %lu 次；链接变化未确认 %lu 次。链接消失不等于物理块已经释放。",
+        (unsigned long)lastLink,(unsigned long)stillLinked,(unsigned long)unconfirmed];
     NSUInteger observed=0;for (NSDictionary *volume in evidence[@"volumes"]) if ([volume[@"state"] isEqual:@"observed"]) observed++;
     if (observed) [text appendFormat:@"；%lu 个卷有前后空闲空间观测，含其他进程影响，不能归为本次释放",(unsigned long)observed];
+    for (NSDictionary *volume in evidence[@"volumes"]) {
+        if ([volume[@"state"] isEqual:@"observed"]) {
+            [text appendFormat:@"\n卷 %@：空闲空间变化 %+lld B；可用空间变化 %+lld B；观察间隔 %.3f 秒。",
+                volume[@"volumeID"],[volume[@"freeBytesDelta"] longLongValue],[volume[@"availableBytesDelta"] longLongValue],[volume[@"elapsedSeconds"] doubleValue]];
+        } else [text appendFormat:@"\n卷 %@：%@，空间变化未取得完整观测。",volume[@"volumeID"],
+            [volume[@"state"] isEqual:@"recording"] ? @"采集中" : [volume[@"state"] isEqual:@"overflow"] ? @"数值超限" : @"观测不可用"];
+        if ([volume[@"closeErrno"] unsignedIntegerValue]) [text appendFormat:@" 观测句柄关闭失败（errno %@）。",volume[@"closeErrno"]];
+    }
     return text;
 }
 

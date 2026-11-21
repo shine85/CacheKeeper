@@ -25,6 +25,24 @@ for name,before,after,expected in [
 (ROOT/'tmp').mkdir(exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='release-receipts-',dir=ROOT/'tmp') as temp:
     output=pathlib.Path(temp)
+    # Exact display-only counterexample: same receipt and volume samples, but
+    # hide signed values. No subprocess lifecycle or CI control is changed.
+    display=(ROOT/'AxsCacheKeeperPresentation.h').read_text(encoding='utf-8')
+    anchor='if ([volume[@"state"] isEqual:@"observed"]) {'
+    if display.count(anchor)!=1:raise SystemExit('Ambiguous volume display control')
+    display_root=output/'display-red';(display_root/'tests').mkdir(parents=True)
+    for header in ('AxsCacheKeeperReceipts.h','AxsCacheKeeperReleaseEvidenceStatus.h','AxsCacheKeeperAllocation.h'):
+        shutil.copyfile(ROOT/header,display_root/header)
+    (display_root/'AxsCacheKeeperPresentation.h').write_text(display.replace(anchor,'if (NO && [volume[@"state"] isEqual:@"observed"]) {'),encoding='utf-8')
+    shutil.copyfile(ROOT/'tests/release_receipt_tests.m',display_root/'tests/release_receipt_tests.m')
+    executable=display_root/'display-red'
+    subprocess.run([compiler,'clang','-fobjc-arc','-fblocks','-Wall','-Wextra','-Werror=format',
+        '-Werror=implicit-function-declaration','-I'+str(ROOT),'-framework','Foundation',
+        str(ROOT/'AxsCacheKeeperReceipts.m'),str(display_root/'tests/release_receipt_tests.m'),'-o',str(executable)],check=True,timeout=60)
+    negative=subprocess.run([str(executable),str(display_root/'fixtures')],capture_output=True,text=True,timeout=60)
+    expected='FAIL: release receipt: actual signed volume changes and time are visible without attribution'
+    if negative.returncode!=1 or negative.stderr.strip()!=expected:raise SystemExit('Volume display RED did not reach exact assertion: '+negative.stderr)
+    print('PASS: release receipt exact volume display control')
     for name,code,expected in controls:
         copied=output/(name+'.m');copied.write_text(code,encoding='utf-8')
         executable=output/name

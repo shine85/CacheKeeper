@@ -239,6 +239,17 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
             if (shown++>=3) break;
             [text appendFormat:@"  匿名节点 %@ · %@：逻辑 %.3f GB / 分配 %.3f GB\n",node[@"id"],node[@"category"],[node[@"logicalBytes"] doubleValue]/1e9,[node[@"allocatedBytes"] doubleValue]/1e9];
         }
+        if ([measurement[@"layoutProfile"] isEqual:@"swiftgramGroupStructureV1"]) {
+            NSDictionary *labels=@{@"postboxDatabase":@"Postbox 数据库",@"postboxMedia":@"Postbox 媒体",@"postboxMediaCache":@"媒体缓存子目录",@"logs":@"日志目录"};
+            [text appendString:@"  私有资源结构分类（本轮观察，不授予清理；父子容量不要相加）：\n"];
+            NSUInteger classified=0;
+            for (NSDictionary *node in nodes) {
+                NSString *label=labels[node[@"category"]];if (!label) continue;
+                if (classified++>=12) { [text appendString:@"  其余分类节点见导出报告。\n"];break; }
+                [text appendFormat:@"  %@ · 节点 %@：逻辑 %.3f GB / 分配 %.3f GB\n",label,node[@"id"],[node[@"logicalBytes"] doubleValue]/1e9,[node[@"allocatedBytes"] doubleValue]/1e9];
+            }
+            if (!classified) [text appendString:@"  本轮未识别出这些结构，不表示占用为 0。\n"];
+        }
     }
     NSMutableArray *noRoots=[NSMutableArray new];
     for (NSDictionary *entry in result[@"entries"]) if ([entry[@"state"] isEqual:@"noRegisteredRoots"]) [noRoots addObject:entry[@"bundle"]];

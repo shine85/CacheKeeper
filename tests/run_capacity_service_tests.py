@@ -31,7 +31,7 @@ def main():
             # Each RED gets the same-version real header closure. The copied test
             # imports ../Status.h, so protocol mutations actually reach projection.
             for header in ("AxsCacheKeeperCapacityService.h", "AxsCacheKeeperCapacity.h", "AxsCacheKeeperInstallation.h",
-                           "AxsCacheKeeperFileAccess.h", "AxsCacheKeeperPolicy.h"):
+                           "AxsCacheKeeperFileAccess.h", "AxsCacheKeeperPolicy.h", "AxsCacheKeeperResourceLayout.h"):
                 shutil.copyfile(root / header, target / header)
             (target / "AxsCacheKeeperCapacityStatus.h").write_text(status if protocol is None else protocol, encoding="utf-8")
             shutil.copyfile(root / "tests/capacity_service_tests.m", target / "tests/capacity_service_tests.m")
@@ -55,6 +55,8 @@ def main():
                 print("Verified precise service behavior RED:", name)
 
         mutations = (
+            ("private-layout-owner", 'BOOL swiftGroup=[plan[@"owners"] isEqual:@[@"app.swiftgram.ios"]] && [plan[@"roles"] isEqual:@[@"group"]];',
+             'BOOL swiftGroup=NO;', "private-layout", "registered Swiftgram group gets structural profile"),
             ("cursor-closure", 'if (_root) _allCursorsClosed &= _root.openDirectoryCount==0;',
              'if (_root) _allCursorsClosed=NO;', "history",
              "history links consecutive observations with real cursor closure evidence"),
@@ -113,7 +115,7 @@ def main():
              "complete measurement cannot carry cursor errors"),
             ("complete-source-failure", 'if (!failure || [@[@"running",@"complete"] containsObject:value[@"state"]]) return nil;',
              'if (!failure) return nil;', "error-schema", "complete measurement cannot carry source failure"),
-            ("node-depth", 'if (depth>3 || ![node[@"entries"] unsignedLongLongValue]) return nil;',
+            ("node-depth", 'if (depth>axs_cachekeeper_resource_node_depth(layout) || ![node[@"entries"] unsignedLongLongValue]) return nil;',
              'if (! [node[@"entries"] unsignedLongLongValue]) return nil;', "nodes", "anonymous directory depth four is invalid"),
             ("node-sibling-totals", 'if (amount>maximum || sum>maximum-amount) return nil;',
              'if (amount>maximum) return nil;', "nodes", "direct sibling sums cannot exceed parent aggregate"),
@@ -123,7 +125,16 @@ def main():
         for name, before, after, case, failure in protocol_mutations:
             if status.count(before) != 1:
                 raise RuntimeError("ambiguous protocol RED anchor: " + name)
-            run(name, product, case, failure, status.replace(before, after))
+            mutation=status.replace(before, after)
+            if name=="node-depth":
+                # Remove all three depth protections for this one malformed-depth
+                # counterexample; category/parent/aggregate checks otherwise remain.
+                positioned='BOOL positioned=axs_cachekeeper_resource_node_valid('
+                expansion='if (depth>3) {'
+                if mutation.count(positioned)!=1 or mutation.count(expansion)!=1:
+                    raise RuntimeError('depth protection mutation anchors changed')
+                mutation=mutation.replace(positioned,'BOOL positioned=depth>3 || axs_cachekeeper_resource_node_valid(').replace(expansion,'if (NO && depth>3) {')
+            run(name, product, case, failure, mutation)
         run("green", product, "all")
     return 0
 

@@ -1,6 +1,7 @@
 #import "AxsCacheKeeperOperationInfo.h"
 #import "AxsCacheKeeperImageCacheStatus.h"
 #import "AxsCacheKeeperWebKitStatus.h"
+#import "AxsCacheKeeperImageEffectStatus.h"
 #import <dispatch/dispatch.h>
 #include <math.h>
 #include <fcntl.h>
@@ -66,7 +67,14 @@ NSDictionary *axs_cachekeeper_operation_history_validate(id value,NSString *comp
             events[event[@"eventID"]]=event;previousEvent=number;
         }
         for (NSDictionary *action in process[@"actions"]) {
-            if (!AxsCacheKeeperOperationKeys(action,@[@"actionID",@"eventID",@"ownerID",@"state",@"reason",@"timedOut",@"started",@"updated",@"bytesState"]) || !AxsCacheKeeperOperationReason(action[@"reason"])) return nil;
+            if (![action isKindOfClass:NSDictionary.class]) return nil;
+            NSArray *actionKeys=@[@"actionID",@"eventID",@"ownerID",@"state",@"reason",@"timedOut",@"started",@"updated",@"bytesState"];
+            if (action[@"cacheEffect"]) {
+                if (![value[@"component"] isEqual:@"image"] || ![action[@"state"] isEqual:@"apiCompleted"] ||
+                    !axs_cachekeeper_image_effect_projection(action[@"cacheEffect"])) return nil;
+                actionKeys=[actionKeys arrayByAddingObject:@"cacheEffect"];
+            }
+            if (!AxsCacheKeeperOperationKeys(action,actionKeys) || !AxsCacheKeeperOperationReason(action[@"reason"])) return nil;
             for (NSString *key in @[@"actionID",@"eventID",@"ownerID"]) if (!AxsCacheKeeperOperationNumber(action[key],YES) || ![action[key] unsignedIntegerValue]) return nil;
             NSDictionary *event=events[action[@"eventID"]];NSUInteger number=[action[@"actionID"] unsignedIntegerValue];
             if (!event || number<=previousAction || [actions containsObject:action[@"actionID"]] ||
@@ -102,15 +110,25 @@ NSDictionary *axs_cachekeeper_operation_history_projection(id value,NSMutableDic
 NSString *axs_cachekeeper_operation_history_summary(id value) {
     if (!value) return @"旧版回执未记录操作历史";
     NSDictionary *valid=axs_cachekeeper_operation_history_validate(value,nil);if (!valid) return @"操作历史字段无效";
-    NSUInteger completed=0,pending=0,unknown=0;
+    NSUInteger completed=0,pending=0,unknown=0;NSDictionary *latestEffect=nil;double latestTime=-1;
     for (NSDictionary *process in valid[@"processes"]) for (NSDictionary *action in process[@"actions"]) {
         if ([action[@"state"] isEqual:@"apiCompleted"]) completed++;
         else if ([action[@"state"] isEqual:@"unknown"]) unknown++;
         else if (!AxsCacheKeeperOperationTerminal(action[@"state"])) pending++;
+        if ([action[@"state"] isEqual:@"apiCompleted"] && [action[@"updated"] doubleValue]>=latestTime) {latestEffect=action[@"cacheEffect"];latestTime=[action[@"updated"] doubleValue];}
     }
-    return [NSString stringWithFormat:@"保留 %lu 个进程实例：API 完成 %lu，等待 %lu，结果未知 %lu；释放空间未测量%@%@",
+    NSString *summary=[NSString stringWithFormat:@"保留 %lu 个进程实例：API 完成 %lu，等待 %lu，结果未知 %lu；释放空间未测量%@%@",
         (unsigned long)[valid[@"processes"] count],(unsigned long)completed,(unsigned long)pending,(unsigned long)unknown,
         [valid[@"historyTruncated"] boolValue] ? @"；较早历史已截断" : @"",[valid[@"historyRejected"] boolValue] ? @"；旧历史校验被拒绝" : @""];
+    if (latestEffect) {
+        NSDictionary *before=latestEffect[@"before"],*after=latestEffect[@"after"];
+        if ([latestEffect[@"result"] isEqual:@"unverified"])
+            summary=[summary stringByAppendingFormat:@"\n最近一次已记录的单实例清理：目录结果未能完整核验（前 %@，后 %@），不能认定已清空",axs_cachekeeper_image_sample_message(before[@"state"]),axs_cachekeeper_image_sample_message(after[@"state"])];
+        else summary=[summary stringByAppendingFormat:@"\n最近一次已记录的单实例清理：%@；文件 %@→%@，逻辑字节 %@→%@，已分配字节 %@→%@。按目录项计数，非原子采样，不代表独占物理释放",
+            [latestEffect[@"result"] isEqual:@"empty"] ? @"后查为空" : @"仍有残留",before[@"files"],after[@"files"],
+            before[@"logicalBytes"],after[@"logicalBytes"],before[@"allocatedBytes"],after[@"allocatedBytes"]];
+    } else if ([valid[@"component"] isEqual:@"image"] && completed) summary=[summary stringByAppendingString:@"；已有 API 完成记录未附目录结果核验"];
+    return summary;
 }
 static NSMutableDictionary *AxsCacheKeeperOperationCurrent(NSMutableDictionary *history) {return [history[@"raw"][@"processes"] lastObject];}
 static NSMutableDictionary *AxsCacheKeeperOperationEvent(NSMutableDictionary *history,NSUInteger identifier) {
@@ -265,6 +283,18 @@ void axs_cachekeeper_operation_transition_reason(NSMutableDictionary *history,NS
             AxsCacheKeeperOperationSettle(history,[action[@"eventID"] unsignedIntegerValue]);break;
         }
         AxsCacheKeeperOperationTrim(history);
+    }
+}
+void axs_cachekeeper_operation_image_effect(NSMutableDictionary *history,NSUInteger identifier,NSDictionary *effect) {
+    NSDictionary *valid=axs_cachekeeper_image_effect_projection(effect);if (!valid) return;
+    @synchronized(history) {
+        if (![history[@"raw"][@"component"] isEqual:@"image"]) return;
+        for (NSMutableDictionary *action in AxsCacheKeeperOperationCurrent(history)[@"actions"]) {
+            if ([action[@"actionID"] unsignedIntegerValue]!=identifier) continue;
+            if (![action[@"state"] isEqual:@"submitted"] || action[@"cacheEffect"]) return;
+            action[@"cacheEffect"]=valid;
+            axs_cachekeeper_operation_transition_reason(history,identifier,@"apiCompleted",@"none",NO);return;
+        }
     }
 }
 void axs_cachekeeper_operation_event_reason(NSMutableDictionary *history,NSUInteger identifier,NSString *reason) {

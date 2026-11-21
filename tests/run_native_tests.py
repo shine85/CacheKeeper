@@ -15,9 +15,13 @@ from native_test_batch import Suite, run_suites, summary_exit_code
 import run_native_core
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+PORTABLE_C_GROUPS = frozenset(("resource-layout", "image-effect", "image-admission-core", "scaled-representation-geometry"))
 # Wrapper budgets include several compile and test processes. Individual native
 # commands retain their <=60 second timeout in their actual test runners.
 SCRIPT_GROUPS = (
+    ("runtime-diagnostic-assets", "test_runtime_diagnostic_assets.py", 60),
+    ("qq-resource-schema", "../test_qq_method_schema.py", 60),
+    ("qq-resource-code", "../test_qq_image_code.cjs", 60),
     ("presentation-red", "run_presentation_red.py", 180),
     ("configuration-red", "run_configuration_red.py", 240),
     ("diagnostics-red", "run_diagnostics_red.py", 180),
@@ -25,6 +29,13 @@ SCRIPT_GROUPS = (
     ("owner-snapshot", "test_owner_snapshot.py", 60),
     ("storage-inventory", "run_storage_inventory_tests.py", 300),
     ("capacity", "run_capacity_tests.py", 480),
+    ("resource-layout", "run_resource_layout_tests.py", 135),
+    ("image-effect", "run_image_effect_tests.py", 195),
+    ("image-effect-status", "run_image_effect_status_tests.py", 180),
+    ("image-admission-core", "run_image_admission_core_tests.py", 180),
+    ("image-admission-status", "run_image_admission_status_tests.py", 180),
+    ("scaled-representation-geometry", "run_scaled_representation_geometry_tests.py", 195),
+    ("alog-version", "run_alog_version_tests.py", 180),
     ("capacity-service", "run_capacity_service_tests.py", 480),
     ("cache-mode-behavior", "run_cache_mode_behavior_tests.py", 360),
     ("package-version", "package_version_tests.py", 60),
@@ -85,14 +96,26 @@ def _report_timeout(group: str, error: subprocess.TimeoutExpired) -> None:
 
 def run_group(name: str) -> int:
     compiler = shutil.which("xcrun")
-    if name not in {"owner-snapshot", "package-version"} and (sys.platform != "darwin" or not compiler):
+    if name not in ({"owner-snapshot", "package-version", "runtime-diagnostic-assets", "qq-resource-schema", "qq-resource-code"} | PORTABLE_C_GROUPS) and (sys.platform != "darwin" or not compiler):
         print("UNAVAILABLE: native regression tests require macOS and xcrun; no tests ran.")
         return 2
     for group, script, _ in SCRIPT_GROUPS:
         if group == name:
+            if name == "qq-resource-code":
+                node = shutil.which("node")
+                if not node:
+                    print("UNAVAILABLE: QQ code-window regression requires Node.js; no tests ran.")
+                    return 2
+                return subprocess.run([node, str(ROOT / "tests" / script)], cwd=ROOT, timeout=60).returncode
             # Preserve unittest/script argv semantics while keeping the timeout
             # boundary visible to the parent batch without patching subprocess.
             sys.argv = [str(ROOT / "tests" / script)]
+            if name in PORTABLE_C_GROUPS and name != "image-admission-core":
+                host_compiler = shutil.which("clang") or shutil.which("cc") or shutil.which("zig")
+                if host_compiler:
+                    sys.argv.extend(["--cc", host_compiler])
+            if name == "qq-resource-schema":
+                sys.path.insert(0, str(ROOT))
             runpy.run_path(sys.argv[0], run_name="__main__")
             return 0
     for group, function, _ in CORE_GROUPS:

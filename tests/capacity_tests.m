@@ -458,9 +458,43 @@ static void AxsCacheKeeperCapacityInvalidRoot(void) {
             "invalid root never exports seeded errno as observed cursor IO");
     }
 }
+static void AxsCacheKeeperCapacityPrivateLayout(NSString *base) {
+    NSString *path=AxsCacheKeeperCapacityDirectory(base,@"private-layout");
+    for (NSString *relative in @[@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/media/cache",@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/db",@"PRIVATE_OUTER/logs",@"other/deep/unclassified/branch/ignored"])
+        AxsCacheKeeperCapacityDirectory(path,relative);
+    AxsCacheKeeperCapacityFile([path stringByAppendingPathComponent:@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/media/cache/opaque"],17);
+    AxsCacheKeeperCapacityFile([path stringByAppendingPathComponent:@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/db/opaque"],31);
+    struct stat identity=AxsCacheKeeperCapacityStat(path);
+    AxsCacheKeeperCapacityRoot *root=[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:[NSURL fileURLWithPath:path] expectedDevice:identity.st_dev expectedInode:identity.st_ino layout:AxsCacheKeeperResourceLayoutSwiftgramGroup];
+    AxsCacheKeeperCapacityFinish(root,1);
+    NSMutableDictionary *categories=[NSMutableDictionary new];
+    for (NSDictionary *node in root.result[@"nodes"]) categories[node[@"category"]]=node;
+    AxsCacheKeeperCapacityCheck([root.state isEqual:@"complete"] && [root.result[@"logicalBytes"] isEqual:@48],"private classification preserves whole-root totals");
+    AxsCacheKeeperCapacityCheck([categories[@"postboxDatabase"][@"logicalBytes"] isEqual:@31] && [categories[@"postboxMedia"][@"logicalBytes"] isEqual:@17] && [categories[@"postboxMediaCache"][@"logicalBytes"] isEqual:@17],"private media database and cache use actual independent fixture sizes");
+    AxsCacheKeeperCapacityCheck([root.result[@"layoutProfile"] isEqual:@"swiftgramGroupStructureV1"] && [root.result[@"deletionAuthorization"] isEqual:@"notGranted"],"private structural profile never grants cleanup");
+    NSData *json=[NSJSONSerialization dataWithJSONObject:root.result options:0 error:nil];
+    NSString *text=[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
+    AxsCacheKeeperCapacityCheck([text rangeOfString:@"PRIVATE_"].location==NSNotFound && [text rangeOfString:@"opaque"].location==NSNotFound,"private layout never exports account or file names");
+    AxsCacheKeeperCapacityRoot *standard=[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:[NSURL fileURLWithPath:path]];
+    AxsCacheKeeperCapacityFinish(standard,1);AxsCacheKeeperCapacityClosedResult(standard.result);
+    AxsCacheKeeperCapacityCheck([standard.result[@"logicalBytes"] isEqual:root.result[@"logicalBytes"]] && [standard.result[@"allocatedBytes"] isEqual:root.result[@"allocatedBytes"]],"classification does not change measured allocation");
+    NSUInteger previousNodes=[root.result[@"nodes"] count];
+    for (NSUInteger i=0;i<65;i++) {
+        NSString *shard=AxsCacheKeeperCapacityDirectory(path,[NSString stringWithFormat:@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/media/PRIVATE_SHARD_%lu/deeper",(unsigned long)i]);
+        AxsCacheKeeperCapacityFile([shard stringByAppendingPathComponent:@"opaque"],1);
+    }
+    // A familiar marker is still only a regular file, not a directory node.
+    AxsCacheKeeperCapacityFile([path stringByAppendingPathComponent:@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/logs"],3);
+    identity=AxsCacheKeeperCapacityStat(path);
+    AxsCacheKeeperCapacityRoot *shards=[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:[NSURL fileURLWithPath:path] expectedDevice:identity.st_dev expectedInode:identity.st_ino layout:AxsCacheKeeperResourceLayoutSwiftgramGroup];
+    AxsCacheKeeperCapacityFinish(shards,1);
+    AxsCacheKeeperCapacityCheck([shards.state isEqual:@"complete"] && [shards.result[@"nodes"] count]==previousNodes && [shards.result[@"logicalBytes"] isEqual:@116],"unknown media shards and same-named files add bytes without consuming classification nodes");
+}
 int main(int argc,const char **argv) { @autoreleasepool {
     AxsCacheKeeperCapacityCheck(argc==2 || argc==3,"unique fixture root and optional case");
     NSString *base=[NSString stringWithUTF8String:argv[1]],*selection=argc==3 ? [NSString stringWithUTF8String:argv[2]] : @"all";
+    if ([selection isEqual:@"all"] || [selection isEqual:@"private-layout"]) AxsCacheKeeperCapacityPrivateLayout(base);
+    if ([selection isEqual:@"private-layout"]) return 0;
     if([selection isEqual:@"all"] || [selection isEqual:@"invalid-root"]) AxsCacheKeeperCapacityInvalidRoot();
     if([selection isEqual:@"invalid-root"]) return 0;
     if([selection isEqual:@"all"] || [selection isEqual:@"cursor-errors"]) AxsCacheKeeperCapacityErrors(base);

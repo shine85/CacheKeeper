@@ -92,7 +92,7 @@ static NSString * const AxsCacheKeeperUserLogRuleRevision = @"1";
 @end
 
 static NSMutableDictionary *AxsCacheKeeperBuiltinRules(void) {
-    AxsCacheKeeperAppRule *rule=[[AxsCacheKeeperALogRule alloc] initWithRuleID:@"douyin-alog" revision:@"2" appVersion:@"41.1.0"
+    AxsCacheKeeperAppRule *rule=[[AxsCacheKeeperALogRule alloc] initWithRuleID:@"douyin-alog" revision:@"3" appVersion:@"41.1.0"
         cleanablePaths:@[@"Library/alog"] retentionPaths:@[] dependencyPaths:@[]];
     NSMutableDictionary *rules=[@{@"com.ss.iphone.ugc.Aweme":[NSMutableArray arrayWithObject:rule]} mutableCopy];
     NSArray *retentions=@[
@@ -237,6 +237,17 @@ static BOOL AxsCacheKeeperRuleApplies(AxsCacheKeeperAppRule *rule, NSString *ver
             basis:AxsCacheKeeperCleanupBasisAppRule ruleID:rule.ruleID ruleRevision:rule.ruleRevision
             scopeRelativePath:cleanable reason:@"APP 专属规则：可清资源" dependencyPaths:rule.dependencyPaths];
     }
+    // ALog version boundary: reserve known scope before generic fallback.
+    // Check after all applicable rules so an older registration cannot shadow a
+    // later supported version. An upgrade never broadens the log-file contract.
+    for (AxsCacheKeeperAppRule *rule in rules) {
+        if (![rule isKindOfClass:AxsCacheKeeperALogRule.class] || AxsCacheKeeperRuleApplies(rule,version)) continue;
+        NSString *scope=AxsCacheKeeperMatchedScope(relativePath,rule.cleanablePaths);
+        if (scope) return [[AxsCacheKeeperCleanupDecision alloc] initWithDisposition:AxsCacheKeeperCleanupUnresolved
+            basis:AxsCacheKeeperCleanupBasisNone ruleID:rule.ruleID ruleRevision:rule.ruleRevision
+            scopeRelativePath:scope reason:@"当前 APP 版本未验证此专属日志范围，保留且不回退到通用日志规则" dependencyPaths:@[]];
+    }
+    // End ALog version boundary.
     NSString *parent = relativePath.stringByDeletingLastPathComponent;
     if (parent.length && axs_cachekeeper_retention_path(parent))
         return [[AxsCacheKeeperCleanupDecision alloc] initWithDisposition:AxsCacheKeeperCleanupKeep

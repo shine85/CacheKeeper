@@ -3,6 +3,18 @@
 #import "AxsCacheKeeperInstallation.h"
 #import "AxsCacheKeeperFileAccess.h"
 #include <math.h>
+#include "AxsCacheKeeperResourceLayout.h"
+
+static inline AxsCacheKeeperResourceCategory axs_cachekeeper_capacity_category(id value) {
+    if (![value isKindOfClass:NSString.class]) return AxsCacheKeeperResourceCategoryCount;
+    const char *text=[value UTF8String];if (!text) return AxsCacheKeeperResourceCategoryCount;
+    size_t length=[value lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    for (int i=0;i<AxsCacheKeeperResourceCategoryCount;i++) {
+        const char *name=axs_cachekeeper_resource_category_name((AxsCacheKeeperResourceCategory)i);
+        if (length==strlen(name) && !memcmp(text,name,length)) return (AxsCacheKeeperResourceCategory)i;
+    }
+    return AxsCacheKeeperResourceCategoryCount;
+}
 
 // Closed, path-free saved observations; one spelling at both schema levels.
 static inline BOOL axs_cachekeeper_capacity_number(id value) {
@@ -132,6 +144,11 @@ static inline BOOL axs_cachekeeper_capacity_strings(id value,BOOL bundles) {
 }
 static inline NSDictionary *axs_cachekeeper_capacity_measurement(id value) {
     if (![value isKindOfClass:NSDictionary.class]) return nil;
+    AxsCacheKeeperResourceLayout layout=AxsCacheKeeperResourceLayoutPlatform;
+    if (value[@"layoutProfile"]) {
+        if (![value[@"layoutProfile"] isEqual:@"swiftgramGroupStructureV1"]) return nil;
+        layout=AxsCacheKeeperResourceLayoutSwiftgramGroup;
+    }
     NSArray *numbers=@[@"schemaVersion",@"logicalBytes",@"allocatedBytes",@"entries",@"uniqueInodes",@"duplicateInodes",@"entryLimit",@"depthLimit",@"inodeLimit",@"nodeLimit"];
     NSMutableDictionary *out=[NSMutableDictionary new];
     for (NSString *key in numbers) {if (!axs_cachekeeper_capacity_number(value[key])) return nil;out[key]=value[key];}
@@ -154,15 +171,17 @@ static inline NSDictionary *axs_cachekeeper_capacity_measurement(id value) {
         if ([node[@"id"] unsignedLongLongValue]==0 || [ids containsObject:node[@"id"]] ||
             (nodes.count==0 ? ![node[@"id"] isEqual:@1] || ![node[@"parent"] isEqual:@0] : ![node[@"parent"] unsignedLongLongValue]) ||
             ([node[@"parent"] unsignedLongLongValue] && ![ids containsObject:node[@"parent"]]) ||
-            ![@[@"unknown",@"Documents",@"Library",@"Caches",@"Application Support",@"tmp"] containsObject:node[@"category"]] ||
+            axs_cachekeeper_capacity_category(node[@"category"])==AxsCacheKeeperResourceCategoryCount ||
             (nodes.count==0 && ![node[@"category"] isEqual:@"unknown"])) return nil;
         NSDictionary *parent=byId[node[@"parent"]];NSUInteger depth=parent ? [depths[node[@"parent"]] unsignedIntegerValue]+1 : 0;
-        if (depth>3 || ![node[@"entries"] unsignedLongLongValue]) return nil;
+        if (depth>axs_cachekeeper_resource_node_depth(layout) || ![node[@"entries"] unsignedLongLongValue]) return nil;
         NSString *category=node[@"category"];
-        BOOL positioned=[category isEqual:@"unknown"] ||
-            (depth==1 && [@[@"Documents",@"Library",@"tmp"] containsObject:category]) ||
-            (depth==2 && [parent[@"category"] isEqual:@"Library"] && [@[@"Caches",@"Application Support"] containsObject:category]);
+        BOOL positioned=axs_cachekeeper_resource_node_valid(layout,axs_cachekeeper_capacity_category(category),axs_cachekeeper_capacity_category(parent[@"category"]),depth);
         if (!positioned) return nil;
+        if (depth>3) {
+            NSDictionary *postbox=depth==4 ? parent : byId[parent[@"parent"]];
+            if (![postbox[@"category"] isEqual:@"postbox"]) return nil;
+        }
         if (parent) {
             NSMutableDictionary *totals=childTotals[node[@"parent"]];if (!totals) childTotals[node[@"parent"]]=totals=[NSMutableDictionary new];
             for (NSString *key in @[@"logicalBytes",@"allocatedBytes",@"entries"]) {
@@ -192,6 +211,7 @@ static inline NSDictionary *axs_cachekeeper_capacity_measurement(id value) {
         if (!failure || [@[@"running",@"complete"] containsObject:value[@"state"]]) return nil;
         out[@"sourceFailure"]=failure;
     }
+    if (value[@"layoutProfile"]) out[@"layoutProfile"]=value[@"layoutProfile"];
     out[@"nodes"]=nodes;return [out copy];
 }
 static inline NSDictionary *axs_cachekeeper_capacity_projection(id value) {
@@ -250,6 +270,7 @@ static inline NSDictionary *axs_cachekeeper_capacity_projection(id value) {
             !axs_cachekeeper_capacity_strings(root[@"owners"],YES) || ![root[@"owners"] count] || [root[@"owners"] containsObject:@"com.tencent.qy.xin"] ||
             !axs_cachekeeper_capacity_strings(root[@"roles"],NO) || ![root[@"roles"] count]) return invalid;
         NSDictionary *measurement=axs_cachekeeper_capacity_measurement(root[@"measurement"]);if (!measurement) return invalid;
+        if (measurement[@"layoutProfile"] && (![root[@"owners"] isEqual:@[@"app.swiftgram.ios"]] || ![root[@"roles"] isEqual:@[@"group"]])) return invalid;
         if (!running && [measurement[@"state"] isEqual:@"running"]) return invalid;
         nodes+=[measurement[@"nodes"] count];if (nodes>65536) return invalid;
         if ([measurement[@"state"] isEqual:@"complete"]) completed++;
