@@ -300,11 +300,26 @@ int main(int argc, const char *argv[]) {
             @"removed":@3, @"bytes":@1048576, @"failed":@1});
         require([summary containsString:@"1 个"] && [summary containsString:@"3 个"] && [summary containsString:@"限写失败"], @"检测与清理结果同时可见");
         NSString *lastSummary = axs_cachekeeper_summary(nil, @{@"removed":@5103, @"bytes":@0, @"lastRemoved":@294, @"lastBytes":@66846720});
-        require([lastSummary containsString:@"上次清理：63.75 MB"] && [lastSummary rangeOfString:@"上次清理："].location > [lastSummary rangeOfString:@"累计清理"].location, @"上次清理行紧跟累计清理并显示上轮 MB 数");
+        require([lastSummary containsString:@"最近一轮：未记录"] && [lastSummary containsString:@"最近实际清理：未记录"] &&
+            [lastSummary containsString:@"累计清理 5103 个"] && ![lastSummary containsString:@"63.75 MB"], @"旧末轮计数缺少轮次来源时不能冒充有效清理历史");
         NSString *noLastSummary = axs_cachekeeper_summary(nil, @{@"removed":@5103, @"bytes":@0});
-        require(![noLastSummary containsString:@"上次清理"], @"未记录上轮时不显示上次清理行");
+        require([noLastSummary containsString:@"最近一轮：未记录"] && [noLastSummary containsString:@"最近实际清理：未记录"], @"缺少历史时两个轮次来源明确未记录");
         NSString *zeroLastSummary = axs_cachekeeper_summary(nil, @{@"removed":@5103, @"bytes":@0, @"lastRemoved":@0, @"lastBytes":@0});
-        require([zeroLastSummary containsString:@"上次清理：0.00 MB"], @"上轮零删除时显示 0.00 MB 而非缺行");
+        require([zeroLastSummary containsString:@"最近一轮：未记录"] && [zeroLastSummary containsString:@"最近实际清理：未记录"], @"旧零计数同样不能制造已完成空轮");
+        NSDictionary *effectiveRound=@{@"roundID":@"summary-effective",@"finishedAt":[NSDate dateWithTimeIntervalSince1970:100],
+            @"removed":@294,@"bytes":@66846720,@"failed":@0,@"endReason":@1,@"coverageComplete":@YES,
+            @"context":@{@"state":@"notRecorded"},@"releaseEvidence":@{@"state":@"notRecorded"}};
+        NSDictionary *emptyRound=@{@"roundID":@"summary-empty",@"finishedAt":[NSDate dateWithTimeIntervalSince1970:200],
+            @"removed":@0,@"bytes":@0,@"failed":@0,@"endReason":@1,@"coverageComplete":@YES,
+            @"context":@{@"state":@"notRecorded"},@"releaseEvidence":@{@"state":@"notRecorded"}};
+        NSDictionary *summaryHistory=@{@"removed":@5103,@"bytes":@0,@"lastRemoved":@0,@"lastBytes":@0,
+            @"cleanupContext":@{@"state":@"notRecorded"},@"lastEffectiveCleanup":effectiveRound,
+            @"cleanupHistory":@{@"schemaVersion":@1,@"state":@"recorded",@"capacity":@16,@"truncatedCount":@0,@"rounds":@[effectiveRound,emptyRound]}};
+        NSString *historySummary=axs_cachekeeper_summary(nil,summaryHistory);
+        NSArray *historyLines=[historySummary componentsSeparatedByString:@"\n"];
+        require(historyLines.count==3 && [historyLines[1] hasPrefix:@"最近一轮："] && [historyLines[1] containsString:@"0 项 / 0.00 MB"] &&
+            [historyLines[2] hasPrefix:@"最近实际清理："] && [historyLines[2] containsString:@"294 项 / 63.75 MB"],
+            @"空轮显示零而有效历史紧跟累计保留准确 MB，不借用旧末轮计数");
         NSTimeZone *previousZone=NSTimeZone.defaultTimeZone;
         [NSTimeZone setDefaultTimeZone:[NSTimeZone timeZoneWithName:@"Asia/Shanghai"]];
         NSDate *epoch=[NSDate dateWithTimeIntervalSince1970:0];
@@ -1744,6 +1759,21 @@ int main(int argc, const char *argv[]) {
         require([fm createDirectoryAtPath:receiptsFolder withIntermediateDirectories:YES attributes:nil error:nil], @"回执夹具目录");
         [AxsCacheKeeperReceipts resetForTesting];
         [AxsCacheKeeperReceipts configureWithStatusFolder:receiptsFolder];
+        NSString *summaryBundle=@"test.receipts.summary",*summaryPath=[receiptsFolder stringByAppendingPathComponent:@"test.receipts.summary.auto.plist"];
+        require([AxsCacheKeeperReceipts submitRoundForBundle:summaryBundle roundID:@"summary-effective" removed:294 bytes:66846720 endReason:1
+            phase:@"complete" message:@"" failed:0 effectivePaths:@[] discoveredPaths:nil directories:nil round:@{@"removed":@294,@"bytes":@66846720} coverageComplete:YES],@"真实回执保存有效清理轮");
+        require([AxsCacheKeeperReceipts submitRoundForBundle:summaryBundle roundID:@"summary-empty" removed:0 bytes:0 endReason:1
+            phase:@"complete" message:@"" failed:0 effectivePaths:@[] discoveredPaths:nil directories:nil round:@{@"removed":@0,@"bytes":@0} coverageComplete:YES],@"真实回执保存独立空轮");
+        NSDictionary *savedSummary=[NSDictionary dictionaryWithContentsOfFile:summaryPath];
+        NSString *savedText=axs_cachekeeper_summary(nil,savedSummary);
+        require([savedText containsString:@"0 项 / 0.00 MB"] && [savedText containsString:@"294 项 / 63.75 MB"] &&
+            [savedSummary[@"removed"] isEqual:@294] && [savedSummary[@"bytes"] isEqual:@66846720] &&
+            [savedSummary[@"lastBytes"] isEqual:@0],@"真实空轮不抹掉有效历史且不借用末轮字节");
+        require([AxsCacheKeeperReceipts updateStatusForBundle:summaryBundle phase:@"waiting" message:@"" failed:0
+            effectivePaths:@[] discoveredPaths:nil directories:nil],@"真实状态刷新成功");
+        NSDictionary *refreshedSummary=[NSDictionary dictionaryWithContentsOfFile:summaryPath];
+        require([refreshedSummary[@"cleanupHistory"] isEqual:savedSummary[@"cleanupHistory"]] &&
+            [refreshedSummary[@"lastEffectiveCleanup"] isEqual:savedSummary[@"lastEffectiveCleanup"]],@"真实状态刷新冻结两种历史来源");
         NSString *receiptBundle = @"test.receipts.app";
         NSString *receiptPath = [[receiptsFolder stringByAppendingPathComponent:receiptBundle] stringByAppendingString:@".auto.plist"];
         // 1. 同轮累计与幂等：r1 100→150，重复提交 150 不重复计入。
