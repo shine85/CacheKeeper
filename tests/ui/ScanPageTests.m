@@ -105,7 +105,7 @@
     NSDictionary *report=@{@"removed":@3,@"bytes":@36,@"failed":@0,@"updated":[NSDate dateWithTimeIntervalSince1970:1700001000],
         @"confirmedRoundID":@"saved-round",@"cleanupContext":context,@"lastEffectiveCleanup":round,
         @"cleanupHistory":@{@"schemaVersion":@1,@"state":@"recorded",@"capacity":@16,@"truncatedCount":@0,@"rounds":@[round]}};
-    XCTAssertTrue([report writeToFile:[self.page file:[NSString stringWithFormat:@"Status/%@.auto.plist",self.page.bundle]] atomically:YES]);
+    XCTAssertTrue(([report writeToFile:[self.page file:[NSString stringWithFormat:@"Status/%@.auto.plist",self.page.bundle]] atomically:YES]));
 }
 - (void)axs_cachekeeper_assertHistoryWithHint:(NSString *)hint {
     self.page.displayCache=nil;
@@ -139,7 +139,7 @@
 }
 - (void)testEnabledAppWithoutDirectoriesKeepsHistoricalSummaryAndActionStatus {
     [self axs_cachekeeper_saveCleanupHistory];self.page.actionStatus=@"操作状态：配置已保存";
-    XCTAssertTrue([@{self.page.bundle:@{@"enabled":@YES,@"autoDiscover":@NO}} writeToFile:[self.page file:@"appEnabled.plist"] atomically:YES]);
+    XCTAssertTrue(([@{self.page.bundle:@{@"enabled":@YES,@"autoDiscover":@NO}} writeToFile:[self.page file:@"appEnabled.plist"] atomically:YES]));
     XCTAssertTrue([@{} writeToFile:[self.page file:@"directories.plist"] atomically:YES]);
     NSData *before=[NSData dataWithContentsOfFile:[self.page file:@"appEnabled.plist"]];
     [self axs_cachekeeper_assertHistoryWithHint:@"总开关已开启；未选择文件清理目录，网络缓存按独立选项执行"];
