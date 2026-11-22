@@ -188,6 +188,7 @@ class NativeOrchestrationTests(unittest.TestCase):
         # budget. The parent must leave time to publish that group's result.
         required = {"resource-layout": 60 + 60,
                     "image-effect": 2 * (60 + 30),
+                    "image-source-observation": 60 + 4 * (60 + 30),
                     "scaled-representation-geometry": 2 * (60 + 30)}
         budgets = {name: budget for name, _, budget in run_native_tests.SCRIPT_GROUPS}
         for name, command_seconds in required.items():

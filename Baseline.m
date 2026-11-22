@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static AxsCacheKeeperReleaseStat axs_cachekeeper_release_stat(struct stat info, int result, int code) {
+static AxsCacheKeeperReleaseStat axs_cachekeeper_release_stat_from_filesystem(struct stat info, int result, int code) {
     AxsCacheKeeperReleaseStat value={0};
     value.state=result ? AxsCacheKeeperReleaseUnavailable : AxsCacheKeeperReleaseObserved;
     value.error=result ? code : 0;
@@ -565,7 +565,7 @@ static AxsCacheKeeperReleaseStat axs_cachekeeper_release_stat(struct stat info, 
             if (self.releaseEvidenceObserver) {
                 struct stat post={0};int postResult=fstat(file,&post);int postError=postResult ? errno : 0;
                 self.releaseEvidenceObserver(AxsCacheKeeperReleaseOrdinary,result,code,
-                    axs_cachekeeper_release_stat(current,0,0),axs_cachekeeper_release_stat(post,postResult,postError));
+                    axs_cachekeeper_release_stat_from_filesystem(current,0,0),axs_cachekeeper_release_stat_from_filesystem(post,postResult,postError));
                 errno=syscallError;
             }
             removed=result==0;
@@ -867,7 +867,7 @@ static BOOL axs_cachekeeper_hardlink_stat_matches(struct stat current, struct st
                     if (sweep.releaseEvidenceObserver) {
                         struct stat post={0};int postResult=fstat(file,&post);int postError=postResult ? errno : 0;
                         sweep.releaseEvidenceObserver(AxsCacheKeeperReleaseHardlink,result,unlinkError,
-                            axs_cachekeeper_release_stat(evidencePre,0,0),axs_cachekeeper_release_stat(post,postResult,postError));
+                            axs_cachekeeper_release_stat_from_filesystem(evidencePre,0,0),axs_cachekeeper_release_stat_from_filesystem(post,postResult,postError));
                     }
                     errno=unlinkError;[self axs_cachekeeper_failed_from:cursor member:member code:unlinkError stage:@"hardlink-unlinkat"];return;
                 }
@@ -877,7 +877,7 @@ static BOOL axs_cachekeeper_hardlink_stat_matches(struct stat current, struct st
                 [sweep axs_cachekeeper_did_remove:member.path parentFD:parentFD];
                 int postResult=fstat(file,&current);int postError=postResult ? errno : 0;int savedPostError=errno;
                 if (sweep.releaseEvidenceObserver) sweep.releaseEvidenceObserver(AxsCacheKeeperReleaseHardlink,0,0,
-                    axs_cachekeeper_release_stat(evidencePre,0,0),axs_cachekeeper_release_stat(current,postResult,postError));
+                    axs_cachekeeper_release_stat_from_filesystem(evidencePre,0,0),axs_cachekeeper_release_stat_from_filesystem(current,postResult,postError));
                 errno=savedPostError;
                 if (postResult) {[self axs_cachekeeper_failed_from:cursor+1 member:member code:postError stage:@"hardlink-post-unlink-stat"];return;}
                 if (!axs_cachekeeper_hardlink_stat_matches(current,expected,YES)) {

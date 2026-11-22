@@ -41,6 +41,7 @@ static NSDictionary *axs_cachekeeper_inventory_sdk(id wrapper,BOOL image) {
     for (NSString *key in image ? @[@"observed",@"eligible",@"restricted",@"writesBlocked",@"queued",@"submitted",@"apiCompleted",@"skipped",@"pending"] : @[@"persistentStores",@"nonPersistentStores",@"submitted",@"completed",@"pending"])
         if (axs_cachekeeper_inventory_count(projected[key])) out[key]=projected[key];
     for (NSString *key in @[@"runtimeInfo",@"discoveryCheck",@"runtimeSourceObservation",@"sdkMethodsRejectionObservation",@"installedRuntimeRelation",@"installationCheck",@"reason"]) if (projected[key]) out[key]=projected[key];
+    if (image && !out[@"sdkMethodsRejectionObservation"]) out[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
     out[@"bytesState"]=@"notMeasured";return [out copy];
 }
 // A pure view over this report's raw reads. Version and observation axes stay independent.
@@ -78,6 +79,7 @@ NSDictionary *axs_cachekeeper_capabilities(NSDictionary *raw,NSString *panelVers
                 if (data[field]) entry[field]=data[field];
             if ([key isEqual:@"network"]) entry[@"actionState"]=data[@"policyObservation"] ?: ([data[@"prevent"] boolValue] ? ([data[@"applied"] boolValue] ? @"restrictionReported" : @"restrictionNotApplied") : ([data[@"applied"] boolValue] ? @"unrestrictedOrRestoreReported" : @"restorePending"));
             if ([key isEqual:@"image"] || [key isEqual:@"webKit"]) entry[@"actionState"]=data[@"state"];
+            if ([key isEqual:@"image"] && !entry[@"sdkMethodsRejectionObservation"]) entry[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
             if ([key isEqual:@"standardDirectories"]) entry[@"resourceContract"]=@"standardDirectoryRulesOnly";
         }
         out[key]=entry;

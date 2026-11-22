@@ -49,7 +49,7 @@ SCRIPT_GROUPS = (
     ("image-legacy-source", "run_image_legacy_source_tests.py", 180),
     ("executable-image", "run_executable_image_tests.py", 180),
     ("image-runtime-source", "run_image_runtime_source_tests.py", 240),
-    ("image-source-observation", "run_image_source_observation_tests.py", 180),
+    ("image-source-observation", "run_image_source_observation_tests.py", 435),
     ("image-resource-identity", "run_image_resource_identity_tests.py", 180),
     ("inspection-export", "run_inspection_export_tests.py", 180),
     ("scan-diagnostics", "run_scan_diagnostics_tests.py", 180),

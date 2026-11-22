@@ -111,7 +111,11 @@ static inline NSDictionary *axs_cachekeeper_image_runtime_observation_projection
 // Diagnostic metadata reads enumerate own methods: they never ask the resolver for a Method.
 static inline NSDictionary *axs_cachekeeper_image_observation_own_methods(Class owner,NSArray *records) {
     unsigned count=0;Method *methods=class_copyMethodList(owner,&count);NSMutableDictionary *snapshot=[NSMutableDictionary new];
-    NSMutableSet *selected=[NSMutableSet new];for (NSDictionary *record in records) if (record[@"class"]==owner && ![record[@"absent"] boolValue]) [selected addObject:record[@"selector"]];
+    NSMutableSet *selected=[NSMutableSet new];for (NSDictionary *record in records) {
+        // Class metadata must not acquire an id retain that initializes it before the raw lookup.
+        Class recordOwner=record[@"class"];
+        if (recordOwner==owner && ![record[@"absent"] boolValue]) [selected addObject:record[@"selector"]];
+    }
     for (unsigned index=0;index<count;index++) {
         NSString *selector=NSStringFromSelector(method_getName(methods[index]));if (![selected containsObject:selector]) continue;
         if (snapshot[selector]) continue;
@@ -146,14 +150,14 @@ static inline NSDictionary *AxsCacheKeeperImageMethodsCheck(NSArray *methods,NSU
             if (!snapshot) {snapshot=axs_cachekeeper_image_observation_own_methods(owner,methods);ownerSnapshots[key]=snapshot;}
             beforeRow=snapshot[entry[@"selector"]];
         }
-        Method before=[beforeRow[@"method"] pointerValue];const void *beforeIMP=[beforeRow[@"implementation"] pointerValue];
+        Method before=(Method)[beforeRow[@"method"] pointerValue];const void *beforeIMP=[beforeRow[@"implementation"] pointerValue];
         // This is the gate's original, single lookup. Canonical relations below never grant admission.
         IMP actual=class_getMethodImplementation(owner,selector);
         if ((const void *)actual!=stored) {
             result[@"cause"]=@"implementation";result[@"methodIndex"]=@(index+1);result[@"relationState"]=captureRelations ? @"collected" : @"notCollected";
             if (!captureRelations) return [result copy];
             NSDictionary *afterRow=axs_cachekeeper_image_observation_own_methods(owner,methods)[entry[@"selector"]];
-            Method after=[afterRow[@"method"] pointerValue];const void *afterIMP=[afterRow[@"implementation"] pointerValue];
+            Method after=(Method)[afterRow[@"method"] pointerValue];const void *afterIMP=[afterRow[@"implementation"] pointerValue];
             result[@"methodPresentBefore"]=before ? @YES : @NO;result[@"methodPresentAfter"]=after ? @YES : @NO;
             result[@"methodIdentityStable"]=(before && after && before==after) ? @YES : @NO;
             result[@"methodIMPStable"]=(before && after && beforeIMP==afterIMP) ? @YES : @NO;

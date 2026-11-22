@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import "ImageObservationMethodRecord.h"
 static unsigned ckgateMethodLists;
 static Method *ckgateCopyMethodList(Class owner,unsigned *count) {ckgateMethodLists++;return class_copyMethodList(owner,count);}
 #define class_copyMethodList ckgateCopyMethodList
@@ -63,13 +64,14 @@ static id ckchanged(id owner,SEL selector) {(void)selector;return owner;}
 - (id)axs_cachekeeper_value {ckgateBusiness++;return self;}
 @end
 static NSMutableArray *ckgateRecords(Class owner,SEL selector,IMP expected) {
-    NSDictionary *record=@{@"class":owner,@"selector":NSStringFromSelector(selector),@"implementation":[NSValue valueWithPointer:(const void *)expected]};
+    NSDictionary *record=AxsCacheKeeperObservationMethodRecord(owner,selector,expected);
     NSMutableArray *records=[NSMutableArray new];for (NSUInteger i=0;i<25;i++) [records addObject:record];return records;
 }
 static void ckgate(void) {
     Class owner=objc_getClass("AxsCacheKeeperGateCanary");SEL selector=sel_registerName("axs_cachekeeper_value");
     Method method=ckown(owner,selector);ckgateBefore=method_getImplementation(method);
     NSMutableArray *records=ckgateRecords(owner,selector,ckgateBefore);
+    ckcheck(!ckgateInitialized,"fixture leaves gate class uninitialized before lookup");
     NSDictionary *result=AxsCacheKeeperImageMethodsCheck(records,4,^NSDictionary *{abort();},AxsCacheKeeperImageLegacyCodeAddress,YES);
     ckcheck([result[@"cause"] isEqual:@"installationOriginal"] && [result[@"methodIndex"] isEqual:@4] && !ckgateInitialized,"installation failure short-circuits all helper and runtime reads");
     NSDictionary *helper=@{@"schemaVersion":@1,@"accepted":@NO,@"stage":@"helperWindow",@"reason":@"digest",@"methodIndex":@0,@"helperIndex":@2};

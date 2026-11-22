@@ -23,7 +23,9 @@ jobs:
   native:
     name: 全部原生回归与结果汇总
     runs-on: macos-15-intel
-    timeout-minutes: 30
+    # The image fixture adds a separate MRC object; its group permits all four
+    # native variants plus that compilation before publishing its result.
+    timeout-minutes: 35
     steps:
       - name: 获取源码
         uses: actions/checkout@v4
@@ -34,6 +36,7 @@ jobs:
         run: |
           python3 tests/test_native_orchestration.py
           python3 tests/test_image_runtime_orchestration.py
+          python3 tests/test_exact_failure_control.py
 
       - name: 原生回归测试
         run: |

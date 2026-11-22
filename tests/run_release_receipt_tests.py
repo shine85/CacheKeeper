@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from exact_failure_control import require_exact_failure
 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 compiler=shutil.which('xcrun')
@@ -50,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix='release-receipts-',dir=ROOT/'tmp') as t
         str(ROOT/'AxsCacheKeeperReceipts.m'),str(display_root/'tests/release_receipt_tests.m'),'-o',str(executable)],check=True,timeout=60)
     negative=subprocess.run([str(executable),str(display_root/'fixtures')],capture_output=True,text=True,timeout=60)
     expected='FAIL: release receipt: actual signed volume changes and time are visible without attribution'
-    if negative.returncode!=1 or negative.stderr.strip()!=expected:raise SystemExit('Volume display RED did not reach exact assertion: '+negative.stderr)
+    require_exact_failure(negative,expected,'Volume display RED')
     print('PASS: release receipt exact volume display control')
     time_anchor='axs_cachekeeper_presentation_time(round[@"finishedAt"])'
     if display.count(time_anchor)!=1:raise SystemExit('Ambiguous cleanup round time control')
@@ -68,8 +69,7 @@ with tempfile.TemporaryDirectory(prefix='release-receipts-',dir=ROOT/'tmp') as t
             str(main),str(time_root/'tests/presentation_tests.m'),'-o',str(binary)],check=True,timeout=60)
         result=subprocess.run([str(binary)],capture_output=True,text=True,timeout=60)
         if label=='time-red':
-            if result.returncode!=1 or result.stderr.strip()!='FAIL: presentation: status-only updates cannot relabel historical cleanup time or configuration':
-                raise SystemExit('Round time RED did not reach exact assertion: '+result.stderr)
+            require_exact_failure(result,'FAIL: presentation: status-only updates cannot relabel historical cleanup time or configuration','Round time RED')
         elif result.returncode:raise SystemExit('Current round time display failed: '+result.stderr)
         print('PASS: cleanup historical time '+label)
     # Reproduce the old summary with frozen failure/cancel/coverage suffixes hidden.
@@ -93,8 +93,7 @@ with tempfile.TemporaryDirectory(prefix='release-receipts-',dir=ROOT/'tmp') as t
         str(ROOT/'AxsCacheKeeperReceipts.m'),str(policy_root/'tests/release_receipt_tests.m'),'-o',str(binary)],check=True,timeout=60)
     result=subprocess.run([str(binary),str(policy_root/'fixtures')],capture_output=True,text=True,timeout=60)
     expected='FAIL: release receipt: policy summary preserves each frozen failure cancellation and coverage after status-only update'
-    if result.returncode!=1 or result.stderr.strip()!=expected:
-        raise SystemExit('Frozen round failure RED did not reach exact assertion: '+result.stderr)
+    require_exact_failure(result,expected,'Frozen round failure RED')
     print('PASS: release receipt exact frozen round failure display control')
     for name,code,expected in controls:
         copied=output/(name+'.m');copied.write_text(code,encoding='utf-8')
@@ -105,7 +104,6 @@ with tempfile.TemporaryDirectory(prefix='release-receipts-',dir=ROOT/'tmp') as t
         result=subprocess.run([str(executable),str(output/(name+'-fixtures'))],capture_output=True,text=True,timeout=60)
         print(result.stdout,end='');print(result.stderr,end='',file=sys.stderr)
         if expected:
-            if result.returncode!=1 or 'FAIL: release receipt: '+expected not in result.stderr:
-                raise SystemExit('Control did not reach expected behavior: '+name)
+            require_exact_failure(result,'FAIL: release receipt: '+expected,'Release receipt control '+name)
             print('PASS: release receipt exact control '+name)
         elif result.returncode: raise SystemExit(result.returncode)

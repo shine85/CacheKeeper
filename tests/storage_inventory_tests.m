@@ -264,8 +264,16 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
     withRejection[@"sdkMethodsRejectionObservation"]=sdkRejection;
     sicheck([rawSummary(withRejection)[@"sdkMethodsRejectionObservation"] isEqual:sdkRejection],@"inventory preserves closed frozen rejection diagnostic");
     sicheck([rawSummary(image)[@"sdkMethodsRejectionObservation"] isEqual:@{@"schemaVersion":@1,@"state":@"notRecorded"}],@"legacy inventory keeps rejection detail explicitly not recorded");
+    NSDictionary *(^imageCapability)(NSDictionary *)=^NSDictionary *(NSDictionary *receipt) {
+        return axs_cachekeeper_capabilities(@{@"image":@{@"state":@"available",@"data":receipt}},@"0.7.2")[@"image"];
+    };
+    sicheck([imageCapability(image)[@"sdkMethodsRejectionObservation"] isEqual:@{@"schemaVersion":@1,@"state":@"notRecorded"}] &&
+        [imageCapability(image)[@"resourceContract"] isEqual:@"notEstablishedByReceipt"] &&
+        [imageCapability(image)[@"effectVerification"] isEqual:@"notVerified"],@"legacy capability diagnostic remains not recorded without granting effects or contracts");
+    sicheck([imageCapability(withRejection)[@"sdkMethodsRejectionObservation"] isEqual:sdkRejection],@"capability preserves the same frozen rejection as inventory");
     NSMutableDictionary *serializedImage=[image mutableCopy];serializedImage[@"updated"]=@120;
     sicheck([rawSummary(serializedImage)[@"state"] isEqual:@"invalid"],@"exported timestamp cannot masquerade as raw saved SDK receipt");
+    sicheck([imageCapability(serializedImage)[@"sourceState"] isEqual:@"invalid"] && !imageCapability(serializedImage)[@"sdkMethodsRejectionObservation"],@"invalid raw capability cannot receive a valid-looking default diagnostic");
     NSMutableDictionary *privateImage=[image mutableCopy];privateImage[@"rawOwner"]=@"private-owner-canary";
     sicheck([rawSummary(privateImage)[@"state"] isEqual:@"invalid"],@"inventory raw boundary rejects private unknown fields");
     sicheck([s[@"registry"][@"displayEligible"] isEqual:@NO] && [s[@"registry"][@"relationships"][@"home"][@"state"] isEqual:@"notProvided"],@"excluded system no independent home remains explicit");

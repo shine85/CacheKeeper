@@ -17,8 +17,12 @@ def run() -> int:
     with tempfile.TemporaryDirectory(prefix="image-observation-", dir=ROOT / "tmp") as temporary:
         folder = Path(temporary)
         binary = folder / "image-observation"
+        method_record = folder / "method-record.o"
+        subprocess.run([compiler, "clang", "-fno-objc-arc", "-Wall", "-Wextra", "-Werror=format",
+                        "-c", str(ROOT / "tests/ImageObservationMethodRecord.m"), "-o", str(method_record)],
+                       check=True, timeout=60)
         flags = [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format",
-                 "-I" + str(ROOT), "-framework", "Foundation"]
+                 "-I" + str(ROOT), "-I" + str(ROOT / "tests"), "-framework", "Foundation", str(method_record)]
         subprocess.run([*flags, str(ROOT / "tests/image_source_observation_tests.m"), "-o", str(binary)],
                        check=True, timeout=60)
         subprocess.run([str(binary)], check=True, timeout=30)
