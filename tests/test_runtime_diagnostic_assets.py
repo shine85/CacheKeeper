@@ -2,6 +2,8 @@
 import ast
 import hashlib
 import pathlib
+import shutil
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +11,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class RuntimeDiagnosticAssetTests(unittest.TestCase):
+    def test_query_attach_error_reports_observation_without_invented_cause(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('query diagnostic behavior requires Node.js')
+        result = subprocess.run([node, str(ROOT / 'tests/test_query_attach_diagnostics.cjs')],
+                                cwd=ROOT, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def namespace(self):
         source = ROOT / 'scoped_runtime_session.py'
         tree = ast.parse(source.read_text(encoding='utf-8'))

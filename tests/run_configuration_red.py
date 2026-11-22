@@ -26,7 +26,7 @@ int main(int argc, char **argv) {
                   if label == "red" else (root / "AxsCacheKeeperPolicy.h").read_bytes())
         (target / "AxsCacheKeeperPolicy.h").write_bytes(header)
         binary = target / label
-        subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-framework", "Foundation", str(source),
+        subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-I" + str(root), "-framework", "Foundation", str(source),
                         "-o", str(binary)], check=True, timeout=60)
         result = subprocess.run([str(binary), str(target / "appEnabled.plist")], capture_output=True, text=True, timeout=15)
         if label == "red":

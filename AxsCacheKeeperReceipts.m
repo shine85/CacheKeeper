@@ -1,5 +1,6 @@
 #import "AxsCacheKeeperReceipts.h"
 #import "AxsCacheKeeperReleaseEvidenceStatus.h"
+#import "AxsCacheKeeperCleanupHistory.h"
 
 static dispatch_queue_t AxsCacheKeeperReceiptsQueue(void) {
     static dispatch_queue_t queue;
@@ -21,9 +22,10 @@ static NSDictionary *AxsCacheKeeperReadReceipt(NSString *path) {
     id record=[NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:&error];
     if (![record isKindOfClass:NSDictionary.class]) return nil;
     for (NSString *key in @[@"removed",@"bytes",@"confirmedRemoved",@"confirmedBytes",@"failed",@"lastRemoved",@"lastBytes"])
-        if (record[key] && (![record[key] isKindOfClass:NSNumber.class] || [record[key] doubleValue]<0)) return nil;
+        if (record[key] && !axs_cachekeeper_release_uint(record[key],NULL)) return nil;
     if (record[@"updated"] && ![record[@"updated"] isKindOfClass:NSDate.class]) return nil;
     if (record[@"releaseEvidence"] && !axs_cachekeeper_release_evidence_projection(record[@"releaseEvidence"],record[@"confirmedRoundID"])) return nil;
+    if (!axs_cachekeeper_cleanup_history_projection(record,NO)) return nil;
     return record;
 }
 
@@ -86,10 +88,23 @@ static BOOL AxsCacheKeeperReleaseEvidenceStale(NSDictionary *incoming, NSDiction
 }
 
 + (BOOL)submitRoundForBundle:(NSString *)bundle roundID:(NSString *)roundID removed:(NSUInteger)removed bytes:(unsigned long long)bytes endReason:(NSInteger)endReason phase:(NSString *)phase message:(NSString *)message failed:(NSUInteger)failed effectivePaths:(NSArray *)effectivePaths discoveredPaths:(NSArray *)discoveredPaths directories:(NSDictionary *)directories round:(NSDictionary *)round coverageComplete:(BOOL)coverageComplete releaseEvidence:(NSDictionary *)releaseEvidence {
+    return [self submitRoundForBundle:bundle roundID:roundID removed:removed bytes:bytes endReason:endReason phase:phase message:message
+        failed:failed effectivePaths:effectivePaths discoveredPaths:discoveredPaths directories:directories round:round
+        coverageComplete:coverageComplete releaseEvidence:releaseEvidence cleanupContext:@{@"state":@"notRecorded"}];
+}
+
++ (BOOL)submitRoundForBundle:(NSString *)bundle roundID:(NSString *)roundID removed:(NSUInteger)removed bytes:(unsigned long long)bytes endReason:(NSInteger)endReason phase:(NSString *)phase message:(NSString *)message failed:(NSUInteger)failed effectivePaths:(NSArray *)effectivePaths discoveredPaths:(NSArray *)discoveredPaths directories:(NSDictionary *)directories round:(NSDictionary *)round coverageComplete:(BOOL)coverageComplete releaseEvidence:(NSDictionary *)releaseEvidence cleanupContext:(NSDictionary *)cleanupContext {
     if (!bundle.length || !roundID.length) return NO;
+    NSDictionary *context=axs_cachekeeper_cleanup_context_projection(cleanupContext);
+    if (!context || !axs_cachekeeper_cleanup_token(roundID)) return NO;
     NSDictionary *evidence=releaseEvidence ? axs_cachekeeper_release_evidence_projection(releaseEvidence,roundID) : nil;
     if (releaseEvidence && (!evidence || [evidence[@"succeeded"] unsignedLongLongValue]!=removed)) return NO;
+    if (round && (![round isKindOfClass:NSDictionary.class] || !axs_cachekeeper_release_uint(round[@"removed"],NULL) ||
+        !axs_cachekeeper_release_uint(round[@"bytes"],NULL) || [round[@"removed"] unsignedLongLongValue]!=removed ||
+        [round[@"bytes"] unsignedLongLongValue]!=bytes || endReason<1 || endReason>6 || [evidence[@"state"] isEqual:@"recording"])) return NO;
     NSMutableDictionary *snapshot = [NSMutableDictionary dictionaryWithDictionary:@{@"roundID":roundID, @"removed":@(removed), @"bytes":@(bytes), @"endReason":@(endReason), @"phase":phase ?: @"", @"message":message ?: @"", @"failed":@(failed), @"effectivePaths":effectivePaths ?: @[], @"coverageComplete":@(coverageComplete)}];
+    snapshot[@"cleanupContext"]=context;
+    if (round) snapshot[@"finishedAt"]=NSDate.date;
     if (evidence) snapshot[@"releaseEvidence"]=evidence;
     if (discoveredPaths) snapshot[@"discoveredPaths"] = discoveredPaths;
     if (directories) snapshot[@"directories"] = directories;
@@ -98,6 +113,17 @@ static BOOL AxsCacheKeeperReleaseEvidenceStale(NSDictionary *incoming, NSDiction
     dispatch_sync(AxsCacheKeeperReceiptsQueue(), ^{
         if (!AxsCacheKeeperReceiptsPending) AxsCacheKeeperReceiptsPending = [NSMutableDictionary new];
         NSMutableArray *queue = AxsCacheKeeperReceiptsPending[bundle];
+        if (!queue.count && AxsCacheKeeperReceiptsFolder.length) {
+            NSString *path=[[AxsCacheKeeperReceiptsFolder stringByAppendingPathComponent:bundle] stringByAppendingString:@".auto.plist"];
+            NSDictionary *persisted=AxsCacheKeeperReadReceipt(path);
+            if ([persisted[@"confirmedRoundID"] isEqual:roundID] && persisted[@"cleanupContext"] &&
+                ![persisted[@"cleanupContext"] isEqual:context]) return;
+            if ([persisted[@"confirmedRoundID"] isEqual:roundID]) {
+                for (NSDictionary *terminal in persisted[@"cleanupHistory"][@"rounds"])
+                    if ([terminal[@"roundID"] isEqual:roundID] &&
+                        (removed>[terminal[@"removed"] unsignedIntegerValue] || bytes>[terminal[@"bytes"] unsignedLongLongValue])) return;
+            }
+        }
         if (!queue) { queue = [NSMutableArray new]; AxsCacheKeeperReceiptsPending[bundle] = queue; }
         // 同轮合并：同一 roundID 的快照只留最新累计（原地替换，队列顺序不变）；
         // 不同轮次各占一项——每轮累计量独立核算，跨轮合并会错认已确认量致重复或丢失。
@@ -105,9 +131,19 @@ static BOOL AxsCacheKeeperReleaseEvidenceStale(NSDictionary *incoming, NSDiction
         for (NSUInteger i = 0; i < queue.count; i++) if ([queue[i][@"roundID"] isEqual:roundID]) { existing = i; break; }
         if (existing != NSNotFound) {
             NSDictionary *pending=queue[existing];
+            if (![pending[@"cleanupContext"] isEqual:context]) return;
+            // A terminal snapshot describes its first finish boundary, including external failures.
+            // Retirement after a failed write must flush it without rewriting that boundary.
+            if (pending[@"round"]) {
+                if (removed>[pending[@"removed"] unsignedIntegerValue] || bytes>[pending[@"bytes"] unsignedLongLongValue]) return;
+                done = [self flushQueueForBundle:bundle]; return;
+            }
             BOOL stale=removed<[pending[@"removed"] unsignedIntegerValue] || bytes<[pending[@"bytes"] unsignedLongLongValue] || (pending[@"round"] && !round) ||
                 AxsCacheKeeperReleaseEvidenceStale(evidence,pending[@"releaseEvidence"]);
-            if (!stale) queue[existing] = [snapshot copy];
+            if (!stale) {
+                if (pending[@"finishedAt"]) snapshot[@"finishedAt"]=pending[@"finishedAt"];
+                queue[existing] = [snapshot copy];
+            }
         } else [queue addObject:[snapshot copy]];
         done = [self flushQueueForBundle:bundle];
     });
@@ -151,6 +187,18 @@ static BOOL AxsCacheKeeperReleaseEvidenceStale(NSDictionary *incoming, NSDiction
     NSUInteger submittedRemoved = [snapshot[@"removed"] unsignedIntegerValue];
     unsigned long long submittedBytes = [snapshot[@"bytes"] unsignedLongLongValue];
     BOOL sameRound=[previous[@"confirmedRoundID"] isEqual:roundID];
+    // Bounded terminal history also rejects delayed resubmission of a retained earlier round.
+    // Such a round cannot reopen after a newer round started (Scanner's ordered-submit contract).
+    NSDictionary *oldTerminal=nil;
+    for (NSDictionary *row in previous[@"cleanupHistory"][@"rounds"])
+        if ([row[@"roundID"] isEqual:roundID]) {oldTerminal=row;break;}
+    if (!oldTerminal && [previous[@"lastEffectiveCleanup"][@"roundID"] isEqual:roundID]) oldTerminal=previous[@"lastEffectiveCleanup"];
+    if (sameRound && previous[@"cleanupContext"] && ![previous[@"cleanupContext"] isEqual:snapshot[@"cleanupContext"]]) return NO;
+    if (oldTerminal) {
+        if (sameRound && (submittedRemoved>[oldTerminal[@"removed"] unsignedIntegerValue] ||
+            submittedBytes>[oldTerminal[@"bytes"] unsignedLongLongValue])) return NO;
+        return YES; // A finished round cannot reopen or replace its original terminal evidence.
+    }
     if (sameRound && (submittedRemoved<[previous[@"confirmedRemoved"] unsignedIntegerValue] ||
         submittedBytes<[previous[@"confirmedBytes"] unsignedLongLongValue] ||
         AxsCacheKeeperReleaseEvidenceStale(snapshot[@"releaseEvidence"],previous[@"releaseEvidence"]))) return YES;
@@ -170,6 +218,8 @@ static BOOL AxsCacheKeeperReleaseEvidenceStale(NSDictionary *incoming, NSDiction
     NSDictionary *round = snapshot[@"round"];
     NSArray *known = snapshot[@"discoveredPaths"] ?: (previous[@"discoveredPaths"] ?: @[]);
     NSDictionary *directories = snapshot[@"directories"];
+    NSDictionary *history=axs_cachekeeper_cleanup_history_update(previous,snapshot);
+    if (!history) return NO;
     // 去重：增量为 0、非退役、展示内容未变且 30 秒内写过——不重复落盘（沿用旧 report 的去重语义）。
     // 覆盖完整性变化同样打破去重（任务 5/6：发现不完整时面板须如实展示，不得沿用旧的完整标记）。
     if (sameRound && !round && !incrementRemoved && !incrementBytes && [previous[@"phase"] isEqual:snapshot[@"phase"]] && [previous[@"message"] isEqual:snapshot[@"message"]] &&
@@ -187,6 +237,7 @@ static BOOL AxsCacheKeeperReleaseEvidenceStale(NSDictionary *incoming, NSDiction
         @"coverageComplete":snapshot[@"coverageComplete"] ?: (previous[@"coverageComplete"] ?: @NO),
         @"effectivePaths":snapshot[@"effectivePaths"], @"discoveredPaths":known, @"directories":directories ?: previous[@"directories"] ?: @{}} mutableCopy];
     if (snapshot[@"releaseEvidence"]) report[@"releaseEvidence"]=snapshot[@"releaseEvidence"];
+    [report addEntriesFromDictionary:history];
     if (![report writeToFile:path atomically:YES]) { NSLog(@"[CacheKeeper] 无法保存 %@ 清理状态", bundle); return NO; }
     return YES;
 }
@@ -212,6 +263,8 @@ static BOOL AxsCacheKeeperReleaseEvidenceStale(NSDictionary *incoming, NSDiction
         @"coverageComplete":previous[@"coverageComplete"] ?: @NO,
         @"effectivePaths":effectivePaths ?: @[], @"discoveredPaths":known, @"directories":directories ?: previous[@"directories"] ?: @{}} mutableCopy];
     if (previous[@"releaseEvidence"]) report[@"releaseEvidence"]=previous[@"releaseEvidence"];
+    for (NSString *key in @[@"cleanupHistory",@"lastEffectiveCleanup",@"cleanupContext"])
+        if (previous[key]) report[key]=previous[key];
     if (![report writeToFile:path atomically:YES]) { NSLog(@"[CacheKeeper] 无法保存 %@ 清理状态", bundle); return NO; }
     return YES;
 }

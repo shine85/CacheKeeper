@@ -1,4 +1,5 @@
 #import "AxsCacheKeeperCleanupJob.h"
+#import "AxsCacheKeeperCleanupHistory.h"
 #import "AxsCacheKeeperSweep.h"
 #include <sys/mount.h>
 #include <unistd.h>
@@ -34,7 +35,17 @@ const NSTimeInterval AxsCacheKeeperCleanupDeleteTimeLimit = 120;
                       signature:(NSString *)signature
                        instance:(NSString *)instance
                           clock:(NSTimeInterval (^)(void))clock {
+    return [self initWithSweeps:sweeps signature:signature instance:instance cleanupContext:@{@"state":@"notRecorded"} clock:clock];
+}
+- (instancetype)initWithSweeps:(NSArray<AxsCacheKeeperSweep *> *)sweeps
+                      signature:(NSString *)signature
+                       instance:(NSString *)instance
+                 cleanupContext:(NSDictionary *)cleanupContext
+                          clock:(NSTimeInterval (^)(void))clock {
+    NSDictionary *context=axs_cachekeeper_cleanup_context_projection(cleanupContext);
+    if (!context) return nil;
     if ((self = [super init])) {
+        _cleanupContext=context;
         _sweeps = [sweeps copy];
         _signature = [signature copy];
         _instance = [instance copy];

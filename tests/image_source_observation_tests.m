@@ -1,6 +1,10 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+static unsigned ckgateMethodLists;
+static Method *ckgateCopyMethodList(Class owner,unsigned *count) {ckgateMethodLists++;return class_copyMethodList(owner,count);}
+#define class_copyMethodList ckgateCopyMethodList
 #import "../AxsCacheKeeperImageRuntimeSource.h"
+#undef class_copyMethodList
 #import "../AxsCacheKeeperInstallationImageObservation.h"
 #include <stdio.h>
 
@@ -40,6 +44,86 @@ static NSUInteger ckresolved,ckinitialized,ckbusiness;
 static id ckwrapper(id object,SEL selector,id namespace,id directory,id config) {
     (void)selector;(void)namespace;(void)directory;(void)config;ckbusiness++;return object;
 }
+
+// A rejected gate must preserve the first cause; diagnostics never decide admission.
+static Method ckown(Class owner,SEL selector) {
+    unsigned count=0;Method *methods=class_copyMethodList(owner,&count);Method found=NULL;
+    for (unsigned i=0;i<count;i++) if (method_getName(methods[i])==selector) {found=methods[i];break;}
+    free(methods);return found;
+}
+static NSUInteger ckgateInitialized,ckgateResolved,ckgateBusiness;
+static IMP ckgateBefore;
+static id ckchanged(id owner,SEL selector) {(void)selector;return owner;}
+@interface AxsCacheKeeperGateCanary : NSObject
+- (id)axs_cachekeeper_value;
+@end
+@implementation AxsCacheKeeperGateCanary
++ (void)initialize {ckgateInitialized++;method_setImplementation(ckown(self,sel_registerName("axs_cachekeeper_value")),(IMP)ckchanged);}
++ (BOOL)resolveInstanceMethod:(SEL)s {(void)s;ckgateResolved++;return NO;}
+- (id)axs_cachekeeper_value {ckgateBusiness++;return self;}
+@end
+static NSMutableArray *ckgateRecords(Class owner,SEL selector,IMP expected) {
+    NSDictionary *record=@{@"class":owner,@"selector":NSStringFromSelector(selector),@"implementation":[NSValue valueWithPointer:(const void *)expected]};
+    NSMutableArray *records=[NSMutableArray new];for (NSUInteger i=0;i<25;i++) [records addObject:record];return records;
+}
+static void ckgate(void) {
+    Class owner=objc_getClass("AxsCacheKeeperGateCanary");SEL selector=sel_registerName("axs_cachekeeper_value");
+    Method method=ckown(owner,selector);ckgateBefore=method_getImplementation(method);
+    NSMutableArray *records=ckgateRecords(owner,selector,ckgateBefore);
+    NSDictionary *result=AxsCacheKeeperImageMethodsCheck(records,4,^NSDictionary *{abort();},AxsCacheKeeperImageLegacyCodeAddress,YES);
+    ckcheck([result[@"cause"] isEqual:@"installationOriginal"] && [result[@"methodIndex"] isEqual:@4] && !ckgateInitialized,"installation failure short-circuits all helper and runtime reads");
+    NSDictionary *helper=@{@"schemaVersion":@1,@"accepted":@NO,@"stage":@"helperWindow",@"reason":@"digest",@"methodIndex":@0,@"helperIndex":@2};
+    result=AxsCacheKeeperImageMethodsCheck(records,0,^NSDictionary *{return helper;},AxsCacheKeeperImageLegacyCodeAddress,YES);
+    ckcheck([result[@"cause"] isEqual:@"legacyHelper"] && [result[@"helperStage"] isEqual:@"helperWindow"] && [result[@"helperReason"] isEqual:@"digest"] && [result[@"helperIndex"] isEqual:@2] && !ckgateInitialized,"helper failure preserves stage reason and index before method lookup");
+    ckgateMethodLists=0;
+    result=AxsCacheKeeperImageMethodsCheck(records,0,nil,AxsCacheKeeperImageLegacyCodeAddress,YES);
+    ckcheck([result[@"cause"] isEqual:@"implementation"] && [result[@"methodIndex"] isEqual:@1] && ![result[@"accepted"] boolValue],"initialize swizzle cannot become a new baseline");
+    ckcheck(ckgateMethodLists==2,"one owner snapshot and failing owner reread");
+
+    ckcheck([result[@"methodRawMatchesStoredBefore"] boolValue] && ![result[@"methodRawMatchesStoredAfter"] boolValue] && ![result[@"classRawMatchesStored"] boolValue] && ![result[@"methodIMPStable"] boolValue] && [result[@"methodIdentityStable"] boolValue],"single lookup captures before and after initialization relation");
+    ckcheck(ckgateInitialized==1 && !ckgateResolved && !ckgateBusiness,"diagnostics do not resolve or call business methods");
+    ckcheck(axs_cachekeeper_image_methods_check_projection(result)!=nil,"closed implementation diagnostic projects");
+    NSMutableDictionary *canonical=[result mutableCopy];canonical[@"classCanonicalMatchesStored"]=@YES;
+    ckcheck(axs_cachekeeper_image_methods_check_projection(canonical)!=nil && ![canonical[@"accepted"] boolValue],"canonical equality is diagnostic and does not authorize raw mismatch");
+    for (NSString *key in @[@"methodPresentBefore",@"methodIdentityStable",@"methodRawMatchesStoredBefore",@"classCanonicalMatchesStored"]) {
+        NSMutableDictionary *wrong=[result mutableCopy];wrong[key]=@1;ckcheck(!axs_cachekeeper_image_methods_check_projection(wrong),"relation flags require actual booleans");
+    }
+
+    NSMutableDictionary *inconsistent=[result mutableCopy];inconsistent[@"methodIMPStable"]=@YES;
+    ckcheck(!axs_cachekeeper_image_methods_check_projection(inconsistent),"stable IMP cannot contradict before and after raw relations");
+    inconsistent=[result mutableCopy];inconsistent[@"relationState"]=@"notCollected";
+    ckcheck(!axs_cachekeeper_image_methods_check_projection(inconsistent),"not collected state rejects populated relation data");
+    NSMutableDictionary *bad=[result mutableCopy];bad[@"address"]=@"0x1234";ckcheck(!axs_cachekeeper_image_methods_check_projection(bad),"gate projection rejects unknown pointer fields");
+    bad=[result mutableCopy];bad[@"classRawMatchesStored"]=@YES;ckcheck(!axs_cachekeeper_image_methods_check_projection(bad),"rejection cannot claim raw class equality");
+
+    records[10]=@{@"class":owner,@"selector":@"missingObservationGate",@"absent":@YES};
+    NSDictionary *rejectedBeforeMissing=AxsCacheKeeperImageMethodsCheck(records,0,nil,AxsCacheKeeperImageLegacyCodeAddress,YES);
+    ckcheck([rejectedBeforeMissing[@"methodIndex"] isEqual:@1] && !ckgateResolved,"first rejection stops before later absent-slot resolver");
+    records=ckgateRecords(owner,selector,ckgateBefore);
+    method_setImplementation(method,ckgateBefore);
+    ckgateMethodLists=0;
+    result=AxsCacheKeeperImageMethodsCheck(records,0,nil,AxsCacheKeeperImageLegacyCodeAddress,NO);
+    ckcheck([result[@"accepted"] boolValue] && ckgateMethodLists==0,"ordinary raw gate performs no method-list diagnostics");
+    ckgateMethodLists=0;
+    result=AxsCacheKeeperImageMethodsCheck(records,0,nil,AxsCacheKeeperImageLegacyCodeAddress,YES);
+    ckcheck(ckgateMethodLists==1,"diagnostic gate enumerates each owner once");
+    Class other=objc_getClass("AxsCacheKeeperObservationParent");SEL otherSelector=sel_registerName("diskCache");
+    class_getMethodImplementation(other,otherSelector);IMP otherIMP=method_getImplementation(ckown(other,otherSelector));
+    records[24]=@{@"class":other,@"selector":@"diskCache",@"implementation":[NSValue valueWithPointer:(const void *)otherIMP]};
+    ckgateMethodLists=0;NSDictionary *multiple=AxsCacheKeeperImageMethodsCheck(records,0,nil,AxsCacheKeeperImageLegacyCodeAddress,YES);
+    ckcheck([multiple[@"accepted"] boolValue] && ckgateMethodLists==2,"each distinct diagnostic owner is enumerated once");
+    records=ckgateRecords(owner,selector,ckgateBefore);
+
+    ckcheck([result[@"accepted"] boolValue] && [result[@"cause"] isEqual:@"complete"],"restored method matches original baseline");
+    [records removeLastObject];result=AxsCacheKeeperImageMethodsCheck(records,0,nil,AxsCacheKeeperImageLegacyCodeAddress,YES);
+    ckcheck([result[@"cause"] isEqual:@"methodCount"] && [result[@"methodsCount"] isEqual:@24] && [result[@"methodIndex"] isEqual:@0],"incomplete method table has an explicit cause");
+    records=ckgateRecords(owner,selector,ckgateBefore);records[10]=@{@"class":owner,@"selector":NSStringFromSelector(selector),@"absent":@YES};
+    result=AxsCacheKeeperImageMethodsCheck(records,0,nil,AxsCacheKeeperImageLegacyCodeAddress,YES);
+    ckcheck([result[@"cause"] isEqual:@"unexpectedMethod"] && [result[@"methodIndex"] isEqual:@11],"absent contract slot appearing is rejected");
+    NSData *data=[NSJSONSerialization dataWithJSONObject:result options:0 error:nil];NSString *text=[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    for (NSString *canary in @[@"AxsCacheKeeperGateCanary",@"axs_cachekeeper_value",@"address",@"0x",@"/private/"]) ckcheck(![text containsString:canary],"gate diagnostic exports no class selector pointer or path");
+}
+
 static void ckparser(void) {
     AxsCacheKeeperObservationFixture fixture={.data=ckmacho(1)};
     NSDictionary *value=AxsCacheKeeperImageMachOObservation(0,ckread,&fixture);
@@ -126,6 +210,7 @@ static void ckclosure(void) {
     ckcheck(axs_cachekeeper_installed_runtime_relation_matches(uncompared,value),"partial view keeps explicit unverified relation");
 }
 int main(void) {@autoreleasepool {
+    ckgate();
     ckparser();ckclosure();
     Class __unsafe_unretained classes[5]={objc_getClass("AxsCacheKeeperObservationCanary"),Nil,Nil,Nil,Nil};
     AxsCacheKeeperImageObservationMethod specs[27]={0};

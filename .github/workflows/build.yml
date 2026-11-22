@@ -100,10 +100,10 @@ jobs:
     needs: native
     if: inputs.native_only != true
     runs-on: macos-15-intel
-    # Runner command maxima total 9180s; <=28 owned-group stops add <=168s.
-    # Runner deadline 9500s < step 160m. Checkout3 + tools8 + checks2 + run160
-    # + immutable archive3 + upload5 = 181m, within the 190m job budget.
-    timeout-minutes: 190
+    # Runner command maxima total 10380s; <=29 owned-group stops add <=174s.
+    # Runner deadline 10700s < step 180m. Checkout3 + tools8 + checks2 + run180
+    # + immutable archive3 + upload5 = 201m, within the 210m job budget.
+    timeout-minutes: 210
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: '1'
@@ -123,9 +123,10 @@ jobs:
         run: |
           python3 tests/test_ui_orchestration.py
           python3 tests/test_ui_process_lifecycle.py
+          python3 tests/test_cleanup_summary_diagnostics.py
 
       - name: UIKit 点按与键盘回归
-        timeout-minutes: 160
+        timeout-minutes: 180
         run: exec python3 tests/run_ui_tests.py
 
       - name: 固化 UIKit 回归产物

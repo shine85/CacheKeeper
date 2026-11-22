@@ -1,6 +1,7 @@
 #import "AxsCacheKeeperPDFInspection.h"
 #import "AxsCacheKeeperDiagnostics.h"
 #import "AxsCacheKeeperReleaseEvidenceStatus.h"
+#import "AxsCacheKeeperCleanupHistory.h"
 #import "AxsCacheKeeperInstallation.h"
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperSearchDiagnostics.h"
@@ -277,8 +278,18 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
         } else if ([directories[@"state"] isEqual:@"available"]) app[@"selectionState"]=@"missing";
         NSDictionary *scan=snapshots[@"data"][bundle];
         app[@"scan"]=[redactor axs_cachekeeper_record:scan ? @{@"state":@"available",@"data":scan} : @{@"state":[snapshots[@"state"] isEqual:@"available"] ? @"missing" : snapshots[@"state"]}];
-        for (NSArray *source in @[@[@"cleanup",@"auto"],@[@"inspection",@"inspection"],@[@"probe",@"probe"]])
-            app[source[0]]=[redactor axs_cachekeeper_record:AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.%@.plist",bundle,source[1]])];
+        for (NSArray *source in @[@[@"cleanup",@"auto"],@[@"inspection",@"inspection"],@[@"probe",@"probe"]]) {
+            NSDictionary *read=AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.%@.plist",bundle,source[1]]);
+            NSMutableDictionary *projected=[[redactor axs_cachekeeper_record:read] mutableCopy];
+            if ([source[0] isEqual:@"cleanup"] && [read[@"state"] isEqual:@"available"]) {
+                NSMutableDictionary *data=[projected[@"data"] mutableCopy];
+                NSDictionary *history=axs_cachekeeper_cleanup_history_projection(read[@"data"],YES);
+                if (history) [data addEntriesFromDictionary:history];
+                else for (NSString *key in @[@"cleanupHistory",@"lastEffectiveCleanup",@"cleanupContext"]) data[key]=@{@"state":@"invalid"};
+                projected[@"data"]=data;
+            }
+            app[source[0]]=projected;
+        }
         NSDictionary *networkRead=AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.network.plist",bundle]);
         NSDictionary *hostRead=AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.host.plist",bundle]);
         NSDictionary *observedRead=AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.hostObserved.plist",bundle]);

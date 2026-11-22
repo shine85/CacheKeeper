@@ -39,11 +39,18 @@ typedef NS_ENUM(NSInteger, AxsCacheKeeperCleanupEndReason) {
                       signature:(NSString *)signature
                        instance:(NSString *)instance
                           clock:(NSTimeInterval (^)(void))clock;
+- (instancetype)initWithSweeps:(NSArray<AxsCacheKeeperSweep *> *)sweeps
+                      signature:(NSString *)signature
+                       instance:(NSString *)instance
+                 cleanupContext:(NSDictionary *)cleanupContext
+                          clock:(NSTimeInterval (^)(void))clock;
 @property(nonatomic, readonly, copy) NSArray<AxsCacheKeeperSweep *> *sweeps;
 @property(nonatomic, readonly, copy) NSString *signature;
 @property(nonatomic, readonly, copy) NSString *instance;
 // 本轮固定标识（init 时生成 UUID）：回执按 roundID 幂等核算，作业替换不丢未上报增量（任务 4）。
 @property(nonatomic, readonly, copy) NSString *roundID;
+// Frozen public configuration/version snapshot; never contains signature, installation identity or paths.
+@property(nonatomic, readonly, copy) NSDictionary *cleanupContext;
 // Anonymous bounded observation snapshot, separate from authoritative removed/bytes. No I/O in getter.
 @property(nonatomic, readonly, copy) NSDictionary *releaseEvidence;
 @property(nonatomic, readonly) AxsCacheKeeperCleanupPhase phase;

@@ -16,7 +16,8 @@
 // nodes contain only id,parent,category,logicalBytes,allocatedBytes,entries;
 // id=1,parent=0 is the root, category=unknown; directory nodes to depth 3.
 // An explicitly selected Swiftgram group layout adds structural labels and
-// only db/media to depth 4 and media/cache to depth 5; layoutProfile records it.
+// only db/media to depth 4 and media/cache, short-cache, animation-cache to depth 5;
+// layoutProfile records it.
 // Fixed categories Documents/Library/tmp at depth 1, Caches/Application Support
 // only under Library at depth 2. All other names remain unknown and private.
 // Allocation contributions belong to the first path; summing ancestor nodes

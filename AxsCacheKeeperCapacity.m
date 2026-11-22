@@ -136,7 +136,8 @@ static AxsCacheKeeperResourceCategory AxsCacheKeeperCapacityCategory(AxsCacheKee
         for (NSUInteger i=0;i<count;i++) parts[i]=(AxsCacheKeeperResourcePart){components[i].bytes,components[i].length};
         AxsCacheKeeperResourceCategory parent=axs_cachekeeper_resource_category(_layout,parts,4);
         if (parent==AxsCacheKeeperResourcePostboxDatabase || parent==AxsCacheKeeperResourcePostboxMedia) nodeDepth=4;
-        if (count==5 && axs_cachekeeper_resource_category(_layout,parts,5)==AxsCacheKeeperResourcePostboxCache) nodeDepth=5;
+        if (count==5 && axs_cachekeeper_resource_node_valid(_layout,
+                axs_cachekeeper_resource_category(_layout,parts,5),parent,5)) nodeDepth=5;
     }
     if(directory && components.count<=nodeDepth) {
         if(_nodes.count>=_nodeLimit) { _failure=@"nodeLimit";return; }

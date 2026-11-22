@@ -52,6 +52,42 @@ int main(void) {@autoreleasepool {
     check([axs_cachekeeper_image_cache_message(old) containsString:@"队列身份已变化"],"queue change is distinguished from custom backend");
     [old removeObjectForKey:@"instanceAdmission"];
     check(![axs_cachekeeper_image_cache_message(old) containsString:@"自定义后端"],"legacy generic rejection does not invent a cause");
+
+    NSDictionary *notRecorded=@{@"schemaVersion":@1,@"state":@"notRecorded"};
+    check([axs_cachekeeper_image_cache_projection(old)[@"sdkMethodsRejectionObservation"] isEqual:notRecorded],"legacy rejection detail explicitly remains not recorded");
+    NSDictionary *gate=@{@"schemaVersion":@1,@"accepted":@NO,@"cause":@"methodCount",@"methodIndex":@0,@"methodsCount":@24};
+    NSDictionary *failure=@{@"schemaVersion":@1,@"state":@"recorded",@"initializerOrdinal":@2,@"check":gate};
+    old[@"instanceAdmission"]=@{@"schemaVersion":@1,@"initializerReturns":@2,@"registered":@0,@"unregistered":@2,@"released":@0,@"overflow":@NO,@"unregisteredReasons":@{@"diskMissing":@1,@"sdkMethodsChanged":@1},@"liveReasons":@{}};
+    old[@"observed"]=@0;old[@"sdkMethodsRejectionObservation"]=failure;
+    check(axs_cachekeeper_image_cache_projection(old)!=nil,"saved rejection and lifecycle counters agree");
+    NSDictionary *rejectedAdmission=old[@"instanceAdmission"];
+    for (id malformed in @[@[],NSNull.null,@{@"sdkMethodsChanged":@[]},@{@"sdkMethodsChanged":NSNull.null}]) {
+        NSMutableDictionary *invalidAdmission=[rejectedAdmission mutableCopy];invalidAdmission[@"unregisteredReasons"]=malformed;
+        old[@"instanceAdmission"]=invalidAdmission;
+        @try {check(!axs_cachekeeper_image_cache_projection(old),"recorded rejection rejects malformed cumulative reason data");}
+        @catch (NSException *exception) {(void)exception;check(NO,"recorded rejection validates admission before reading cumulative reason data");}
+    }
+    for (id malformed in @[@[],NSNull.null]) {
+        NSMutableDictionary *invalidAdmission=[rejectedAdmission mutableCopy];invalidAdmission[@"initializerReturns"]=malformed;
+        old[@"instanceAdmission"]=invalidAdmission;
+        @try {check(!axs_cachekeeper_image_cache_projection(old),"recorded rejection rejects malformed initializer counts");}
+        @catch (NSException *exception) {(void)exception;check(NO,"recorded rejection validates admission before reading initializer counts");}
+    }
+    old[@"instanceAdmission"]=rejectedAdmission;
+    NSMutableDictionary *wrong=[failure mutableCopy];wrong[@"state"]=@"notRecorded";old[@"sdkMethodsRejectionObservation"]=wrong;
+    check(!axs_cachekeeper_image_cache_projection(old),"not recorded state cannot conceal a populated rejection");
+    for (id ordinal in @[@0,@YES,@1.5,@(-1)]) {
+        wrong=[failure mutableCopy];wrong[@"initializerOrdinal"]=ordinal;old[@"sdkMethodsRejectionObservation"]=wrong;
+        check(!axs_cachekeeper_image_cache_projection(old),"first rejection ordinal must be a positive exact counter");
+    }
+    old[@"sdkMethodsRejectionObservation"]=failure;
+    NSMutableDictionary *badFailure=[failure mutableCopy];badFailure[@"initializerOrdinal"]=@3;old[@"sdkMethodsRejectionObservation"]=badFailure;
+    check(!axs_cachekeeper_image_cache_projection(old),"rejection ordinal cannot exceed real initializer returns");
+    badFailure=[failure mutableCopy];badFailure[@"address"]=@"0x1234";old[@"sdkMethodsRejectionObservation"]=badFailure;
+    check(!axs_cachekeeper_image_cache_projection(old),"saved rejection rejects unknown pointer fields");
+    old[@"sdkMethodsRejectionObservation"]=failure;old[@"instanceAdmission"]=valid;
+    check(!axs_cachekeeper_image_cache_projection(old),"recorded SDK rejection requires matching cumulative reason count");
+    [old removeObjectForKey:@"sdkMethodsRejectionObservation"];old[@"instanceAdmission"]=valid;
     puts("PASS: image-admission-status closed projection, privacy, legacy and wording");
     return 0;
 }}

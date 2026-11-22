@@ -148,6 +148,14 @@ static AxsCacheKeeperImageLegacyCheck axs_cachekeeper_runtime_source_check(const
     return axs_cachekeeper_runtime_source_matches(base,implementations) ? AxsCacheKeeperImageLegacyComplete() :
         AxsCacheKeeperImageLegacyResult("mainIdentity","bundle",0,0);
 }
+static AxsCacheKeeperImageLegacyCheck axs_cachekeeper_runtime_main_layout_check(const void *base,AxsCacheKeeperImageLegacyLayout *layout) {
+    if (base!=axs_cachekeeper_runtime_main_header) return AxsCacheKeeperImageLegacyResult("mainIdentity","notMainBase",0,0);
+    layout->base=(uintptr_t)base;return AxsCacheKeeperImageLegacyComplete();
+}
+static AxsCacheKeeperImageLegacyCheck axs_cachekeeper_runtime_helpers_check(const AxsCacheKeeperImageLegacyLayout *layout) {
+    return axs_cachekeeper_runtime_helpers_match((const void *)layout->base) ? AxsCacheKeeperImageLegacyComplete() : AxsCacheKeeperImageLegacyResult("helperWindow","changed",0,1);
+}
+
 static atomic_uint axs_cachekeeper_runtime_home_resolutions;
 static atomic_bool axs_cachekeeper_runtime_count_only_home;
 @interface NSString (AxsCacheKeeperCountedHomeResolution)
@@ -162,6 +170,8 @@ static atomic_bool axs_cachekeeper_runtime_count_only_home;
     return self.stringByResolvingSymlinksInPath;
 }
 @end
+#define AxsCacheKeeperImageLegacyMainLayoutCheck axs_cachekeeper_runtime_main_layout_check
+#define AxsCacheKeeperImageLegacyHelpersCheck axs_cachekeeper_runtime_helpers_check
 #define AxsCacheKeeperImageLegacyHelpersMatch axs_cachekeeper_runtime_helpers_match
 #define AxsCacheKeeperImageLegacySourceCheck axs_cachekeeper_runtime_source_check
 #define stringByResolvingSymlinksInPath axs_cachekeeper_countedResolvedHome
@@ -173,6 +183,8 @@ static atomic_bool axs_cachekeeper_runtime_count_only_home;
 #undef _dyld_get_image_name
 #undef _dyld_get_image_vmaddr_slide
 #undef stringByResolvingSymlinksInPath
+#undef AxsCacheKeeperImageLegacyMainLayoutCheck
+#undef AxsCacheKeeperImageLegacyHelpersCheck
 #undef AxsCacheKeeperImageLegacyHelpersMatch
 #undef AxsCacheKeeperImageLegacySourceCheck
 
@@ -293,8 +305,22 @@ static void axs_cachekeeper_runtime_admission(AxsCacheKeeperImageCache *engine,N
     axs_cachekeeper_runtime_require(atomic_load(&axs_cachekeeper_runtime_getter_calls)==calls,"changed methods are rejected before reading members");
     method_setImplementation(getter,original);imp_removeBlock(foreign);
     axs_cachekeeper_runtime_refresh(engine);
+    NSDictionary *rejection=engine.receipt[@"sdkMethodsRejectionObservation"];
+    axs_cachekeeper_runtime_require([rejection[@"state"] isEqual:@"recorded"] && [rejection[@"initializerOrdinal"] isEqual:@32] &&
+        [rejection[@"check"][@"cause"] isEqual:@"implementation"] && [rejection[@"check"][@"methodIndex"] isEqual:@4],"first SDK rejection freezes ordinal and exact method slot");
+    dispatch_sync(engine.work,^{[engine axs_cachekeeper_publish];});
+    axs_cachekeeper_runtime_require([engine.receipt[@"sdkMethodsRejectionObservation"] isEqual:rejection],"publication does not rerun or overwrite frozen SDK rejection");
     axs_cachekeeper_runtime_require([engine.receipt[@"instanceAdmission"][@"unregisteredReasons"][@"sdkMethodsChanged"] isEqual:@1] &&
         [engine.receipt[@"restricted"] isEqual:@1],"source method rejection cannot overwrite an admitted owner");
+    Method laterGetter=class_getInstanceMethod(SDImageCache.class,@selector(diskCache));
+    IMP laterOriginal=method_getImplementation(laterGetter);IMP laterForeign=imp_implementationWithBlock(^id(id object) {(void)object;return nil;});
+    method_setImplementation(laterGetter,laterForeign);
+    calls=atomic_load(&axs_cachekeeper_runtime_getter_calls);
+    [engine axs_cachekeeper_observe:next sourceReason:nil attributes:nil contract:AxsCacheKeeperImageContractFixedSerialLegacy];
+    axs_cachekeeper_runtime_require(atomic_load(&axs_cachekeeper_runtime_getter_calls)==calls,"later method rejection still occurs before member reads");
+    method_setImplementation(laterGetter,laterOriginal);imp_removeBlock(laterForeign);axs_cachekeeper_runtime_refresh(engine);
+    axs_cachekeeper_runtime_require([engine.receipt[@"instanceAdmission"][@"unregisteredReasons"][@"sdkMethodsChanged"] isEqual:@2] &&
+        [engine.receipt[@"sdkMethodsRejectionObservation"] isEqual:rejection],"later SDK rejection increments counters without replacing first failure");
     dispatch_queue_t nextQueue=next.ioQueue;
     dispatch_semaphore_t entered=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0);
     dispatch_async(nextQueue,^{dispatch_semaphore_signal(entered);dispatch_semaphore_wait(release,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));});

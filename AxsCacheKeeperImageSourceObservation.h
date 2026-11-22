@@ -1,6 +1,7 @@
 #pragma once
 #import "AxsCacheKeeperImageDiscovery.h"
 #include <stdint.h>
+#include <stdlib.h>
 
 static inline BOOL axs_cachekeeper_image_observation_keys(NSDictionary *value,NSArray *keys) {
     return [value isKindOfClass:NSDictionary.class] && [value count]==keys.count &&
@@ -104,4 +105,116 @@ static inline NSDictionary *axs_cachekeeper_image_runtime_observation_projection
     if ([value[@"candidateModule"] unsignedIntegerValue]!=candidate) return nil;
     NSData *data=[NSPropertyListSerialization dataWithPropertyList:value format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
     return data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:nil] : nil;
+}
+
+#import <objc/runtime.h>
+// Diagnostic metadata reads enumerate own methods: they never ask the resolver for a Method.
+static inline NSDictionary *axs_cachekeeper_image_observation_own_methods(Class owner,NSArray *records) {
+    unsigned count=0;Method *methods=class_copyMethodList(owner,&count);NSMutableDictionary *snapshot=[NSMutableDictionary new];
+    NSMutableSet *selected=[NSMutableSet new];for (NSDictionary *record in records) if (record[@"class"]==owner && ![record[@"absent"] boolValue]) [selected addObject:record[@"selector"]];
+    for (unsigned index=0;index<count;index++) {
+        NSString *selector=NSStringFromSelector(method_getName(methods[index]));if (![selected containsObject:selector]) continue;
+        if (snapshot[selector]) continue;
+        snapshot[selector]=@{@"method":[NSValue valueWithPointer:methods[index]],@"implementation":[NSValue valueWithPointer:(const void *)method_getImplementation(methods[index])]};
+    }
+    free(methods);return [snapshot copy];
+}
+typedef const void *(*AxsCacheKeeperImageObservationCodeAddress)(const void *);
+static inline NSDictionary *AxsCacheKeeperImageMethodsCheck(NSArray *methods,NSUInteger installationFailure,NSDictionary *(^helperCheck)(void),AxsCacheKeeperImageObservationCodeAddress codeAddress,BOOL captureRelations) {
+    NSMutableDictionary *result=[@{@"schemaVersion":@1,@"accepted":@NO,@"cause":@"complete",@"methodIndex":@0,@"methodsCount":@(methods.count)} mutableCopy];
+    if (installationFailure) {result[@"cause"]=@"installationOriginal";result[@"methodIndex"]=@(installationFailure);return [result copy];}
+    if (helperCheck) {
+        NSDictionary *helper=axs_cachekeeper_image_source_check_projection(helperCheck());
+        if (!helper) {result[@"cause"]=@"helperCheckInvalid";return [result copy];}
+        if (![helper[@"accepted"] boolValue]) {
+            result[@"cause"]=@"legacyHelper";result[@"helperStage"]=helper[@"stage"];result[@"helperReason"]=helper[@"reason"];result[@"helperIndex"]=helper[@"helperIndex"];
+            return [result copy];
+        }
+    }
+    NSMutableDictionary *ownerSnapshots=captureRelations ? [NSMutableDictionary new] : nil;
+    for (NSUInteger index=0;index<methods.count;index++) {
+        NSDictionary *entry=methods[index];Class owner=entry[@"class"];SEL selector=NSSelectorFromString(entry[@"selector"]);
+        if ([entry[@"absent"] boolValue]) {
+            if (class_getInstanceMethod(owner,selector)) {result[@"cause"]=@"unexpectedMethod";result[@"methodIndex"]=@(index+1);return [result copy];}
+            continue;
+        }
+        const void *stored=[entry[@"implementation"] pointerValue];
+        NSDictionary *beforeRow=nil;
+        if (captureRelations) {
+            NSValue *key=[NSValue valueWithPointer:(__bridge const void *)owner];NSDictionary *snapshot=ownerSnapshots[key];
+            // Freeze each class before its first gate lookup; later selectors reuse that same view.
+            if (!snapshot) {snapshot=axs_cachekeeper_image_observation_own_methods(owner,methods);ownerSnapshots[key]=snapshot;}
+            beforeRow=snapshot[entry[@"selector"]];
+        }
+        Method before=[beforeRow[@"method"] pointerValue];const void *beforeIMP=[beforeRow[@"implementation"] pointerValue];
+        // This is the gate's original, single lookup. Canonical relations below never grant admission.
+        IMP actual=class_getMethodImplementation(owner,selector);
+        if ((const void *)actual!=stored) {
+            result[@"cause"]=@"implementation";result[@"methodIndex"]=@(index+1);result[@"relationState"]=captureRelations ? @"collected" : @"notCollected";
+            if (!captureRelations) return [result copy];
+            NSDictionary *afterRow=axs_cachekeeper_image_observation_own_methods(owner,methods)[entry[@"selector"]];
+            Method after=[afterRow[@"method"] pointerValue];const void *afterIMP=[afterRow[@"implementation"] pointerValue];
+            result[@"methodPresentBefore"]=before ? @YES : @NO;result[@"methodPresentAfter"]=after ? @YES : @NO;
+            result[@"methodIdentityStable"]=(before && after && before==after) ? @YES : @NO;
+            result[@"methodIMPStable"]=(before && after && beforeIMP==afterIMP) ? @YES : @NO;
+            result[@"methodRawMatchesStoredBefore"]=(before && (const void *)beforeIMP==stored) ? @YES : @NO;
+            result[@"methodRawMatchesStoredAfter"]=(after && (const void *)afterIMP==stored) ? @YES : @NO;
+            result[@"classRawMatchesStored"]=@NO;
+            result[@"methodCanonicalMatchesStoredBefore"]=(before && codeAddress((const void *)beforeIMP)==codeAddress(stored)) ? @YES : @NO;
+            result[@"methodCanonicalMatchesStoredAfter"]=(after && codeAddress((const void *)afterIMP)==codeAddress(stored)) ? @YES : @NO;
+            result[@"classCanonicalMatchesStored"]=(codeAddress((const void *)actual)==codeAddress(stored)) ? @YES : @NO;
+            return [result copy];
+        }
+    }
+    if (methods.count!=AxsCacheKeeperImageMethodCount) result[@"cause"]=@"methodCount";
+    else result[@"accepted"]=@YES;
+    return [result copy];
+}
+static inline NSDictionary *axs_cachekeeper_image_methods_check_projection(id value) {
+    NSArray *keys=@[@"schemaVersion",@"accepted",@"cause",@"methodIndex",@"methodsCount"];
+    if (![value isKindOfClass:NSDictionary.class] || !axs_cachekeeper_image_discovery_integer(value[@"schemaVersion"],1) || [value[@"schemaVersion"] unsignedIntegerValue]!=1 ||
+        !axs_cachekeeper_image_discovery_bool(value[@"accepted"]) || !axs_cachekeeper_image_discovery_integer(value[@"methodIndex"],4096) ||
+        !axs_cachekeeper_image_discovery_integer(value[@"methodsCount"],4096) || ![value[@"cause"] isKindOfClass:NSString.class]) return nil;
+    NSString *cause=value[@"cause"];NSUInteger index=[value[@"methodIndex"] unsignedIntegerValue],count=[value[@"methodsCount"] unsignedIntegerValue];
+    BOOL accepted=[value[@"accepted"] boolValue];
+    if ([cause isEqual:@"complete"]) {if (!accepted || index || count!=25) return nil;}
+    else if (accepted) return nil;
+    else if ([cause isEqual:@"installationOriginal"]) {if (!index || index>25) return nil;}
+    else if ([cause isEqual:@"legacyHelper"]) {
+        if (index) return nil;keys=[keys arrayByAddingObjectsFromArray:@[@"helperStage",@"helperReason",@"helperIndex"]];
+        NSDictionary *helper=@{@"schemaVersion":@1,@"accepted":@NO,@"stage":value[@"helperStage"] ?: NSNull.null,@"reason":value[@"helperReason"] ?: NSNull.null,@"methodIndex":@0,@"helperIndex":value[@"helperIndex"] ?: NSNull.null};
+        NSDictionary *valid=axs_cachekeeper_image_source_check_projection(helper);
+        if (!valid || ![@[@"mainIdentity",@"layout",@"helperOwner",@"helperABI",@"helperWindow"] containsObject:valid[@"stage"]]) return nil;
+    } else if ([cause isEqual:@"implementation"]) {
+        if (!index || index>count) return nil;
+        keys=[keys arrayByAddingObject:@"relationState"];
+        if (![value[@"relationState"] isEqual:@"collected"]) {
+            if (![value[@"relationState"] isEqual:@"notCollected"]) return nil;
+            return axs_cachekeeper_image_observation_keys(value,keys) ? [value copy] : nil;
+        }
+        NSArray *relations=@[@"methodPresentBefore",@"methodPresentAfter",@"methodIdentityStable",@"methodIMPStable",@"methodRawMatchesStoredBefore",@"methodRawMatchesStoredAfter",@"classRawMatchesStored",@"methodCanonicalMatchesStoredBefore",@"methodCanonicalMatchesStoredAfter",@"classCanonicalMatchesStored"];
+        keys=[keys arrayByAddingObjectsFromArray:relations];for (NSString *key in relations) if (!axs_cachekeeper_image_discovery_bool(value[key])) return nil;
+        if ([value[@"classRawMatchesStored"] boolValue] ||
+            (![value[@"methodPresentBefore"] boolValue] && ([value[@"methodRawMatchesStoredBefore"] boolValue] || [value[@"methodCanonicalMatchesStoredBefore"] boolValue])) ||
+            (![value[@"methodPresentAfter"] boolValue] && ([value[@"methodRawMatchesStoredAfter"] boolValue] || [value[@"methodCanonicalMatchesStoredAfter"] boolValue])) ||
+            (([value[@"methodIdentityStable"] boolValue] || [value[@"methodIMPStable"] boolValue]) && (![value[@"methodPresentBefore"] boolValue] || ![value[@"methodPresentAfter"] boolValue])) ||
+            ([value[@"methodRawMatchesStoredBefore"] boolValue] && ![value[@"methodCanonicalMatchesStoredBefore"] boolValue]) ||
+            ([value[@"methodRawMatchesStoredAfter"] boolValue] && ![value[@"methodCanonicalMatchesStoredAfter"] boolValue])) return nil;
+    } else if ([cause isEqual:@"unexpectedMethod"]) {if (!index || index>count) return nil;}
+    else if ([cause isEqual:@"methodCount"]) {if (index || count==25) return nil;}
+    else if ([cause isEqual:@"helperCheckInvalid"]) {if (index) return nil;}
+    else return nil;
+    if ([cause isEqual:@"implementation"] && [value[@"relationState"] isEqual:@"collected"] && [value[@"methodIMPStable"] boolValue] &&
+        ([value[@"methodRawMatchesStoredBefore"] boolValue]!=[value[@"methodRawMatchesStoredAfter"] boolValue] ||
+         [value[@"methodCanonicalMatchesStoredBefore"] boolValue]!=[value[@"methodCanonicalMatchesStoredAfter"] boolValue])) return nil;
+    return axs_cachekeeper_image_observation_keys(value,keys) ? [value copy] : nil;
+}
+static inline NSDictionary *axs_cachekeeper_image_sdk_rejection_projection(id value) {
+    if (![value isKindOfClass:NSDictionary.class] || !axs_cachekeeper_image_discovery_integer(value[@"schemaVersion"],1) || [value[@"schemaVersion"] unsignedIntegerValue]!=1) return nil;
+    if ([value[@"state"] isEqual:@"notRecorded"]) return axs_cachekeeper_image_observation_keys(value,@[@"schemaVersion",@"state"]) ? [value copy] : nil;
+    NSDictionary *check=axs_cachekeeper_image_methods_check_projection(value[@"check"]);
+    if ([check[@"cause"] isEqual:@"implementation"] && ![check[@"relationState"] isEqual:@"collected"]) return nil;
+    if (![value[@"state"] isEqual:@"recorded"] || !axs_cachekeeper_image_observation_keys(value,@[@"schemaVersion",@"state",@"initializerOrdinal",@"check"]) ||
+        !axs_cachekeeper_image_discovery_integer(value[@"initializerOrdinal"],9007199254740991ULL) || ![value[@"initializerOrdinal"] unsignedLongLongValue] || !check || [check[@"accepted"] boolValue]) return nil;
+    return @{@"schemaVersion":@1,@"state":@"recorded",@"initializerOrdinal":value[@"initializerOrdinal"],@"check":check};
 }

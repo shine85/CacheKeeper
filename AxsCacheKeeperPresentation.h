@@ -2,6 +2,8 @@
 #import <Foundation/Foundation.h>
 #import "AxsCacheKeeperAllocation.h"
 #import "AxsCacheKeeperReleaseEvidenceStatus.h"
+#import "AxsCacheKeeperRuntimeInfo.h"
+#import "AxsCacheKeeperCleanupHistory.h"
 
 static inline NSString *axs_cachekeeper_presentation_release_evidence(id value) {
     if (!value) return @"本轮删除证据未记录；物理释放量未测定";
@@ -56,6 +58,52 @@ static inline NSString *axs_cachekeeper_presentation_time(id updated) {
     formatter.dateFormat=@"yyyy-MM-dd HH:mm:ss";
     formatter.timeZone=NSTimeZone.localTimeZone;
     return [formatter stringFromDate:updated];
+}
+static inline NSString *axs_cachekeeper_presentation_saved_runtime(NSDictionary *record, NSString *panelVersion) {
+    NSDictionary *runtime=axs_cachekeeper_runtime_info_projection(record[@"runtimeInfo"]);
+    NSString *time=axs_cachekeeper_presentation_time(record[@"updated"]);
+    if (!runtime) return [NSString stringWithFormat:@"%@（%@）；不能验证当前模式",record[@"runtimeInfo"] ? @"来源版本无效" : @"来源版本未记录",time];
+    NSString *version=runtime[@"packageVersion"];
+    BOOL validPanel=axs_cachekeeper_runtime_info_projection(@{@"schemaVersion":@1,@"packageVersion":panelVersion ?: @"",@"firstObserved":@1})!=nil;
+    if (!validPanel) return [NSString stringWithFormat:@"来源 %@（%@）；面板版本未知，不能验证当前模式",version,time];
+    if (![version isEqual:panelVersion]) return [NSString stringWithFormat:@"旧版记录 %@（%@）；不能验证当前模式",version,time];
+    return [NSString stringWithFormat:@"同版历史记录 %@（%@）；当前模式效果仍需核验",version,time];
+}
+static inline NSString *axs_cachekeeper_presentation_cleanup_scope(NSDictionary *report) {
+    NSMutableString *text=[NSMutableString stringWithFormat:@"APP 已保存轮次的全部清理范围（非本目录统计）\n状态记录时间：%@",
+        axs_cachekeeper_presentation_time(report[@"updated"])];
+    NSDictionary *history=axs_cachekeeper_cleanup_history_projection(report,NO);
+    if (!history) return [text stringByAppendingString:@"\n清理历史无效；该轮时间、配置和删除证据不能确认"];
+    NSString *identifier=report[@"confirmedRoundID"];
+    NSDictionary *round=nil;
+    for (NSDictionary *candidate in history[@"cleanupHistory"][@"rounds"])
+        if ([candidate[@"roundID"] isEqual:identifier]) {round=candidate;break;}
+    NSDictionary *effective=history[@"lastEffectiveCleanup"];
+    if (!round && [effective[@"roundID"] isEqual:identifier]) round=effective;
+    // Status-only writes refresh updated while keeping the preceding round. Only a
+    // validated matching terminal supplies its time; another round never substitutes.
+    if (round) {
+        [text appendFormat:@"\n该轮结束时间：%@",axs_cachekeeper_presentation_time(round[@"finishedAt"])];
+        if ([round[@"endReason"] unsignedIntegerValue]==4) [text appendString:@"；该轮已中止"];
+        if ([round[@"failed"] unsignedIntegerValue]) [text appendFormat:@"；该轮失败 %@ 项",round[@"failed"]];
+        if (![round[@"coverageComplete"] boolValue]) [text appendString:@"；该轮覆盖未完整"];
+    } else [text appendString:@"\n该轮结束时间未记录或未确认"];
+    NSDictionary *context=round ? round[@"context"] : history[@"cleanupContext"];
+    if ([context[@"state"] isEqual:@"recorded"]) {
+        NSString *mode=@{@"auto":@"自动",@"clean":@"只清理",@"prevent":@"限制缓存并清理"}[context[@"mode"]];
+        [text appendFormat:@"\n该回执配置：%@ · 插件 %@ · APP %@（构建 %@）；当前配置效果仍需核验",
+            mode,context[@"packageVersion"],context[@"appVersion"] ?: @"未记录",context[@"appBuild"] ?: @"未记录"];
+    } else [text appendString:@"\n该回执配置未记录"];
+    id raw=round ? round[@"releaseEvidence"] : report[@"releaseEvidence"];
+    if (axs_cachekeeper_release_keys(raw,@[@"state"]) && [raw[@"state"] isEqual:@"notRecorded"])
+        [text appendString:@"\n该轮删除证据未记录；物理释放量未测定"];
+    else {
+        NSDictionary *evidence=axs_cachekeeper_cleanup_token(identifier) ? axs_cachekeeper_release_evidence_projection(raw,identifier) : nil;
+        NSString *summary=evidence ? axs_cachekeeper_presentation_release_evidence(evidence) :
+            (raw ? @"该轮删除证据无效；物理释放量未测定" : @"该轮删除证据未记录；物理释放量未测定");
+        [text appendFormat:@"\n%@",[summary stringByReplacingOccurrencesOfString:@"本轮" withString:@"该轮"]];
+    }
+    return text;
 }
 static inline NSUInteger axs_cachekeeper_presentation_deferred(NSDictionary *receipt) {
     return receipt[@"deferred"] ? [receipt[@"deferred"] unsignedIntegerValue] :
@@ -118,8 +166,7 @@ static inline NSString *axs_cachekeeper_presentation_receipt(NSDictionary *recei
         [text appendFormat:@"\nAPP 汇总覆盖未完整（APP 回执时间：%@）；本目录状态按本目录回执判断。",axs_cachekeeper_presentation_time(appReport[@"updated"])];
     if ([receipt[@"error"] length]) [text appendFormat:@"\n%@",receipt[@"error"]];
     if (appReport[@"confirmedRoundID"] || appReport[@"releaseEvidence"])
-        [text appendFormat:@"\nAPP 本轮全部清理范围（APP 回执时间：%@；非本目录统计）\n%@",
-            axs_cachekeeper_presentation_time(appReport[@"updated"]),axs_cachekeeper_presentation_release_evidence(appReport[@"releaseEvidence"])];
+        [text appendFormat:@"\n%@",axs_cachekeeper_presentation_cleanup_scope(appReport)];
     return text;
 }
 static inline NSString *axs_cachekeeper_presentation_inspection(NSDictionary *report) {

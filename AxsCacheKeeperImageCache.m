@@ -86,30 +86,25 @@ static NSString *AxsCacheKeeperImageMethodFailure(Class cls, const AxsCacheKeepe
     [methods addObject:@{@"class":cls,@"selector":NSStringFromSelector(sel),@"implementation":[NSValue valueWithPointer:(const void *)implementation]}];
     return nil;
 }
-static BOOL AxsCacheKeeperImageMethodsUnchangedAtIndex(NSUInteger *changedIndex) {
-    if (changedIndex) *changedIndex=0;
+static NSDictionary *AxsCacheKeeperImageMethodsCheckSnapshot(BOOL captureRelations) {
     NSArray *methods;NSUInteger installationFailure;const void *legacyBase;
     @synchronized(AxsCacheKeeperImageCache.class) {
         methods=axs_cachekeeper_image_methods;installationFailure=axs_cachekeeper_image_installation_failure_index;
         legacyBase=axs_cachekeeper_image_legacy_base;
     }
-    // Restoring a wrapper cannot repair an unverified original already captured in its chain.
-    if (installationFailure) {if (changedIndex) *changedIndex=installationFailure;return NO;}
-    if (legacyBase && !AxsCacheKeeperImageLegacyHelpersMatch(legacyBase)) return NO;
-    for (NSUInteger index=0;index<methods.count;index++) {
-        NSDictionary *entry=methods[index];
-        if ([entry[@"absent"] boolValue]) {
-            if (class_getInstanceMethod(entry[@"class"],NSSelectorFromString(entry[@"selector"]))) {
-                if (changedIndex) *changedIndex=index+1;return NO;
-            }
-            continue;
-        }
-        IMP actual=class_getMethodImplementation(entry[@"class"],NSSelectorFromString(entry[@"selector"]));
-        if ((const void *)actual!=[entry[@"implementation"] pointerValue]) {
-            if (changedIndex) *changedIndex=index+1;return NO;
-        }
-    }
-    return methods.count==AxsCacheKeeperImageMethodCount;
+    NSDictionary *(^helpers)(void)=nil;
+    if (legacyBase) helpers=^NSDictionary *{
+        AxsCacheKeeperImageLegacyLayout layout;
+        AxsCacheKeeperImageLegacyCheck check=AxsCacheKeeperImageLegacyMainLayoutCheck(legacyBase,&layout);
+        if (check.accepted) check=AxsCacheKeeperImageLegacyHelpersCheck(&layout);
+        return @{@"schemaVersion":@1,@"accepted":check.accepted ? @YES : @NO,@"stage":@(check.stage),@"reason":@(check.reason),@"methodIndex":@(check.methodIndex),@"helperIndex":@(check.helperIndex)};
+    };
+    return AxsCacheKeeperImageMethodsCheck(methods,installationFailure,helpers,AxsCacheKeeperImageLegacyCodeAddress,captureRelations);
+}
+static BOOL AxsCacheKeeperImageMethodsUnchangedAtIndex(NSUInteger *changedIndex) {
+    NSDictionary *check=AxsCacheKeeperImageMethodsCheckSnapshot(NO);
+    if (changedIndex) *changedIndex=[check[@"methodIndex"] unsignedIntegerValue];
+    return [check[@"accepted"] boolValue];
 }
 static BOOL AxsCacheKeeperImageMethodsUnchanged(void) {
     return AxsCacheKeeperImageMethodsUnchangedAtIndex(NULL);
@@ -383,6 +378,7 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
 @property(nonatomic) AxsCacheKeeperImageContract pinnedTestContract;
 @property(atomic,copy) NSDictionary *discoveryCheck;
 @property(atomic,copy) NSDictionary *runtimeSourceObservation;
+@property(nonatomic,copy) NSDictionary *firstSDKMethodsRejection;
 @property(nonatomic) BOOL runtimeObservationPending;
 @property(nonatomic) BOOL discoveryRefreshPending;
 @property(nonatomic) BOOL admissionPublishPending;
@@ -393,6 +389,7 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
 - (void)axs_cachekeeper_observe:(id)owner sourceReason:(NSString *)sourceReason attributes:(id)attributes contract:(AxsCacheKeeperImageContract)contract;
 - (void)axs_cachekeeper_observeCreatedRoot:(AxsCacheKeeperImageBinding *)binding;
 - (void)axs_cachekeeper_unregistered:(AxsCacheKeeperImageReason)reason;
+- (void)axs_cachekeeper_unregistered:(AxsCacheKeeperImageReason)reason methodsCheck:(NSDictionary *)check;
 - (void)axs_cachekeeper_publish;
 @end
 
@@ -817,8 +814,15 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     @synchronized(self) {self.generation++;for (AxsCacheKeeperImageBinding *binding in self.bindings) binding.restricted=NO;}
 }
 - (void)axs_cachekeeper_unregistered:(AxsCacheKeeperImageReason)reason {
+    [self axs_cachekeeper_unregistered:reason methodsCheck:nil];
+}
+- (void)axs_cachekeeper_unregistered:(AxsCacheKeeperImageReason)reason methodsCheck:(NSDictionary *)check {
     @synchronized(self) {
         AxsCacheKeeperImageAdmissionRecord(&_admission,reason);
+        if (reason==AxsCacheKeeperImageReasonSDKMethodsChanged && !self.firstSDKMethodsRejection && check) {
+            self.firstSDKMethodsRejection=axs_cachekeeper_image_sdk_rejection_projection(@{@"schemaVersion":@1,@"state":@"recorded",
+                @"initializerOrdinal":@(_admission.initializerReturns),@"check":check});
+        }
         // Early exits update evidence only. They must not replace a live owner's
         // authorization state or invoke additional SDK getters on publication.
         if (self.admissionPublishPending) return;
@@ -834,7 +838,8 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     if (!owner) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonInitializerReturnedNil];return;}
     if (self.capacityExceeded) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonObservationLimit];return;}
     if (object_getClass(owner)!=axs_cachekeeper_image_class) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonOwnerClass];return;}
-    if (!AxsCacheKeeperImageMethodsUnchanged()) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonSDKMethodsChanged];return;}
+    NSDictionary *methodsCheck=AxsCacheKeeperImageMethodsCheckSnapshot(YES);
+    if (![methodsCheck[@"accepted"] boolValue]) {[self axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonSDKMethodsChanged methodsCheck:methodsCheck];return;}
     id disk=AxsCacheKeeperImageGet(owner,"diskCache"),config=AxsCacheKeeperImageGet(owner,"config");
     if (!disk || !config) {[self axs_cachekeeper_unregistered:!disk ? AxsCacheKeeperImageReasonDiskMissing : AxsCacheKeeperImageReasonConfigurationMissing];return;}
     AxsCacheKeeperImageBinding *binding=[AxsCacheKeeperImageBinding new];binding.owner=owner;binding.disk=disk;binding.config=config;binding.contract=contract;
@@ -1094,6 +1099,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
             @"queued":@(self.queued),@"submitted":@(self.submitted),@"apiCompleted":@(self.completed),@"skipped":@(self.skipped),
             @"pending":@(pending),@"updated":NSDate.date,@"bytesState":@"notMeasured",@"discoveryCheck":self.discoveryCheck,
             @"instanceAdmission":admission};
+        {NSMutableDictionary *record=[receipt mutableCopy];record[@"sdkMethodsRejectionObservation"]=self.firstSDKMethodsRejection ?: @{@"schemaVersion":@1,@"state":@"notRecorded"};receipt=record;}
         if (self.runtimeSourceObservation) {
             NSMutableDictionary *record=[receipt mutableCopy];record[@"runtimeSourceObservation"]=self.runtimeSourceObservation;receipt=record;
         }

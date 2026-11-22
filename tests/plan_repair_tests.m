@@ -278,7 +278,10 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     // 作业取消结算也走生产 helper，写失败、停用、恢复后累计精确。
     NSString *cancelRoot=makeDir(home,@"Library/Caches/retire"); put([cancelRoot stringByAppendingPathComponent:@"a"]); put([cancelRoot stringByAppendingPathComponent:@"b"]);
     AxsCacheKeeperSweep *cancelSweep=sweepFor(cancelRoot,@{});
-    AxsCacheKeeperCleanupJob *cancelJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[cancelSweep] signature:@"retire" instance:@"" clock:^NSTimeInterval { return 100; }];
+    NSMutableDictionary *cancelContext=[axs_cachekeeper_cleanup_context(@"clean",YES,NO,NO,YES,@"0.7.2-188.1",@"1.0",@"100",@"platform-cache:2",@[@"Library/Caches"],@[],@[]) mutableCopy];
+    NSDictionary *frozenContext=[cancelContext copy];
+    AxsCacheKeeperCleanupJob *cancelJob=[[AxsCacheKeeperCleanupJob alloc] initWithSweeps:@[cancelSweep] signature:@"private-signature-canary" instance:@"private-instance-canary" cleanupContext:cancelContext clock:^NSTimeInterval { return 100; }];
+    [cancelContext addEntriesFromDictionary:axs_cachekeeper_cleanup_context(@"prevent",NO,YES,YES,NO,@"0.7.2-189.1",@"2.0",@"200",@"platform-cache:2",@[@"tmp"],@[],@[])];
     while (cancelJob.phase==AxsCacheKeeperCleanupPhaseChecking) [cancelJob advanceCycleWithPerRootLimit:16 gate:^BOOL { return YES; }];
     [cancelJob advanceCycleWithPerRootLimit:1 gate:^BOOL { return YES; }]; check(cancelJob.removed==1,@"取消前真实删 1 项");
     check(!chmod(status.fileSystemRepresentation,0500),@"取消写失败");
@@ -286,6 +289,22 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     check(!chmod(status.fileSystemRepresentation,0700),@"取消存储恢复"); [AxsCacheKeeperReceipts flushAllPending];
     saved=[NSDictionary dictionaryWithContentsOfFile:receiptPath];
     check([saved[@"removed"] unsignedIntegerValue]==151 && [saved[@"lastRemoved"] unsignedIntegerValue]==1 && [saved[@"endReason"] integerValue]==AxsCacheKeeperCleanupEndReasonCancelled,@"取消后补记精确累计与终态");
+    check([saved[@"lastEffectiveCleanup"][@"context"] isEqual:frozenContext] && [saved[@"cleanupContext"] isEqual:frozenContext] &&
+        [saved[@"lastEffectiveCleanup"][@"roundID"] isEqual:cancelJob.roundID] &&
+        [saved[@"lastEffectiveCleanup"][@"releaseEvidence"][@"state"] isEqual:@"cancelled"],@"真实部分删除取消并重试后仍保存创建时模式版本及同轮证据");
+    NSString *historyJSON=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:axs_cachekeeper_cleanup_history_projection(saved,YES) options:0 error:nil] encoding:NSUTF8StringEncoding];
+    check(![historyJSON containsString:@"private-signature-canary"] && ![historyJSON containsString:@"private-instance-canary"],@"作业私有签名和进程身份不进入公开历史");
+    NSString *finishedBundle=@"test.plan.finished-boundary";
+    NSDictionary *finalSummary=[AxsCacheKeeperCleanupSchedule summaryForJob:hardJob directories:@{hardSweep.relativePath:hardReport}
+        externalFailures:2 discoveryComplete:YES];
+    check([AxsCacheKeeperReceipts submitRoundForBundle:finishedBundle roundID:hardJob.roundID removed:hardJob.removed bytes:hardJob.bytes
+        endReason:[finalSummary[@"endReason"] integerValue] phase:@"complete" message:@"首次结束" failed:2 effectivePaths:@[]
+        discoveredPaths:nil directories:nil round:@{@"removed":@(hardJob.removed),@"bytes":@(hardJob.bytes)}
+        coverageComplete:[finalSummary[@"coverageComplete"] boolValue] releaseEvidence:hardJob.releaseEvidence cleanupContext:hardJob.cleanupContext],@"保存带外部失败的真实作业终态");
+    NSString *finishedPath=[status stringByAppendingPathComponent:[finishedBundle stringByAppendingString:@".auto.plist"]];
+    NSDictionary *finishedReceipt=[NSDictionary dictionaryWithContentsOfFile:finishedPath];
+    check([AxsCacheKeeperCleanupSchedule retireJob:hardJob bundle:finishedBundle message:@"配置变化重复结算"] &&
+        [[NSDictionary dictionaryWithContentsOfFile:finishedPath] isEqual:finishedReceipt],@"真实已完成作业重复退役不改写首次终态外部失败");
     [AxsCacheKeeperReceipts resetForTesting];
     puts("PASS: plan repairs: delete boundary, bounded preflight, exact scope, scheduling, residuals, receipts, restore and coverage");
 }

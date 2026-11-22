@@ -14,9 +14,9 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUDGETS = dict(generate=60, discovery=300, boot=60, bootstatus=420,
                search_red=1200, build=600, codesign=60, suite=420, search=900,
-               legacy_red=1320, export=60, archive=120)
-MAX_COMMANDS = 28
-RUNNER_BUDGET_SECONDS = 9500
+               legacy_red=1320, history_red=1200, export=60, archive=120)
+MAX_COMMANDS = 29
+RUNNER_BUDGET_SECONDS = 10700
 GROUP_GRACE_SECONDS = 2
 CURRENT = "2de3a496eaf6df9a1312862adcfd54acd73c39c0"
 RESULTS = (("ScanPageTests.xcresult", "ScanPageScreenshots"),
@@ -27,14 +27,14 @@ RESULTS = (("ScanPageTests.xcresult", "ScanPageScreenshots"),
            ("ImageCache510AbsentResults.xcresult", "ImageCache510AbsentScreenshots"),
            ("Results.xcresult", "Screenshots"))
 SUITES = ("WebKit", "SDWebImage 5.21.7", "ScanPage", "Search/XCUI", "SDWebImage 5.15.5",
-          "SDWebImage 5.10.4 admission baseline", "SDWebImage 5.10.4", "SDWebImage 5.10.4 absent API")
+          "SDWebImage 5.10.4 admission baseline", "SDWebImage 5.10.4", "SDWebImage 5.10.4 absent API", "Cleanup history summary baseline")
 
 
 def command_budget_seconds():
-    # 3 generations/builds, seven test invocations, two RED wrappers, seven exports.
+    # 3 generations/builds, seven test invocations, three RED wrappers, seven exports.
     return (3*BUDGETS['generate'] + BUDGETS['discovery'] + BUDGETS['boot'] + BUDGETS['bootstatus'] +
             BUDGETS['search_red'] + 3*BUDGETS['build'] + BUDGETS['codesign'] +
-            6*BUDGETS['suite'] + BUDGETS['search'] + BUDGETS['legacy_red'] + 7*BUDGETS['export'])
+            6*BUDGETS['suite'] + BUDGETS['search'] + BUDGETS['legacy_red'] + BUDGETS['history_red'] + 7*BUDGETS['export'])
 
 
 class Cancelled(BaseException):
@@ -191,6 +191,7 @@ def archive_candidates(root):
     output = root / 'tmp/input-ui-tests'
     candidates = [output / name for pair in RESULTS for name in pair]
     candidates += [output / 'run-summary.json']
+    candidates += [root / 'tmp/history-display-red-results']
     for directory in ('search-editing-red', 'image-legacy-red'):
         candidates += [root / 'tmp' / directory / name for name in
                        ('RedResults.xcresult', 'red-summary.json', 'red.log', 'build.log', 'source-manifest.json')]
@@ -392,6 +393,7 @@ class UIRun:
                                          ('ScanPage', 'ScanPageTests', 'ScanPageTests.xcresult')):
                 self.step(name, ['xcodebuild', 'test-without-building', *self.build_options, '-only-testing:' + target,
                                  '-resultBundlePath', str(self.output / result), '-parallel-testing-enabled', 'NO'], BUDGETS['suite'])
+            self.step('Cleanup history summary baseline', [sys.executable, str(self.root / 'tests/run_cleanup_summary_red.py'), device], BUDGETS['history_red'])
             self.step('Search/XCUI', ['xcodebuild', 'test-without-building', *self.build_options,
                       '-skip-testing:WebKitIntegrationTests', '-skip-testing:ImageCacheIntegrationTests', '-skip-testing:ScanPageTests',
                       '-resultBundlePath', str(self.output / 'Results.xcresult'), '-parallel-testing-enabled', 'NO'], BUDGETS['search'])

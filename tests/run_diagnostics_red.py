@@ -12,7 +12,7 @@ with tempfile.TemporaryDirectory(prefix="diagnostics-red-", dir=root / "tmp") as
     for name in ("AxsCacheKeeperDiagnostics.h", "AxsCacheKeeperDiagnostics.m"):
         (target / name).write_bytes(subprocess.check_output(
             ["git", "show", f"{baseline}:{name}"], cwd=root, timeout=15))
-    for name in ("AxsCacheKeeperPolicy.h", "tests/diagnostics_tests.m"):
+    for name in ("AxsCacheKeeperPolicy.h", "AxsCacheKeeperCleanupHistory.h", "AxsCacheKeeperReleaseEvidenceStatus.h", "tests/diagnostics_tests.m"):
         (target / name).write_bytes((root / name).read_bytes())
     (target / "main.m").write_text(
         '#import <Foundation/Foundation.h>\n'
@@ -21,7 +21,7 @@ with tempfile.TemporaryDirectory(prefix="diagnostics-red-", dir=root / "tmp") as
         'axs_cachekeeper_run_diagnostics_tests([NSString stringWithUTF8String:argv[1]]); } return 0; }\n',
         encoding="utf-8")
     binary = target / "red-test"
-    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-framework", "Foundation",
+    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-I" + str(root), "-framework", "Foundation",
                     str(target / "main.m"), str(target / "AxsCacheKeeperDiagnostics.m"),
                     str(target / "tests/diagnostics_tests.m"), "-o", str(binary)],
                    check=True, timeout=60)

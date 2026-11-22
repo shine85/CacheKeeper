@@ -37,13 +37,14 @@ class UILifecycleTests(unittest.TestCase):
         if self.module is None:self.fail('bounded command plan not implemented')
         self.assertGreaterEqual(self.module.BUDGETS['discovery'],300)
         self.assertGreater(self.module.BUDGETS['legacy_red'],5*15+60+600+420+60)
+        self.assertGreater(self.module.BUDGETS['history_red'],60+600+420+60)
         self.assertGreaterEqual(self.module.RUNNER_BUDGET_SECONDS,self.module.command_budget_seconds()+self.module.MAX_COMMANDS*6)
         workflow=(ROOT/'.github/workflows/build.yml').read_text(encoding='utf-8-sig')
         uikit=workflow.split('  uikit:\n',1)[1].split('  build:\n',1)[0]
-        self.assertIn('timeout-minutes: 190',uikit)
-        self.assertIn('timeout-minutes: 160',uikit)
-        self.assertLess(self.module.RUNNER_BUDGET_SECONDS,160*60)
-        self.assertLessEqual(3+8+2+160+3+5,190)
+        self.assertIn('timeout-minutes: 210',uikit)
+        self.assertIn('timeout-minutes: 180',uikit)
+        self.assertLess(self.module.RUNNER_BUDGET_SECONDS,180*60)
+        self.assertLessEqual(3+8+2+180+3+5,210)
         self.assertIn('needs: [native, uikit]',workflow)
         upload=uikit.split('uses: actions/upload-artifact@v4',1)[1]
         self.assertNotIn('.xcresult',upload)

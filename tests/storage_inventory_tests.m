@@ -258,6 +258,12 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
     };
     sicheck([rawSummary(image)[@"receiptState"] isEqual:@"apiCompleted"] && [rawSummary(image)[@"sourceUpdated"] isEqual:@120],
         @"inventory summarizes original saved SDK receipt before export transformation");
+    NSMutableDictionary *withRejection=[image mutableCopy];
+    withRejection[@"instanceAdmission"]=@{@"schemaVersion":@1,@"initializerReturns":@2,@"registered":@1,@"unregistered":@1,@"released":@0,@"overflow":@NO,@"unregisteredReasons":@{@"sdkMethodsChanged":@1},@"liveReasons":@{@"none":@1}};
+    NSDictionary *sdkRejection=@{@"schemaVersion":@1,@"state":@"recorded",@"initializerOrdinal":@2,@"check":@{@"schemaVersion":@1,@"accepted":@NO,@"cause":@"methodCount",@"methodIndex":@0,@"methodsCount":@24}};
+    withRejection[@"sdkMethodsRejectionObservation"]=sdkRejection;
+    sicheck([rawSummary(withRejection)[@"sdkMethodsRejectionObservation"] isEqual:sdkRejection],@"inventory preserves closed frozen rejection diagnostic");
+    sicheck([rawSummary(image)[@"sdkMethodsRejectionObservation"] isEqual:@{@"schemaVersion":@1,@"state":@"notRecorded"}],@"legacy inventory keeps rejection detail explicitly not recorded");
     NSMutableDictionary *serializedImage=[image mutableCopy];serializedImage[@"updated"]=@120;
     sicheck([rawSummary(serializedImage)[@"state"] isEqual:@"invalid"],@"exported timestamp cannot masquerade as raw saved SDK receipt");
     NSMutableDictionary *privateImage=[image mutableCopy];privateImage[@"rawOwner"]=@"private-owner-canary";

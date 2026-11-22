@@ -12,7 +12,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-GATE = "    if (legacyBase && !AxsCacheKeeperImageLegacyHelpersMatch(legacyBase)) return NO;"
+GATE = "    if (legacyBase) helpers=^NSDictionary *{"
 EXPECTED_RED = "FAIL: image-runtime-source: helper change immediately restores original write"
 REFRESH_GATE = "NSString *otherRelative=relativePaths[otherIndex]==NSNull.null ? nil : relativePaths[otherIndex];"
 REFRESH_RED = "FAIL: image-runtime-source: 64-owner refresh resolves home at most once plus 64 FD identity probes"
@@ -86,7 +86,7 @@ def run() -> int:
         for role in ("pool-red", "member-red", "red", "green"):
             folder = Path(directory) / role
             folder.mkdir()
-            candidate = source.replace(GATE, "") if role == "red" else source
+            candidate = source.replace(GATE, "    if (NO) helpers=^NSDictionary *{") if role == "red" else source
             if role == "pool-red":
                 candidate = candidate.replace(OWNER_POOL_GATE, '- (void)axs_cachekeeper_refresh_event:(NSUInteger)event {\n    {')
             if role == "member-red":

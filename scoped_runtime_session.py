@@ -38,7 +38,7 @@ PYTHON = sys.executable
 KNOWN_HOSTS = BASE.parent / 'device_known_hosts'
 TARGETS = ('com.baidu.netdisk', 'com.tencent.mqq', 'com.ss.iphone.ugc.Aweme', 'app.swiftgram.ios')
 SINGLE_APPS = dict(zip(('baidu','qq','douyin','swiftgram'),TARGETS))
-PROBE_SCRIPT_SHA = 'e4ce07304fd6741c161541333962ec66ed930ce7aeba65f9eb819990f3dcfb3e'
+PROBE_SCRIPT_SHA = 'f8f36d779ec3dd9b1c433f7ed4f3201a991592164e875bccff6cc302b6d1540b'
 FAILURE_CODES = frozenset(('foregroundConfirmationDeadline', 'foregroundConfirmationUnavailable', 'foregroundConfirmationRejected',
     'probeSourceChanged', 'assetChanged', 'invalidStageAssetManifest',
     'stageIdentityMissing', 'stageFailedOrFraming', 'streamSize', 'lineSize', 'protocolEncoding',

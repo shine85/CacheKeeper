@@ -1,6 +1,7 @@
 #include <math.h>
 #import <Foundation/Foundation.h>
 #import "../AxsCacheKeeperDiagnostics.h"
+#import "../AxsCacheKeeperCleanupHistory.h"
 
 static void dxcheck(BOOL condition, NSString *message) {
     if (!condition) { fprintf(stderr,"FAIL: diagnostics: %s\n",message.UTF8String);exit(1); }
@@ -510,5 +511,27 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
         ![encoded containsString:@"private-release-path-canary"],@"额外路径拒绝且不进入诊断JSON");
     dxwrite(folder,@"Status/test.active.auto.plist",@{@"confirmedRoundID":@"old-round",@"removed":@1});
     dxcheck([[session reportWithApps:@[@{@"id":@"test.active"}] environment:@{}][@"apps"][0][@"cleanup"][@"data"][@"releaseEvidence"] isEqual:@{@"state":@"notRecorded"}],@"旧清理回执没有释放证据时明确未记录");
+    NSDictionary *historyContext=axs_cachekeeper_cleanup_context(@"clean",YES,NO,NO,YES,@"0.7.2-188.1",@"1.0",@"100",@"platform-cache:2",@[@"Library/Caches"],@[],@[]);
+    NSDictionary *historyRow=@{@"roundID":releaseRound,@"finishedAt":[NSDate dateWithTimeIntervalSince1970:100],@"removed":@1,
+        @"bytes":@12,@"failed":@0,@"endReason":@1,@"coverageComplete":@YES,@"context":historyContext,@"releaseEvidence":release};
+    NSDictionary *historyReceipt=@{@"confirmedRoundID":releaseRound,@"cleanupContext":historyContext,@"lastEffectiveCleanup":historyRow,
+        @"cleanupHistory":@{@"schemaVersion":@1,@"state":@"recorded",@"capacity":@16,@"truncatedCount":@0,@"rounds":@[historyRow]}};
+    dxwrite(folder,@"Status/test.active.auto.plist",historyReceipt);
+    NSDictionary *historyExport=[session reportWithApps:@[@{@"id":@"test.active"}] environment:@{}][@"apps"][0][@"cleanup"][@"data"];
+    dxcheck([historyExport[@"lastEffectiveCleanup"][@"context"] isEqual:historyContext] &&
+        [historyExport[@"lastEffectiveCleanup"][@"releaseEvidence"] isEqual:release] &&
+        [historyExport[@"lastEffectiveCleanup"][@"finishedAt"] isEqual:@100] &&
+        [historyExport[@"cleanupHistory"][@"rounds"] count]==1,@"诊断导出保留历史模式版本时间和同轮证据");
+    NSMutableDictionary *badHistory=[historyReceipt mutableCopy],*badHistoryContext=[historyContext mutableCopy];
+    badHistoryContext[@"installationFingerprint"]=@"private-history-identity-canary";
+    badHistory[@"cleanupContext"]=badHistoryContext;
+    dxwrite(folder,@"Status/test.active.auto.plist",badHistory);
+    NSDictionary *invalidHistoryReport=[session reportWithApps:@[@{@"id":@"test.active"}] environment:@{}];
+    NSString *invalidHistoryJSON=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:invalidHistoryReport options:0 error:nil] encoding:NSUTF8StringEncoding];
+    dxcheck([invalidHistoryReport[@"apps"][0][@"cleanup"][@"data"][@"cleanupHistory"] isEqual:@{@"state":@"invalid"}] &&
+        ![invalidHistoryJSON containsString:@"private-history-identity-canary"],@"新版历史私有额外字段标无效且不进入导出");
+    dxwrite(folder,@"Status/test.active.auto.plist",@{@"removed":@900});
+    dxcheck([[session reportWithApps:@[@{@"id":@"test.active"}] environment:@{}][@"apps"][0][@"cleanup"][@"data"][@"lastEffectiveCleanup"]
+        isEqual:@{@"state":@"notRecorded"}],@"旧累计数据不能导出伪造的最近实际清理");
     printf("PASS: diagnostic saved-record aggregation, privacy, fixed progress, missing records and zero filesystem writes\n");
 }

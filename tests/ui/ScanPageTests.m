@@ -98,6 +98,53 @@
     if (error) record[@"error"]=error;
     XCTAssertTrue([record writeToURL:[NSURL fileURLWithPath:[self.page file:@"scan.plist"]] error:NULL]);
 }
+- (void)axs_cachekeeper_saveCleanupHistory {
+    NSDictionary *context=axs_cachekeeper_cleanup_context(@"clean",YES,YES,NO,YES,@"0.7.2-188.1",@"1.0",@"110",@"platform-cache:2",@[],@[],@[]);
+    NSDictionary *round=@{@"roundID":@"saved-round",@"finishedAt":[NSDate dateWithTimeIntervalSince1970:1700000000],
+        @"removed":@3,@"bytes":@36,@"failed":@1,@"endReason":@4,@"coverageComplete":@NO,@"context":context,@"releaseEvidence":@{@"state":@"notRecorded"}};
+    NSDictionary *report=@{@"removed":@3,@"bytes":@36,@"failed":@0,@"updated":[NSDate dateWithTimeIntervalSince1970:1700001000],
+        @"confirmedRoundID":@"saved-round",@"cleanupContext":context,@"lastEffectiveCleanup":round,
+        @"cleanupHistory":@{@"schemaVersion":@1,@"state":@"recorded",@"capacity":@16,@"truncatedCount":@0,@"rounds":@[round]}};
+    XCTAssertTrue([report writeToFile:[self.page file:[NSString stringWithFormat:@"Status/%@.auto.plist",self.page.bundle]] atomically:YES]);
+}
+- (void)axs_cachekeeper_assertHistoryWithHint:(NSString *)hint {
+    self.page.displayCache=nil;
+    UITableViewCell *cell=[self.page tableView:self.page.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]];
+    NSString *text=cell.detailTextLabel.text;
+    NSDateFormatter *formatter=[NSDateFormatter new];formatter.locale=[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+    formatter.calendar=[[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    formatter.timeZone=NSTimeZone.localTimeZone;formatter.dateFormat=@"yyyy-MM-dd HH:mm:ss";
+    NSString *savedTime=[formatter stringFromDate:[NSDate dateWithTimeIntervalSince1970:1700000000]];
+    NSDictionary *facts=@{self.page.actionStatus:@1,hint:@1,@"累计清理 3 个":@1,@"最近一轮：":@1,@"最近实际清理：":@1,
+        savedTime:@2,@"3 项 /":@2,@"只清理":@2,@"插件 0.7.2-188.1":@2,@"APP 1.0（构建 110）":@2,
+        @"该轮失败 1 项":@2,@"该轮已中止":@2,@"该轮覆盖未完整":@2};
+    for (NSString *fact in facts) {
+        NSUInteger count=[text componentsSeparatedByString:fact].count-1;
+        XCTAssertEqual(count,[facts[fact] unsignedIntegerValue],@"HISTORY_CONFIGURATION: expected saved fact %@ exactly %@ times in %@",fact,facts[fact],text);
+    }
+    XCTAssertTrue([text hasPrefix:[self.page.actionStatus stringByAppendingString:@"\n"]],@"HISTORY_CONFIGURATION: action status must remain the first line");
+    XCTAssertTrue([text hasSuffix:hint],@"HISTORY_CONFIGURATION: current configuration hint must follow the retained history");
+    NSRange total=[cell.detailTextLabel.text rangeOfString:@"累计清理 "];
+    XCTAssertNotEqual(total.location,NSNotFound,@"HISTORY_CONFIGURATION: current hint must not erase cumulative cleanup");
+    if (total.location!=NSNotFound) {
+        XCTAssertEqualObjects([cell.detailTextLabel.attributedText attribute:NSForegroundColorAttributeName atIndex:total.location effectiveRange:NULL],UIColor.systemRedColor,@"The retained cumulative cleanup line must keep its red emphasis");
+        XCTAssertNotEqualObjects([cell.detailTextLabel.attributedText attribute:NSForegroundColorAttributeName atIndex:0 effectiveRange:NULL],UIColor.systemRedColor,@"Action status must not inherit the historical red range");
+    }
+}
+- (void)testDisabledAppKeepsHistoricalSummaryAndActionStatus {
+    [self axs_cachekeeper_saveCleanupHistory];self.page.actionStatus=@"操作状态：配置已保存";
+    NSData *before=[NSData dataWithContentsOfFile:[self.page file:@"appEnabled.plist"]];
+    [self axs_cachekeeper_assertHistoryWithHint:@"未开启；打开总开关、单项开启或一键开启后才生效"];
+    XCTAssertEqualObjects(before,[NSData dataWithContentsOfFile:[self.page file:@"appEnabled.plist"]]);
+}
+- (void)testEnabledAppWithoutDirectoriesKeepsHistoricalSummaryAndActionStatus {
+    [self axs_cachekeeper_saveCleanupHistory];self.page.actionStatus=@"操作状态：配置已保存";
+    XCTAssertTrue([@{self.page.bundle:@{@"enabled":@YES,@"autoDiscover":@NO}} writeToFile:[self.page file:@"appEnabled.plist"] atomically:YES]);
+    XCTAssertTrue([@{} writeToFile:[self.page file:@"directories.plist"] atomically:YES]);
+    NSData *before=[NSData dataWithContentsOfFile:[self.page file:@"appEnabled.plist"]];
+    [self axs_cachekeeper_assertHistoryWithHint:@"总开关已开启；未选择文件清理目录，网络缓存按独立选项执行"];
+    XCTAssertEqualObjects(before,[NSData dataWithContentsOfFile:[self.page file:@"appEnabled.plist"]]);
+}
 - (void)testRunningReceiptKeepsWaitingAndStopRetainsToken {
     [self.page scan];NSString *token=self.page.token;XCTAssertNotNil(self.page.timer);
     self.page.started=NSProcessInfo.processInfo.systemUptime-40;

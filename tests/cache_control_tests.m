@@ -1760,8 +1760,8 @@ int main(int argc, const char *argv[]) {
         require([AxsCacheKeeperReceipts submitRoundForBundle:receiptBundle roundID:@"r2" removed:50 bytes:500 endReason:1 phase:@"complete" message:@"m3" failed:0 effectivePaths:@[@"Library/Caches"] discoveredPaths:nil directories:nil round:@{@"removed":@50, @"bytes":@500} coverageComplete:YES], @"回执新轮提交");
         receipt = [NSDictionary dictionaryWithContentsOfFile:receiptPath];
         require([receipt[@"removed"] unsignedIntegerValue]==200 && [receipt[@"confirmedRoundID"] isEqual:@"r2"] && [receipt[@"lastRemoved"] unsignedIntegerValue]==50 && [receipt[@"lastBytes"] unsignedLongLongValue]==500, @"新轮计全量且退役记上次清理");
-        // 3. 非退役提交不改上次清理：r2 追加到 60，累计 210，上次清理仍为 50。
-        require([AxsCacheKeeperReceipts submitRoundForBundle:receiptBundle roundID:@"r2" removed:60 bytes:600 endReason:0 phase:@"cleaning" message:@"m4" failed:0 effectivePaths:@[@"Library/Caches"] discoveredPaths:nil directories:nil round:nil coverageComplete:YES], @"回执中途提交");
+        // 3. 新独立轮的中途增量不改上次清理；已完成 r2 不得重新打开。
+        require([AxsCacheKeeperReceipts submitRoundForBundle:receiptBundle roundID:@"r3" removed:10 bytes:100 endReason:0 phase:@"cleaning" message:@"m4" failed:0 effectivePaths:@[@"Library/Caches"] discoveredPaths:nil directories:nil round:nil coverageComplete:YES], @"回执中途提交");
         receipt = [NSDictionary dictionaryWithContentsOfFile:receiptPath];
         require([receipt[@"removed"] unsignedIntegerValue]==210 && [receipt[@"lastRemoved"] unsignedIntegerValue]==50, @"中途提交不改上次清理");
         // 4. 写失败滞留与恢复：指向不存在的目录，提交失败且待处理；作业替换后新轮提交同样滞留；
@@ -1808,9 +1808,9 @@ int main(int argc, const char *argv[]) {
         [AxsCacheKeeperReceipts configureWithStatusFolder:receiptsFolder];
         require([AxsCacheKeeperReceipts updateStatusForBundle:receiptBundle phase:@"waiting" message:@"wait" failed:0 effectivePaths:@[@"Library/Caches"] discoveredPaths:nil directories:nil], @"展示更新成功");
         receipt = [NSDictionary dictionaryWithContentsOfFile:receiptPath];
-        require([receipt[@"removed"] unsignedIntegerValue]==210 && [receipt[@"confirmedRoundID"] isEqual:@"r2"] && [receipt[@"phase"] isEqual:@"waiting"] && [receipt[@"coverageComplete"] boolValue], @"展示更新不改累计与已确认轮次，覆盖标记原样保留");
+        require([receipt[@"removed"] unsignedIntegerValue]==210 && [receipt[@"confirmedRoundID"] isEqual:@"r3"] && [receipt[@"phase"] isEqual:@"waiting"] && [receipt[@"coverageComplete"] boolValue], @"展示更新不改累计与已确认轮次，覆盖标记原样保留");
         // 8. 覆盖完整性变化打破去重：同轮同累计、展示内容完全相同，仅覆盖标记翻转，仍落盘且累计不重复计入。
-        require([AxsCacheKeeperReceipts submitRoundForBundle:receiptBundle roundID:@"r2" removed:60 bytes:600 endReason:0 phase:@"waiting" message:@"wait" failed:0 effectivePaths:@[@"Library/Caches"] discoveredPaths:nil directories:nil round:nil coverageComplete:NO], @"覆盖翻转提交");
+        require([AxsCacheKeeperReceipts submitRoundForBundle:receiptBundle roundID:@"r3" removed:10 bytes:100 endReason:0 phase:@"waiting" message:@"wait" failed:0 effectivePaths:@[@"Library/Caches"] discoveredPaths:nil directories:nil round:nil coverageComplete:NO], @"覆盖翻转提交");
         receipt = [NSDictionary dictionaryWithContentsOfFile:receiptPath];
         require([receipt[@"removed"] unsignedIntegerValue]==210 && ![receipt[@"coverageComplete"] boolValue], @"覆盖翻转落盘，累计不重复计入");
         axs_cachekeeper_run_plan_repair_tests(fixture);

@@ -1,5 +1,7 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#import "AxsCacheKeeperCleanupHistory.h"
+#import "AxsCacheKeeperRelativePath.h"
 #include <sys/stat.h>
 #include <string.h>
 #include <errno.h>
@@ -9,13 +11,6 @@ static NSString *const AxsCacheKeeperPreferencesChanged = @"dev.local.cachekeepe
 static const NSTimeInterval AxsCacheKeeperMinimumFileAge = 60;
 static inline void axs_cachekeeper_notify_preferences(void) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)AxsCacheKeeperPreferencesChanged, NULL, NULL, YES);
-}
-static inline BOOL axs_cachekeeper_relative_path(NSString *path) {
-    if (![path isKindOfClass:NSString.class] || !path.length || [path hasPrefix:@"/"]) return NO;
-    for (NSString *part in [path componentsSeparatedByString:@"/"]) {
-        if (!part.length || [part isEqual:@"."] || [part isEqual:@".."] || [part containsString:@"\\"]) return NO;
-    }
-    return YES;
 }
 static inline BOOL axs_cachekeeper_protected_path(NSString *path) {
     if (!axs_cachekeeper_relative_path(path)) return YES;
@@ -494,6 +489,18 @@ static inline NSString *axs_cachekeeper_format_time(id value, NSTimeZone *zone) 
 static inline NSString *axs_cachekeeper_time_string(id value) {
     return axs_cachekeeper_format_time(value,NSTimeZone.localTimeZone);
 }
+static inline NSString *axs_cachekeeper_cleanup_round_summary(NSString *label, NSDictionary *round) {
+    if (!round[@"roundID"]) return [label stringByAppendingString:@"：未记录"];
+    NSDictionary *context=round[@"context"];
+    NSString *mode=@{@"auto":@"自动",@"clean":@"只清理",@"prevent":@"禁止缓存"}[context[@"mode"] ?: @""] ?: @"模式未记录";
+    NSMutableString *text=[[NSString stringWithFormat:@"%@：%@ · %@ · %@ 项 / %.2f MB · 插件 %@ · APP %@（构建 %@）",label,
+        axs_cachekeeper_time_string(round[@"finishedAt"]),mode,round[@"removed"],[round[@"bytes"] doubleValue]/1048576.0,
+        context[@"packageVersion"] ?: @"未记录",context[@"appVersion"] ?: @"未记录",context[@"appBuild"] ?: @"未记录"] mutableCopy];
+    if ([round[@"endReason"] unsignedIntegerValue]==4) [text appendString:@"；该轮已中止"];
+    if ([round[@"failed"] unsignedIntegerValue]) [text appendFormat:@"；该轮失败 %@ 项",round[@"failed"]];
+    if (![round[@"coverageComplete"] boolValue]) [text appendString:@"；该轮覆盖未完整"];
+    return text;
+}
 static inline NSString *axs_cachekeeper_summary(NSDictionary *scan, NSDictionary *report) {
     NSMutableArray *parts = [NSMutableArray new];
     if ([scan[@"rows"] isKindOfClass:NSArray.class]) [parts addObject:[NSString stringWithFormat:@"检测到 %lu 个目录（大小为检测快照）", (unsigned long)[scan[@"rows"] count]]];
@@ -501,7 +508,12 @@ static inline NSString *axs_cachekeeper_summary(NSDictionary *scan, NSDictionary
         NSString *message = report[@"message"];
         if ([message isKindOfClass:NSString.class] && message.length) [parts addObject:message];
         [parts addObject:[NSString stringWithFormat:@"累计清理 %lu 个 · %.2f MB", (unsigned long)[report[@"removed"] unsignedIntegerValue], [report[@"bytes"] doubleValue] / 1048576.0]];
-        if (report[@"lastBytes"]) [parts addObject:[NSString stringWithFormat:@"上次清理：%.2f MB", [report[@"lastBytes"] doubleValue] / 1048576.0]];
+        NSDictionary *history=axs_cachekeeper_cleanup_history_projection(report,NO);
+        if (!history) [parts addObject:@"清理历史无效，不能确认最近实际清理"];
+        else {
+            [parts addObject:axs_cachekeeper_cleanup_round_summary(@"最近一轮",[history[@"cleanupHistory"][@"rounds"] lastObject])];
+            [parts addObject:axs_cachekeeper_cleanup_round_summary(@"最近实际清理",history[@"lastEffectiveCleanup"])];
+        }
         if ([report[@"failed"] unsignedIntegerValue]) [parts addObject:[NSString stringWithFormat:@"本轮失败 %@ 项", report[@"failed"]]];
         if (report[@"updated"]) [parts addObject:[NSString stringWithFormat:@"最近检查 %@", axs_cachekeeper_time_string(report[@"updated"])]];
     }

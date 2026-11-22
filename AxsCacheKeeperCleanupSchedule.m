@@ -86,7 +86,7 @@ static NSArray *AxsCacheKeeperRangeStamp(struct stat info) {
     for (AxsCacheKeeperSweep *sweep in job.sweeps) directories[sweep.relativePath]=[sweep directoryReport];
     return [AxsCacheKeeperReceipts submitRoundForBundle:bundle roundID:job.roundID removed:job.removed bytes:job.bytes
         endReason:job.endReason phase:@"waiting" message:message failed:job.failed effectivePaths:directories.allKeys
-        discoveredPaths:nil directories:directories round:@{@"removed":@(job.removed),@"bytes":@(job.bytes)} coverageComplete:NO releaseEvidence:job.releaseEvidence];
+        discoveredPaths:nil directories:directories round:@{@"removed":@(job.removed),@"bytes":@(job.bytes)} coverageComplete:NO releaseEvidence:job.releaseEvidence cleanupContext:job.cleanupContext];
 }
 + (BOOL)shouldSkipSummary:(NSDictionary *)summary signature:(NSString *)signature now:(NSTimeInterval)now {
     if (![summary[@"signature"] isEqual:signature] || ![summary[@"finishedAt"] isKindOfClass:NSNumber.class]) return NO;

@@ -17,7 +17,8 @@ const setupDiagnostic = {phase: 'setup', error: 'none', methodCount: 0, matchedM
 function queryAttachError(error) {
     const text = error instanceof Error ? error.message : '';
     if (/^unable to intercept (?:function|instruction) at 0x[0-9a-fA-F]+; no instruction could be decoded there$/.test(text)) return 'invalidInstruction';
-    if (/^unable to intercept (?:function|instruction) at 0x[0-9a-fA-F]+; please file a bug$/.test(text)) return 'wrongSignature';
+    // Frida's generic relocation failure does not establish an Objective-C ABI mismatch.
+    if (/^unable to intercept (?:function|instruction) at 0x[0-9a-fA-F]+; please file a bug$/.test(text)) return 'interceptionFailed';
     if (text === 'already attached to this function') return 'alreadyAttached';
     if (text === 'not permitted by code-signing policy') return 'codeSigningPolicy';
     if (text === 'wrong type') return 'wrongType';

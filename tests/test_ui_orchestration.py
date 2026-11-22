@@ -53,6 +53,8 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
             stage, expected_timeout = "searchRed", 1200
         elif len(command) > 1 and command[1].endswith("run_image_legacy_red.py"):
             stage, expected_timeout = "imageLegacyRed", 1320
+        elif len(command) > 1 and command[1].endswith("run_cleanup_summary_red.py"):
+            stage, expected_timeout = "historySummaryRed", 1200
         elif command[:3] == ["xcrun", "simctl", "list"]:
             stage, expected_timeout = "discovery", 300
         elif command[0] == "xcodegen":
@@ -158,6 +160,8 @@ cases = [
     ("initial_red_fail_stop", {"searchRed": "exit"}, None, False, [], [], True, None),
     ("initial_red_timeout_stop", {"searchRed": "timeout"}, None, False, [], [], True, None),
     ("all_pass", {}, None, False, ALL_SUITES, ALL_EXPORTS, False, None),
+    ("history_summary_failure_continue", {"historySummaryRed": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "Cleanup history"),
+    ("history_summary_timeout_continue", {"historySummaryRed": "timeout"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "Cleanup history"),
     ("webkit_fails_continue", {"WebKit": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "WebKit"),
     ("sdk521_fails_continue", {"SDK521": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "5.21.7"),
     ("scanpage_failure_continue", {"ScanPage": "exit"}, None, False, ALL_SUITES, ALL_EXPORTS, True, "ScanPage"),
@@ -213,6 +217,12 @@ def main(argv=None):
             errors.append('durable summary disagrees with actual exit')
         if ledger and any(row['state'] == 'running' for row in ledger['stages']):
             errors.append('finished command remains running in durable ledger')
+        if name == "all_pass" and "historySummaryRed" not in result["commands"]:
+            errors.append("cleanup historical summary RED was never scheduled")
+        if name == "all_pass" and ledger["suites"].get("Cleanup history summary baseline") != "passed":
+            errors.append("cleanup history baseline missing from completed suite ledger")
+        if name.startswith("history_summary_") and ledger["suites"].get("Cleanup history summary baseline") != ("timeout" if "timeout" in name else "failed"):
+            errors.append("cleanup history failure is absent from suite ledger")
         if name.startswith('discovery_') and 'boot' in result['commands']:
             errors.append('failed discovery must not boot a simulator')
         if summary_label:

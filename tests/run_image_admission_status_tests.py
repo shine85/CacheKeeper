@@ -7,11 +7,19 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+ADMISSION_CHECK = '    if (value[@"instanceAdmission"] && !axs_cachekeeper_image_admission_projection(value[@"instanceAdmission"],(NSUInteger)observed)) return nil;\n'
+REJECTION_CHECK = '''    NSDictionary *rejection=value[@"sdkMethodsRejectionObservation"],*admission=value[@"instanceAdmission"];
+    if ([rejection[@"state"] isEqual:@"recorded"] &&
+        (!admission || [rejection[@"initializerOrdinal"] unsignedLongLongValue]>[admission[@"initializerReturns"] unsignedLongLongValue] ||
+         ![admission[@"unregisteredReasons"][@"sdkMethodsChanged"] unsignedLongLongValue])) return nil;
+'''
 CONTROLS = (
     ("boolean", " || CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID()", "",
      "boolean fractional negative unsafe and nonnumeric counts rejected"),
     ("closure", "liveTotal==live && AxsCacheKeeperImageAdmissionValid(&ledger,live)", "liveTotal==live",
      "contradictory lifecycle counts rejected"),
+    ("rejection-order", ADMISSION_CHECK + REJECTION_CHECK, REJECTION_CHECK + ADMISSION_CHECK,
+     "recorded rejection validates admission before reading cumulative reason data"),
 )
 
 def run():

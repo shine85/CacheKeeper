@@ -240,7 +240,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
             [text appendFormat:@"  匿名节点 %@ · %@：逻辑 %.3f GB / 分配 %.3f GB\n",node[@"id"],node[@"category"],[node[@"logicalBytes"] doubleValue]/1e9,[node[@"allocatedBytes"] doubleValue]/1e9];
         }
         if ([measurement[@"layoutProfile"] isEqual:@"swiftgramGroupStructureV1"]) {
-            NSDictionary *labels=@{@"postboxDatabase":@"Postbox 数据库",@"postboxMedia":@"Postbox 媒体",@"postboxMediaCache":@"媒体缓存子目录",@"logs":@"日志目录"};
+            NSDictionary *labels=@{@"postboxDatabase":@"Postbox 数据库",@"postboxMedia":@"Postbox 媒体",@"postboxMediaCache":@"媒体缓存子目录",@"postboxMediaShortCache":@"短期媒体缓存子目录",@"postboxMediaAnimationCache":@"动画媒体缓存子目录",@"logs":@"日志目录"};
             [text appendString:@"  私有资源结构分类（本轮观察，不授予清理；父子容量不要相加）：\n"];
             NSUInteger classified=0;
             for (NSDictionary *node in nodes) {

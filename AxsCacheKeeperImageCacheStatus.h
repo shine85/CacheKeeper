@@ -158,6 +158,11 @@ static inline NSDictionary *axs_cachekeeper_image_cache_raw_projection(id value)
         if (!axs_cachekeeper_image_discovery_projection(value[@"discoveryCheck"])) return nil;
         keys=[keys arrayByAddingObject:@"discoveryCheck"];
     }
+    if (value[@"sdkMethodsRejectionObservation"]) {
+        NSDictionary *rejection=axs_cachekeeper_image_sdk_rejection_projection(value[@"sdkMethodsRejectionObservation"]);
+        if (!rejection) return nil;
+        keys=[keys arrayByAddingObject:@"sdkMethodsRejectionObservation"];
+    }
     if (value[@"runtimeSourceObservation"]) {
         if (!axs_cachekeeper_image_runtime_observation_projection(value[@"runtimeSourceObservation"])) return nil;
         keys=[keys arrayByAddingObject:@"runtimeSourceObservation"];
@@ -191,11 +196,16 @@ static inline NSDictionary *axs_cachekeeper_image_cache_raw_projection(id value)
     if ([value[@"state"] isEqual:@"timedOut"] && !pending) return nil;
     if ([value[@"state"] isEqual:@"apiCompleted"] && (!completed || pending)) return nil;
     if (value[@"instanceAdmission"] && !axs_cachekeeper_image_admission_projection(value[@"instanceAdmission"],(NSUInteger)observed)) return nil;
+    NSDictionary *rejection=value[@"sdkMethodsRejectionObservation"],*admission=value[@"instanceAdmission"];
+    if ([rejection[@"state"] isEqual:@"recorded"] &&
+        (!admission || [rejection[@"initializerOrdinal"] unsignedLongLongValue]>[admission[@"initializerReturns"] unsignedLongLongValue] ||
+         ![admission[@"unregisteredReasons"][@"sdkMethodsChanged"] unsignedLongLongValue])) return nil;
     return axs_cachekeeper_status_immutable_copy(value);
 }
 static inline NSDictionary *axs_cachekeeper_image_cache_projection_with_aliases(id value,NSMutableDictionary *aliases) {
     NSDictionary *raw=axs_cachekeeper_image_cache_raw_projection(value);if (!raw) return nil;
     NSMutableDictionary *result=[raw mutableCopy];
+    if (!result[@"sdkMethodsRejectionObservation"]) result[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
     if (raw[@"operationHistory"]) {
         NSDictionary *history=axs_cachekeeper_operation_history_projection(raw[@"operationHistory"],aliases);
         if (!history) return nil;result[@"operationHistory"]=history;

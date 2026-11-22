@@ -9,7 +9,8 @@ typedef enum {
     AxsCacheKeeperResourceUnknown, AxsCacheKeeperResourceDocuments, AxsCacheKeeperResourceLibrary,
     AxsCacheKeeperResourceCaches, AxsCacheKeeperResourceSupport, AxsCacheKeeperResourceTemporary,
     AxsCacheKeeperResourcePostbox, AxsCacheKeeperResourcePostboxDatabase, AxsCacheKeeperResourcePostboxMedia,
-    AxsCacheKeeperResourcePostboxCache, AxsCacheKeeperResourceLogs, AxsCacheKeeperResourceCategoryCount
+    AxsCacheKeeperResourcePostboxCache, AxsCacheKeeperResourceLogs,
+    AxsCacheKeeperResourcePostboxShortCache, AxsCacheKeeperResourcePostboxAnimationCache, AxsCacheKeeperResourceCategoryCount
 } AxsCacheKeeperResourceCategory;
 typedef struct { const unsigned char *bytes; size_t length; } AxsCacheKeeperResourcePart;
 static inline bool axs_cachekeeper_resource_part_is(AxsCacheKeeperResourcePart part,const char *text) {
@@ -17,7 +18,8 @@ static inline bool axs_cachekeeper_resource_part_is(AxsCacheKeeperResourcePart p
 }
 static inline const char *axs_cachekeeper_resource_category_name(AxsCacheKeeperResourceCategory category) {
     static const char * const names[]={"unknown","Documents","Library","Caches","Application Support","tmp",
-        "postbox","postboxDatabase","postboxMedia","postboxMediaCache","logs"};
+        "postbox","postboxDatabase","postboxMedia","postboxMediaCache","logs",
+        "postboxMediaShortCache","postboxMediaAnimationCache"};
     return (unsigned)category<AxsCacheKeeperResourceCategoryCount ? names[category] : NULL;
 }
 static inline size_t axs_cachekeeper_resource_node_depth(AxsCacheKeeperResourceLayout layout) {
@@ -33,7 +35,11 @@ static inline AxsCacheKeeperResourceCategory axs_cachekeeper_resource_category(A
             if (depth==4 && axs_cachekeeper_resource_part_is(parts[3],"db")) return AxsCacheKeeperResourcePostboxDatabase;
             if (axs_cachekeeper_resource_part_is(parts[3],"media")) {
                 if (depth==4) return AxsCacheKeeperResourcePostboxMedia;
-                if (depth==5 && axs_cachekeeper_resource_part_is(parts[4],"cache")) return AxsCacheKeeperResourcePostboxCache;
+                if (depth==5) {
+                    if (axs_cachekeeper_resource_part_is(parts[4],"cache")) return AxsCacheKeeperResourcePostboxCache;
+                    if (axs_cachekeeper_resource_part_is(parts[4],"short-cache")) return AxsCacheKeeperResourcePostboxShortCache;
+                    if (axs_cachekeeper_resource_part_is(parts[4],"animation-cache")) return AxsCacheKeeperResourcePostboxAnimationCache;
+                }
             }
         }
     }
@@ -57,7 +63,8 @@ static inline bool axs_cachekeeper_resource_node_valid(AxsCacheKeeperResourceLay
         if (depth==2 && category==AxsCacheKeeperResourceLogs) return true;
         if (depth==3 && category==AxsCacheKeeperResourcePostbox) return true;
         if (depth==4 && parent==AxsCacheKeeperResourcePostbox && (category==AxsCacheKeeperResourcePostboxDatabase || category==AxsCacheKeeperResourcePostboxMedia)) return true;
-        if (depth==5 && parent==AxsCacheKeeperResourcePostboxMedia && category==AxsCacheKeeperResourcePostboxCache) return true;
+        if (depth==5 && parent==AxsCacheKeeperResourcePostboxMedia &&
+            (category==AxsCacheKeeperResourcePostboxCache || category==AxsCacheKeeperResourcePostboxShortCache || category==AxsCacheKeeperResourcePostboxAnimationCache)) return true;
     }
     if (depth==1 && (category==AxsCacheKeeperResourceDocuments || category==AxsCacheKeeperResourceLibrary || category==AxsCacheKeeperResourceTemporary)) return true;
     return depth==2 && parent==AxsCacheKeeperResourceLibrary && (category==AxsCacheKeeperResourceCaches || category==AxsCacheKeeperResourceSupport);

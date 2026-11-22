@@ -151,7 +151,7 @@ class NativeOrchestrationTests(unittest.TestCase):
             [sys.executable, str(ROOT / "tests/run_native_tests.py"), "--group", "runtime-diagnostic-assets"],
             capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Ran 3 tests", result.stdout + result.stderr)
+        self.assertIn("Ran 4 tests", result.stdout + result.stderr)
         self.assertNotIn("UNAVAILABLE:", result.stdout + result.stderr)
 
     def test_qq_code_group_executes_the_repository_probe(self):

@@ -309,7 +309,7 @@ def validate(value, bundle, expected_uuid=None):
         _keys(diagnostic,'phase error methodCount matchedMethods')
         if (bundle!='com.baidu.netdisk' or value.get('queryCoverage')!='installationFailed' or
                 value.get('state') not in ('partial','failed') or diagnostic['phase']!='queryAttach' or
-                diagnostic['error'] not in ('invalidInstruction','wrongSignature','alreadyAttached','codeSigningPolicy','wrongType','unclassified') or
+                diagnostic['error'] not in ('invalidInstruction','interceptionFailed','wrongSignature','alreadyAttached','codeSigningPolicy','wrongType','unclassified') or
                 not _count(diagnostic['methodCount'],4096) or not _count(diagnostic['matchedMethods'],4096)):
             raise ValueError('invalidQueryDiagnostic')
     if isinstance(value, dict) and 'setupDiagnostic' in value:

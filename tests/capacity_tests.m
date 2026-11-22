@@ -460,17 +460,19 @@ static void AxsCacheKeeperCapacityInvalidRoot(void) {
 }
 static void AxsCacheKeeperCapacityPrivateLayout(NSString *base) {
     NSString *path=AxsCacheKeeperCapacityDirectory(base,@"private-layout");
-    for (NSString *relative in @[@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/media/cache",@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/db",@"PRIVATE_OUTER/logs",@"other/deep/unclassified/branch/ignored"])
+    for (NSString *relative in @[@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/media/cache",@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/media/short-cache",@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/media/animation-cache",@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/db",@"PRIVATE_OUTER/logs",@"other/deep/unclassified/branch/ignored"])
         AxsCacheKeeperCapacityDirectory(path,relative);
     AxsCacheKeeperCapacityFile([path stringByAppendingPathComponent:@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/media/cache/opaque"],17);
     AxsCacheKeeperCapacityFile([path stringByAppendingPathComponent:@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/db/opaque"],31);
+    AxsCacheKeeperCapacityFile([path stringByAppendingPathComponent:@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/media/short-cache/opaque"],23);
+    AxsCacheKeeperCapacityFile([path stringByAppendingPathComponent:@"PRIVATE_OUTER/PRIVATE_ACCOUNT/postbox/media/animation-cache/opaque"],29);
     struct stat identity=AxsCacheKeeperCapacityStat(path);
     AxsCacheKeeperCapacityRoot *root=[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:[NSURL fileURLWithPath:path] expectedDevice:identity.st_dev expectedInode:identity.st_ino layout:AxsCacheKeeperResourceLayoutSwiftgramGroup];
     AxsCacheKeeperCapacityFinish(root,1);
     NSMutableDictionary *categories=[NSMutableDictionary new];
     for (NSDictionary *node in root.result[@"nodes"]) categories[node[@"category"]]=node;
-    AxsCacheKeeperCapacityCheck([root.state isEqual:@"complete"] && [root.result[@"logicalBytes"] isEqual:@48],"private classification preserves whole-root totals");
-    AxsCacheKeeperCapacityCheck([categories[@"postboxDatabase"][@"logicalBytes"] isEqual:@31] && [categories[@"postboxMedia"][@"logicalBytes"] isEqual:@17] && [categories[@"postboxMediaCache"][@"logicalBytes"] isEqual:@17],"private media database and cache use actual independent fixture sizes");
+    AxsCacheKeeperCapacityCheck([root.state isEqual:@"complete"] && [root.result[@"logicalBytes"] isEqual:@100],"private classification preserves whole-root totals");
+    AxsCacheKeeperCapacityCheck([categories[@"postboxDatabase"][@"logicalBytes"] isEqual:@31] && [categories[@"postboxMedia"][@"logicalBytes"] isEqual:@69] && [categories[@"postboxMediaCache"][@"logicalBytes"] isEqual:@17] && [categories[@"postboxMediaShortCache"][@"logicalBytes"] isEqual:@23] && [categories[@"postboxMediaAnimationCache"][@"logicalBytes"] isEqual:@29],"private media database and cache use actual independent fixture sizes");
     AxsCacheKeeperCapacityCheck([root.result[@"layoutProfile"] isEqual:@"swiftgramGroupStructureV1"] && [root.result[@"deletionAuthorization"] isEqual:@"notGranted"],"private structural profile never grants cleanup");
     NSData *json=[NSJSONSerialization dataWithJSONObject:root.result options:0 error:nil];
     NSString *text=[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
@@ -488,7 +490,7 @@ static void AxsCacheKeeperCapacityPrivateLayout(NSString *base) {
     identity=AxsCacheKeeperCapacityStat(path);
     AxsCacheKeeperCapacityRoot *shards=[[AxsCacheKeeperCapacityRoot alloc] initWithRoot:[NSURL fileURLWithPath:path] expectedDevice:identity.st_dev expectedInode:identity.st_ino layout:AxsCacheKeeperResourceLayoutSwiftgramGroup];
     AxsCacheKeeperCapacityFinish(shards,1);
-    AxsCacheKeeperCapacityCheck([shards.state isEqual:@"complete"] && [shards.result[@"nodes"] count]==previousNodes && [shards.result[@"logicalBytes"] isEqual:@116],"unknown media shards and same-named files add bytes without consuming classification nodes");
+    AxsCacheKeeperCapacityCheck([shards.state isEqual:@"complete"] && [shards.result[@"nodes"] count]==previousNodes && [shards.result[@"logicalBytes"] isEqual:@168],"unknown media shards and same-named files add bytes without consuming classification nodes");
 }
 int main(int argc,const char **argv) { @autoreleasepool {
     AxsCacheKeeperCapacityCheck(argc==2 || argc==3,"unique fixture root and optional case");

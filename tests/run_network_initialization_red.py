@@ -25,7 +25,7 @@ def verify_failure(baseline, expected):
         fixture.mkdir()
         binary = target / "red-test"
         subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-framework", "Foundation",
-                        "-I" + str(root / "tests/include"), str(target / "main.m"),
+                        "-I" + str(root), "-I" + str(root / "tests/include"), str(target / "main.m"),
                         str(target / "AxsCacheKeeperNetworkCache.m"),
                         str(target / "tests/network_cache_tests.m"), "-o", str(binary)],
                        check=True, timeout=60)

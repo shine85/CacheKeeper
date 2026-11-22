@@ -251,6 +251,27 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     XCTAssertNil([owner diskImageDataForKey:@"blocked-after-restoration"]);
     XCTAssertNotNil([owner diskImageDataForKey:@"allowed-while-changed"]);
 }
+
+- (void)testFirstSDKMethodRejectionFreezesAndSurvivesRestore {
+    SDImageCacheConfig *config=[SDImageCacheConfig new];config.shouldRemoveExpiredDataWhenEnterBackground=NO;config.shouldRemoveExpiredDataWhenTerminate=NO;
+    Method getter=class_getInstanceMethod(SDImageCache.class,@selector(diskCache));IMP original=method_getImplementation(getter);
+    IMP foreign=imp_implementationWithBlock(^id(id receiver) {return ((id (*)(id,SEL))original)(receiver,@selector(diskCache));});
+    method_setImplementation(getter,foreign);NSDictionary *frozen=nil;
+    @try {
+        SDImageCache *first=[[SDImageCache alloc] initWithNamespace:@"gate-first" diskCacheDirectory:[self.home stringByAppendingPathComponent:@"Library/Caches"] config:config];
+        XCTAssertNotNil(first);[self.owners addObject:first];
+        [self axs_cachekeeper_wait:^BOOL(NSDictionary *r) {return [r[@"instanceAdmission"][@"unregisteredReasons"][@"sdkMethodsChanged"] isEqual:@1];} description:@"first hook rejection published"];
+        frozen=self.engine.receipt[@"sdkMethodsRejectionObservation"];
+        XCTAssertEqualObjects(frozen[@"state"],@"recorded");XCTAssertEqualObjects(frozen[@"initializerOrdinal"],@1);
+        XCTAssertEqualObjects(frozen[@"check"][@"cause"],@"implementation");XCTAssertEqualObjects(frozen[@"check"][@"methodIndex"],@2);
+        XCTAssertEqualObjects(frozen[@"check"][@"classRawMatchesStored"],@NO);
+        XCTAssertEqualObjects(self.engine.receipt[@"instanceAdmission"][@"registered"],@0);
+    } @finally {method_setImplementation(getter,original);XCTAssertTrue(imp_removeBlock(foreign));}
+    [self axs_cachekeeper_owner:@"gate-restored" config:nil];
+    XCTAssertEqualObjects(self.engine.receipt[@"sdkMethodsRejectionObservation"],frozen,@"recovery must not replace historical first failure");
+    XCTAssertEqualObjects(self.engine.receipt[@"instanceAdmission"][@"registered"],@1);
+}
+
 - (void)testStandardMemoryKVOConfigurationIsAdmittedButCustomConfigurationIsNot {
     SDImageCache *standard=[self axs_cachekeeper_owner:@"standard-kvo" config:nil];
     XCTAssertNotEqual(object_getClass(standard.config),SDImageCacheConfig.class);

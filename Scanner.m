@@ -9,6 +9,8 @@
 #import "AxsCacheKeeperRecords.h"
 #import "AxsCacheKeeperSweep.h"
 #import "AxsCacheKeeperCleanupJob.h"
+#import "AxsCacheKeeperCleanupHistory.h"
+#import "AxsCacheKeeperRuntimeBuild.h"
 #import "AxsCacheKeeperCleanupRules.h"
 #import "AxsCacheKeeperDirectories.h"
 #import "AxsCacheKeeperProcess.h"
@@ -470,7 +472,18 @@ void CKApplyDirectorySwitches(void) {
             // 容器路径已在签名内（roots 为绝对路径，含 home 前缀）：重装换容器即签名变化，静默期失效。
             // 任务 8 起签名不再含 fullClear（该键已废止，标准缓存统一按平台规则处理）。
             NSString *exclusionsString = [axs_cachekeeper_exclusions(states[bundle]) componentsJoinedByString:@"\n"] ?: @"";
-            NSString *signature = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@", [roots componentsJoinedByString:@"\n"], mode, target[@"instance"], [purgePaths componentsJoinedByString:@"\n"], exclusionsString, [AxsCacheKeeperCleanupRules rulesVersion], target[@"version"], [axs_cachekeeper_log_paths(states[bundle]) componentsJoinedByString:@"\n"], [restoreExclusions componentsJoinedByString:@"\n"], target[@"revision"], target[@"processExited"], installationID];
+            NSDictionary *cleanupContext=axs_cachekeeper_cleanup_context(mode,axs_cachekeeper_app_enabled(states[bundle]),
+                axs_cachekeeper_url_cache_enabled(states[bundle]),axs_cachekeeper_webkit_disk_cache_enabled(states[bundle]),
+                axs_cachekeeper_auto_discover(states[bundle]),axs_cachekeeper_runtime_info()[@"packageVersion"],
+                installation[@"version"],installation[@"build"],[AxsCacheKeeperCleanupRules rulesVersion],
+                axs_cachekeeper_cache_paths(selection[bundle]),axs_cachekeeper_exclusions(states[bundle]),axs_cachekeeper_log_paths(states[bundle]));
+            if (!cleanupContext) {
+                [AxsCacheKeeperCleanupSchedule retireJob:jobs[bundle] bundle:bundle message:@"清理上下文无效，已停止本轮清理"];
+                [jobs removeObjectForKey:bundle];[jobReports removeObjectForKey:bundle];
+                [AxsCacheKeeperReceipts updateStatusForBundle:bundle phase:@"error" message:@"无法保存公开清理版本与配置上下文" failed:1 effectivePaths:paths discoveredPaths:nil directories:nil];
+                continue;
+            }
+            NSString *signature = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@", [roots componentsJoinedByString:@"\n"], mode, target[@"instance"], [purgePaths componentsJoinedByString:@"\n"], exclusionsString, [AxsCacheKeeperCleanupRules rulesVersion], target[@"version"], [axs_cachekeeper_log_paths(states[bundle]) componentsJoinedByString:@"\n"], [restoreExclusions componentsJoinedByString:@"\n"], target[@"revision"], target[@"processExited"], installationID, cleanupContext[@"configurationID"]];
             NSDictionary *done = finished[bundle];
             // 静默期（方案任务 3，P1-3＋扩展）：1800 秒只给真正干净的完成轮——结束原因 Completed
             //（触顶/未确认轮不算，哪怕 0 删除）、无删除、无失败、无变化、无近期待处理文件、
@@ -523,7 +536,7 @@ void CKApplyDirectorySwitches(void) {
                         diagnostics[failedPath]=@{@"updated":NSDate.date,@"measurementComplete":@NO,@"coverageComplete":@NO,@"failed":@1,@"error":restored[@"error"] ?: @"旧权限恢复失败"};
                 }
                 jobReports[bundle]=diagnostics;
-                job = [[AxsCacheKeeperCleanupJob alloc] initWithSweeps:sweeps signature:signature instance:target[@"instance"] ?: @"" clock:^NSTimeInterval { return axs_cachekeeper_monotonic_seconds(); }];
+                job = [[AxsCacheKeeperCleanupJob alloc] initWithSweeps:sweeps signature:signature instance:target[@"instance"] ?: @"" cleanupContext:cleanupContext clock:^NSTimeInterval { return axs_cachekeeper_monotonic_seconds(); }];
                 jobs[bundle] = job;
             }
             if ([AxsCacheKeeperReceipts hasPendingForBundle:bundle]) continue;
@@ -625,7 +638,7 @@ void CKApplyDirectorySwitches(void) {
             // 回执写成功后才退役作业；写失败时保留已完成作业，下周期先重试落盘再推进
             //（暂停检查在作业构建前，见上）。一轮退役时把本轮总量记为上次清理；中途周期传 nil，沿用上一轮的值。
             NSDictionary *round = (complete || capHit || cancelled || unresolvedEnd) ? @{@"removed":@(removed), @"bytes":@(bytes)} : nil;
-            BOOL reported = [AxsCacheKeeperReceipts submitRoundForBundle:bundle roundID:job.roundID removed:removed bytes:bytes endReason:(NSInteger)endReason phase:phase message:message failed:failures effectivePaths:paths discoveredPaths:axs_cachekeeper_auto_discover(states[bundle]) ? discovered : nil directories:directoryReports round:round coverageComplete:[summary[@"coverageComplete"] boolValue] releaseEvidence:job.releaseEvidence];
+            BOOL reported = [AxsCacheKeeperReceipts submitRoundForBundle:bundle roundID:job.roundID removed:removed bytes:bytes endReason:(NSInteger)endReason phase:phase message:message failed:failures effectivePaths:paths discoveredPaths:axs_cachekeeper_auto_discover(states[bundle]) ? discovered : nil directories:directoryReports round:round coverageComplete:[summary[@"coverageComplete"] boolValue] releaseEvidence:job.releaseEvidence cleanupContext:job.cleanupContext];
             if (reported) {
                 if (cancelled || complete || capHit || unresolvedEnd) {
                     // 结束记录供静默期判定：结束原因＋近期文件数＋未确认残留＋发现覆盖完整性（方案任务 3）。
