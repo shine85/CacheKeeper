@@ -197,9 +197,16 @@ static inline NSDictionary *axs_cachekeeper_image_cache_raw_projection(id value)
     if ([value[@"state"] isEqual:@"apiCompleted"] && (!completed || pending)) return nil;
     if (value[@"instanceAdmission"] && !axs_cachekeeper_image_admission_projection(value[@"instanceAdmission"],(NSUInteger)observed)) return nil;
     NSDictionary *rejection=value[@"sdkMethodsRejectionObservation"],*admission=value[@"instanceAdmission"];
+    NSDictionary *rejectionCheck=rejection[@"check"];
+    // A revoked main view may register a closed observation before readmission.
+    // Its first rejection survives recovery/release without inventing another return.
+    BOOL registeredMainView=[admission[@"registered"] unsignedLongLongValue]>0 &&
+        [rejectionCheck[@"cause"] isEqual:@"legacyHelper"] && [rejectionCheck[@"helperStage"] isEqual:@"mainIdentity"] &&
+        [rejectionCheck[@"helperReason"] isEqual:@"notMainBase"] && [rejectionCheck[@"methodsCount"] unsignedIntegerValue]==25 &&
+        ![rejectionCheck[@"methodIndex"] unsignedIntegerValue] && ![rejectionCheck[@"helperIndex"] unsignedIntegerValue];
     if ([rejection[@"state"] isEqual:@"recorded"] &&
         (!admission || [rejection[@"initializerOrdinal"] unsignedLongLongValue]>[admission[@"initializerReturns"] unsignedLongLongValue] ||
-         ![admission[@"unregisteredReasons"][@"sdkMethodsChanged"] unsignedLongLongValue])) return nil;
+         (![admission[@"unregisteredReasons"][@"sdkMethodsChanged"] unsignedLongLongValue] && !registeredMainView))) return nil;
     return axs_cachekeeper_status_immutable_copy(value);
 }
 static inline NSDictionary *axs_cachekeeper_image_cache_projection_with_aliases(id value,NSMutableDictionary *aliases) {

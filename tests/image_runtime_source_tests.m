@@ -224,7 +224,12 @@ static void axs_cachekeeper_runtime_refresh(AxsCacheKeeperImageCache *engine) {
     [engine refreshWithCompletion:^{dispatch_semaphore_signal(done);}];
     axs_cachekeeper_runtime_require(dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"refresh completes");
     axs_cachekeeper_runtime_worker_fence(engine);
-    axs_cachekeeper_runtime_require(axs_cachekeeper_image_cache_projection(engine.receipt)!=nil,"receipt retains the public schema");
+    NSDictionary *receipt=engine.receipt;
+    axs_cachekeeper_runtime_require(axs_cachekeeper_image_discovery_projection(receipt[@"discoveryCheck"])!=nil,"receipt discovery remains closed");
+    axs_cachekeeper_runtime_require(axs_cachekeeper_image_sdk_rejection_projection(receipt[@"sdkMethodsRejectionObservation"])!=nil,"receipt first SDK rejection remains closed");
+    axs_cachekeeper_runtime_require(axs_cachekeeper_image_admission_projection(receipt[@"instanceAdmission"],[receipt[@"observed"] unsignedIntegerValue])!=nil,"receipt initializer accounting remains closed");
+    axs_cachekeeper_runtime_require(axs_cachekeeper_operation_history_validate(receipt[@"operationHistory"],@"image")!=nil,"receipt operation history remains closed");
+    axs_cachekeeper_runtime_require(axs_cachekeeper_image_cache_projection(receipt)!=nil,"receipt retains the public schema");
 }
 static void axs_cachekeeper_runtime_wait(AxsCacheKeeperImageCache *engine,BOOL (^condition)(NSDictionary *),const char *message) {
     for (NSUInteger attempt=0;attempt<500;attempt++) {if (condition(engine.receipt)) return;usleep(10000);}

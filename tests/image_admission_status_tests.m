@@ -88,6 +88,30 @@ int main(void) {@autoreleasepool {
     old[@"sdkMethodsRejectionObservation"]=failure;old[@"instanceAdmission"]=valid;
     check(!axs_cachekeeper_image_cache_projection(old),"recorded SDK rejection requires matching cumulative reason count");
     [old removeObjectForKey:@"sdkMethodsRejectionObservation"];old[@"instanceAdmission"]=valid;
+    NSDictionary *waitingGate=@{@"schemaVersion":@1,@"accepted":@NO,@"cause":@"legacyHelper",@"methodIndex":@0,@"methodsCount":@25,@"helperStage":@"mainIdentity",@"helperReason":@"notMainBase",@"helperIndex":@0};
+    NSDictionary *waitingRejection=@{@"schemaVersion":@1,@"state":@"recorded",@"initializerOrdinal":@1,@"check":waitingGate};
+    NSDictionary *waitingAdmission=@{@"schemaVersion":@1,@"initializerReturns":@1,@"registered":@1,@"unregistered":@0,@"released":@0,@"overflow":@NO,@"unregisteredReasons":@{},@"liveReasons":@{@"sdkMethodsChanged":@1}};
+    old[@"instanceAdmission"]=waitingAdmission;old[@"sdkMethodsRejectionObservation"]=waitingRejection;
+    old[@"observed"]=@1;old[@"eligible"]=@0;old[@"restricted"]=@0;
+    check(axs_cachekeeper_image_cache_projection(old)!=nil,"registered waiting main rejection survives strict receipt export");
+    candidate=[waitingAdmission mutableCopy];candidate[@"liveReasons"]=@{@"none":@1};old[@"instanceAdmission"]=candidate;
+    old[@"state"]=@"restricting";old[@"reason"]=@"none";old[@"eligible"]=@1;old[@"restricted"]=@1;
+    NSDictionary *recovered=axs_cachekeeper_image_cache_projection(old);
+    check(recovered && [recovered[@"sdkMethodsRejectionObservation"] isEqual:waitingRejection],"recovered main view keeps first rejection and original initializer accounting");
+    plist=[NSPropertyListSerialization dataWithPropertyList:old format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+    check(plist && axs_cachekeeper_image_cache_projection([NSPropertyListSerialization propertyListWithData:plist options:0 format:NULL error:nil]),"recovered main view strict receipt survives saved roundtrip");
+    candidate=[waitingAdmission mutableCopy];candidate[@"released"]=@1;candidate[@"liveReasons"]=@{};old[@"instanceAdmission"]=candidate;
+    old[@"observed"]=@0;old[@"eligible"]=@0;old[@"restricted"]=@0;old[@"state"]=@"notObserved";
+    check(axs_cachekeeper_image_cache_projection(old)!=nil,"released waiting owner retains authentic first rejection history");
+    for (NSDictionary *unsupported in @[
+        @{@"schemaVersion":@1,@"accepted":@NO,@"cause":@"legacyHelper",@"methodIndex":@0,@"methodsCount":@25,@"helperStage":@"mainIdentity",@"helperReason":@"version",@"helperIndex":@0},
+        @{@"schemaVersion":@1,@"accepted":@NO,@"cause":@"legacyHelper",@"methodIndex":@0,@"methodsCount":@25,@"helperStage":@"helperWindow",@"helperReason":@"changed",@"helperIndex":@1},
+        @{@"schemaVersion":@1,@"accepted":@NO,@"cause":@"legacyHelper",@"methodIndex":@0,@"methodsCount":@24,@"helperStage":@"mainIdentity",@"helperReason":@"notMainBase",@"helperIndex":@0},gate]) {
+        old[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"recorded",@"initializerOrdinal":@1,@"check":unsupported};
+        check(!axs_cachekeeper_image_cache_projection(old),"registered count cannot excuse a different SDK rejection");
+    }
+    old[@"sdkMethodsRejectionObservation"]=waitingRejection;old[@"instanceAdmission"]=@{@"schemaVersion":@1,@"initializerReturns":@1,@"registered":@0,@"unregistered":@1,@"released":@0,@"overflow":@NO,@"unregisteredReasons":@{@"diskMissing":@1},@"liveReasons":@{}};
+    check(!axs_cachekeeper_image_cache_projection(old),"waiting main rejection requires actual observation registration or matching early rejection count");
     puts("PASS: image-admission-status closed projection, privacy, legacy and wording");
     return 0;
 }}

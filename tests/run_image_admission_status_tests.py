@@ -9,9 +9,16 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 ADMISSION_CHECK = '    if (value[@"instanceAdmission"] && !axs_cachekeeper_image_admission_projection(value[@"instanceAdmission"],(NSUInteger)observed)) return nil;\n'
 REJECTION_CHECK = '''    NSDictionary *rejection=value[@"sdkMethodsRejectionObservation"],*admission=value[@"instanceAdmission"];
+    NSDictionary *rejectionCheck=rejection[@"check"];
+    // A revoked main view may register a closed observation before readmission.
+    // Its first rejection survives recovery/release without inventing another return.
+    BOOL registeredMainView=[admission[@"registered"] unsignedLongLongValue]>0 &&
+        [rejectionCheck[@"cause"] isEqual:@"legacyHelper"] && [rejectionCheck[@"helperStage"] isEqual:@"mainIdentity"] &&
+        [rejectionCheck[@"helperReason"] isEqual:@"notMainBase"] && [rejectionCheck[@"methodsCount"] unsignedIntegerValue]==25 &&
+        ![rejectionCheck[@"methodIndex"] unsignedIntegerValue] && ![rejectionCheck[@"helperIndex"] unsignedIntegerValue];
     if ([rejection[@"state"] isEqual:@"recorded"] &&
         (!admission || [rejection[@"initializerOrdinal"] unsignedLongLongValue]>[admission[@"initializerReturns"] unsignedLongLongValue] ||
-         ![admission[@"unregisteredReasons"][@"sdkMethodsChanged"] unsignedLongLongValue])) return nil;
+         (![admission[@"unregisteredReasons"][@"sdkMethodsChanged"] unsignedLongLongValue] && !registeredMainView))) return nil;
 '''
 CONTROLS = (
     ("boolean", " || CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID()", "",
