@@ -242,6 +242,16 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
         !axs_cachekeeper_platform_cache_scope(@"Library/CachesExtra") && !axs_cachekeeper_platform_cache_scope(@"Cache") &&
         !axs_cachekeeper_platform_cache_scope(@"../tmp") && axs_cachekeeper_retention_path(@"Library/Caches/account/state"),
         @"single platform scope preserves roots, boundaries and separate necessary-data retention");
+    // Names describe an unverified purpose hint, not a proven data contract.
+    {
+        NSArray *rows=@[@{@"path":@"Library/Caches/authors",@"bytes":@10}];
+        NSDictionary *direct=axs_cachekeeper_storage_inventory(nil,@{@"state":@"available",@"data":@{@"test.inventory.names":@{@"enabled":@YES}}},
+            @{@"state":@"available",@"data":@{@"test.inventory.names":@[]}},
+            @{@"state":@"available",@"data":@{@"test.inventory.names":siscan(rows,date,YES)}},@[],^NSString *(NSString *path){return path;});
+        NSDictionary *row=sirow(siapp(direct,@"test.inventory.names"),@"Library/Caches/authors");
+        sicheck([row[@"retentionReason"] isEqual:@"nameHintPurposeUnverified"] &&
+            [row[@"authorizationState"] isEqual:@"retainedPendingContract"],@"name hint does not establish necessary data or expand deletion");
+    }
     sicheck([apps count]==2 && [registry[@"entries"] count]==3,@"system metadata does not widen display filtering");
     sicheck([[inventory[@"entries"] valueForKey:@"bundle"] isEqual:@[@"com.apple.inventory.system",@"test.inventory.alpha",@"test.inventory.beta",@"test.inventory.configured"]],@"bundle union sorted and deduplicated");
     NSDictionary *a=siapp(inventory,@"test.inventory.alpha"),*b=siapp(inventory,@"test.inventory.beta"),*s=siapp(inventory,@"com.apple.inventory.system");
@@ -267,6 +277,24 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
     NSDictionary *(^imageCapability)(NSDictionary *)=^NSDictionary *(NSDictionary *receipt) {
         return axs_cachekeeper_capabilities(@{@"image":@{@"state":@"available",@"data":receipt}},@"0.7.2")[@"image"];
     };
+    AxsCacheKeeperWriteObservation writeCounts={0};
+    uint64_t writerEpoch=axs_cachekeeper_write_epoch_begin(&writeCounts,3,1,true,2);
+    axs_cachekeeper_write_observe(&writeCounts,writerEpoch,0,true);
+    writerEpoch=axs_cachekeeper_write_epoch_begin(&writeCounts,4,1,false,2);
+    axs_cachekeeper_write_observe(&writeCounts,writerEpoch,1,false);
+    NSDictionary *writeObservation=axs_cachekeeper_write_observation_record(writeCounts);
+    NSMutableDictionary *withWrites=[image mutableCopy];withWrites[@"writeObservation"]=writeObservation;
+    sicheck([rawSummary(withWrites)[@"writeObservation"] isEqual:writeObservation] &&
+        [imageCapability(withWrites)[@"writeObservation"] isEqual:writeObservation],
+        @"inventory and capability preserve the same validated writer epochs without a second counter source");
+    sicheck(!rawSummary(image)[@"writeObservation"] && !imageCapability(image)[@"writeObservation"],
+        @"legacy summaries never fabricate zero writer epochs");
+    NSMutableDictionary *badWrites=[writeObservation mutableCopy];badWrites[@"privateKey"]=@"private-writer-canary";
+    withWrites[@"writeObservation"]=badWrites;
+    sicheck([rawSummary(withWrites)[@"state"] isEqual:@"invalid"] &&
+        [imageCapability(withWrites)[@"sourceState"] isEqual:@"invalid"] &&
+        !rawSummary(withWrites)[@"writeObservation"] && !imageCapability(withWrites)[@"writeObservation"],
+        @"both summary paths reject invalid writer evidence before copying fields");
     sicheck([imageCapability(image)[@"sdkMethodsRejectionObservation"] isEqual:@{@"schemaVersion":@1,@"state":@"notRecorded"}] &&
         [imageCapability(image)[@"resourceContract"] isEqual:@"notEstablishedByReceipt"] &&
         [imageCapability(image)[@"effectVerification"] isEqual:@"notVerified"],@"legacy capability diagnostic remains not recorded without granting effects or contracts");

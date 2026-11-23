@@ -183,11 +183,14 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     check(batch.checking && batch.remainingCandidates<=4 && batch.removed==0,@"枚举结束不能无界决策全树");
     finish(batch); check(batch.removed==20 && batch.remainingCandidates==0,@"分批预检最终处理全部候选");
 
-    // 读取失败真实报错、短重试；恢复访问后实际删除。
+    // 平台用途不读内容，但删除前 O_RDONLY 打开失败仍真实报错；恢复后实际删除。
     NSString *readRoot=makeDir(home,@"Library/Caches/read-retry"); NSString *secret=[readRoot stringByAppendingPathComponent:@"secret"];
     put(secret); check(!chmod(secret.fileSystemRepresentation,0000),@"禁止读取夹具");
     AxsCacheKeeperSweep *readFailure=sweepFor(readRoot,@{}); finish(readFailure);
-    check(readFailure.failed==1 && readFailure.deferredCount==1 && !readFailure.coverageComplete && [fm fileExistsAtPath:secret],@"读取失败不冒充正常保留");
+    check(readFailure.failed==1 && readFailure.deferredCount==0 && readFailure.remainingCandidates==1 &&
+        !readFailure.coverageComplete && [fm fileExistsAtPath:secret] &&
+        [readFailure.failureDetails.firstObject[@"stage"] isEqual:@"openat-file"] &&
+        [readFailure.failureDetails.firstObject[@"code"] intValue]==EACCES,@"平台删除前打开失败保持待重试且报告真实失败阶段");
     check(!chmod(secret.fileSystemRepresentation,0644),@"恢复读取夹具");
     AxsCacheKeeperSweep *readRetry=sweepFor(readRoot,@{}); finish(readRetry); check(readRetry.removed==1,@"访问恢复后正向删除");
 

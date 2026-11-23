@@ -92,6 +92,7 @@ static inline bool AxsCacheKeeperImageAdmissionValid(const AxsCacheKeeperImageAd
 }
 #ifdef __OBJC__
 #import <Foundation/Foundation.h>
+#import "AxsCacheKeeperImageWriteObservation.h"
 #import "AxsCacheKeeperOperationInfo.h"
 #import "AxsCacheKeeperInstallationCheck.h"
 #import "AxsCacheKeeperRuntimeInfo.h"
@@ -175,6 +176,10 @@ static inline NSDictionary *axs_cachekeeper_image_cache_raw_projection(id value)
     if (value[@"operationHistory"]) {
         if (!axs_cachekeeper_operation_history_validate(value[@"operationHistory"],@"image")) return nil;
         keys=[keys arrayByAddingObject:@"operationHistory"];
+    }
+    if (value[@"writeObservation"]) {
+        if (!axs_cachekeeper_write_observation_projection(value[@"writeObservation"])) return nil;
+        keys=[keys arrayByAddingObject:@"writeObservation"];
     }
     if (value[@"instanceAdmission"]) keys=[keys arrayByAddingObject:@"instanceAdmission"];
     if ([value count]!=keys.count || ![[NSSet setWithArray:[value allKeys]] isEqual:[NSSet setWithArray:keys]]) return nil;

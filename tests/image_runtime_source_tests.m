@@ -41,6 +41,11 @@ static intptr_t axs_cachekeeper_runtime_slide(uint32_t index) {return _dyld_get_
 #undef _dyld_get_image_vmaddr_slide
 
 static atomic_uint axs_cachekeeper_runtime_writes,axs_cachekeeper_runtime_metadata,axs_cachekeeper_runtime_clears;
+#if AXS_CACHEKEEPER_WRITE_OBSERVATION_TESTING
+static void (^axs_cachekeeper_runtime_writer_barrier)(void);
+static void (^axs_cachekeeper_runtime_writer_getter_barrier)(void);
+static _Thread_local BOOL axs_cachekeeper_runtime_hold_writer_getter;
+#endif
 static atomic_uint axs_cachekeeper_runtime_source_checks,axs_cachekeeper_runtime_helper_checks;
 // Constructor fixture faults do not replace any IMP or relax an adapter gate.
 static unsigned axs_cachekeeper_runtime_constructor_fault;
@@ -56,6 +61,12 @@ static void axs_cachekeeper_runtime_deferred_owner(id owner) {
 }
 static void axs_cachekeeper_runtime_getter(void) {
     atomic_fetch_add(&axs_cachekeeper_runtime_getter_calls,1);
+#if AXS_CACHEKEEPER_WRITE_OBSERVATION_TESTING
+    if (axs_cachekeeper_runtime_hold_writer_getter) {
+        axs_cachekeeper_runtime_hold_writer_getter=NO;
+        void (^barrier)(void)=axs_cachekeeper_runtime_writer_getter_barrier;if (barrier) barrier();
+    }
+#endif
     if (axs_cachekeeper_runtime_forbid_getters) {fputs("FAIL: image-runtime-source: publication must not call an SDK getter\n",stderr);exit(1);}
 }
 @class SDDiskCache,SDMemoryCache;
@@ -101,7 +112,12 @@ static void axs_cachekeeper_runtime_getter(void) {
 - (void)removeAllData {atomic_fetch_add(&axs_cachekeeper_runtime_clears,1);}
 - (id)cachePathForKey:(id)key {return [self cachePathForKey:key inPath:self.diskCachePath];}
 - (id)cachePathForKey:(id)key inPath:(id)path {(void)key;return path;}
-- (void)setData:(id)data forKey:(id)key {(void)data;(void)key;atomic_fetch_add(&axs_cachekeeper_runtime_writes,1);}
+- (void)setData:(id)data forKey:(id)key {
+    (void)data;(void)key;atomic_fetch_add(&axs_cachekeeper_runtime_writes,1);
+#if AXS_CACHEKEEPER_WRITE_OBSERVATION_TESTING
+    void (^barrier)(void)=axs_cachekeeper_runtime_writer_barrier;if (barrier) barrier();
+#endif
+}
 - (void)setExtendedData:(id)data forKey:(id)key {(void)data;(void)key;atomic_fetch_add(&axs_cachekeeper_runtime_metadata,1);}
 @end
 @implementation SDMemoryCache
@@ -641,9 +657,12 @@ static void axs_cachekeeper_runtime_recovery_race(AxsCacheKeeperImageCache *engi
         "helper change during restoration remains a true early rejection after the helper is restored");
 }
 #endif
+#if AXS_CACHEKEEPER_WRITE_OBSERVATION_TESTING
+#import "image_write_observation_cases.h"
+#endif
 int main(int argc,const char *argv[]) {
     @autoreleasepool {
-        axs_cachekeeper_runtime_require(argc==2 && (!strcmp(argv[1],"fingerprint") || !strcmp(argv[1],"fingerprint-shifted") || !strcmp(argv[1],"sample") || !strcmp(argv[1],"pinned") || !strcmp(argv[1],"refresh") || !strcmp(argv[1],"admission") || !strcmp(argv[1],"owner-pool") || !strcmp(argv[1],"main-view") || !strcmp(argv[1],"recovery-race") || !strcmp(argv[1],"rediscovery")),"one isolated scenario is required");
+        axs_cachekeeper_runtime_require(argc==2 && (!strcmp(argv[1],"fingerprint") || !strcmp(argv[1],"fingerprint-shifted") || !strcmp(argv[1],"sample") || !strcmp(argv[1],"pinned") || !strcmp(argv[1],"refresh") || !strcmp(argv[1],"admission") || !strcmp(argv[1],"owner-pool") || !strcmp(argv[1],"main-view") || !strcmp(argv[1],"recovery-race") || !strcmp(argv[1],"rediscovery") || !strcmp(argv[1],"write-observation")),"one isolated scenario is required");
         axs_cachekeeper_runtime_real_main_gate=!strcmp(argv[1],"main-view") || !strcmp(argv[1],"recovery-race") || !strcmp(argv[1],"rediscovery");
         axs_cachekeeper_runtime_shifted=!strcmp(argv[1],"fingerprint-shifted");
         axs_cachekeeper_runtime_fingerprinted=!strcmp(argv[1],"fingerprint") || axs_cachekeeper_runtime_shifted || axs_cachekeeper_runtime_real_main_gate;
@@ -686,6 +705,13 @@ int main(int argc,const char *argv[]) {
         AxsCacheKeeperImageCache *engine=[[AxsCacheKeeperImageCache alloc] initWithContextProvider:provider observer:nil];
         if (!axs_cachekeeper_runtime_fingerprinted) [engine usePinnedLegacySDKForIntegrationTests];
         [engine startObserving];axs_cachekeeper_runtime_refresh(engine);
+#if AXS_CACHEKEEPER_WRITE_OBSERVATION_TESTING
+        if (!strcmp(argv[1],"write-observation")) {
+            axs_cachekeeper_runtime_write_observation(engine,home,context);
+            axs_cachekeeper_runtime_require([NSFileManager.defaultManager removeItemAtPath:home error:nil],"write observation fixture removed");
+            puts("PASS: image-runtime-source fixture write-observation");return 0;
+        }
+#endif
 #if !defined(AXS_CACHEKEEPER_MAIN_VIEW_BASELINE)
         if (!strcmp(argv[1],"rediscovery")) {
             axs_cachekeeper_runtime_rediscovery(engine,home,context);

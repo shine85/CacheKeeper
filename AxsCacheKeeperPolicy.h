@@ -26,8 +26,8 @@ static inline BOOL axs_cachekeeper_protected_path(NSString *path) {
     }
     return NO;
 }
-// 保留子树判定（修订方案任务 1）：相对路径的任一目录成分命中必要状态词，即为已确认
-// 保留范围——其下文件不删，其余独立范围继续。与 protected_path 的区别：只含状态词
+// 名称提示沿用既有保留边界，不能单独证明资源用途；待 owner 或明确规则核实后再迁移。
+// 其下文件本轮不删，其余已有独立清理依据的范围继续。与 protected_path 的区别：只含状态词
 //（偏好/登录/凭据/下载/收件等必要状态），不含格式词（database/sqlite/realm）与文件
 // 后缀规则——数据库格式不能单独证明必须保留，平台缓存内的 SQLite 按平台规则可清。
 // 调用方只对目录成分使用本函数，不对文件名使用（文件名命中状态词不等于整目录保留）。
@@ -64,7 +64,7 @@ static inline NSString *axs_cachekeeper_platform_cache_scope(NSString *path) {
     return nil;
 }
 static inline NSString *axs_cachekeeper_platform_cache_rule_id(void) {return @"platform-cache";}
-static inline NSString *axs_cachekeeper_platform_cache_rule_revision(void) {return @"2";}
+static inline NSString *axs_cachekeeper_platform_cache_rule_revision(void) {return @"3";}
 // 扫描可展示所有一级数据目录；允许删除的根只来自这里，不能由目录名字含 cache 推断。
 static inline BOOL axs_cachekeeper_cache_path(NSString *path) {
     if (axs_cachekeeper_protected_path(path)) return NO;

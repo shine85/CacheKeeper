@@ -76,6 +76,37 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
 @property(nonatomic) NSUInteger refreshSequence;
 @end
 @implementation ImageCacheIntegrationTests
+- (void)testActualWritesKeepSeparateConfigurationEvidenceAndRestoreFiles {
+#if !AXS_CACHEKEEPER_IMAGE_LEGACY_RED
+    SDImageCache *owner=[self axs_cachekeeper_owner:@"write-epochs" config:nil];NSData *payload=[self axs_cachekeeper_payload];
+    NSNumber *(^epoch)(void)=^NSNumber *{return [self.engine.receipt[@"writeObservation"][@"epochs"] lastObject][@"epoch"];};
+    NSDictionary *(^row)(NSNumber *)=^NSDictionary *(NSNumber *identifier){
+        for (NSDictionary *item in self.engine.receipt[@"writeObservation"][@"epochs"]) if ([item[@"epoch"] isEqual:identifier]) return item;
+        return nil;
+    };
+    NSNumber *clean=epoch();XCTAssertNotNil(clean);
+    [owner storeImageDataToDisk:payload forKey:@"seed"];XCTAssertEqualObjects([owner diskImageDataForKey:@"seed"],payload);
+    dispatch_sync(owner.ioQueue,^{[owner.diskCache setExtendedData:payload forKey:@"seed"];});
+    [self axs_cachekeeper_state:@{@"enabled":@YES,@"mode":@"prevent"}];
+    XCTAssertEqualObjects(row(clean)[@"data"][@"allowed"],@1);XCTAssertEqualObjects(row(clean)[@"extended"][@"allowed"],@1);
+    NSNumber *blocked=epoch();
+    [owner storeImageDataToDisk:payload forKey:@"blocked"];XCTAssertNil([owner diskImageDataForKey:@"blocked"]);
+    __block NSData *metadata=nil;
+    dispatch_sync(owner.ioQueue,^{[owner.diskCache setExtendedData:nil forKey:@"seed"];[owner.diskCache setExtendedData:payload forKey:@"seed"];metadata=[owner.diskCache extendedDataForKey:@"seed"];});
+    XCTAssertNil(metadata);
+    [self axs_cachekeeper_state:@{@"enabled":@NO,@"mode":@"prevent"}];
+    XCTAssertEqualObjects(row(blocked)[@"data"][@"attempts"],@1);XCTAssertEqualObjects(row(blocked)[@"data"][@"blocked"],@1);
+    XCTAssertEqualObjects(row(blocked)[@"extended"][@"attempts"],@1);XCTAssertEqualObjects(row(blocked)[@"extended"][@"blocked"],@1);
+    NSNumber *disabled=epoch();
+    [owner storeImageDataToDisk:payload forKey:@"restored"];XCTAssertEqualObjects([owner diskImageDataForKey:@"restored"],payload);
+    dispatch_sync(owner.ioQueue,^{[owner.diskCache setExtendedData:payload forKey:@"seed"];metadata=[owner.diskCache extendedDataForKey:@"seed"];});
+    XCTAssertEqualObjects(metadata,payload);[self axs_cachekeeper_refresh];
+    XCTAssertEqualObjects(row(disabled)[@"enabled"],@NO);XCTAssertEqualObjects(row(disabled)[@"data"][@"allowed"],@1);
+    XCTAssertEqualObjects(row(disabled)[@"extended"][@"allowed"],@1);XCTAssertEqualObjects(row(disabled)[@"data"][@"blocked"],@0);
+    XCTAssertEqualObjects(self.engine.receipt[@"writeObservation"][@"allowedMeaning"],@"originalCallForwarded");
+    XCTAssertEqualObjects(self.engine.receipt[@"writeObservation"][@"diskPersistence"],@"notMeasured");
+#endif
+}
 - (void)setUp {
     [super setUp];
     self.home=[[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString] stringByStandardizingPath];

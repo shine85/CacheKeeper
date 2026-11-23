@@ -135,7 +135,7 @@ static AxsCacheKeeperReleaseStat axs_cachekeeper_release_stat_from_filesystem(st
     NSString *resolvedRoot = [NSURL fileURLWithPath:root].URLByResolvingSymlinksInPath.path;
     if (resolvedRoot) { [forms addObject:resolvedRoot]; [forms addObject:resolvedRoot.stringByStandardizingPath]; }
     _rootForms = forms.allObjects;
-    // 根相对容器的路径：决策入口的相对路径基准。根本身若为已确认保留范围
+    // 根相对容器的路径：决策入口的相对路径基准。根本身若命中既有名称保留策略
     //（如整个根是 Preferences），预先记入保留范围（枚举器不输出根自身）。
     _retentionRanges = [NSMutableSet new];
     // 调度器采集的本轮不可访问路径，独立于持久用户排除；仅用于恢复失败子树。
@@ -310,11 +310,17 @@ static AxsCacheKeeperReleaseStat axs_cachekeeper_release_stat_from_filesystem(st
     }
     return nil;
 }
-// 预检证据采集：文件头 16 字节。证据判断不受年龄/nlink/删除资格过滤——
-// 近期文件、硬链接中的证据同样生效（删除资格由决定与删除阶段另行处理）。
-// 身份不符（枚举后被替换）或短读/读失败都记为读取不完整，本轮不删除。
+// Rules alone decide whether content evidence is needed. Platform purpose does
+// not need a header read; snapshots, maturity and final FD identity gates remain.
 - (NSDictionary *)axs_cachekeeper_collect_facts:(NSString *)entry info:(struct stat)info {
     NSString *relative = [self axs_cachekeeper_relative_path:entry];
+    NSNumber *matureAt=@(MAX(info.st_birthtimespec.tv_sec + info.st_birthtimespec.tv_nsec/1e9,
+        MAX(info.st_mtimespec.tv_sec + info.st_mtimespec.tv_nsec/1e9,info.st_ctimespec.tv_sec + info.st_ctimespec.tv_nsec/1e9)) + AxsCacheKeeperMinimumFileAge);
+    AxsCacheKeeperCleanupDecision *purpose=[AxsCacheKeeperCleanupRules decisionForBundle:self.bundle version:self.version
+        relativePath:relative state:self.state evidence:@{@"readComplete":@NO,@"retentionRanges":self.retentionRanges.allObjects ?: @[]}];
+    // NO records that content was not read; it never stands in for FD identity.
+    if (purpose.disposition==AxsCacheKeeperCleanupDelete && purpose.basis==AxsCacheKeeperCleanupBasisPlatformCache)
+        return @{@"matureAt":matureAt,@"readComplete":@NO};
     BOOL nameEvidence = axs_cachekeeper_data_marker(entry.lastPathComponent) ||
         axs_cachekeeper_purge_evidence_path(relative);
     NSString *parent = entry.stringByDeletingLastPathComponent;
@@ -337,8 +343,7 @@ static AxsCacheKeeperReleaseStat axs_cachekeeper_release_stat_from_filesystem(st
         (count >= 6 && !memcmp(signature, "bplist", 6)));
     BOOL mediaSignature = readComplete && axs_cachekeeper_media_signature(signature, (size_t)count);
     return @{@"hasEvidence": @(nameEvidence || headerEvidence),
-        @"matureAt":@(MAX(info.st_birthtimespec.tv_sec + info.st_birthtimespec.tv_nsec/1e9,
-            MAX(info.st_mtimespec.tv_sec + info.st_mtimespec.tv_nsec/1e9,info.st_ctimespec.tv_sec + info.st_ctimespec.tv_nsec/1e9)) + AxsCacheKeeperMinimumFileAge),
+        @"matureAt":matureAt,
         @"hasMediaSignature": @(mediaSignature),
         @"readComplete": @(readComplete)};
 }
@@ -363,7 +368,7 @@ static AxsCacheKeeperReleaseStat axs_cachekeeper_release_stat_from_filesystem(st
         if (axs_cachekeeper_retention_path(relative) &&
             ![AxsCacheKeeperCleanupRules hasCleanableRangeForBundle:self.bundle version:self.version relativePath:relative]) {
             [self.retentionRanges addObject:relative];
-            [self axs_cachekeeper_record_retained_subtree:relative reason:@"命中保留规则，未遍历内部文件"];
+            [self axs_cachekeeper_record_retained_subtree:relative reason:@"名称触发既有保留策略，用途未核实；未遍历内部文件"];
             [self.entries skipDescendants];
         }
         return;

@@ -539,9 +539,11 @@ int main(int argc, const char *argv[]) {
         // 保留范围优先于平台规则。
         dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Preferences/a.txt" state:emptyState evidence:retentionEvidence];
         require(dec.disposition == AxsCacheKeeperCleanupKeep && [dec.ruleID isEqualToString:@"retention-range"], @"保留范围优先于平台规则");
-        // 读取不完整 → Defer，本轮不删除，访问恢复后重试。
+        // 平台用途不依赖内容读取；日志/APP 内容规则仍必须完成读取。
         dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/Caches/secret.log" state:emptyState evidence:incompleteEvidence];
-        require(dec.disposition == AxsCacheKeeperCleanupDefer && [dec.ruleID isEqualToString:@"read-incomplete"], @"读取不完整本轮不删除");
+        require(dec.disposition == AxsCacheKeeperCleanupDelete && dec.basis==AxsCacheKeeperCleanupBasisPlatformCache, @"平台缓存用途不依赖内容格式读取");
+        dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/alog/secret.log" state:emptyState evidence:incompleteEvidence];
+        require(dec.disposition == AxsCacheKeeperCleanupDefer && [dec.ruleID isEqualToString:@"read-incomplete"], @"非平台内容读取不完整本轮不删除");
         // 日志定级：日志名 + 无证据 + 无媒体头 + 不受保护 → Delete/UserLog。
         NSDictionary *logState = @{@"logPaths": @[@"Library/alog"]};
         dec = [AxsCacheKeeperCleanupRules decisionForBundle:bundle version:@"1.0" relativePath:@"Library/alog/app.log" state:logState evidence:cleanEvidence];

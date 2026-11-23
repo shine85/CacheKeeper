@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import "AxsCacheKeeperImageWriteObservation.h"
 #import "../AxsCacheKeeperDiagnostics.h"
 
 static void oecheck(BOOL condition, NSString *message) {
@@ -24,7 +25,7 @@ int main(int argc,char **argv) { @autoreleasepool {
     NSMutableDictionary *image=[@{@"schemaVersion":@1,@"sdk":@"SDWebImage",@"state":@"unsupported",@"reason":@"unsupportedSDK",@"observed":@0,@"eligible":@0,@"restricted":@0,@"writesBlocked":@0,@"queued":@0,@"submitted":@0,@"apiCompleted":@0,@"skipped":@0,@"pending":@0,@"updated":time,@"bytesState":@"notMeasured",@"discoveryCheck":discovery,@"installationCheck":installation(identity)} mutableCopy];
     NSMutableDictionary *web=[@{@"schemaVersion":@1,@"requested":@YES,@"timedOut":@NO,@"state":@"blocked",@"reason":@"installationUnverified",@"persistentStores":@0,@"nonPersistentStores":@0,@"submitted":@0,@"completed":@0,@"pending":@0,@"updated":time,@"bytesState":@"notMeasured",@"installationCheck":installation(identity)} mutableCopy];
     AxsCacheKeeperDiagnostics *session=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:folder];
-    __block BOOL binaryFixture=NO;
+    __block BOOL binaryFixture=NO;__block NSDictionary *inventoryImage=nil;
     NSDictionary *(^read)(void)=^NSDictionary *{
         if (binaryFixture) {
             for (NSString *path in @[imagePath,webPath]) {
@@ -39,6 +40,10 @@ int main(int argc,char **argv) { @autoreleasepool {
         oecheck(json && [[NSData dataWithContentsOfFile:imagePath] isEqual:beforeImage] && [[NSData dataWithContentsOfFile:webPath] isEqual:beforeWeb],@"JSON roundtrip preserves both source files");
         oecheck(![[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] containsString:@"observation-private-canary"],@"private data never escapes invalid observations");
         NSDictionary *decoded=[NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
+        inventoryImage=nil;
+        for (NSDictionary *entry in decoded[@"storageInventory"][@"entries"])
+            if ([entry[@"bundle"] isEqual:@"test.observation"]) inventoryImage=entry[@"sdkReceipts"][@"imageDiskCache"];
+        oecheck(inventoryImage!=nil,@"saved SDK app is present in the actual all-app inventory export");
         return decoded[@"apps"][0];
     };
     NSDictionary *app=read(),*out=app[@"imageDiskCache"][@"data"];
@@ -47,9 +52,55 @@ int main(int argc,char **argv) { @autoreleasepool {
         oecheck([app[key][@"data"][@"installationCheck"] isEqual:installation(identity)],@"same closed installation view evidence survives both component exports");
         oecheck([app[key][@"data"][@"updated"] isEqual:@1794800000],@"saved observation timestamp is not refreshed by export");
     }
+    // Complete producer-shaped epoch evidence travels through saved plist,
+    // production Diagnostics/Inventory and JSON without becoming persistence proof.
+    AxsCacheKeeperWriteObservation writes={0};
+    uint64_t writeEpoch=axs_cachekeeper_write_epoch_begin(&writes,1,1,true,2);
+    axs_cachekeeper_write_observe(&writes,writeEpoch,0,true);axs_cachekeeper_write_observe(&writes,writeEpoch,1,true);
+    writeEpoch=axs_cachekeeper_write_epoch_begin(&writes,2,1,false,2);
+    axs_cachekeeper_write_observe(&writes,writeEpoch,0,false);
+    NSDictionary *writeRecord=axs_cachekeeper_write_observation_record(writes);
+    image[@"writeObservation"]=writeRecord;
+    app=read();
+    oecheck([app[@"imageDiskCache"][@"data"][@"writeObservation"] isEqual:writeRecord] &&
+        [app[@"capabilities"][@"image"][@"writeObservation"] isEqual:writeRecord] &&
+        [inventoryImage[@"writeObservation"] isEqual:writeRecord],@"same writer decisions survive saved plist through canonical capability and inventory JSON paths");
+    oecheck([app[@"capabilities"][@"image"][@"effectVerification"] isEqual:@"notVerified"] &&
+        [app[@"capabilities"][@"image"][@"resourceContract"] isEqual:@"notEstablishedByReceipt"] &&
+        [inventoryImage[@"resourceContract"] isEqual:@"notEstablishedByReceipt"],@"forwarded writer decisions do not grant an effect or resource contract");
+    for (NSString *field in @[@"scope",@"allowedMeaning",@"diskPersistence",@"privatePath"]) {
+        NSMutableDictionary *bad=[writeRecord mutableCopy];bad[field]=@"observation-private-canary";image[@"writeObservation"]=bad;
+        app=read();
+        oecheck([app[@"imageDiskCache"][@"state"] isEqual:@"invalid"] &&
+            [app[@"capabilities"][@"image"][@"sourceState"] isEqual:@"invalid"] &&
+            [inventoryImage[@"state"] isEqual:@"invalid"] && !inventoryImage[@"writeObservation"] &&
+            !app[@"capabilities"][@"image"][@"writeObservation"],@"unknown writer semantics reject all three saved receipt consumers");
+    }
+    for (NSString *change in @[@"sum",@"disabled",@"duplicate",@"boolean",@"overflow",@"installation",@"unknown"]) {
+        NSData *encoded=[NSPropertyListSerialization dataWithPropertyList:writeRecord format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+        NSMutableDictionary *bad=[NSPropertyListSerialization propertyListWithData:encoded options:NSPropertyListMutableContainersAndLeaves format:NULL error:nil];
+        NSMutableDictionary *first=bad[@"epochs"][0],*second=bad[@"epochs"][1];
+        if ([change isEqual:@"sum"]) first[@"data"][@"attempts"]=@2;
+        else if ([change isEqual:@"disabled"]) first[@"enabled"]=@NO;
+        else if ([change isEqual:@"duplicate"]) second[@"epoch"]=@1;
+        else if ([change isEqual:@"boolean"]) first[@"data"][@"allowed"]=@NO;
+        else if ([change isEqual:@"overflow"]) first[@"data"][@"overflow"]=@YES;
+        else if ([change isEqual:@"installation"]) second[@"installation"]=@0;
+        else first[@"rawKey"]=@"observation-private-canary";
+        image[@"writeObservation"]=bad;
+        oecheck([read()[@"imageDiskCache"][@"state"] isEqual:@"invalid"],@"impossible counts or cross-epoch splice cannot pass saved receipt validation");
+    }
+    [image removeObjectForKey:@"writeObservation"];
+    app=read();
+    oecheck(!app[@"imageDiskCache"][@"data"][@"writeObservation"] &&
+        !app[@"capabilities"][@"image"][@"writeObservation"] && !inventoryImage[@"writeObservation"],
+        @"old receipts are not backfilled with zero writer evidence in any consumer");
+    image[@"writeObservation"]=writeRecord;
     binaryFixture=YES;
     image[@"updated"]=[NSDate dateWithTimeIntervalSince1970:1794800000.25];web[@"updated"]=image[@"updated"];
     app=read();
+    oecheck([app[@"capabilities"][@"image"][@"writeObservation"] isEqual:writeRecord] &&
+        [inventoryImage[@"writeObservation"] isEqual:writeRecord],@"binary saved writer decisions retain the same all-app summaries");
     for (NSString *key in @[@"imageDiskCache",@"webKitDiskCache"])
         oecheck([app[key][@"data"][@"updated"] isEqual:@1794800000.25],@"current binary receipt preserves fractional time through export");
     for (NSString *key in @[@"sourceCheck",@"loadedRelation"]) {

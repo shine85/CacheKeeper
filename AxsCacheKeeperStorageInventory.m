@@ -42,6 +42,7 @@ static NSDictionary *axs_cachekeeper_inventory_sdk(id wrapper,BOOL image) {
     for (NSString *key in image ? @[@"observed",@"eligible",@"restricted",@"writesBlocked",@"queued",@"submitted",@"apiCompleted",@"skipped",@"pending"] : @[@"persistentStores",@"nonPersistentStores",@"submitted",@"completed",@"pending"])
         if (axs_cachekeeper_inventory_count(projected[key])) out[key]=projected[key];
     for (NSString *key in @[@"runtimeInfo",@"discoveryCheck",@"runtimeSourceObservation",@"sdkMethodsRejectionObservation",@"installedRuntimeRelation",@"installationCheck",@"reason"]) if (projected[key]) out[key]=projected[key];
+    if (image && projected[@"writeObservation"]) out[@"writeObservation"]=projected[@"writeObservation"];
     if (image && !out[@"sdkMethodsRejectionObservation"]) out[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
     out[@"bytesState"]=@"notMeasured";return [out copy];
 }
@@ -80,6 +81,7 @@ NSDictionary *axs_cachekeeper_capabilities(NSDictionary *raw,NSString *panelVers
                 if (data[field]) entry[field]=data[field];
             if ([key isEqual:@"network"]) entry[@"actionState"]=data[@"policyObservation"] ?: ([data[@"prevent"] boolValue] ? ([data[@"applied"] boolValue] ? @"restrictionReported" : @"restrictionNotApplied") : ([data[@"applied"] boolValue] ? @"unrestrictedOrRestoreReported" : @"restorePending"));
             if ([key isEqual:@"image"] || [key isEqual:@"webKit"]) entry[@"actionState"]=data[@"state"];
+            if ([key isEqual:@"image"] && data[@"writeObservation"]) entry[@"writeObservation"]=data[@"writeObservation"];
             if ([key isEqual:@"webKit"]) entry[@"liveProcessState"]=@"unknown";
             if ([key isEqual:@"image"] && !entry[@"sdkMethodsRejectionObservation"]) entry[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
             if ([key isEqual:@"standardDirectories"]) entry[@"resourceContract"]=@"standardDirectoryRulesOnly";
@@ -176,7 +178,7 @@ NSDictionary *axs_cachekeeper_storage_inventory(id registryInventory,NSDictionar
             if (diagnostics) {row[@"scanDiagnostics"]=diagnostics;row[@"coverageState"]=[diagnostics[@"measurementComplete"] boolValue] ? @"completeAtObservation" : @"partialAtObservation";}
             else if (valid && sourceRow[@"scanDiagnostics"]) row[@"coverageState"]=@"invalid";
             if (shared) row[@"retentionReason"]=@"sharedContainerReadOnly";
-            else if (retained) row[@"retentionReason"]=@"necessaryData";
+            else if (retained) row[@"retentionReason"]=@"nameHintPurposeUnverified";
             else row[@"retentionReason"]=@"purposeOwnerRecoveryContractMissing";
             if (scope) {
                 row[@"policyReference"]=@{@"ruleID":axs_cachekeeper_platform_cache_rule_id(),@"ruleRevision":axs_cachekeeper_platform_cache_rule_revision(),@"scope":scope};

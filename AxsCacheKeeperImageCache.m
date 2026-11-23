@@ -1,5 +1,6 @@
 #import "AxsCacheKeeperImageCache.h"
 #import "AxsCacheKeeperImageEffectStatus.h"
+#import "AxsCacheKeeperImageWriteObservation.h"
 #import "AxsCacheKeeperImageLegacySource.h"
 #import "AxsCacheKeeperImageRuntimeSource.h"
 #import "AxsCacheKeeperPolicy.h"
@@ -333,6 +334,16 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
     return finish(mask,kind,source,@"complete",@"none",0);
 }
 
+// Independent diagnostic lock: self -> binding -> observation, never the reverse.
+// Neither an SDK call nor publication runs while this ledger is locked.
+@interface AxsCacheKeeperImageWriteLedger : NSObject {
+@public
+    AxsCacheKeeperWriteObservation observation;
+}
+@end
+@implementation AxsCacheKeeperImageWriteLedger
+@end
+
 @interface AxsCacheKeeperImageBinding : NSObject
 @property(nonatomic,weak) id owner;
 @property(nonatomic,weak) id disk;
@@ -362,6 +373,8 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
 @property(nonatomic) NSTimeInterval flightDeadline;
 @property(atomic) BOOL pluginRemoving;
 @property(nonatomic) NSUInteger blockedWrites;
+@property(nonatomic,strong) AxsCacheKeeperImageWriteLedger *writeLedger;
+@property(nonatomic) uint64_t writeEpoch;
 @property(nonatomic,copy) NSString *reason;
 @end
 @implementation AxsCacheKeeperImageBinding
@@ -374,6 +387,7 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
 @property(nonatomic,copy) AxsCacheKeeperImageContextProvider provider;
 @property(nonatomic,copy) void (^observer)(NSDictionary *);
 @property(nonatomic,strong) NSMutableArray<AxsCacheKeeperImageBinding *> *bindings;
+@property(nonatomic,strong) AxsCacheKeeperImageWriteLedger *writeLedger;
 @property(atomic,copy) NSDictionary *context;
 @property(nonatomic,copy) NSDictionary *lastReceipt;
 @property(nonatomic) NSUInteger generation;
@@ -479,18 +493,32 @@ static BOOL AxsCacheKeeperImageInstanceUnchanged(AxsCacheKeeperImageBinding *bin
     binding.admissionReason=reason ? AxsCacheKeeperImageReasonParse(reason.UTF8String) : AxsCacheKeeperImageReasonNone;
     return !reason;
 }
-static BOOL AxsCacheKeeperImageBlocksWrite(id disk) {
+static BOOL AxsCacheKeeperImageBlocksWrite(id disk,unsigned writer) {
     AxsCacheKeeperImageBinding *binding=objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey);
-    if (binding.restricted && binding.contract==AxsCacheKeeperImageContractFixedSerialLegacy && !AxsCacheKeeperImageExecutable().header) {
-        [binding.engine requestDiscoveryRefresh];return NO;
+    if (!binding) return NO;
+    AxsCacheKeeperImageCache *engine=binding.engine;
+    BOOL restricted;uint64_t epoch;
+    @synchronized(binding) {restricted=binding.restricted;epoch=binding.writeEpoch;}
+    BOOL valid=NO;
+    if (restricted && binding.contract==AxsCacheKeeperImageContractFixedSerialLegacy && !AxsCacheKeeperImageExecutable().header)
+        [engine requestDiscoveryRefresh];
+    else if (restricted && engine && binding.disk==disk) valid=AxsCacheKeeperImageInstanceUnchanged(binding);
+    // A refresh may have revoked or replaced the snapshot while the existing SDK
+    // identity gates ran. Never use those old checks to block under a new epoch.
+    @synchronized(binding) {
+        BOOL sameEpoch=binding.writeEpoch==epoch;
+        BOOL blocked=valid && binding.restricted && sameEpoch;
+        if (blocked && binding.blockedWrites<AXS_CACHEKEEPER_WRITE_MAX) binding.blockedWrites++;
+        AxsCacheKeeperImageWriteLedger *ledger=binding.writeLedger;
+        if (engine && binding.disk==disk && ledger) @synchronized(ledger) {
+            axs_cachekeeper_write_observe(&ledger->observation,sameEpoch ? epoch : 0,writer,blocked);
+        }
+        return blocked;
     }
-    if (!binding.restricted || !binding.engine || binding.disk!=disk || !AxsCacheKeeperImageInstanceUnchanged(binding)) return NO;
-    @synchronized(binding) { if (!binding.restricted) return NO;binding.blockedWrites++; }
-    return YES;
 }
 static void AxsCacheKeeperImageSetData(id disk,SEL selector,id data,id key) {
     IMP original;@synchronized(AxsCacheKeeperImageCache.class) {original=axs_cachekeeper_image_data_original;}
-    if (!data || !key || !AxsCacheKeeperImageBlocksWrite(disk)) {
+    if (!data || !key || !AxsCacheKeeperImageBlocksWrite(disk,0)) {
         ((void (*)(id,SEL,id,id))original)(disk,selector,data,key);
         AxsCacheKeeperImageBinding *binding=objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey);
         if (data && key) [binding.engine axs_cachekeeper_observeCreatedRoot:binding];
@@ -499,7 +527,7 @@ static void AxsCacheKeeperImageSetData(id disk,SEL selector,id data,id key) {
 static void AxsCacheKeeperImageSetExtendedData(id disk,SEL selector,id data,id key) {
     IMP original;@synchronized(AxsCacheKeeperImageCache.class) {original=axs_cachekeeper_image_extended_original;}
     // nil removes existing metadata in the SDK; it is not an added cache write.
-    if (!data || !key || !AxsCacheKeeperImageBlocksWrite(disk)) ((void (*)(id,SEL,id,id))original)(disk,selector,data,key);
+    if (!data || !key || !AxsCacheKeeperImageBlocksWrite(disk,1)) ((void (*)(id,SEL,id,id))original)(disk,selector,data,key);
 }
 static id AxsCacheKeeperImageInit(id object __attribute__((ns_consumed)),SEL selector,id space,id directory,id config) __attribute__((ns_returns_retained));
 static id AxsCacheKeeperImageInit(id object __attribute__((ns_consumed)),SEL selector,id space,id directory,id config) {
@@ -684,7 +712,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
 @implementation AxsCacheKeeperImageCache
 - (instancetype)initWithContextProvider:(AxsCacheKeeperImageContextProvider)provider observer:(void (^)(NSDictionary *))observer {
     if ((self=[super init])) {
-        _provider=[provider copy];_bindings=[NSMutableArray new];
+        _provider=[provider copy];_bindings=[NSMutableArray new];_writeLedger=[AxsCacheKeeperImageWriteLedger new];
         _operationHistory=axs_cachekeeper_operation_history_create(@"image",nil);
         // Weak getters and SDK calls may return autoreleased objects. Close their
         // lifetime at each worker item instead of inheriting the global queue pool.
@@ -833,7 +861,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     @synchronized(self) {return [self.bindings copy];}
 }
 - (void)axs_cachekeeper_cancel {
-    @synchronized(self) {self.generation++;for (AxsCacheKeeperImageBinding *binding in self.bindings) binding.restricted=NO;}
+    @synchronized(self) {self.generation++;for (AxsCacheKeeperImageBinding *binding in self.bindings) @synchronized(binding) {binding.restricted=NO;binding.writeEpoch=0;}}
 }
 - (void)axs_cachekeeper_unregistered:(AxsCacheKeeperImageReason)reason {
     [self axs_cachekeeper_unregistered:reason methodsCheck:nil];
@@ -861,13 +889,17 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
             (void)unused;
             __attribute__((objc_precise_lifetime)) id liveOwner=item.owner;
             if (!liveOwner && !item.releaseRecorded) {item.releaseRecorded=YES;AxsCacheKeeperImageAdmissionRelease(&self->_admission);}
-            return liveOwner || item.pending;
+            BOOL retained=liveOwner || item.pending;
+            // The disk may outlive its owner through an external reference. Once
+            // detached, this binding no longer receives configuration revocations.
+            if (!retained) @synchronized(item) {item.restricted=NO;item.writeEpoch=0;}
+            return retained;
         }]];
         if (self.capacityExceeded || self.bindings.count>=64) {
             // An untracked owner might share any existing path. Stop all previously admitted
             // instances for this process instead of pretending that discovery is complete.
             self.capacityExceeded=YES;self.generation++;
-            for (AxsCacheKeeperImageBinding *item in self.bindings) {item.invalidated=YES;item.restricted=NO;}
+            for (AxsCacheKeeperImageBinding *item in self.bindings) @synchronized(item) {item.invalidated=YES;item.restricted=NO;item.writeEpoch=0;}
             AxsCacheKeeperImageAdmissionRecord(&_admission,AxsCacheKeeperImageReasonObservationLimit);
             [self axs_cachekeeper_schedule_refresh:@"imageLoad"];return NO;
         }
@@ -876,7 +908,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         self.generation++;
         // Revoke conflicting gates immediately, before another SDK queue can write or clear.
         for (AxsCacheKeeperImageBinding *other in self.bindings)
-            if ((other.owner || other.pending) && AxsCacheKeeperImageOverlaps(binding.relative,other.relative)) other.restricted=NO;
+            if ((other.owner || other.pending) && AxsCacheKeeperImageOverlaps(binding.relative,other.relative)) @synchronized(other) {other.restricted=NO;other.writeEpoch=0;}
         binding.operationOwner=++self.operationOwner;
         [self.bindings addObject:binding];
         AxsCacheKeeperImageAdmissionRecord(&_admission,AxsCacheKeeperImageReasonNone);
@@ -889,7 +921,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
 - (AxsCacheKeeperImageReason)axs_cachekeeper_prepareBinding:(AxsCacheKeeperImageBinding *)binding owner:(id)owner sourceReason:(NSString *)sourceReason attributes:(id)attributes contract:(AxsCacheKeeperImageContract)contract {
     id disk=AxsCacheKeeperImageGet(owner,"diskCache"),config=AxsCacheKeeperImageGet(owner,"config");
     if (!disk || !config) return !disk ? AxsCacheKeeperImageReasonDiskMissing : AxsCacheKeeperImageReasonConfigurationMissing;
-    binding.owner=owner;binding.disk=disk;binding.config=config;binding.contract=contract;
+    binding.owner=owner;binding.disk=disk;binding.config=config;binding.contract=contract;binding.writeLedger=self.writeLedger;
     binding.queue=AxsCacheKeeperImageGet(owner,"ioQueue");id path=AxsCacheKeeperImageGet(owner,"diskCachePath");binding.engine=self;
     if (!binding.queue) return AxsCacheKeeperImageReasonQueueMissing;
     if (path && ![path isKindOfClass:NSString.class]) return AxsCacheKeeperImageReasonPathType;
@@ -1033,7 +1065,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     for (NSUInteger index=0;index<bindings.count;index++) {
         AxsCacheKeeperImageBinding *binding=bindings[index];
         NSString *relative=relativePaths[index]==NSNull.null ? nil : relativePaths[index];
-        binding.restricted=NO;binding.eligible=NO;
+        @synchronized(binding) {binding.restricted=NO;binding.writeEpoch=0;}binding.eligible=NO;
         NSString *reason=AxsCacheKeeperImageScopeReasonWithRelative(context,binding,relative);
         if (reason) binding.admissionReason=binding.initialReason ? AxsCacheKeeperImageReasonParse(binding.initialReason.UTF8String) : AxsCacheKeeperImageReasonNotChecked;
         if (!reason && !AxsCacheKeeperImageInstanceUnchanged(binding)) reason=@"unsupportedInstance";
@@ -1049,10 +1081,23 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
             binding.installation=context[@"installation"];binding.relative=relative;binding.home=context[@"home"];
             @synchronized(binding) {if (!binding.identity) binding.identity=identity;}
             binding.eligible=YES;
-            @synchronized(self) {if (generation==self.generation) binding.restricted=axs_cachekeeper_wants_restriction(context[@"appState"]);}
         }
     }
-    @synchronized(self) {if (generation!=self.generation) {axs_cachekeeper_operation_refresh(self.operationHistory,event,@"obsolete");return;}}
+    @synchronized(self) {
+        if (generation!=self.generation) {axs_cachekeeper_operation_refresh(self.operationHistory,event,@"obsolete");return;}
+        uint64_t epoch=0;id state=context[@"appState"];
+        if ([context[@"valid"] boolValue] && axs_cachekeeper_state_valid(state) &&
+            [context[@"installation"] isKindOfClass:NSString.class] && [context[@"installation"] length]) {
+            NSString *mode=axs_cachekeeper_mode(state);unsigned code=[mode isEqual:@"clean"] ? 1 : [mode isEqual:@"prevent"] ? 2 : 0;
+            @synchronized(self.writeLedger) {epoch=axs_cachekeeper_write_epoch_begin(&self.writeLedger->observation,generation,self.installationGeneration,axs_cachekeeper_app_enabled(state),code);}
+        }
+        // Commit attribution and restriction together after every owner check;
+        // cancellation uses the same lock order and cannot leave a stale epoch.
+        for (AxsCacheKeeperImageBinding *binding in bindings) @synchronized(binding) {
+            binding.writeEpoch=epoch;
+            binding.restricted=binding.eligible && axs_cachekeeper_wants_restriction(state);
+        }
+    }
     axs_cachekeeper_operation_refresh(self.operationHistory,event,@"applied");
     self.reason=@"none";self.state=@"ready";
     if (![context[@"valid"] boolValue]) {self.reason=@"configurationInvalid";self.state=@"blocked";}
@@ -1212,6 +1257,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
             @"queued":@(self.queued),@"submitted":@(self.submitted),@"apiCompleted":@(self.completed),@"skipped":@(self.skipped),
             @"pending":@(pending),@"updated":NSDate.date,@"bytesState":@"notMeasured",@"discoveryCheck":self.discoveryCheck,
             @"instanceAdmission":admission};
+        {NSMutableDictionary *record=[receipt mutableCopy];@synchronized(self.writeLedger) {record[@"writeObservation"]=axs_cachekeeper_write_observation_record(self.writeLedger->observation);}receipt=record;}
         {NSMutableDictionary *record=[receipt mutableCopy];record[@"sdkMethodsRejectionObservation"]=self.firstSDKMethodsRejection ?: @{@"schemaVersion":@1,@"state":@"notRecorded"};receipt=record;}
         if (self.runtimeSourceObservation) {
             NSMutableDictionary *record=[receipt mutableCopy];record[@"runtimeSourceObservation"]=self.runtimeSourceObservation;receipt=record;

@@ -49,7 +49,7 @@ typedef NS_ENUM(NSInteger, AxsCacheKeeperCleanupBasis) {
 @property(nonatomic, readonly, copy) NSString *appVersion; // 适用版本；nil 表示任意版本（仅测试用）
 @property(nonatomic, readonly, copy) NSArray<NSString *> *cleanablePaths;  // 相对容器，可清范围
 @property(nonatomic, readonly, copy) NSArray<NSString *> *retentionPaths;  // 相对容器，保留范围
-@property(nonatomic, readonly, copy) NSArray<NSString *> *dependencyPaths; // 相对容器，规则依赖（资源索引等）
+@property(nonatomic, readonly, copy) NSArray<NSString *> *dependencyPaths; // 相对容器，执行前重验依赖；可包含授权清理的集合，必保项另列 retentionPaths
 - (instancetype)initWithRuleID:(NSString *)ruleID
                       revision:(NSString *)revision
                     appVersion:(NSString *)appVersion
@@ -63,8 +63,8 @@ typedef NS_ENUM(NSInteger, AxsCacheKeeperCleanupBasis) {
 // 状态字典（excludedPaths/logPaths）；evidence 为预检事实快照：
 //   @"hasEvidence"      @(BOOL) 文件有数据证据（数据标记名/受保护路径成分/数据库头）
 //   @"hasMediaSignature"@(BOOL) 文件头为可识别媒体签名
-//   @"readComplete"     @(BOOL) 内容读取完整（短读/读失败为 NO）
-//   @"retentionRanges"  NSArray<NSString *> 预检发现的已确认保留范围（相对容器）
+//   @"readComplete"     @(BOOL) 内容读取完整；平台用途可不读并保持 NO，身份核验独立
+//   @"retentionRanges"  NSArray<NSString *> 预检本轮保留范围（含名称待核实、恢复失败；不等于用途已证）
 // 字段由生产采集方产生，UI 标签不能伪造可恢复证据。
 + (AxsCacheKeeperCleanupDecision *)decisionForBundle:(NSString *)bundle
                                             version:(NSString *)version
