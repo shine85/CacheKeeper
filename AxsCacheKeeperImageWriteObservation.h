@@ -79,7 +79,7 @@ static inline NSDictionary *axs_cachekeeper_write_observation_record(AxsCacheKee
     }
     return @{@"schemaVersion":@1,@"scope":@"boundWriterDecisions",@"attemptBasis":@"dataAndKeyNonNil",@"allowedMeaning":@"originalCallForwarded",
         @"diskPersistence":@"notMeasured",@"lastEpoch":@(observation.lastEpoch),@"droppedEpochs":@(observation.droppedEpochs),
-        @"truncated":@(observation.droppedEpochs>0),@"overflow":@(observation.overflow),@"epochs":[epochs copy],
+        @"truncated":@((BOOL)(observation.droppedEpochs>0)),@"overflow":@(observation.overflow),@"epochs":[epochs copy],
         @"unattributed":@{@"data":axs_cachekeeper_write_counts_record(observation.unattributed[0]),@"extended":axs_cachekeeper_write_counts_record(observation.unattributed[1])}};
 }
 static inline NSDictionary *axs_cachekeeper_write_observation_projection(id value) {

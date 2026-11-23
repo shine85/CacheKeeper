@@ -6,6 +6,7 @@ static NSDictionary *axs_cachekeeper_write_epoch(NSDictionary *observation,NSNum
     return nil;
 }
 #if !AXS_CACHEKEEPER_WRITE_OBSERVATION_OLD
+void axs_cachekeeper_run_write_status_tests(void);
 static void axs_cachekeeper_runtime_pruned_writer(AxsCacheKeeperImageCache *engine,NSString *home,NSMutableDictionary *context) {
     for (NSString *mode in @[@"disabled",@"clean"]) {
         context[@"appState"]=@{@"enabled":@YES,@"mode":@"auto",@"autoDiscover":@YES};
@@ -57,6 +58,7 @@ static void axs_cachekeeper_runtime_pruned_writer(AxsCacheKeeperImageCache *engi
 static void axs_cachekeeper_runtime_write_observation(AxsCacheKeeperImageCache *engine,NSString *home,NSMutableDictionary *context) {
     SDDiskCache *disk;NSData *data=[NSData data];
 #if !AXS_CACHEKEEPER_WRITE_OBSERVATION_OLD
+    axs_cachekeeper_run_write_status_tests();
     __weak id weakOwner;NSDictionary *beforeRelease;
     @autoreleasepool {
 #endif

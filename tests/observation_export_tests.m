@@ -13,6 +13,13 @@ int main(int argc,char **argv) { @autoreleasepool {
     NSString *folder=[NSString stringWithUTF8String:argv[1]],*status=[folder stringByAppendingPathComponent:@"Status"];
     oecheck([NSFileManager.defaultManager createDirectoryAtPath:status withIntermediateDirectories:YES attributes:nil error:nil],@"create fixture folder");
     NSString *imagePath=[status stringByAppendingPathComponent:@"test.observation.imagecache.plist"],*webPath=[status stringByAppendingPathComponent:@"test.observation.webkit.plist"];
+    // Inventory membership comes from registration or saved configuration;
+    // the displayed app list and SDK receipts do not establish that membership.
+    NSString *statesPath=[folder stringByAppendingPathComponent:@"appEnabled.plist"],
+        *directoriesPath=[folder stringByAppendingPathComponent:@"directories.plist"];
+    oecheck([@{@"test.observation":@NO} writeToFile:statesPath atomically:YES] &&
+        [@{} writeToFile:directoriesPath atomically:YES],@"save disabled app configuration as inventory membership source");
+    NSData *savedStates=[NSData dataWithContentsOfFile:statesPath],*savedDirectories=[NSData dataWithContentsOfFile:directoriesPath];
     NSDictionary *source=@{@"schemaVersion":@1,@"accepted":@NO,@"stage":@"mainIdentity",@"reason":@"notMainBase",@"methodIndex":@0,@"helperIndex":@0};
     NSDictionary *relation=oejson(@"{\"schemaVersion\":1,\"classPresentMask\":31,\"classNameKnownMask\":31,\"classNameEqualsMainMask\":0,\"classResolvedMask\":0,\"classLoadedMainMask\":0,\"classUUIDMatchesMainMask\":0,\"initializerUsesSavedOriginal\":false,\"initializerResolved\":true,\"initializerBaseIsMain\":false,\"initializerUUIDMatchesMain\":false,\"originalResolvedMask\":0,\"originalBaseIsMainMask\":0,\"originalUUIDMatchesMainMask\":0,\"helperResolvedMask\":3,\"helperBaseIsMainMask\":0,\"helperUUIDMatchesMainMask\":0,\"mainUUIDResolved\":true,\"mainUUIDMatchesContract\":true,\"mainLayoutChecked\":false}");
     NSMutableDictionary *discovery=[@{@"schemaVersion":@2,@"stage":@"source",@"classMask":@15,@"imageKind":@"other",@"source":@"rejected",@"failure":@"unknownSource",@"methodIndex":@0,@"sourceCheck":source,@"loadedRelation":relation} mutableCopy];
@@ -38,11 +45,17 @@ int main(int argc,char **argv) { @autoreleasepool {
         NSDictionary *report=[session reportWithApps:@[@{@"id":@"test.observation"}] environment:@{}];
         NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:nil];
         oecheck(json && [[NSData dataWithContentsOfFile:imagePath] isEqual:beforeImage] && [[NSData dataWithContentsOfFile:webPath] isEqual:beforeWeb],@"JSON roundtrip preserves both source files");
+        oecheck([[NSData dataWithContentsOfFile:statesPath] isEqual:savedStates] &&
+            [[NSData dataWithContentsOfFile:directoriesPath] isEqual:savedDirectories],@"export preserves the saved inventory membership and disabled configuration");
         oecheck(![[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] containsString:@"observation-private-canary"],@"private data never escapes invalid observations");
         NSDictionary *decoded=[NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
         inventoryImage=nil;
         for (NSDictionary *entry in decoded[@"storageInventory"][@"entries"])
-            if ([entry[@"bundle"] isEqual:@"test.observation"]) inventoryImage=entry[@"sdkReceipts"][@"imageDiskCache"];
+            if ([entry[@"bundle"] isEqual:@"test.observation"]) {
+                oecheck([entry[@"appEnabled"] isEqual:@NO] && [entry[@"configurationPresent"] isEqual:@YES],
+                    @"saved configuration admits an inventory row without enabling cleanup");
+                inventoryImage=entry[@"sdkReceipts"][@"imageDiskCache"];
+            }
         oecheck(inventoryImage!=nil,@"saved SDK app is present in the actual all-app inventory export");
         return decoded[@"apps"][0];
     };
