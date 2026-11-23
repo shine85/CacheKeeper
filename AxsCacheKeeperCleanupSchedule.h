@@ -13,6 +13,11 @@ typedef NS_ENUM(NSInteger, AxsCacheKeeperRangeState) {
 + (NSDictionary *)registrationForSweep:(AxsCacheKeeperSweep *)sweep signature:(NSString *)signature now:(NSTimeInterval)now;
 + (AxsCacheKeeperRangeState)checkRoot:(NSString *)root registration:(NSDictionary *)registration signature:(NSString *)signature
                                 now:(NSTimeInterval)now stat:(int (^)(const char *, struct stat *))statBlock error:(NSString **)error;
++ (NSArray<AxsCacheKeeperSweep *> *)sweepsForRanges:(NSArray<NSString *> *)ranges home:(NSString *)home
+    bundle:(NSString *)bundle version:(NSString *)version state:(NSDictionary *)state signature:(NSString *)signature
+    registrations:(NSMutableDictionary *)registrations exclusions:(NSArray<NSString *> *)exclusions
+    restoreError:(NSString *)restoreError now:(NSTimeInterval)now diagnostics:(NSMutableDictionary *)diagnostics;
++ (BOOL)hasWorkForSweeps:(NSArray *)sweeps diagnostics:(NSDictionary *)diagnostics externalFailures:(NSUInteger)failures manual:(BOOL)manual;
 + (NSDictionary *)carriedReport:(NSDictionary *)registration;
 + (NSDictionary *)summaryForJob:(AxsCacheKeeperCleanupJob *)job directories:(NSDictionary *)directories
               externalFailures:(NSUInteger)externalFailures discoveryComplete:(BOOL)discoveryComplete;

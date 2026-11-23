@@ -198,7 +198,9 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     check(recent.unresolvedCount==1 && recent.recentCount==1 && ![AxsCacheKeeperCleanupSchedule registrationForSweep:recent signature:@"mix" now:10],@"混合近期根不登记为纯未知");
     AxsCacheKeeperSweep *mature=sweepFor(mixed,logs); finish(mature);
     check(mature.removed==1 && mature.unresolvedCount==1 && ![fm fileExistsAtPath:[mixed stringByAppendingPathComponent:@"ordinary.log"]],@"近期日志成熟后下轮删除");
-    NSDictionary *registration=[AxsCacheKeeperCleanupSchedule registrationForSweep:mature signature:@"mix" now:10];
+    check(![AxsCacheKeeperCleanupSchedule registrationForSweep:mature signature:@"mix" now:9],@"删除轮次短周期重新完整观察再登记");
+    AxsCacheKeeperSweep *settled=sweepFor(mixed,logs);finish(settled);
+    NSDictionary *registration=[AxsCacheKeeperCleanupSchedule registrationForSweep:settled signature:@"mix" now:10];
     check(registration!=nil,@"纯未知范围可登记");
     check([AxsCacheKeeperCleanupSchedule checkRoot:mixed registration:registration signature:@"mix" now:20 stat:nil error:nil]==AxsCacheKeeperRangeUnchanged,@"纯未知稳定范围沿用");
     for (NSNumber *code in @[@EACCES,@EIO,@ENOENT]) {
@@ -217,6 +219,34 @@ void axs_cachekeeper_run_plan_repair_tests(NSString *fixture) {
     NSDictionary *summary=[AxsCacheKeeperCleanupSchedule summaryForJob:empty directories:@{@"Library/diagnostics":carried} externalFailures:0 discoveryComplete:YES];
     check([summary[@"endReason"] integerValue]==AxsCacheKeeperCleanupEndReasonUnresolved && [summary[@"unresolved"] unsignedIntegerValue]==1 &&
         [AxsCacheKeeperCleanupSchedule quietIntervalForSummary:summary]==30,@"全部结转未知仍为部分完成，不进入干净静默");
+
+    // Stable observations must not become repeated empty cleanup rounds.
+    NSString *stableRoot=makeDir(home,@"Library/Caches/stable-empty");
+    AxsCacheKeeperSweep *stable=sweepFor(stableRoot,@{});finish(stable);
+    NSDictionary *stableRegistration=[AxsCacheKeeperCleanupSchedule registrationForSweep:stable signature:@"stable" now:10];
+    check(stableRegistration!=nil,@"无待处理缓存根登记为稳定观察，避免重复零终态");
+    check([AxsCacheKeeperCleanupSchedule checkRoot:stableRoot registration:stableRegistration signature:@"stable" now:45 stat:nil error:nil]==AxsCacheKeeperRangeUnchanged,@"稳定空缓存仍执行元数据检查后复用");
+    check(![AxsCacheKeeperCleanupSchedule hasWorkForSweeps:@[] diagnostics:@{} externalFailures:0 manual:NO],@"未变观察没有实际工作，不产生新清理轮");
+    check([AxsCacheKeeperCleanupSchedule hasWorkForSweeps:@[] diagnostics:@{} externalFailures:1 manual:NO] &&
+        [AxsCacheKeeperCleanupSchedule hasWorkForSweeps:@[] diagnostics:@{@"root":@{@"failed":@1}} externalFailures:0 manual:NO] &&
+        [AxsCacheKeeperCleanupSchedule hasWorkForSweeps:@[] diagnostics:@{} externalFailures:0 manual:YES],@"故障与手动重查不能被未变观察吞掉");
+    put([stableRoot stringByAppendingPathComponent:@"new"]);
+    check([AxsCacheKeeperCleanupSchedule checkRoot:stableRoot registration:stableRegistration signature:@"stable" now:46 stat:nil error:nil]==AxsCacheKeeperRangeScan,@"新增缓存使稳定观察立即失效");
+    AxsCacheKeeperSweep *stableNew=sweepFor(stableRoot,@{});check([AxsCacheKeeperCleanupSchedule hasWorkForSweeps:@[stableNew] diagnostics:@{} externalFailures:0 manual:NO],@"新增范围进入实际清理");finish(stableNew);check(stableNew.removed==1,@"变化后实际新缓存仍删除");
+    check(![AxsCacheKeeperCleanupSchedule registrationForSweep:stableNew signature:@"stable" now:46],@"删除后不能登记包含未观察新增的根");
+    AxsCacheKeeperSweep *stableAgain=sweepFor(stableRoot,@{});finish(stableAgain);
+    NSDictionary *newRegistration=[AxsCacheKeeperCleanupSchedule registrationForSweep:stableAgain signature:@"stable" now:46];
+    check(newRegistration!=nil && [AxsCacheKeeperCleanupSchedule checkRoot:stableRoot registration:newRegistration signature:@"stable" now:1846 stat:nil error:nil]==AxsCacheKeeperRangeScan,@"未变化根仍在最长30分钟后完整复核");
+    put([stableRoot stringByAppendingPathComponent:@"after-observation"]);
+    check(![AxsCacheKeeperCleanupSchedule registrationForSweep:stableAgain signature:@"stable" now:47],@"观察结束后的新增不能被登记为旧稳定范围");
+    NSString *deepRoot=makeDir(home,@"Library/Caches/deep-observation"),*deepChild=makeDir(home,@"Library/Caches/deep-observation/nested");
+    AxsCacheKeeperSweep *deep=sweepFor(deepRoot,@{});finish(deep);
+    NSDictionary *deepRegistration=[AxsCacheKeeperCleanupSchedule registrationForSweep:deep signature:@"deep" now:50];
+    put([deepChild stringByAppendingPathComponent:@"new-descendant"]);
+    check(deepRegistration!=nil && [AxsCacheKeeperCleanupSchedule checkRoot:deepRoot registration:deepRegistration signature:@"deep" now:51 stat:nil error:nil]==AxsCacheKeeperRangeUnchanged,@"深层新增保持根元数据不变，短周期不冒充完整复查");
+    check([AxsCacheKeeperCleanupSchedule checkRoot:deepRoot registration:deepRegistration signature:@"deep" now:1850 stat:nil error:nil]==AxsCacheKeeperRangeScan,@"深层变化在最长30分钟后进入真实完整复查");
+    AxsCacheKeeperSweep *deepRetry=sweepFor(deepRoot,@{});finish(deepRetry);
+    check(deepRetry.removed==1 && ![fm fileExistsAtPath:[deepChild stringByAppendingPathComponent:@"new-descendant"]],@"到期完整复查实际删除此前根时间戳未反映的深层新增");
 
     // 身份/年龄核验中跨期限：首文件成功，下一文件核验时到期，实际 unlink 不得开始。
     NSString *boundaryRoot=makeDir(home,@"Library/Caches/boundary"); put([boundaryRoot stringByAppendingPathComponent:@"one"]); put([boundaryRoot stringByAppendingPathComponent:@"two"]);

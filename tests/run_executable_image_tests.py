@@ -9,6 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def run() -> int:
+    portable = subprocess.run([sys.executable, str(ROOT / "tests/run_executable_view_tests.py")], cwd=ROOT, timeout=75)
+    if portable.returncode not in (0, 2):
+        return portable.returncode
     compiler = shutil.which("xcrun")
     if sys.platform != "darwin" or not compiler:
         print("UNAVAILABLE: executable image tests require macOS/xcrun; no native tests ran.")
@@ -20,7 +23,7 @@ def run() -> int:
         old = "AxsCacheKeeperExecutableImageRow value=row(index);"
         assert source.count(old) == 1, "ambiguous loader-order regression"
         stale = "generation!=atomic_load(&axs_cachekeeper_image_observation_generation)"
-        assert source.count(stale) == 3, "ambiguous generation revocation regression"
+        assert source.count(stale) == 4, "ambiguous generation revocation regression"
         for role in ("red", "stale", "green"):
             target = folder / role
             target.mkdir()

@@ -24,6 +24,22 @@ def run() -> int:
         output = Path(directory)
         old = output / "diagnostics-old.m"
         old.write_bytes(baseline)
+        # Current diagnostics with the pre-1123 inventory isolates saved liveness
+        # from the independent historical alias regression below.
+        old_inventory = output / "inventory-193.m"
+        old_inventory.write_bytes(subprocess.check_output(["git", "show", "2f19b98b500c51043e561544fafab25938f42719:AxsCacheKeeperStorageInventory.m"], cwd=ROOT, timeout=15))
+        for role, inventory in (("pending-red", old_inventory),):
+            binary = output / role
+            sources = [ROOT / "tests/operation_export_tests.m", ROOT / "AxsCacheKeeperDiagnostics.m", ROOT / "AxsCacheKeeperOperationInfo.m",
+                       ROOT / "AxsCacheKeeperInstallation.m", ROOT / "AxsCacheKeeperPDFInspection.m", inventory,
+                       ROOT / "AxsCacheKeeperHostEvidence.m", ROOT / "AxsCacheKeeperInjectionConditions.m"]
+            subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-I" + str(ROOT),
+                            "-I" + str(ROOT / "tests/include"), "-framework", "Foundation", *map(str, sources), "-o", str(binary)], check=True, timeout=60)
+            result = subprocess.run([str(binary), str(output / (role + "-fixture")), "pending"], capture_output=True, text=True, encoding="utf-8", timeout=60)
+            if role == "pending-red":
+                if result.returncode != 1 or result.stderr.strip() != "FAIL: operation export: saved pending receipt is not evidence of a live process":
+                    raise SystemExit("FAIL: incorrect saved liveness RED\n" + result.stdout + result.stderr)
+                print("PASS: 193 inventory reproduces exact saved liveness RED")
         for role, source in (("red", old), ("green", ROOT / "AxsCacheKeeperDiagnostics.m")):
             binary = output / role
             sources = [ROOT / "tests/operation_export_tests.m", source, ROOT / "AxsCacheKeeperOperationInfo.m",
@@ -44,6 +60,10 @@ def run() -> int:
             else:
                 if result.returncode:
                     raise SystemExit("FAIL: operation export GREEN\n" + result.stdout + result.stderr)
+                print(result.stdout, end="")
+                result = subprocess.run([str(binary), str(output / "pending-green-fixture"), "pending"], capture_output=True, text=True, encoding="utf-8", timeout=60)
+                if result.returncode:
+                    raise SystemExit("FAIL: pending export GREEN\n" + result.stdout + result.stderr)
                 print(result.stdout, end="")
     return 0
 

@@ -21,11 +21,15 @@ ADMISSION_RED = "FAIL: image-runtime-source: early returns retain prior live adm
 MEMBER_GATE = "    id disk=AxsCacheKeeperImageGet(owner,\"diskCache\"),config=AxsCacheKeeperImageGet(owner,\"config\");\n    NSString *reason=AxsCacheKeeperImageStructureReason(owner,disk,config);if (reason) return reason;"
 MEMBER_RED = "FAIL: image-runtime-source: released disk member is not misreported as released owner"
 OWNER_POOL_GATE = '- (void)axs_cachekeeper_refresh_event:(NSUInteger)event {\n    // End SDK getter temporaries before completion or the next state transition,\n    // including direct refreshes within a still-running worker item.\n    @autoreleasepool {'
+MAIN_VIEW_RED = "FAIL: image-runtime-source: constructor owner survives revoked main view and is fully readmitted by discovery"
+MAIN_METADATA_GATE = 'return index==0 ? bundle.bundleIdentifier : bundle.infoDictionary[index==1 ? @"CFBundleShortVersionString" : @"CFBundleVersion"];'
+MAIN_LAYOUT_GATE = 'return AxsCacheKeeperImageLegacyLayoutCheck(base,executable.slide,layout);'
 OWNER_POOL_RED = "INFO: release live=1 observed=1 released=0 expected=1\nFAIL: image-runtime-source: weak owner release is recorded once without retention"
 
 
 def verify_case(role, scenario, result):
     red = {
+        ("view-red", "main-view"): (MAIN_VIEW_RED, "193.1 constructor owner loss RED through actual main executable gate"),
         ("pool-red", "owner-pool"): (OWNER_POOL_RED, "owner pool RED inside actual refresh with deferred SDK getter reference"),
         ("member-red", "admission"): (MEMBER_RED, "stale member RED at actual owner getter and retained old member"),
         ("red", "admission"): (ADMISSION_RED, "admission RED at actual initializer observation"),
@@ -59,14 +63,14 @@ def run_cases(binary, role, scenarios, remaining):
     return failures
 
 
-def run() -> int:
+def run(main_view=False) -> int:
     compiler = shutil.which("xcrun")
     if sys.platform != "darwin" or not compiler:
         print("UNAVAILABLE: image runtime helper regression requires macOS and xcrun; no tests ran.")
         return 2
-    # run_native_tests.py owns a 240s wrapper. Compile/test maxima are individually
-    # capped by the remaining 225s work budget, leaving room for wrapper reporting.
-    deadline = time.monotonic() + 225
+    # Main-view: 3 compiles <=60s, fixed-source read <=30s, 3 runs <=30s.
+    # Independent wrapper 330s includes reporting; existing runtime retains 240s.
+    deadline = time.monotonic() + (315 if main_view else 225)
     def remaining(maximum):
         seconds = deadline - time.monotonic()
         if seconds <= 0:
@@ -83,10 +87,15 @@ def run() -> int:
         subprocess.run([compiler, "clang", "-fno-objc-arc", "-Wall", "-Wextra", "-Werror=format",
                         "-c", str(ROOT / "tests/image_runtime_autorelease_fixture.m"), "-o", str(helper)],
                        cwd=ROOT, check=True, timeout=remaining(60))
-        for role in ("pool-red", "member-red", "red", "green"):
+        for role in (("view-red", "green") if main_view else ("pool-red", "member-red", "red", "green")):
             folder = Path(directory) / role
             folder.mkdir()
             candidate = source.replace(GATE, "    if (NO) helpers=^NSDictionary *{") if role == "red" else source
+            if role == "view-red":
+                # Fixed shipped 193.1 source: the RED must execute its early return,
+                # never a hand-written owner registry or a MainLayoutCheck double.
+                baseline = subprocess.run(["git", "show", "2f19b98b500c51043e561544fafab25938f42719:AxsCacheKeeperImageCache.m"], cwd=ROOT, capture_output=True, text=True, encoding="utf8", check=True, timeout=remaining(30))
+                candidate = baseline.stdout
             if role == "pool-red":
                 candidate = candidate.replace(OWNER_POOL_GATE, '- (void)axs_cachekeeper_refresh_event:(NSUInteger)event {\n    {')
             if role == "member-red":
@@ -94,12 +103,27 @@ def run() -> int:
             if role == "red":
                 candidate = candidate.replace(REFRESH_GATE, 'NSString *otherRelative=AxsCacheKeeperImageRelative(context[@"home"],other.path);')
                 candidate = candidate.replace(ADMISSION_GATE, "        (void)reason;")
+            # Runtime fixtures cannot impersonate Baidu's ARM64 executable on a
+            # macOS host. Substitute metadata and layout fingerprints only; the
+            # complete production MainLayoutCheck control flow/Executable lookup
+            # remain present, including the synchronous NULL rejection branch.
+            header = (ROOT / "AxsCacheKeeperImageLegacySource.h").read_text(encoding="utf-8-sig")
+            if header.count(MAIN_METADATA_GATE) != 1 or header.count(MAIN_LAYOUT_GATE) != 1:
+                raise SystemExit("FAIL: ambiguous real main gate fixture boundaries")
+            header = header.replace(MAIN_METADATA_GATE, 'return index==0 ? @"com.baidu.netdisk" : (index==1 ? @"13.37.5" : @"13.37.5.10");')
+            header = header.replace(MAIN_LAYOUT_GATE, 'layout->base=(uintptr_t)base;return AxsCacheKeeperImageLegacyComplete();')
+            (folder / "AxsCacheKeeperImageLegacySource.h").write_text(header, encoding="utf-8")
+            # Keep quoted includes in one fixture directory: the runtime header
+            # must include this metadata/layout boundary, not a second root copy.
+            (folder / "AxsCacheKeeperImageRuntimeSource.h").write_bytes((ROOT / "AxsCacheKeeperImageRuntimeSource.h").read_bytes())
             (folder / "AxsCacheKeeperImageCache.m").write_text(candidate, encoding="utf-8")
             print(f"INFO: image-runtime-source {role} SHA256 {hashlib.sha256(candidate.encode()).hexdigest()}", flush=True)
             binary = folder / "runtime-source-tests"
             try:
                 subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format",
-                            "-DAXS_CACHEKEEPER_IMAGE_TESTING=1", "-I" + str(folder), "-I" + str(ROOT),
+                            "-DAXS_CACHEKEEPER_IMAGE_TESTING=1",
+                            *(["-DAXS_CACHEKEEPER_MAIN_VIEW_BASELINE=1"] if role == "view-red" else []),
+                            "-I" + str(folder), "-I" + str(ROOT),
                             "-framework", "Foundation", str(ROOT / "tests/image_runtime_source_tests.m"),
                             str(ROOT / "AxsCacheKeeperCleanupRules.m"),
                             str(ROOT / "AxsCacheKeeperOperationInfo.m"), str(helper), "-o", str(binary)],
@@ -108,7 +132,7 @@ def run() -> int:
                 failures.append(f"{role}/compile")
                 print(f"FAIL: image-runtime-source {role} compile: {error}", file=sys.stderr, flush=True)
                 continue
-            scenarios = ("owner-pool",) if role == "pool-red" else ("admission",) if role == "member-red" else ("fingerprint", "fingerprint-shifted", "pinned", "refresh", "sample", "admission") + (("owner-pool",) if role == "green" else ())
+            scenarios = (("main-view",) if role == "view-red" else ("main-view", "recovery-race")) if main_view else ("owner-pool",) if role == "pool-red" else ("admission",) if role == "member-red" else ("fingerprint", "fingerprint-shifted", "pinned", "refresh", "sample", "admission") + (("owner-pool",) if role == "green" else ())
             failures.extend(run_cases(binary, role, scenarios, remaining))
     if failures:
         print("FAIL: image-runtime-source cases: " + ", ".join(failures), file=sys.stderr, flush=True)
@@ -116,4 +140,4 @@ def run() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(run())
+    raise SystemExit(run(main_view="--main-view" in sys.argv[1:]))

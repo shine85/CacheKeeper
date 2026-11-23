@@ -12,6 +12,10 @@ static atomic_uint axs_cachekeeper_runtime_paths,axs_cachekeeper_runtime_headers
 // Reorder real loader rows, preserving their actual headers, names and slides.
 // This models RootHide's launcher-before-executable order without inventing code.
 static BOOL axs_cachekeeper_runtime_shifted;
+static BOOL axs_cachekeeper_runtime_real_main_gate;
+static BOOL axs_cachekeeper_runtime_revoke_after_helper;
+static unsigned axs_cachekeeper_runtime_restore_after_main_failure;
+static BOOL axs_cachekeeper_runtime_restore_changes_helper;
 static uint32_t axs_cachekeeper_runtime_main_index,axs_cachekeeper_runtime_other_index;
 static const void *axs_cachekeeper_runtime_main_header;
 static uint32_t axs_cachekeeper_runtime_loader_index(uint32_t index) {
@@ -149,11 +153,28 @@ static AxsCacheKeeperImageLegacyCheck axs_cachekeeper_runtime_source_check(const
         AxsCacheKeeperImageLegacyResult("mainIdentity","bundle",0,0);
 }
 static AxsCacheKeeperImageLegacyCheck axs_cachekeeper_runtime_main_layout_check(const void *base,AxsCacheKeeperImageLegacyLayout *layout) {
+    if (axs_cachekeeper_runtime_real_main_gate) {
+        AxsCacheKeeperImageLegacyCheck check=AxsCacheKeeperImageLegacyMainLayoutCheck(base,layout);
+        if (!check.accepted && !strcmp(check.reason,"notMainBase") && axs_cachekeeper_runtime_restore_after_main_failure &&
+            --axs_cachekeeper_runtime_restore_after_main_failure==0) {
+            // Restore the actual executable only after the production main gate
+            // returned its rejection; classification must retain that same view.
+            AxsCacheKeeperImageRefreshExecutable();
+            if (axs_cachekeeper_runtime_restore_changes_helper)
+                method_setImplementation(class_getClassMethod(AxsCacheKeeperRuntimeSourceHelper.class,@selector(axs_cachekeeper_sample)),(IMP)axs_cachekeeper_runtime_changed_helper);
+        }
+        return check;
+    }
     if (base!=axs_cachekeeper_runtime_main_header) return AxsCacheKeeperImageLegacyResult("mainIdentity","notMainBase",0,0);
     layout->base=(uintptr_t)base;return AxsCacheKeeperImageLegacyComplete();
 }
 static AxsCacheKeeperImageLegacyCheck axs_cachekeeper_runtime_helpers_check(const AxsCacheKeeperImageLegacyLayout *layout) {
-    return axs_cachekeeper_runtime_helpers_match((const void *)layout->base) ? AxsCacheKeeperImageLegacyComplete() : AxsCacheKeeperImageLegacyResult("helperWindow","changed",0,1);
+    AxsCacheKeeperImageLegacyCheck check=axs_cachekeeper_runtime_helpers_match((const void *)layout->base) ? AxsCacheKeeperImageLegacyComplete() : AxsCacheKeeperImageLegacyResult("helperWindow","changed",0,1);
+    if (check.accepted && axs_cachekeeper_runtime_revoke_after_helper) {
+        axs_cachekeeper_runtime_revoke_after_helper=NO;
+        atomic_fetch_add(&axs_cachekeeper_image_observation_generation,1);
+    }
+    return check;
 }
 
 static atomic_uint axs_cachekeeper_runtime_home_resolutions;
@@ -376,11 +397,184 @@ static void axs_cachekeeper_runtime_owner_pool(AxsCacheKeeperImageCache *engine,
     dispatch_semaphore_signal(finish);axs_cachekeeper_runtime_worker_fence(engine);
     axs_cachekeeper_runtime_defer_owner=NO;
 }
+static void axs_cachekeeper_runtime_main_view(AxsCacheKeeperImageCache *engine,NSString *home,NSMutableDictionary *context) {
+    dispatch_semaphore_t entered=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0);
+    dispatch_async(engine.work,^{dispatch_semaphore_signal(entered);dispatch_semaphore_wait(release,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));});
+    axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(entered,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"main view discovery is held before constructor returns");
+    axs_cachekeeper_image_runtime_view_changed();
+    AxsCacheKeeperImageLegacyLayout layout;
+    AxsCacheKeeperImageLegacyCheck stale=AxsCacheKeeperImageLegacyMainLayoutCheck(axs_cachekeeper_runtime_main_header,&layout);
+    axs_cachekeeper_runtime_require(!stale.accepted && !strcmp(stale.stage,"mainIdentity") && !strcmp(stale.reason,"notMainBase"),"actual MainLayoutCheck refuses revoked executable before asynchronous discovery");
+    SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"recover" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+    SDDiskCache *disk=owner.diskCache;
+    [disk setData:[NSData data] forKey:@"waiting"];[disk setExtendedData:[NSData data] forKey:@"waiting"];
+    axs_cachekeeper_runtime_require(!objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey) && atomic_load(&axs_cachekeeper_runtime_writes)==1 && atomic_load(&axs_cachekeeper_runtime_metadata)==1,"waiting owner has no binding association and preserves both original writes");
+    // Pure discovery used to lose this owner forever. No configuration refresh
+    // may substitute for the actual asynchronous discovery completion here.
+    [engine requestDiscoveryRefresh];dispatch_semaphore_signal(release);
+    axs_cachekeeper_runtime_worker_fence(engine);axs_cachekeeper_runtime_worker_fence(engine);
+    axs_cachekeeper_runtime_require([engine.receipt[@"observed"] isEqual:@1] && [engine.receipt[@"restricted"] isEqual:@1],"constructor owner survives revoked main view and is fully readmitted by discovery");
+#if !defined(AXS_CACHEKEEPER_MAIN_VIEW_BASELINE)
+    axs_cachekeeper_runtime_require([engine.receipt[@"instanceAdmission"][@"initializerReturns"] isEqual:@1] && [engine.receipt[@"instanceAdmission"][@"registered"] isEqual:@1] && [engine.receipt[@"instanceAdmission"][@"unregistered"] isEqual:@0],"waiting observation closes original initializer accounting without invented retry returns");
+    NSDictionary *rejection=engine.receipt[@"sdkMethodsRejectionObservation"];
+    axs_cachekeeper_runtime_require([rejection[@"check"][@"helperReason"] isEqual:@"notMainBase"] && [rejection[@"initializerOrdinal"] isEqual:@1],"first synchronous main rejection remains frozen after recovery");
+    [disk setData:[NSData data] forKey:@"recovered"];[disk setExtendedData:[NSData data] forKey:@"recovered"];
+    axs_cachekeeper_runtime_require(atomic_load(&axs_cachekeeper_runtime_writes)==1 && atomic_load(&axs_cachekeeper_runtime_metadata)==1,"recovered owner blocks both writes only after full admission");
+    context[@"appState"]=@{@"enabled":@NO,@"mode":@"auto",@"autoDiscover":@YES};axs_cachekeeper_runtime_refresh(engine);
+    [disk setData:[NSData data] forKey:@"disabled"];[disk setExtendedData:[NSData data] forKey:@"disabled"];
+    axs_cachekeeper_runtime_require(atomic_load(&axs_cachekeeper_runtime_writes)==2 && atomic_load(&axs_cachekeeper_runtime_metadata)==2 && [engine.receipt[@"restricted"] isEqual:@0],"disabled policy restores both writes after main view recovery");
+    context[@"appState"]=@{@"enabled":@YES,@"mode":@"auto",@"autoDiscover":@YES};axs_cachekeeper_runtime_refresh(engine);
+    // Policy exclusions block recovery temporarily, not the authentic owner for
+    // the rest of its lifetime. The old queue/path/FD snapshot remains required.
+    dispatch_semaphore_t scopeEntered=dispatch_semaphore_create(0),scopeRelease=dispatch_semaphore_create(0);
+    dispatch_async(engine.work,^{dispatch_semaphore_signal(scopeEntered);dispatch_semaphore_wait(scopeRelease,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));});
+    axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(scopeEntered,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"scope recovery worker is held");
+    axs_cachekeeper_image_runtime_view_changed();
+    SDImageCache *excluded=[[SDImageCache alloc] initWithNamespace:@"policy-scope" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+    context[@"appState"]=@{@"enabled":@YES,@"mode":@"auto",@"autoDiscover":@YES,@"excludedPaths":@[@"Library/Caches/policy-scope"]};
+    dispatch_semaphore_signal(scopeRelease);axs_cachekeeper_runtime_refresh(engine);
+    AxsCacheKeeperImageBinding *waitingScope=nil;for (AxsCacheKeeperImageBinding *item in [engine axs_cachekeeper_bindings]) if (item.owner==excluded) waitingScope=item;
+    unsigned beforeExcluded=atomic_load(&axs_cachekeeper_runtime_writes),metadataExcluded=atomic_load(&axs_cachekeeper_runtime_metadata);
+    [excluded.diskCache setData:[NSData data] forKey:@"excluded"];[excluded.diskCache setExtendedData:[NSData data] forKey:@"excluded"];
+    axs_cachekeeper_runtime_require(waitingScope.awaitingMainView && !waitingScope.invalidated && !waitingScope.eligible && !waitingScope.restricted &&
+        !objc_getAssociatedObject(excluded.diskCache,AxsCacheKeeperImageBindingKey) && atomic_load(&axs_cachekeeper_runtime_writes)==beforeExcluded+1 && atomic_load(&axs_cachekeeper_runtime_metadata)==metadataExcluded+1,
+        "temporarily excluded waiting owner keeps both original writes without permanent invalidation");
+    context[@"appState"]=@{@"enabled":@YES,@"mode":@"auto",@"autoDiscover":@YES};axs_cachekeeper_runtime_refresh(engine);
+    [excluded.diskCache setData:[NSData data] forKey:@"scope-restored"];[excluded.diskCache setExtendedData:[NSData data] forKey:@"scope-restored"];
+    axs_cachekeeper_runtime_require(!waitingScope.awaitingMainView && !waitingScope.invalidated && waitingScope.eligible && waitingScope.restricted &&
+        atomic_load(&axs_cachekeeper_runtime_writes)==beforeExcluded+1 && atomic_load(&axs_cachekeeper_runtime_metadata)==metadataExcluded+1,
+        "removing the exclusion fully readmits the same owner with its original identity");
+    NSUInteger observedAfterScope=[engine.receipt[@"observed"] unsignedIntegerValue];
+    // Once the view is valid, changed constructor members are rejected rather
+    // than becoming a fresh trusted baseline. Restoring them cannot retry.
+    for (NSString *fault in @[@"queue",@"installation",@"helper",@"rawIMP"]) {
+        dispatch_semaphore_t faultEntered=dispatch_semaphore_create(0),faultRelease=dispatch_semaphore_create(0);
+        dispatch_async(engine.work,^{dispatch_semaphore_signal(faultEntered);dispatch_semaphore_wait(faultRelease,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));});
+        axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(faultEntered,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"rejection recovery worker is held");
+        axs_cachekeeper_image_runtime_view_changed();
+        SDImageCache *changed=[[SDImageCache alloc] initWithNamespace:fault diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+        dispatch_queue_t queue=changed.ioQueue;
+        Method helper=class_getClassMethod(AxsCacheKeeperRuntimeSourceHelper.class,@selector(axs_cachekeeper_sample));
+        Method writer=class_getInstanceMethod(SDDiskCache.class,@selector(setData:forKey:));IMP writerIMP=method_getImplementation(writer);
+        if ([fault isEqual:@"queue"]) changed.ioQueue=dispatch_queue_create("cachekeeper.changed.queue",DISPATCH_QUEUE_SERIAL);
+        if ([fault isEqual:@"installation"]) context[@"installation"]=@"changed-runtime-fixture";
+        if ([fault isEqual:@"helper"]) method_setImplementation(helper,(IMP)axs_cachekeeper_runtime_changed_helper);
+        if ([fault isEqual:@"rawIMP"]) method_setImplementation(writer,axs_cachekeeper_image_data_original);
+        dispatch_semaphore_signal(faultRelease);axs_cachekeeper_runtime_worker_fence(engine);axs_cachekeeper_runtime_worker_fence(engine);
+        AxsCacheKeeperImageBinding *rejected=nil;for (AxsCacheKeeperImageBinding *binding in [engine axs_cachekeeper_bindings]) if (binding.owner==changed) rejected=binding;
+        axs_cachekeeper_runtime_require(rejected && rejected.invalidated && !rejected.eligible && !rejected.restricted && !objc_getAssociatedObject(changed.diskCache,AxsCacheKeeperImageBindingKey),"changed source or constructor member stays unassociated and rejected");
+        changed.ioQueue=queue;context[@"installation"]=@"runtime-fixture";method_setImplementation(helper,axs_cachekeeper_runtime_helper_original);method_setImplementation(writer,writerIMP);
+        axs_cachekeeper_runtime_refresh(engine);
+        axs_cachekeeper_runtime_require(rejected.invalidated && !rejected.eligible && !rejected.restricted,"terminal waiting rejection never retries after member restoration");
+    }
+    NSUInteger releasedBefore=[engine.receipt[@"instanceAdmission"][@"released"] unsignedIntegerValue];
+    // Released waiting instances have no captured strong reference in the worker.
+    dispatch_semaphore_t entered2=dispatch_semaphore_create(0),release2=dispatch_semaphore_create(0);
+    dispatch_async(engine.work,^{dispatch_semaphore_signal(entered2);dispatch_semaphore_wait(release2,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));});
+    axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(entered2,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"release recovery worker is held");
+    axs_cachekeeper_image_runtime_view_changed();__weak SDImageCache *weak;
+    @autoreleasepool {SDImageCache *temporary=[[SDImageCache alloc] initWithNamespace:@"released" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];weak=temporary;}
+    axs_cachekeeper_runtime_require(!weak,"waiting registry does not retain its owner");
+    dispatch_semaphore_signal(release2);axs_cachekeeper_runtime_worker_fence(engine);axs_cachekeeper_runtime_worker_fence(engine);
+    axs_cachekeeper_runtime_require([engine.receipt[@"observed"] isEqual:@(observedAfterScope)] && [engine.receipt[@"instanceAdmission"][@"released"] isEqual:@(releasedBefore+1)],"released waiting owner is counted once and is never readmitted");
+#endif
+}
+#if !defined(AXS_CACHEKEEPER_MAIN_VIEW_BASELINE)
+static IMP axs_cachekeeper_runtime_register_original;
+static BOOL axs_cachekeeper_runtime_register_reentry;
+static BOOL axs_cachekeeper_runtime_register_after(id engine,SEL selector,AxsCacheKeeperImageBinding *binding,NSDictionary *check) {
+    BOOL registered=((BOOL (*)(id,SEL,id,id))axs_cachekeeper_runtime_register_original)(engine,selector,binding,check);
+    if (axs_cachekeeper_runtime_register_reentry) {
+        axs_cachekeeper_runtime_register_reentry=NO;
+        // This outcome arrives exactly after the registry transaction but before
+        // the outer observe method can execute its next instruction.
+        [engine axs_cachekeeper_unregistered:AxsCacheKeeperImageReasonInitializerReturnedNil];
+    }
+    return registered;
+}
+static void axs_cachekeeper_runtime_recovery_race(AxsCacheKeeperImageCache *engine,NSString *home,NSDictionary *context) {
+    dispatch_semaphore_t entered=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0),done=dispatch_semaphore_create(0),resume=dispatch_semaphore_create(0);
+    dispatch_async(engine.work,^{
+        dispatch_semaphore_signal(entered);
+        dispatch_semaphore_wait(release,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));
+        // Refresh only the real executable cache. The first helper check inside
+        // production recovery succeeds, then revokes the view before instance
+        // validation repeats it. No recovery method or result is substituted.
+        AxsCacheKeeperImageRefreshExecutable();
+        axs_cachekeeper_runtime_revoke_after_helper=YES;
+        [engine axs_cachekeeper_recoverMainView:context];
+        [engine axs_cachekeeper_publish];
+        dispatch_semaphore_signal(done);
+        dispatch_semaphore_wait(resume,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));
+    });
+    axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(entered,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"recovery race worker is held");
+    axs_cachekeeper_image_runtime_view_changed();
+    SEL selector=sel_registerName("axs_cachekeeper_registerBinding:methodsCheck:");
+    Method registration=class_getInstanceMethod(AxsCacheKeeperImageCache.class,selector);
+    axs_cachekeeper_runtime_require(registration!=NULL,"registration transaction exposes the complete rejection input");
+    axs_cachekeeper_runtime_register_original=method_setImplementation(registration,(IMP)axs_cachekeeper_runtime_register_after);
+    axs_cachekeeper_runtime_register_reentry=YES;
+    SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"race" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+    method_setImplementation(registration,axs_cachekeeper_runtime_register_original);
+    axs_cachekeeper_runtime_require([engine.firstSDKMethodsRejection[@"initializerOrdinal"] isEqual:@1] &&
+        [engine.firstSDKMethodsRejection[@"check"][@"helperReason"] isEqual:@"notMainBase"],"reentrant early return cannot steal the waiting rejection ordinal or snapshot");
+    AxsCacheKeeperImageBinding *binding=nil;for (AxsCacheKeeperImageBinding *item in [engine axs_cachekeeper_bindings]) if (item.owner==owner) binding=item;
+    axs_cachekeeper_runtime_require(binding && binding.awaitingMainView,"race owner starts in weak waiting registry");
+    dispatch_semaphore_signal(release);
+    axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC)),"revoked recovery check completes");
+    axs_cachekeeper_runtime_require(binding.awaitingMainView && !binding.invalidated && !binding.restricted && !binding.eligible &&
+        !objc_getAssociatedObject(owner.diskCache,AxsCacheKeeperImageBindingKey),"a second view revocation between recovery checks keeps the live owner waiting");
+    dispatch_semaphore_signal(resume);
+    axs_cachekeeper_runtime_refresh(engine);
+    axs_cachekeeper_runtime_require(!binding.awaitingMainView && !binding.invalidated && binding.restricted && binding.eligible,
+        "stable view after the recovery race fully readmits the same owner");
+    // Combining view revocation with a genuine raw-IMP change never gets the
+    // retry privilege. Restoring that IMP later cannot readmit this instance.
+    dispatch_semaphore_t entered2=dispatch_semaphore_create(0),release2=dispatch_semaphore_create(0),done2=dispatch_semaphore_create(0);
+    dispatch_async(engine.work,^{dispatch_semaphore_signal(entered2);dispatch_semaphore_wait(release2,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));
+        AxsCacheKeeperImageRefreshExecutable();axs_cachekeeper_runtime_revoke_after_helper=YES;
+        [engine axs_cachekeeper_recoverMainView:context];dispatch_semaphore_signal(done2);});
+    axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(entered2,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"mixed recovery race worker is held");
+    axs_cachekeeper_image_runtime_view_changed();
+    SDImageCache *changed=[[SDImageCache alloc] initWithNamespace:@"race-raw" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+    AxsCacheKeeperImageBinding *failed=nil;for (AxsCacheKeeperImageBinding *item in [engine axs_cachekeeper_bindings]) if (item.owner==changed) failed=item;
+    Method writer=class_getInstanceMethod(SDDiskCache.class,@selector(setData:forKey:));IMP saved=method_setImplementation(writer,axs_cachekeeper_image_data_original);
+    dispatch_semaphore_signal(release2);axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(done2,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC)),"mixed recovery race completes");
+    method_setImplementation(writer,saved);axs_cachekeeper_runtime_refresh(engine);
+    axs_cachekeeper_runtime_require(failed.invalidated && !failed.restricted && !failed.eligible && !objc_getAssociatedObject(changed.diskCache,AxsCacheKeeperImageBindingKey),"raw IMP change remains terminal even when the executable view is also revoked");
+    for (unsigned checkpoint=1;checkpoint<=3;checkpoint++) {
+        dispatch_semaphore_t held=dispatch_semaphore_create(0),go=dispatch_semaphore_create(0);
+        dispatch_async(engine.work,^{dispatch_semaphore_signal(held);dispatch_semaphore_wait(go,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));});
+        axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(held,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"constructor classification worker is held");
+        axs_cachekeeper_image_runtime_view_changed();axs_cachekeeper_runtime_restore_after_main_failure=checkpoint;
+        SDImageCache *restored=[[SDImageCache alloc] initWithNamespace:[NSString stringWithFormat:@"restore-%u",checkpoint] diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+        axs_cachekeeper_runtime_require(!axs_cachekeeper_runtime_restore_after_main_failure,"the actual main rejection restored its executable at the selected constructor checkpoint");
+        dispatch_semaphore_signal(go);axs_cachekeeper_runtime_refresh(engine);
+        AxsCacheKeeperImageBinding *readmitted=nil;for (AxsCacheKeeperImageBinding *item in [engine axs_cachekeeper_bindings]) if (item.owner==restored) readmitted=item;
+        axs_cachekeeper_runtime_require(readmitted && !readmitted.initialReason && !readmitted.invalidated && !readmitted.awaitingMainView && readmitted.eligible && readmitted.restricted,
+            "a restored view after the constructor main rejection never freezes a permanent source reason or loses the owner");
+    }
+    // A genuine helper change at that same restore boundary remains terminal.
+    dispatch_semaphore_t held=dispatch_semaphore_create(0),go=dispatch_semaphore_create(0);
+    dispatch_async(engine.work,^{dispatch_semaphore_signal(held);dispatch_semaphore_wait(go,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));});
+    axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(held,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"helper restoration worker is held");
+    NSUInteger unregistered=[engine.receipt[@"instanceAdmission"][@"unregistered"] unsignedIntegerValue];
+    axs_cachekeeper_image_runtime_view_changed();axs_cachekeeper_runtime_restore_after_main_failure=1;axs_cachekeeper_runtime_restore_changes_helper=YES;
+    SDImageCache *helperChanged=[[SDImageCache alloc] initWithNamespace:@"restore-helper" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+    axs_cachekeeper_runtime_restore_changes_helper=NO;dispatch_semaphore_signal(go);axs_cachekeeper_runtime_refresh(engine);
+    method_setImplementation(class_getClassMethod(AxsCacheKeeperRuntimeSourceHelper.class,@selector(axs_cachekeeper_sample)),axs_cachekeeper_runtime_helper_original);
+    axs_cachekeeper_runtime_refresh(engine);
+    axs_cachekeeper_runtime_require(!objc_getAssociatedObject(helperChanged.diskCache,AxsCacheKeeperImageBindingKey) &&
+        [engine.receipt[@"instanceAdmission"][@"unregistered"] unsignedIntegerValue]==unregistered+1,
+        "helper change during restoration remains a true early rejection after the helper is restored");
+}
+#endif
 int main(int argc,const char *argv[]) {
     @autoreleasepool {
-        axs_cachekeeper_runtime_require(argc==2 && (!strcmp(argv[1],"fingerprint") || !strcmp(argv[1],"fingerprint-shifted") || !strcmp(argv[1],"sample") || !strcmp(argv[1],"pinned") || !strcmp(argv[1],"refresh") || !strcmp(argv[1],"admission") || !strcmp(argv[1],"owner-pool")),"one isolated scenario is required");
+        axs_cachekeeper_runtime_require(argc==2 && (!strcmp(argv[1],"fingerprint") || !strcmp(argv[1],"fingerprint-shifted") || !strcmp(argv[1],"sample") || !strcmp(argv[1],"pinned") || !strcmp(argv[1],"refresh") || !strcmp(argv[1],"admission") || !strcmp(argv[1],"owner-pool") || !strcmp(argv[1],"main-view") || !strcmp(argv[1],"recovery-race")),"one isolated scenario is required");
+        axs_cachekeeper_runtime_real_main_gate=!strcmp(argv[1],"main-view") || !strcmp(argv[1],"recovery-race");
         axs_cachekeeper_runtime_shifted=!strcmp(argv[1],"fingerprint-shifted");
-        axs_cachekeeper_runtime_fingerprinted=!strcmp(argv[1],"fingerprint") || axs_cachekeeper_runtime_shifted;
+        axs_cachekeeper_runtime_fingerprinted=!strcmp(argv[1],"fingerprint") || axs_cachekeeper_runtime_shifted || axs_cachekeeper_runtime_real_main_gate;
         unsigned executables=0;
         for (uint32_t i=0;i<_dyld_image_count();i++) {
             const struct mach_header *header=_dyld_get_image_header(i);
@@ -420,6 +614,18 @@ int main(int argc,const char *argv[]) {
         AxsCacheKeeperImageCache *engine=[[AxsCacheKeeperImageCache alloc] initWithContextProvider:provider observer:nil];
         if (!axs_cachekeeper_runtime_fingerprinted) [engine usePinnedLegacySDKForIntegrationTests];
         [engine startObserving];axs_cachekeeper_runtime_refresh(engine);
+#if !defined(AXS_CACHEKEEPER_MAIN_VIEW_BASELINE)
+        if (!strcmp(argv[1],"recovery-race")) {
+            axs_cachekeeper_runtime_recovery_race(engine,home,provider());
+            axs_cachekeeper_runtime_require([NSFileManager.defaultManager removeItemAtPath:home error:nil],"recovery race fixture root removed");
+            puts("PASS: image-runtime-source fixture recovery-race");return 0;
+        }
+#endif
+        if (!strcmp(argv[1],"main-view")) {
+            axs_cachekeeper_runtime_main_view(engine,home,context);
+            axs_cachekeeper_runtime_require([NSFileManager.defaultManager removeItemAtPath:home error:nil],"main view fixture root removed");
+            puts("PASS: image-runtime-source fixture main-view");return 0;
+        }
         if (!strcmp(argv[1],"owner-pool")) {
             axs_cachekeeper_runtime_owner_pool(engine,home);
             axs_cachekeeper_runtime_require([NSFileManager.defaultManager removeItemAtPath:home error:nil],"owner pool fixture root removed");

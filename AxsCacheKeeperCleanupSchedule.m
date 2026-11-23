@@ -12,16 +12,18 @@ static NSArray *AxsCacheKeeperRangeStamp(struct stat info) {
 
 @implementation AxsCacheKeeperCleanupSchedule
 + (NSDictionary *)registrationForSweep:(AxsCacheKeeperSweep *)sweep signature:(NSString *)signature now:(NSTimeInterval)now {
-    // 只暂停纯待识别范围；近期、变化、失败、未删候选都必须进入后续轮次。
-    if (!sweep.complete || sweep.cancelled || !sweep.coverageComplete || !sweep.unresolvedCount ||
-        sweep.remainingCandidates || sweep.deferredCount) return nil;
+    // 删除会推进目录基线，可能包含未观察的新条目；下个短周期完整观察后再登记。
+    if (!sweep.complete || sweep.cancelled || sweep.removed || !sweep.coverageComplete || !sweep.measurementComplete ||
+        sweep.failed || sweep.recentCount || sweep.changedCount || sweep.hardLinkRetainedCount ||
+        sweep.dependencyInvalidated || sweep.remainingCandidates || sweep.deferredCount) return nil;
     struct stat info;
-    if (lstat(sweep.root.fileSystemRepresentation,&info) || !S_ISDIR(info.st_mode)) return nil;
+    if (lstat(sweep.root.fileSystemRepresentation,&info) || !S_ISDIR(info.st_mode) ||
+        ![sweep.rootObservationStamp isEqual:AxsCacheKeeperRangeStamp(info)]) return nil;
     NSMutableDictionary *record=[@{@"signature":signature, @"stamp":AxsCacheKeeperRangeStamp(info), @"checkedAt":@(now),
         @"updated":NSDate.date, @"unresolved":@(sweep.unresolvedCount), @"unresolvedBytes":@(sweep.unresolvedBytes),
         @"evidence":sweep.unresolvedEvidence ?: @""} mutableCopy];
     NSDictionary *report=[sweep directoryReport];
-    for (NSString *key in @[@"appRuleID",@"appRuleSummary",@"appRuleWaitingForExit"]) if (report[key]) record[key]=report[key];
+    for (NSString *key in @[@"protected",@"retainedSubtreeCount",@"retainedSubtrees",@"appRuleID",@"appRuleSummary",@"appRuleWaitingForExit"]) if (report[key]) record[key]=report[key];
     return record;
 }
 + (AxsCacheKeeperRangeState)checkRoot:(NSString *)root registration:(NSDictionary *)registration signature:(NSString *)signature
@@ -44,12 +46,48 @@ static NSArray *AxsCacheKeeperRangeStamp(struct stat info) {
         [registration[@"stamp"] isEqual:AxsCacheKeeperRangeStamp(info)]) return AxsCacheKeeperRangeUnchanged;
     return AxsCacheKeeperRangeScan;
 }
++ (NSArray<AxsCacheKeeperSweep *> *)sweepsForRanges:(NSArray<NSString *> *)ranges home:(NSString *)home
+    bundle:(NSString *)bundle version:(NSString *)version state:(NSDictionary *)state signature:(NSString *)signature
+    registrations:(NSMutableDictionary *)registrations exclusions:(NSArray<NSString *> *)exclusions
+    restoreError:(NSString *)restoreError now:(NSTimeInterval)now diagnostics:(NSMutableDictionary *)diagnostics {
+    NSMutableArray *sweeps=[NSMutableArray new];
+    for (NSString *relative in ranges) {
+        BOOL blocked=NO;
+        for (NSString *failedPath in exclusions) if (!failedPath.length || [relative isEqual:failedPath] ||
+            [relative hasPrefix:[failedPath stringByAppendingString:@"/"]]) {blocked=YES;break;}
+        if (blocked) {
+            [registrations removeObjectForKey:relative];
+            diagnostics[relative]=@{@"updated":NSDate.date,@"measurementComplete":@NO,@"coverageComplete":@NO,
+                @"failed":@1,@"error":restoreError ?: @"旧权限恢复失败"};continue;
+        }
+        NSString *root=[home stringByAppendingPathComponent:relative],*rangeError=nil;
+        AxsCacheKeeperRangeState rangeState=[self checkRoot:root registration:registrations[relative]
+            signature:signature now:now stat:nil error:&rangeError];
+        if (rangeState==AxsCacheKeeperRangeUnchanged) continue;
+        [registrations removeObjectForKey:relative];
+        if (rangeState==AxsCacheKeeperRangeMissing) continue;
+        if (rangeState==AxsCacheKeeperRangeFailed) {
+            diagnostics[relative]=@{@"updated":NSDate.date,@"measurementComplete":@NO,@"coverageComplete":@NO,
+                @"failed":@1,@"error":rangeError};continue;
+        }
+        [sweeps addObject:[[AxsCacheKeeperSweep alloc] initWithRoot:root bundle:bundle version:version containerPath:home state:state]];
+    }
+    for (NSString *failedPath in exclusions) if (failedPath.length) {
+        for (NSString *relative in ranges) if ([failedPath hasPrefix:[relative stringByAppendingString:@"/"]])
+            diagnostics[failedPath]=@{@"updated":NSDate.date,@"measurementComplete":@NO,@"coverageComplete":@NO,
+                @"failed":@1,@"error":restoreError ?: @"旧权限恢复失败"};
+    }
+    return sweeps;
+}
++ (BOOL)hasWorkForSweeps:(NSArray *)sweeps diagnostics:(NSDictionary *)diagnostics externalFailures:(NSUInteger)failures manual:(BOOL)manual {
+    return manual || sweeps.count || diagnostics.count || failures;
+}
 + (NSDictionary *)carriedReport:(NSDictionary *)registration {
     NSMutableDictionary *report=[@{@"updated":registration[@"updated"], @"complete":@YES, @"checking":@NO, @"cancelled":@NO,
         @"measurementComplete":@NO, @"coverageComplete":@NO, @"skipped":@YES, @"removed":@0, @"bytes":@0,
         @"unresolved":registration[@"unresolved"], @"unresolvedBytes":registration[@"unresolvedBytes"],
-        @"purgeClassification":@"paused", @"purgeEvidence":registration[@"evidence"] ?: @"", @"error":@""} mutableCopy];
-    for (NSString *key in @[@"appRuleID",@"appRuleSummary",@"appRuleWaitingForExit"]) if (registration[key]) report[key]=registration[key];
+        @"purgeClassification":[registration[@"unresolved"] boolValue] ? @"paused" : @"", @"purgeEvidence":registration[@"evidence"] ?: @"", @"error":@""} mutableCopy];
+    for (NSString *key in @[@"protected",@"retainedSubtreeCount",@"retainedSubtrees",@"appRuleID",@"appRuleSummary",@"appRuleWaitingForExit"]) if (registration[key]) report[key]=registration[key];
     return report;
 }
 + (NSDictionary *)summaryForJob:(AxsCacheKeeperCleanupJob *)job directories:(NSDictionary *)directories
@@ -72,12 +110,7 @@ static NSArray *AxsCacheKeeperRangeStamp(struct stat info) {
         @"endReason":@(reason), @"coverageComplete":@(coverage)};
 }
 + (NSTimeInterval)quietIntervalForSummary:(NSDictionary *)summary {
-    return [summary[@"endReason"] integerValue]==AxsCacheKeeperCleanupEndReasonCompleted &&
-        ![summary[@"removed"] unsignedIntegerValue] && ![summary[@"failed"] unsignedIntegerValue] &&
-        ![summary[@"recent"] unsignedIntegerValue] && ![summary[@"changed"] unsignedIntegerValue] &&
-        ![summary[@"remaining"] unsignedIntegerValue] && ![summary[@"unresolved"] unsignedIntegerValue] &&
-        ![summary[@"hardLinkRetained"] unsignedIntegerValue] &&
-        [summary[@"coverageComplete"] boolValue] ? 1800 : 30;
+    (void)summary;return 30;
 }
 + (BOOL)retireJob:(AxsCacheKeeperCleanupJob *)job bundle:(NSString *)bundle message:(NSString *)message {
     if (!job) return YES;
@@ -91,6 +124,7 @@ static NSArray *AxsCacheKeeperRangeStamp(struct stat info) {
 + (BOOL)shouldSkipSummary:(NSDictionary *)summary signature:(NSString *)signature now:(NSTimeInterval)now {
     if (![summary[@"signature"] isEqual:signature] || ![summary[@"finishedAt"] isKindOfClass:NSNumber.class]) return NO;
     NSTimeInterval elapsed=now-[summary[@"finishedAt"] doubleValue];
+    // 长静默只限制完整遍历；根元数据和发现集仍每短周期核对，避免新增缓存盲等。
     return elapsed>=0 && elapsed<[self quietIntervalForSummary:summary];
 }
 + (NSArray<NSString *> *)restoreExclusions:(NSDictionary *)restored home:(NSString *)home {

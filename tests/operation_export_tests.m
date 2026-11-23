@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 #import "../AxsCacheKeeperDiagnostics.h"
 #import "../AxsCacheKeeperImageEffectStatus.h"
+#import "../AxsCacheKeeperStorageInventory.h"
+#include <string.h>
 
 static void oxcheck(BOOL value, NSString *message) {
     if (!value) { fprintf(stderr,"FAIL: operation export: %s\n",message.UTF8String); exit(1); }
@@ -14,7 +16,8 @@ static NSDictionary *oxhistory(NSString *component, NSString *process) {
                 @"reason":@"none",@"started":@1794800001,@"updated":@1794800002,@"bytesState":@"notMeasured"}]}]};
 }
 int main(int argc, char **argv) { @autoreleasepool {
-    if (argc!=2) return 2;
+    if (argc!=2 && argc!=3) return 2;
+    BOOL pendingScenario=argc==3 && strcmp(argv[2],"pending")==0;
     NSString *folder=[NSString stringWithUTF8String:argv[1]],*status=[folder stringByAppendingPathComponent:@"Status"];
     oxcheck([NSFileManager.defaultManager createDirectoryAtPath:status withIntermediateDirectories:YES attributes:nil error:nil],@"create saved receipt directory");
     NSString *processA=@"550E8400-E29B-41D4-A716-446655440000",*processB=@"550E8400-E29B-41D4-A716-446655440001";
@@ -47,6 +50,12 @@ int main(int argc, char **argv) { @autoreleasepool {
             records[file]=record;
         }
     }
+    if (pendingScenario) for (NSString *file in records) if ([file hasSuffix:@".webkit.plist"]) {
+        NSMutableDictionary *record=records[file];record[@"state"]=@"submitted";record[@"completed"]=@0;record[@"pending"]=@1;
+        NSData *data=[NSPropertyListSerialization dataWithPropertyList:record[@"operationHistory"] format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+        NSMutableDictionary *history=[NSPropertyListSerialization propertyListWithData:data options:NSPropertyListMutableContainersAndLeaves format:NULL error:nil];
+        history[@"processes"][0][@"events"][0][@"state"]=@"active";history[@"processes"][0][@"actions"][0][@"state"]=@"submitted";record[@"operationHistory"]=history;
+    }
     AxsCacheKeeperDiagnostics *session=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:folder];
     NSDictionary *(^read)(void)=^NSDictionary *{
         NSMutableDictionary *before=[NSMutableDictionary new];
@@ -68,6 +77,20 @@ int main(int argc, char **argv) { @autoreleasepool {
     NSDictionary *report=read();NSArray *apps=report[@"apps"];
     NSDictionary *aImage=apps[0][@"imageDiskCache"][@"data"],*aWeb=apps[0][@"webKitDiskCache"][@"data"];
     NSDictionary *bImage=apps[1][@"imageDiskCache"][@"data"],*bWeb=apps[1][@"webKitDiskCache"][@"data"];
+    if (pendingScenario) {
+        oxcheck([aWeb[@"state"] isEqual:@"submitted"] && [aWeb[@"pending"] isEqual:@1] && [aWeb[@"completed"] isEqual:@0] &&
+            [aWeb[@"operationHistory"][@"processes"][0][@"actions"][0][@"state"] isEqual:@"submitted"],@"saved pending export never invents API completion or interruption");
+        for (NSDictionary *entry in report[@"storageInventory"][@"entries"]) {
+            NSDictionary *sdk=entry[@"sdkReceipts"][@"webKitDiskCache"];
+            oxcheck([sdk[@"liveProcessState"] isEqual:@"unknown"],
+                @"saved pending receipt is not evidence of a live process");
+            oxcheck([sdk[@"pending"] isEqual:@1] && [sdk[@"completed"] isEqual:@0] && [sdk[@"sourceUpdated"] isEqual:@1794800002],
+                @"saved pending count and observation time remain original");
+        }
+        oxcheck([apps[0][@"capabilities"][@"webKit"][@"liveProcessState"] isEqual:@"unknown"],@"capability cannot imply a current live process");
+        oxcheck([read()[@"apps"] isEqual:apps],@"reading pending twice cannot refresh or terminalize saved request");
+        puts("PASS: saved pending receipt preserves unknown live state and original request");return 0;
+    }
     NSNumber *aliasA=aImage[@"operationHistory"][@"processes"][0][@"processAlias"];
     NSNumber *aliasB=aWeb[@"operationHistory"][@"processes"][0][@"processAlias"];
     NSDictionary *effect=aImage[@"operationHistory"][@"processes"][0][@"actions"][0][@"cacheEffect"];

@@ -97,8 +97,8 @@ static inline NSString *axs_cachekeeper_webkit_message(id value) {
         }
     }
     if ([record[@"pending"] boolValue]) return [record[@"timedOut"] boolValue] ?
-        @"系统清理回调等待超时；原请求仍在等待，未启动后续回收" :
-        @"已提交网页磁盘缓存回收，等待系统回调；不代表已测得释放空间";
+        @"保存的系统清理请求已记录回调超时，尚无完成回执；当前进程状态未知" :
+        @"已保存网页磁盘缓存回收请求，尚无系统完成回执；当前进程状态未知，释放空间未测量";
     NSDictionary *messages=@{@"appDisabled":@"此 APP 未开启，本轮未执行",@"notAuthorized":@"未开启网页磁盘缓存回收",
         @"configurationUnreadable":@"配置不可读，本轮未执行",@"configurationInvalid":@"配置字段无效，本轮未执行",
         @"exclusionUnrepresentable":@"存在手动保留目录；系统接口不能逐路径排除，本轮未执行",

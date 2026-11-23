@@ -485,10 +485,7 @@ void CKApplyDirectorySwitches(void) {
             }
             NSString *signature = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@\n%@", [roots componentsJoinedByString:@"\n"], mode, target[@"instance"], [purgePaths componentsJoinedByString:@"\n"], exclusionsString, [AxsCacheKeeperCleanupRules rulesVersion], target[@"version"], [axs_cachekeeper_log_paths(states[bundle]) componentsJoinedByString:@"\n"], [restoreExclusions componentsJoinedByString:@"\n"], target[@"revision"], target[@"processExited"], installationID, cleanupContext[@"configurationID"]];
             NSDictionary *done = finished[bundle];
-            // 静默期（方案任务 3，P1-3＋扩展）：1800 秒只给真正干净的完成轮——结束原因 Completed
-            //（触顶/未确认轮不算，哪怕 0 删除）、无删除、无失败、无变化、无近期待处理文件、
-            // 无未确认残留、发现覆盖完整。任一条件不满足都按 30 秒重试；APP 再次运行
-            //（新实例→签名变化）、规则升级、排除改变或容器改变时不受限；手动清理不受限。
+            // 短周期仍复核根元数据；稳定完整观察不新建清理轮，最长30分钟重新遍历。
             if (!manual && !discoveryErrors.length && !restoreExclusions.count && !unlocatedRestoreFailures &&
                 [AxsCacheKeeperCleanupSchedule shouldSkipSummary:done signature:signature now:axs_cachekeeper_monotonic_seconds()]) continue;
             AxsCacheKeeperCleanupJob *job = jobs[bundle];
@@ -503,38 +500,19 @@ void CKApplyDirectorySwitches(void) {
                 [AxsCacheKeeperCleanupSchedule retireJob:job bundle:bundle message:@"配置、版本或范围改变，已结算旧轮清理"];
                 [jobs removeObjectForKey:bundle]; [jobReports removeObjectForKey:bundle];
                 if ([AxsCacheKeeperReceipts hasPendingForBundle:bundle]) continue;
-                NSMutableArray *sweeps=[NSMutableArray new];
                 NSMutableDictionary *diagnostics=[NSMutableDictionary new];
                 NSMutableDictionary *sweepState=[states[bundle] isKindOfClass:NSDictionary.class] ? [states[bundle] mutableCopy] : [NSMutableDictionary new];
                 sweepState[@"unavailablePaths"]=restoreExclusions;
                 // 来源只能是本轮系统观测，覆盖配置里任何同名键；不能把挂起当真实退出。
                 sweepState[@"processExited"]=target[@"processExited"];
                 NSArray *ranges=axs_cachekeeper_parent_paths([paths arrayByAddingObjectsFromArray:purgePaths]);
-                for (NSString *relative in ranges) {
-                    NSString *root=[target[@"home"] stringByAppendingPathComponent:relative];
-                    BOOL blocked=NO;
-                    for (NSString *failedPath in restoreExclusions) if (!failedPath.length || [relative isEqual:failedPath] || [relative hasPrefix:[failedPath stringByAppendingString:@"/"]]) { blocked=YES; break; }
-                    if (blocked) {
-                        [unresolvedRanges[bundle] removeObjectForKey:relative];
-                        diagnostics[relative]=@{@"updated":NSDate.date,@"measurementComplete":@NO,@"coverageComplete":@NO,@"failed":@1,@"error":restored[@"error"] ?: @"旧权限恢复失败"};
-                        continue;
-                    }
-                    NSString *rangeError=nil;
-                    AxsCacheKeeperRangeState rangeState=[AxsCacheKeeperCleanupSchedule checkRoot:root registration:unresolvedRanges[bundle][relative] signature:signature now:axs_cachekeeper_monotonic_seconds() stat:nil error:&rangeError];
-                    if (rangeState==AxsCacheKeeperRangeUnchanged) continue;
-                    [unresolvedRanges[bundle] removeObjectForKey:relative];
-                    if (rangeState==AxsCacheKeeperRangeMissing) continue;
-                    if (rangeState==AxsCacheKeeperRangeFailed) {
-                        diagnostics[relative]=@{@"updated":NSDate.date,@"measurementComplete":@NO,@"coverageComplete":@NO,@"failed":@1,@"error":rangeError};
-                        continue;
-                    }
-                    [sweeps addObject:[[AxsCacheKeeperSweep alloc] initWithRoot:root bundle:bundle version:target[@"version"] containerPath:target[@"home"] state:sweepState]];
-                }
-                // 失败子树单列诊断；父范围通过本轮排除仍可处理独立 sibling。
-                for (NSString *failedPath in restoreExclusions) if (failedPath.length) {
-                    for (NSString *relative in ranges) if ([failedPath hasPrefix:[relative stringByAppendingString:@"/"]])
-                        diagnostics[failedPath]=@{@"updated":NSDate.date,@"measurementComplete":@NO,@"coverageComplete":@NO,@"failed":@1,@"error":restored[@"error"] ?: @"旧权限恢复失败"};
-                }
+                NSArray *sweeps=[AxsCacheKeeperCleanupSchedule sweepsForRanges:ranges home:target[@"home"]
+                    bundle:bundle version:target[@"version"] state:sweepState signature:signature
+                    registrations:unresolvedRanges[bundle] exclusions:restoreExclusions restoreError:restored[@"error"]
+                    now:axs_cachekeeper_monotonic_seconds() diagnostics:diagnostics];
+                // 全部根均复用或已消失时没有实际检查/清理工作；保留上轮历史与有效量。
+                if (![AxsCacheKeeperCleanupSchedule hasWorkForSweeps:sweeps diagnostics:diagnostics
+                    externalFailures:unlocatedRestoreFailures+(discoveryErrors.length ? 1 : 0) manual:manual]) continue;
                 jobReports[bundle]=diagnostics;
                 job = [[AxsCacheKeeperCleanupJob alloc] initWithSweeps:sweeps signature:signature instance:target[@"instance"] ?: @"" cleanupContext:cleanupContext clock:^NSTimeInterval { return axs_cachekeeper_monotonic_seconds(); }];
                 jobs[bundle] = job;

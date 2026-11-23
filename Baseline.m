@@ -238,6 +238,10 @@ static AxsCacheKeeperReleaseStat axs_cachekeeper_release_stat_from_filesystem(st
         return [left.members.firstObject.path compare:right.members.firstObject.path];
     }];
 }
+- (NSArray *)rootObservationStamp {
+    NSArray *record=self.directorySnapshots[[self axs_cachekeeper_directory_key:self.root]];
+    return record.count>=6 ? @[record[1],record[0],record[2],record[3],record[4],record[5]] : nil;
+}
 - (NSDictionary *)directoryReport {
     NSMutableDictionary *report = [@{@"updated":NSDate.date, @"complete":@(self.complete),
         @"checking":@(self.checking), @"cancelled":@(self.cancelled), @"measurementComplete":@(self.measurementComplete),

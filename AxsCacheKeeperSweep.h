@@ -27,6 +27,8 @@
 @property(nonatomic, readonly, copy) NSString *bundle;
 @property(nonatomic, readonly, copy) NSString *version;
 @property(nonatomic, readonly, copy) NSString *containerPath;
+// Root metadata from the sweep baseline; only deletion-free observations may be reused.
+@property(nonatomic, readonly, copy) NSArray *rootObservationStamp;
 @property(nonatomic, readonly, copy) NSString *relativePath; // root 相对容器
 @property(nonatomic, readonly) BOOL complete;
 @property(nonatomic, readonly) BOOL cancelled;

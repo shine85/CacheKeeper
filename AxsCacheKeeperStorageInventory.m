@@ -38,6 +38,7 @@ static NSDictionary *axs_cachekeeper_inventory_sdk(id wrapper,BOOL image) {
     NSNumber *time=axs_cachekeeper_inventory_time(projected[@"updated"]);
     if (!time) return @{@"state":@"invalid"};
     out[@"receiptState"]=projected[@"state"];out[@"sourceUpdated"]=time;
+    if (!image) out[@"liveProcessState"]=@"unknown";
     for (NSString *key in image ? @[@"observed",@"eligible",@"restricted",@"writesBlocked",@"queued",@"submitted",@"apiCompleted",@"skipped",@"pending"] : @[@"persistentStores",@"nonPersistentStores",@"submitted",@"completed",@"pending"])
         if (axs_cachekeeper_inventory_count(projected[key])) out[key]=projected[key];
     for (NSString *key in @[@"runtimeInfo",@"discoveryCheck",@"runtimeSourceObservation",@"sdkMethodsRejectionObservation",@"installedRuntimeRelation",@"installationCheck",@"reason"]) if (projected[key]) out[key]=projected[key];
@@ -79,6 +80,7 @@ NSDictionary *axs_cachekeeper_capabilities(NSDictionary *raw,NSString *panelVers
                 if (data[field]) entry[field]=data[field];
             if ([key isEqual:@"network"]) entry[@"actionState"]=data[@"policyObservation"] ?: ([data[@"prevent"] boolValue] ? ([data[@"applied"] boolValue] ? @"restrictionReported" : @"restrictionNotApplied") : ([data[@"applied"] boolValue] ? @"unrestrictedOrRestoreReported" : @"restorePending"));
             if ([key isEqual:@"image"] || [key isEqual:@"webKit"]) entry[@"actionState"]=data[@"state"];
+            if ([key isEqual:@"webKit"]) entry[@"liveProcessState"]=@"unknown";
             if ([key isEqual:@"image"] && !entry[@"sdkMethodsRejectionObservation"]) entry[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
             if ([key isEqual:@"standardDirectories"]) entry[@"resourceContract"]=@"standardDirectoryRulesOnly";
         }

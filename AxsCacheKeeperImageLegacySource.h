@@ -63,9 +63,10 @@ typedef struct {
     BOOL accepted;
     const char *stage,*reason;
     NSUInteger methodIndex,helperIndex;
+    BOOL mainViewUnavailable; // Internal classification from the rejecting read, never authorization.
 } AxsCacheKeeperImageLegacyCheck;
 static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyResult(const char *stage,const char *reason,NSUInteger method,NSUInteger helper) {
-    return (AxsCacheKeeperImageLegacyCheck){!strcmp(stage,"complete"),stage,reason,method,helper};
+    return (AxsCacheKeeperImageLegacyCheck){!strcmp(stage,"complete"),stage,reason,method,helper,NO};
 }
 static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyComplete(void) {
     return AxsCacheKeeperImageLegacyResult("complete","none",0,0);
@@ -129,27 +130,52 @@ static inline BOOL AxsCacheKeeperExecutableImageSelect(uint32_t count,const char
 }
 static os_unfair_lock axs_cachekeeper_executable_lock=OS_UNFAIR_LOCK_INIT;
 static AxsCacheKeeperExecutableImage axs_cachekeeper_executable_cached;
+static const void *axs_cachekeeper_executable_authenticated_header;
 static NSString *axs_cachekeeper_executable_loader_name;
 static uint32_t axs_cachekeeper_executable_count;
 static unsigned long axs_cachekeeper_executable_generation;
 // Read only: a loader change revokes the cache until discovery refreshes it.
 // Never resolve paths or enumerate the loader table from a write hook.
-static inline AxsCacheKeeperExecutableImage AxsCacheKeeperImageExecutable(void) {
+static inline AxsCacheKeeperExecutableImage AxsCacheKeeperImageExecutableForMainView(const void *base,BOOL *unavailable) {
+    if (unavailable) *unavailable=NO;
     os_unfair_lock_lock(&axs_cachekeeper_executable_lock);
     AxsCacheKeeperExecutableImage cached=axs_cachekeeper_executable_cached;
+    const void *known=axs_cachekeeper_executable_authenticated_header;
     NSString *name=axs_cachekeeper_executable_loader_name;
     uint32_t count=axs_cachekeeper_executable_count;
     unsigned long generation=axs_cachekeeper_executable_generation;
     os_unfair_lock_unlock(&axs_cachekeeper_executable_lock);
     AxsCacheKeeperExecutableImage absent={0},selected={0};
-    if (!cached.header || count!=_dyld_image_count() || generation!=atomic_load(&axs_cachekeeper_image_observation_generation)) return absent;
-    if (!AxsCacheKeeperExecutableImageSelect(1,name.fileSystemRepresentation,
+    BOOL revoked=count!=_dyld_image_count() || generation!=atomic_load(&axs_cachekeeper_image_observation_generation);
+    if (!cached.header || revoked) {
+        if (unavailable) *unavailable=base && base==known && revoked;
+        return absent;
+    }
+    BOOL selectedValid=AxsCacheKeeperExecutableImageSelect(1,name.fileSystemRepresentation,
         ^AxsCacheKeeperExecutableImageRow(uint32_t index) {
             (void)index;return (AxsCacheKeeperExecutableImageRow){_dyld_get_image_header(cached.index),
                 _dyld_get_image_name(cached.index),_dyld_get_image_vmaddr_slide(cached.index)};
-        },&selected) || selected.header!=cached.header || selected.slide!=cached.slide ||
-        count!=_dyld_image_count() || generation!=atomic_load(&axs_cachekeeper_image_observation_generation)) return absent;
+        },&selected);
+    revoked=count!=_dyld_image_count() || generation!=atomic_load(&axs_cachekeeper_image_observation_generation);
+    if (!selectedValid || selected.header!=cached.header || selected.slide!=cached.slide || revoked) {
+        if (unavailable) *unavailable=base && base==known && revoked;
+        return absent;
+    }
     return cached;
+}
+static inline AxsCacheKeeperExecutableImage AxsCacheKeeperImageExecutable(void) {
+    return AxsCacheKeeperImageExecutableForMainView(NULL,NULL);
+}
+// Distinguish a revoked authenticated view from a foreign base or an invalid row.
+// This grants only bounded observation recovery, never code/owner authorization.
+static inline BOOL AxsCacheKeeperImageLegacyMainViewUnavailable(const void *base) {
+    os_unfair_lock_lock(&axs_cachekeeper_executable_lock);
+    const void *known=axs_cachekeeper_executable_authenticated_header;
+    uint32_t count=axs_cachekeeper_executable_count;
+    unsigned long generation=axs_cachekeeper_executable_generation;
+    os_unfair_lock_unlock(&axs_cachekeeper_executable_lock);
+    return base && base==known && (count!=_dyld_image_count() ||
+        generation!=atomic_load(&axs_cachekeeper_image_observation_generation)) && !AxsCacheKeeperImageExecutable().header;
 }
 // Call only from discovery/diagnostic work, before entering the SDK registry lock.
 static inline void AxsCacheKeeperImageRefreshExecutable(void) {
@@ -180,6 +206,7 @@ static inline void AxsCacheKeeperImageRefreshExecutable(void) {
         if (!name.length) return;
         os_unfair_lock_lock(&axs_cachekeeper_executable_lock);
         axs_cachekeeper_executable_loader_name=name;axs_cachekeeper_executable_cached=selected;
+        axs_cachekeeper_executable_authenticated_header=selected.header;
         axs_cachekeeper_executable_count=count;axs_cachekeeper_executable_generation=generation;
         os_unfair_lock_unlock(&axs_cachekeeper_executable_lock);
     }
@@ -339,8 +366,11 @@ static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyMainIdenti
     });
 }
 static inline AxsCacheKeeperImageLegacyCheck AxsCacheKeeperImageLegacyMainLayoutCheck(const void *base,AxsCacheKeeperImageLegacyLayout *layout) {
-    AxsCacheKeeperExecutableImage executable=AxsCacheKeeperImageExecutable();const void *main=executable.header;
-    if (!base || base!=main) return AxsCacheKeeperImageLegacyMainIdentityCheck(base,main,nil,nil,nil);
+    BOOL unavailable=NO;AxsCacheKeeperExecutableImage executable=AxsCacheKeeperImageExecutableForMainView(base,&unavailable);const void *main=executable.header;
+    if (!base || base!=main) {
+        AxsCacheKeeperImageLegacyCheck check=AxsCacheKeeperImageLegacyMainIdentityCheck(base,main,nil,nil,nil);
+        check.mainViewUnavailable=unavailable;return check;
+    }
     AxsCacheKeeperImageLegacyCheck check=AxsCacheKeeperImageLegacyMainIdentityWithProvider(base,main,^id(NSUInteger index) {
         NSBundle *bundle=NSBundle.mainBundle;
         return index==0 ? bundle.bundleIdentifier : bundle.infoDictionary[index==1 ? @"CFBundleShortVersionString" : @"CFBundleVersion"];

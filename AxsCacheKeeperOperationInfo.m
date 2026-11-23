@@ -117,7 +117,7 @@ NSString *axs_cachekeeper_operation_history_summary(id value) {
         else if (!AxsCacheKeeperOperationTerminal(action[@"state"])) pending++;
         if ([action[@"state"] isEqual:@"apiCompleted"] && [action[@"updated"] doubleValue]>=latestTime) {latestEffect=action[@"cacheEffect"];latestTime=[action[@"updated"] doubleValue];}
     }
-    NSString *summary=[NSString stringWithFormat:@"保留 %lu 个进程实例：API 完成 %lu，等待 %lu，结果未知 %lu；释放空间未测量%@%@",
+    NSString *summary=[NSString stringWithFormat:@"保留 %lu 个进程实例：API 完成 %lu，未确认 %lu，结果未知 %lu；释放空间未测量%@%@；保存记录不确认进程当前是否运行",
         (unsigned long)[valid[@"processes"] count],(unsigned long)completed,(unsigned long)pending,(unsigned long)unknown,
         [valid[@"historyTruncated"] boolValue] ? @"；较早历史已截断" : @"",[valid[@"historyRejected"] boolValue] ? @"；旧历史校验被拒绝" : @""];
     if (latestEffect) {
