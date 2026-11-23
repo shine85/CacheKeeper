@@ -410,7 +410,7 @@ static void axs_cachekeeper_runtime_main_view(AxsCacheKeeperImageCache *engine,N
     AxsCacheKeeperImageLegacyLayout layout;
     AxsCacheKeeperImageLegacyCheck stale=AxsCacheKeeperImageLegacyMainLayoutCheck(axs_cachekeeper_runtime_main_header,&layout);
     axs_cachekeeper_runtime_require(!stale.accepted && !strcmp(stale.stage,"mainIdentity") && !strcmp(stale.reason,"notMainBase"),"actual MainLayoutCheck refuses revoked executable before asynchronous discovery");
-    SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"recover" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+    __attribute__((objc_precise_lifetime)) SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"recover" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
     SDDiskCache *disk=owner.diskCache;
     [disk setData:[NSData data] forKey:@"waiting"];[disk setExtendedData:[NSData data] forKey:@"waiting"];
     axs_cachekeeper_runtime_require(!objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey) && atomic_load(&axs_cachekeeper_runtime_writes)==1 && atomic_load(&axs_cachekeeper_runtime_metadata)==1,"waiting owner has no binding association and preserves both original writes");
@@ -435,7 +435,7 @@ static void axs_cachekeeper_runtime_main_view(AxsCacheKeeperImageCache *engine,N
     dispatch_async(engine.work,^{dispatch_semaphore_signal(scopeEntered);dispatch_semaphore_wait(scopeRelease,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));});
     axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(scopeEntered,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"scope recovery worker is held");
     axs_cachekeeper_image_runtime_view_changed();
-    SDImageCache *excluded=[[SDImageCache alloc] initWithNamespace:@"policy-scope" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+    __attribute__((objc_precise_lifetime)) SDImageCache *excluded=[[SDImageCache alloc] initWithNamespace:@"policy-scope" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
     context[@"appState"]=@{@"enabled":@YES,@"mode":@"auto",@"autoDiscover":@YES,@"excludedPaths":@[@"Library/Caches/policy-scope"]};
     dispatch_semaphore_signal(scopeRelease);axs_cachekeeper_runtime_refresh(engine);
     AxsCacheKeeperImageBinding *waitingScope=nil;for (AxsCacheKeeperImageBinding *item in [engine axs_cachekeeper_bindings]) if (item.owner==excluded) waitingScope=item;
@@ -449,15 +449,19 @@ static void axs_cachekeeper_runtime_main_view(AxsCacheKeeperImageCache *engine,N
     axs_cachekeeper_runtime_require(!waitingScope.awaitingMainView && !waitingScope.invalidated && waitingScope.eligible && waitingScope.restricted &&
         atomic_load(&axs_cachekeeper_runtime_writes)==beforeExcluded+1 && atomic_load(&axs_cachekeeper_runtime_metadata)==metadataExcluded+1,
         "removing the exclusion fully readmits the same owner with its original identity");
-    NSUInteger observedAfterScope=[engine.receipt[@"observed"] unsignedIntegerValue];
+    const NSUInteger observedAfterScope=2;
+    axs_cachekeeper_runtime_require([engine.receipt[@"observed"] isEqual:@2],"both recovered owners remain live before fault cases");
     // Once the view is valid, changed constructor members are rejected rather
     // than becoming a fresh trusted baseline. Restoring them cannot retry.
     for (NSString *fault in @[@"queue",@"installation",@"helper",@"rawIMP"]) {
+        __weak SDImageCache *faultOwner;
+        @autoreleasepool {
         dispatch_semaphore_t faultEntered=dispatch_semaphore_create(0),faultRelease=dispatch_semaphore_create(0);
         dispatch_async(engine.work,^{dispatch_semaphore_signal(faultEntered);dispatch_semaphore_wait(faultRelease,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));});
         axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(faultEntered,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"rejection recovery worker is held");
         axs_cachekeeper_image_runtime_view_changed();
-        SDImageCache *changed=[[SDImageCache alloc] initWithNamespace:fault diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+        __attribute__((objc_precise_lifetime)) SDImageCache *changed=[[SDImageCache alloc] initWithNamespace:fault diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+        faultOwner=changed;
         dispatch_queue_t queue=changed.ioQueue;
         Method helper=class_getClassMethod(AxsCacheKeeperRuntimeSourceHelper.class,@selector(axs_cachekeeper_sample));
         Method writer=class_getInstanceMethod(SDDiskCache.class,@selector(setData:forKey:));IMP writerIMP=method_getImplementation(writer);
@@ -471,18 +475,28 @@ static void axs_cachekeeper_runtime_main_view(AxsCacheKeeperImageCache *engine,N
         changed.ioQueue=queue;context[@"installation"]=@"runtime-fixture";method_setImplementation(helper,axs_cachekeeper_runtime_helper_original);method_setImplementation(writer,writerIMP);
         axs_cachekeeper_runtime_refresh(engine);
         axs_cachekeeper_runtime_require(rejected.invalidated && !rejected.eligible && !rejected.restricted,"terminal waiting rejection never retries after member restoration");
+        changed=nil;
+        }
+        // Test-thread weak property reads may return autoreleased strong owners.
+        // Close that pool before testing production release accounting.
+        if (faultOwner) fprintf(stderr,"INFO: fault owner remains live after pool exit: %s\n",fault.UTF8String);
+        axs_cachekeeper_runtime_require(!faultOwner,"fault owner releases at its explicit pool boundary");
     }
-    // Settle the preceding fault owners before freezing this release baseline.
-    // The last loop owner dies after its refresh snapshot; registration would
-    // otherwise count that old release together with the temporary below.
+    // Publish after all four explicit release boundaries, then hold discovery.
     dispatch_semaphore_t entered2=dispatch_semaphore_create(0),release2=dispatch_semaphore_create(0);
     dispatch_async(engine.work,^{[engine axs_cachekeeper_publish];dispatch_semaphore_signal(entered2);dispatch_semaphore_wait(release2,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));});
     axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(entered2,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"release recovery worker is held");
     NSDictionary *beforeRelease=engine.receipt;
-    axs_cachekeeper_runtime_require([beforeRelease[@"observed"] isEqual:@(observedAfterScope)] && axs_cachekeeper_image_cache_projection(beforeRelease)!=nil,"release baseline settles prior fault owners with closed accounting");
+    BOOL projectionClosed=axs_cachekeeper_image_cache_projection(beforeRelease)!=nil;
+    if (![beforeRelease[@"observed"] isEqual:@2] || ![beforeRelease[@"instanceAdmission"][@"released"] isEqual:@4] || !projectionClosed)
+        fprintf(stderr,"INFO: release baseline observed=%lu expected=2 released=%lu expected=4 projection=%d\n",(unsigned long)[beforeRelease[@"observed"] unsignedIntegerValue],(unsigned long)[beforeRelease[@"instanceAdmission"][@"released"] unsignedIntegerValue],projectionClosed);
+    axs_cachekeeper_runtime_require([beforeRelease[@"observed"] isEqual:@2],"release baseline keeps both original owners live");
+    axs_cachekeeper_runtime_require([beforeRelease[@"instanceAdmission"][@"released"] isEqual:@4],"release baseline counts all four fault owners exactly once");
+    axs_cachekeeper_runtime_require([beforeRelease[@"instanceAdmission"][@"registered"] isEqual:@6] && [beforeRelease[@"instanceAdmission"][@"initializerReturns"] isEqual:@6] && [beforeRelease[@"instanceAdmission"][@"unregistered"] isEqual:@0],"release baseline preserves all six original initializer outcomes");
+    axs_cachekeeper_runtime_require(projectionClosed,"release baseline retains the complete public receipt");
     NSUInteger releasedBefore=[beforeRelease[@"instanceAdmission"][@"released"] unsignedIntegerValue];
     axs_cachekeeper_image_runtime_view_changed();__weak SDImageCache *weak;
-    @autoreleasepool {SDImageCache *temporary=[[SDImageCache alloc] initWithNamespace:@"released" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];weak=temporary;}
+    @autoreleasepool {__attribute__((objc_precise_lifetime)) SDImageCache *temporary=[[SDImageCache alloc] initWithNamespace:@"released" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];weak=temporary;temporary=nil;}
     axs_cachekeeper_runtime_require(!weak,"waiting registry does not retain its owner");
     dispatch_semaphore_signal(release2);axs_cachekeeper_runtime_worker_fence(engine);axs_cachekeeper_runtime_worker_fence(engine);
     dispatch_sync(engine.work,^{[engine axs_cachekeeper_publish];});
