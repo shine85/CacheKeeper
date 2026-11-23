@@ -472,16 +472,26 @@ static void axs_cachekeeper_runtime_main_view(AxsCacheKeeperImageCache *engine,N
         axs_cachekeeper_runtime_refresh(engine);
         axs_cachekeeper_runtime_require(rejected.invalidated && !rejected.eligible && !rejected.restricted,"terminal waiting rejection never retries after member restoration");
     }
-    NSUInteger releasedBefore=[engine.receipt[@"instanceAdmission"][@"released"] unsignedIntegerValue];
-    // Released waiting instances have no captured strong reference in the worker.
+    // Settle the preceding fault owners before freezing this release baseline.
+    // The last loop owner dies after its refresh snapshot; registration would
+    // otherwise count that old release together with the temporary below.
     dispatch_semaphore_t entered2=dispatch_semaphore_create(0),release2=dispatch_semaphore_create(0);
-    dispatch_async(engine.work,^{dispatch_semaphore_signal(entered2);dispatch_semaphore_wait(release2,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));});
+    dispatch_async(engine.work,^{[engine axs_cachekeeper_publish];dispatch_semaphore_signal(entered2);dispatch_semaphore_wait(release2,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));});
     axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(entered2,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"release recovery worker is held");
+    NSDictionary *beforeRelease=engine.receipt;
+    axs_cachekeeper_runtime_require([beforeRelease[@"observed"] isEqual:@(observedAfterScope)] && axs_cachekeeper_image_cache_projection(beforeRelease)!=nil,"release baseline settles prior fault owners with closed accounting");
+    NSUInteger releasedBefore=[beforeRelease[@"instanceAdmission"][@"released"] unsignedIntegerValue];
     axs_cachekeeper_image_runtime_view_changed();__weak SDImageCache *weak;
     @autoreleasepool {SDImageCache *temporary=[[SDImageCache alloc] initWithNamespace:@"released" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];weak=temporary;}
     axs_cachekeeper_runtime_require(!weak,"waiting registry does not retain its owner");
     dispatch_semaphore_signal(release2);axs_cachekeeper_runtime_worker_fence(engine);axs_cachekeeper_runtime_worker_fence(engine);
-    axs_cachekeeper_runtime_require([engine.receipt[@"observed"] isEqual:@(observedAfterScope)] && [engine.receipt[@"instanceAdmission"][@"released"] isEqual:@(releasedBefore+1)],"released waiting owner is counted once and is never readmitted");
+    dispatch_sync(engine.work,^{[engine axs_cachekeeper_publish];});
+    NSDictionary *releasedReceipt=engine.receipt;
+    if (![releasedReceipt[@"observed"] isEqual:@(observedAfterScope)] || ![releasedReceipt[@"instanceAdmission"][@"released"] isEqual:@(releasedBefore+1)])
+        fprintf(stderr,"INFO: release observed=%lu expected=%lu released=%lu expected=%lu\n",(unsigned long)[releasedReceipt[@"observed"] unsignedIntegerValue],(unsigned long)observedAfterScope,(unsigned long)[releasedReceipt[@"instanceAdmission"][@"released"] unsignedIntegerValue],(unsigned long)(releasedBefore+1));
+    axs_cachekeeper_runtime_require([releasedReceipt[@"observed"] isEqual:@(observedAfterScope)] && [releasedReceipt[@"instanceAdmission"][@"released"] isEqual:@(releasedBefore+1)] && axs_cachekeeper_image_cache_projection(releasedReceipt)!=nil,"released waiting owner is counted once and is never readmitted");
+    dispatch_sync(engine.work,^{[engine axs_cachekeeper_publish];});
+    axs_cachekeeper_runtime_require([engine.receipt[@"instanceAdmission"] isEqual:releasedReceipt[@"instanceAdmission"]],"repeated publication cannot count the same waiting release again");
 #endif
 }
 #if !defined(AXS_CACHEKEEPER_MAIN_VIEW_BASELINE)
