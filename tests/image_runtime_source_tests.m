@@ -521,6 +521,49 @@ static BOOL axs_cachekeeper_runtime_register_after(id engine,SEL selector,AxsCac
     }
     return registered;
 }
+static void axs_cachekeeper_runtime_rediscovery(AxsCacheKeeperImageCache *engine,NSString *home,NSMutableDictionary *context) {
+    __attribute__((objc_precise_lifetime)) SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"rediscovery" diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+    axs_cachekeeper_runtime_refresh(engine);
+    AxsCacheKeeperImageBinding *binding=nil;for (AxsCacheKeeperImageBinding *item in [engine axs_cachekeeper_bindings]) if (item.owner==owner) binding=item;
+    axs_cachekeeper_runtime_require(binding && !binding.awaitingMainView && binding.eligible && binding.restricted,"rediscovery starts with a fully admitted owner");
+    NSDictionary *discovery=engine.receipt[@"discoveryCheck"];
+    NSUInteger generation=engine.generation;
+    // A background refresh can read the revoked main view before the queued
+    // loader refresh. Keep that real rejection; do not manufacture a binding flag.
+    dispatch_sync(engine.work,^{
+        axs_cachekeeper_image_runtime_view_changed();
+        NSUInteger event=[engine axs_cachekeeper_begin_event:@"background" context:[engine axs_cachekeeper_operation_context] current:YES];
+        [engine axs_cachekeeper_refresh_event:event];axs_cachekeeper_operation_finish(engine.operationHistory,event);[engine axs_cachekeeper_publish];
+    });
+    axs_cachekeeper_runtime_require(!binding.awaitingMainView && !binding.invalidated && !binding.eligible && !binding.restricted &&
+        binding.admissionReason==AxsCacheKeeperImageReasonSDKMethodsChanged,"later main-view rejection closes the previously admitted owner");
+    [engine requestDiscoveryRefresh];axs_cachekeeper_runtime_worker_fence(engine);axs_cachekeeper_runtime_worker_fence(engine);
+    axs_cachekeeper_runtime_require([engine.receipt[@"discoveryCheck"] isEqual:discovery],"restored discovery is identical to its last accepted snapshot");
+    axs_cachekeeper_runtime_require(binding.eligible && binding.restricted && [engine.receipt[@"state"] isEqual:@"restricting"] &&
+        [engine.receipt[@"reason"] isEqual:@"none"],"unchanged discovery revalidates the previously admitted owner after main-view rejection");
+    axs_cachekeeper_runtime_require(engine.generation==generation && [engine.receipt[@"instanceAdmission"][@"registered"] isEqual:@1] &&
+        [engine.receipt[@"instanceAdmission"][@"initializerReturns"] isEqual:@1],"rediscovery preserves generation and original admission counters");
+    AxsCacheKeeperImageContextProvider originalProvider=engine.provider;
+    __block NSUInteger providerCalls=0;engine.provider=^NSDictionary *{providerCalls++;return originalProvider();};
+    [engine requestDiscoveryRefresh];axs_cachekeeper_runtime_worker_fence(engine);axs_cachekeeper_runtime_worker_fence(engine);
+    axs_cachekeeper_runtime_require(providerCalls==0 && engine.generation==generation,"healthy unchanged discovery does not reread policy or revoke pending authorization");
+    engine.provider=originalProvider;
+    unsigned writes=atomic_load(&axs_cachekeeper_runtime_writes),metadata=atomic_load(&axs_cachekeeper_runtime_metadata);
+    [owner.diskCache setData:[NSData data] forKey:@"blocked"];[owner.diskCache setExtendedData:[NSData data] forKey:@"blocked"];
+    axs_cachekeeper_runtime_require(atomic_load(&axs_cachekeeper_runtime_writes)==writes && atomic_load(&axs_cachekeeper_runtime_metadata)==metadata,"rediscovery restores both write gates after full checks");
+    // A different current queue cannot become the saved constructor identity.
+    dispatch_queue_t originalQueue=owner.ioQueue;
+    dispatch_sync(engine.work,^{axs_cachekeeper_image_runtime_view_changed();NSUInteger event=[engine axs_cachekeeper_begin_event:@"background" context:[engine axs_cachekeeper_operation_context] current:YES];[engine axs_cachekeeper_refresh_event:event];axs_cachekeeper_operation_finish(engine.operationHistory,event);});
+    owner.ioQueue=dispatch_queue_create("cachekeeper.foreign.rediscovery",DISPATCH_QUEUE_SERIAL);
+    [engine requestDiscoveryRefresh];axs_cachekeeper_runtime_worker_fence(engine);axs_cachekeeper_runtime_worker_fence(engine);
+    axs_cachekeeper_runtime_require(!binding.eligible && !binding.restricted && binding.admissionReason==AxsCacheKeeperImageReasonQueueIdentity,"rediscovery rejects a changed queue instead of learning its identity");
+    owner.ioQueue=originalQueue;
+    context[@"appState"]=@{@"enabled":@YES,@"mode":@"clean",@"autoDiscover":@YES};axs_cachekeeper_runtime_refresh(engine);
+    axs_cachekeeper_runtime_require(binding.eligible && !binding.restricted && [engine.receipt[@"state"] isEqual:@"ready"],"clean mode restores eligible state without write restriction");
+    [owner.diskCache setData:[NSData data] forKey:@"clean"];[owner.diskCache setExtendedData:[NSData data] forKey:@"clean"];
+    axs_cachekeeper_runtime_require(atomic_load(&axs_cachekeeper_runtime_writes)==writes+1 && atomic_load(&axs_cachekeeper_runtime_metadata)==metadata+1,"clean mode preserves both original writes after recovery");
+    axs_cachekeeper_runtime_require(axs_cachekeeper_image_cache_raw_projection(engine.receipt)!=nil,"rediscovery receipt remains valid under the public schema");
+}
 static void axs_cachekeeper_runtime_recovery_race(AxsCacheKeeperImageCache *engine,NSString *home,NSDictionary *context) {
     dispatch_semaphore_t entered=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0),done=dispatch_semaphore_create(0),resume=dispatch_semaphore_create(0);
     dispatch_async(engine.work,^{
@@ -600,8 +643,8 @@ static void axs_cachekeeper_runtime_recovery_race(AxsCacheKeeperImageCache *engi
 #endif
 int main(int argc,const char *argv[]) {
     @autoreleasepool {
-        axs_cachekeeper_runtime_require(argc==2 && (!strcmp(argv[1],"fingerprint") || !strcmp(argv[1],"fingerprint-shifted") || !strcmp(argv[1],"sample") || !strcmp(argv[1],"pinned") || !strcmp(argv[1],"refresh") || !strcmp(argv[1],"admission") || !strcmp(argv[1],"owner-pool") || !strcmp(argv[1],"main-view") || !strcmp(argv[1],"recovery-race")),"one isolated scenario is required");
-        axs_cachekeeper_runtime_real_main_gate=!strcmp(argv[1],"main-view") || !strcmp(argv[1],"recovery-race");
+        axs_cachekeeper_runtime_require(argc==2 && (!strcmp(argv[1],"fingerprint") || !strcmp(argv[1],"fingerprint-shifted") || !strcmp(argv[1],"sample") || !strcmp(argv[1],"pinned") || !strcmp(argv[1],"refresh") || !strcmp(argv[1],"admission") || !strcmp(argv[1],"owner-pool") || !strcmp(argv[1],"main-view") || !strcmp(argv[1],"recovery-race") || !strcmp(argv[1],"rediscovery")),"one isolated scenario is required");
+        axs_cachekeeper_runtime_real_main_gate=!strcmp(argv[1],"main-view") || !strcmp(argv[1],"recovery-race") || !strcmp(argv[1],"rediscovery");
         axs_cachekeeper_runtime_shifted=!strcmp(argv[1],"fingerprint-shifted");
         axs_cachekeeper_runtime_fingerprinted=!strcmp(argv[1],"fingerprint") || axs_cachekeeper_runtime_shifted || axs_cachekeeper_runtime_real_main_gate;
         unsigned executables=0;
@@ -644,6 +687,11 @@ int main(int argc,const char *argv[]) {
         if (!axs_cachekeeper_runtime_fingerprinted) [engine usePinnedLegacySDKForIntegrationTests];
         [engine startObserving];axs_cachekeeper_runtime_refresh(engine);
 #if !defined(AXS_CACHEKEEPER_MAIN_VIEW_BASELINE)
+        if (!strcmp(argv[1],"rediscovery")) {
+            axs_cachekeeper_runtime_rediscovery(engine,home,context);
+            axs_cachekeeper_runtime_require([NSFileManager.defaultManager removeItemAtPath:home error:nil],"rediscovery fixture root removed");
+            puts("PASS: image-runtime-source fixture rediscovery");return 0;
+        }
         if (!strcmp(argv[1],"recovery-race")) {
             axs_cachekeeper_runtime_recovery_race(engine,home,provider());
             axs_cachekeeper_runtime_require([NSFileManager.defaultManager removeItemAtPath:home error:nil],"recovery race fixture root removed");

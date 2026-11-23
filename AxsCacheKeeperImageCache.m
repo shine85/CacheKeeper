@@ -818,8 +818,12 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         [self startObserving];
         BOOL changed=![before isEqual:self.discoveryCheck];
         NSUInteger event=[self axs_cachekeeper_begin_event:@"imageLoad" context:context current:changed];
-        BOOL awaiting=NO;for (AxsCacheKeeperImageBinding *binding in [self axs_cachekeeper_bindings]) if (binding.awaitingMainView && !binding.invalidated) {awaiting=YES;break;}
-        if (!changed) {if (awaiting) [self axs_cachekeeper_refresh_event:event];axs_cachekeeper_operation_refresh(self.operationHistory,event,@"applied");axs_cachekeeper_operation_finish(self.operationHistory,event);[self axs_cachekeeper_publish];return;}
+        // A normal admitted owner can also lose eligibility when a lifecycle
+        // check sees a revoked main view. Identical discovery must revalidate
+        // that owner, while healthy loader receipts avoid another policy read.
+        BOOL needsRefresh=NO;for (AxsCacheKeeperImageBinding *binding in [self axs_cachekeeper_bindings])
+            if (!binding.invalidated && (binding.awaitingMainView || (!binding.eligible && binding.admissionReason==AxsCacheKeeperImageReasonSDKMethodsChanged))) {needsRefresh=YES;break;}
+        if (!changed) {if (needsRefresh) [self axs_cachekeeper_refresh_event:event];axs_cachekeeper_operation_refresh(self.operationHistory,event,@"applied");axs_cachekeeper_operation_finish(self.operationHistory,event);[self axs_cachekeeper_publish];return;}
         // Unchanged loader observations are separate receipts, not cancellation authority.
         // A changed contract retains the existing synchronous generation revocation.
         [self axs_cachekeeper_cancel];[self axs_cachekeeper_refresh_event:event];axs_cachekeeper_operation_finish(self.operationHistory,event);[self axs_cachekeeper_publish];

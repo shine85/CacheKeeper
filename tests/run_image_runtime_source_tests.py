@@ -21,6 +21,7 @@ ADMISSION_RED = "FAIL: image-runtime-source: early returns retain prior live adm
 MEMBER_GATE = "    id disk=AxsCacheKeeperImageGet(owner,\"diskCache\"),config=AxsCacheKeeperImageGet(owner,\"config\");\n    NSString *reason=AxsCacheKeeperImageStructureReason(owner,disk,config);if (reason) return reason;"
 MEMBER_RED = "FAIL: image-runtime-source: released disk member is not misreported as released owner"
 OWNER_POOL_GATE = '- (void)axs_cachekeeper_refresh_event:(NSUInteger)event {\n    // End SDK getter temporaries before completion or the next state transition,\n    // including direct refreshes within a still-running worker item.\n    @autoreleasepool {'
+REDISCOVERY_RED = "FAIL: image-runtime-source: unchanged discovery revalidates the previously admitted owner after main-view rejection"
 MAIN_VIEW_RED = "FAIL: image-runtime-source: constructor owner survives revoked main view and is fully readmitted by discovery"
 MAIN_METADATA_GATE = 'return index==0 ? bundle.bundleIdentifier : bundle.infoDictionary[index==1 ? @"CFBundleShortVersionString" : @"CFBundleVersion"];'
 MAIN_LAYOUT_GATE = 'return AxsCacheKeeperImageLegacyLayoutCheck(base,executable.slide,layout);'
@@ -29,6 +30,7 @@ OWNER_POOL_RED = "INFO: release live=1 observed=1 released=0 expected=1\nFAIL: i
 
 def verify_case(role, scenario, result):
     red = {
+        ("rediscovery-red", "rediscovery"): (REDISCOVERY_RED, "197.1 admitted-owner rediscovery RED through actual main executable gate"),
         ("view-red", "main-view"): (MAIN_VIEW_RED, "193.1 constructor owner loss RED through actual main executable gate"),
         ("pool-red", "owner-pool"): (OWNER_POOL_RED, "owner pool RED inside actual refresh with deferred SDK getter reference"),
         ("member-red", "admission"): (MEMBER_RED, "stale member RED at actual owner getter and retained old member"),
@@ -68,9 +70,10 @@ def run(main_view=False) -> int:
     if sys.platform != "darwin" or not compiler:
         print("UNAVAILABLE: image runtime helper regression requires macOS and xcrun; no tests ran.")
         return 2
-    # Main-view: 3 compiles <=60s, fixed-source read <=30s, 3 runs <=30s.
-    # Independent wrapper 330s includes reporting; existing runtime retains 240s.
-    deadline = time.monotonic() + (315 if main_view else 225)
+    # Main-view: 4 compiles <=60s, 2 fixed-source reads <=30s, 5 runs <=30s.
+    # Internal 465s and wrapper 480s each retain 15s reporting overhead;
+    # the existing runtime group retains its 225s/240s budgets.
+    deadline = time.monotonic() + (465 if main_view else 225)
     def remaining(maximum):
         seconds = deadline - time.monotonic()
         if seconds <= 0:
@@ -87,7 +90,7 @@ def run(main_view=False) -> int:
         subprocess.run([compiler, "clang", "-fno-objc-arc", "-Wall", "-Wextra", "-Werror=format",
                         "-c", str(ROOT / "tests/image_runtime_autorelease_fixture.m"), "-o", str(helper)],
                        cwd=ROOT, check=True, timeout=remaining(60))
-        for role in (("view-red", "green") if main_view else ("pool-red", "member-red", "red", "green")):
+        for role in (("view-red", "rediscovery-red", "green") if main_view else ("pool-red", "member-red", "red", "green")):
             folder = Path(directory) / role
             folder.mkdir()
             candidate = source.replace(GATE, "    if (NO) helpers=^NSDictionary *{") if role == "red" else source
@@ -95,6 +98,9 @@ def run(main_view=False) -> int:
                 # Fixed shipped 193.1 source: the RED must execute its early return,
                 # never a hand-written owner registry or a MainLayoutCheck double.
                 baseline = subprocess.run(["git", "show", "2f19b98b500c51043e561544fafab25938f42719:AxsCacheKeeperImageCache.m"], cwd=ROOT, capture_output=True, text=True, encoding="utf8", check=True, timeout=remaining(30))
+                candidate = baseline.stdout
+            if role == "rediscovery-red":
+                baseline = subprocess.run(["git", "show", "a6f7c47b5e7b9c37f4697d085ecc6a2368b8c085:AxsCacheKeeperImageCache.m"], cwd=ROOT, capture_output=True, text=True, encoding="utf8", check=True, timeout=remaining(30))
                 candidate = baseline.stdout
             if role == "pool-red":
                 candidate = candidate.replace(OWNER_POOL_GATE, '- (void)axs_cachekeeper_refresh_event:(NSUInteger)event {\n    {')
@@ -132,7 +138,7 @@ def run(main_view=False) -> int:
                 failures.append(f"{role}/compile")
                 print(f"FAIL: image-runtime-source {role} compile: {error}", file=sys.stderr, flush=True)
                 continue
-            scenarios = (("main-view",) if role == "view-red" else ("main-view", "recovery-race")) if main_view else ("owner-pool",) if role == "pool-red" else ("admission",) if role == "member-red" else ("fingerprint", "fingerprint-shifted", "pinned", "refresh", "sample", "admission") + (("owner-pool",) if role == "green" else ())
+            scenarios = (("main-view",) if role == "view-red" else ("rediscovery",) if role == "rediscovery-red" else ("main-view", "recovery-race", "rediscovery")) if main_view else ("owner-pool",) if role == "pool-red" else ("admission",) if role == "member-red" else ("fingerprint", "fingerprint-shifted", "pinned", "refresh", "sample", "admission") + (("owner-pool",) if role == "green" else ())
             failures.extend(run_cases(binary, role, scenarios, remaining))
     if failures:
         print("FAIL: image-runtime-source cases: " + ", ".join(failures), file=sys.stderr, flush=True)
