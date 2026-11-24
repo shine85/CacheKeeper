@@ -145,6 +145,18 @@
     [self axs_cachekeeper_assertHistoryWithHint:@"总开关已开启；未选择文件清理目录，网络缓存按独立选项执行"];
     XCTAssertEqualObjects(before,[NSData dataWithContentsOfFile:[self.page file:@"appEnabled.plist"]]);
 }
+- (void)testRestrictionCopyNamesOnlyAdaptedDiskWriterScope {
+    UITableViewCell *mode=[self.page tableView:self.page.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:1 inSection:0]];
+    UITableViewCell *image=[self.page tableView:self.page.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:6 inSection:0]];
+    NSString *modeCopy=[mode.contentView.subviews description];
+    NSString *imageCopy=image.detailTextLabel.text;
+    XCTAssertTrue([modeCopy containsString:@"SDWebImage"] || [imageCopy containsString:@"SDWebImage"]);
+    XCTAssertTrue([imageCopy containsString:@"磁盘写入"]);
+    XCTAssertTrue([imageCopy containsString:@"未知"]);
+    XCTAssertFalse([imageCopy containsString:@"禁止所有"]);
+    XCTAssertFalse([imageCopy containsString:@"任何磁盘写入"]);
+    XCTAssertFalse([imageCopy containsString:@"所有网络缓存"]);
+}
 - (void)testRunningReceiptKeepsWaitingAndStopRetainsToken {
     [self.page scan];NSString *token=self.page.token;XCTAssertNotNil(self.page.timer);
     self.page.started=NSProcessInfo.processInfo.systemUptime-40;

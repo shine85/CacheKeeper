@@ -181,6 +181,25 @@ static void foreground(void) {applicationState=UIApplicationStateActive;[NSNotif
 static void settled(void) {pump(.15);(void)receipt();dispatch_sync(axs_cachekeeper_gurd_report_queue,^{});pump(.03);}
 static void initialized(void) {await(^BOOL {return axs_cachekeeper_gurd_engine!=nil;},@"real engine configured");settled();}
 
+static void requireProductionSourceRejectsFixtureProof(NSDictionary *provider) {
+    AxsCacheKeeperGurdSource *source=[AxsCacheKeeperGurdSource new];dispatch_semaphore_t done=dispatch_semaphore_create(0);
+    __block NSDictionary *binding=nil;__block NSString *prepareReason=nil,*validationReason=nil,*submitReason=nil;__block BOOL submitted=YES,authorized=NO;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+        binding=[source prepareWithContext:provider reason:&prepareReason];
+        require(binding!=nil && prepareReason==nil,@"production Source prepares the authenticated fixture root");
+        NSMutableDictionary *proof=[binding[@"scopeProof"] mutableCopy];proof[@"state"]=@"complete";proof[@"candidateSource"]=@"testFixture";
+        proof[@"predicateVersion"]=@"fixture-v1";proof[@"candidateCount"]=@1;proof[@"candidateDigest"]=[@"a" stringByPaddingToLength:64 withString:@"a" startingAtIndex:0];
+        proof[@"excludedCount"]=@0;proof[@"exclusionDigest"]=[@"b" stringByPaddingToLength:64 withString:@"b" startingAtIndex:0];
+        NSMutableDictionary *fixtureBinding=[binding mutableCopy];fixtureBinding[@"scopeProof"]=proof;binding=fixtureBinding;
+        validationReason=[source validateBinding:binding context:provider];
+        submitted=[source submitBinding:binding context:provider authorization:^BOOL {authorized=YES;return YES;} reason:&submitReason];
+        dispatch_semaphore_signal(done);
+    });
+    require(dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,@"production proof gate check completes");
+    require([validationReason isEqual:@"scopeUnproven"] && !submitted && [submitReason isEqual:@"scopeUnproven"] && !authorized &&
+        atomic_load(&submissions)==0,@"testFixture positive proof cannot unlock production validation or host submission");
+}
+
 // Hold the real engine FIFO before Runtime can enqueue history restoration.
 // This widens the startup race without replacing restoration or lifecycle logic.
 static id holdRestoreInitializer(id object,SEL selector,AxsCacheKeeperGurdContextProvider provider,
@@ -203,40 +222,41 @@ static void runEnabled(void) {
     NSDictionary *provider=context();
     require([provider[@"version"] isEqual:@"41.2.0"] && [provider[@"build"] isEqual:@"412021"] &&
         [provider[@"installation"] isEqual:@"private-owned-installation"],@"enabled provider agrees with installation metadata");
-    background();await(^BOOL {return atomic_load(&submissions)==1 && [operation()[@"phase"] isEqual:@"submitted"];},@"actual host action submitted");
+    requireProductionSourceRejectsFixtureProof(provider);
+    background();await(^BOOL {return [operation()[@"reason"] isEqual:@"scopeUnproven"] && taskEnds==1;},@"production scope without predicate proof is blocked");settled();
+    NSDictionary *blocked=operation();
+    require([blocked[@"scopeProof"][@"state"] isEqual:@"scopeUnproven"] && [blocked[@"submission"] isEqual:@"notSubmitted"] &&
+        [blocked[@"observation"] isEqual:@"notObserved"] && atomic_load(&hostChecks)>0 && atomic_load(&submissions)==0 &&
+        [NSFileManager.defaultManager fileExistsAtPath:fixtureFile],@"real Source remains scopeUnproven and never invokes host submit");
     NSNumber *activeGeneration=context()[@"configuration"];
     for (NSUInteger i=0;i<4;i++) configure(YES);settled();
-    require(atomic_load(&submissions)==1 && [receipt()[@"operations"] count]==1 && [operation()[@"phase"] isEqual:@"submitted"] &&
-        [context()[@"configuration"] isEqual:activeGeneration],@"identical configure probes preserve in-flight submitted event");
-    await(^BOOL {return [operation()[@"phase"] isEqual:@"observed"] && taskEnds==1;},@"real runtime action and after sample finish");settled();
-    require(atomic_load(&submissions)==1 && [operation()[@"logicalDecrease"] unsignedIntegerValue]==16384 &&
-        [operation()[@"observation"] isEqual:@"reduced"] && ![NSFileManager.defaultManager fileExistsAtPath:fixtureFile],@"production Source and cursor observe actual fixture file decrease");
-    require([operation()[@"hostCompletion"] isEqual:@"notProvided"] && [receipt()[@"restriction"] isEqual:@"unsupported"],@"host submission does not invent completion or restriction");
+    require(atomic_load(&submissions)==0 && [receipt()[@"operations"] count]==1 && [operation()[@"reason"] isEqual:@"scopeUnproven"] &&
+        [context()[@"configuration"] isEqual:activeGeneration],@"identical configure probes preserve the blocked event without retry");
     require(axs_cachekeeper_gurd_receipt_projection(report())!=nil && [report() isEqual:receipt()],@"actual Runtime report writer persists strict receipt");
     NSDictionary *prior=receipt();NSNumber *generation=context()[@"configuration"];
     for (NSUInteger i=0;i<4;i++) configure(YES);settled();
-    require(atomic_load(&submissions)==1 && [receipt()[@"operations"] isEqual:prior[@"operations"]] &&
+    require(atomic_load(&submissions)==0 && [receipt()[@"operations"] isEqual:prior[@"operations"]] &&
         [context()[@"configuration"] isEqual:generation],@"identical configure probes do not create event or resubmit");
 
     writeConfiguration(enabledState(),@[]);configure(YES);
     await(^BOOL {return [operation()[@"event"] unsignedIntegerValue]>1 && [operation()[@"reason"] isEqual:@"scopeNotAuthorized"];},@"changed selection reevaluates background scope");
-    require(atomic_load(&submissions)==1,@"removed selection revokes host scope");
+    require(atomic_load(&submissions)==0,@"removed selection leaves host submission at zero");
     writeConfiguration(enabledState(),selectedRoot());configure(YES);
-    await(^BOOL {return atomic_load(&submissions)==2;},@"new selection permits new verified action");
+    await(^BOOL {return [operation()[@"reason"] isEqual:@"scopeUnproven"] && [operation()[@"event"] unsignedIntegerValue]>1;},@"new selection is reevaluated but remains scopeUnproven");
     void (^oldExpiration)(void)=[lastExpiration copy];foreground();
-    await(^BOOL {return [operation()[@"phase"] isEqual:@"interruptedAfterSubmission"];},@"foreground revokes submitted operation truthfully");
+    await(^BOOL {return [operation()[@"phase"] isEqual:@"cancelled"];},@"foreground closes the blocked operation truthfully");
     NSDictionary *closed=operation();pump(2.1);require([operation() isEqual:closed],@"old delayed sample cannot revive foreground-revoked event");
     writeConfiguration(@{@"enabled":@NO,@"mode":@"prevent"},selectedRoot());configure(YES);settled();
     unsigned long identityCalls=atomic_load(&snapshots)+atomic_load(&validations);
     provider=context();require([provider[@"installation"] isEqual:@""] && identityCalls==atomic_load(&snapshots)+atomic_load(&validations),@"disabled provider never reuses or samples installation identity");
     background();await(^BOOL {return [operation()[@"reason"] isEqual:@"appDisabled"];},@"disabled lifecycle yields explicit skipped receipt");
-    require(atomic_load(&submissions)==2 && identityCalls==atomic_load(&snapshots)+atomic_load(&validations),@"disabled lifecycle performs no identity or host action");
+    require(atomic_load(&submissions)==0 && identityCalls==atomic_load(&snapshots)+atomic_load(&validations),@"disabled lifecycle performs no identity or host action");
     writeConfiguration(enabledState(),selectedRoot());configure(YES);
-    await(^BOOL {return atomic_load(&submissions)==3;},@"reenable reevaluates actual config");
-    oldExpiration();settled();require([operation()[@"submission"] isEqual:@"submitted"],@"old UIKit expiration cannot cancel current event");
+    await(^BOOL {return [operation()[@"reason"] isEqual:@"scopeUnproven"];},@"reenable reevaluates actual config while remaining blocked");
+    oldExpiration();settled();require([operation()[@"submission"] isEqual:@"notSubmitted"],@"old UIKit expiration cannot authorize current event");
     configure(NO);await(^BOOL {return [operation()[@"reason"] isEqual:@"configurationInvalid"];},@"access change revokes active action");
-    require(atomic_load(&submissions)==3,@"lost config access performs no additional host action");
-    configure(YES);await(^BOOL {return atomic_load(&submissions)==4;},@"restored config access reevaluates scope");
+    require(atomic_load(&submissions)==0,@"lost config access performs no additional host action");
+    configure(YES);await(^BOOL {return [operation()[@"reason"] isEqual:@"scopeUnproven"];},@"restored config access reevaluates scope but cannot prove the predicate");
     foreground();settled();
 
     // Block the actual Runtime's installation service while its provider holds
@@ -279,9 +299,9 @@ static void runEnabled(void) {
     require(taskBegins==beginsBeforeRestore+1,
         @"access change and early semantic notice acquire exactly one successor UIKit task");
     dispatch_semaphore_signal(releaseQueue);
-    await(^BOOL {return [operation()[@"phase"] isEqual:@"observed"];},@"access restoration successor completes");settled();
-    require([receipt()[@"operations"] count]==eventsBeforeRestore+1 && atomic_load(&submissions)==submissionsBeforeRestore+1,
-        @"access change and delayed configuration notice create exactly one event and host submission");
+    await(^BOOL {return [operation()[@"reason"] isEqual:@"scopeUnproven"];},@"access restoration successor remains blocked without predicate proof");settled();
+    require([receipt()[@"operations"] count]==eventsBeforeRestore+1 && atomic_load(&submissions)==submissionsBeforeRestore &&
+        [operation()[@"reason"] isEqual:@"scopeUnproven"],@"access change creates one event while production proof still blocks submission");
     foreground();settled();
 }
 static void runBlocked(NSString *scenario) {
@@ -308,7 +328,7 @@ static void runRestore(void) {
     for(NSUInteger i=0;i<3;i++) configure(YES);settled();
     require([receipt()[@"updated"] isEqual:savedReceipt[@"updated"]],@"same startup configuration cannot refresh saved evidence timestamp");
     writeConfiguration(enabledState(),selectedRoot());configure(YES);settled();expectRestoredBeforeTask=YES;background();
-    await(^BOOL {return [operation()[@"phase"] isEqual:@"observed"];},@"restored engine admits next actual lifecycle event");settled();
+    await(^BOOL {return [operation()[@"reason"] isEqual:@"scopeUnproven"];},@"restored engine blocks the next event without predicate proof");settled();
     require([operation()[@"event"] isEqual:@2] && [receipt()[@"operations"][0][@"runtimeInfo"] isEqual:savedReceipt[@"runtimeInfo"]] &&
         [operation()[@"runtimeInfo"][@"packageVersion"] isEqual:@"0.0.0-0.0"] && [receipt()[@"runtimeInfo"] isEqual:operation()[@"runtimeInfo"]],@"old and new events retain separate producer attribution");
     require(axs_cachekeeper_gurd_receipt_projection(report())!=nil,@"mixed producer history saves with strict schema");
@@ -319,7 +339,7 @@ static void runRejectedRestore(void) {
     configure(YES);initialized();await(^BOOL {return [receipt()[@"reason"] isEqual:@"historyRejected"];},@"real restored Status rejects unrecognized fields");settled();
     require([receipt()[@"operations"] count]==0 && atomic_load(&submissions)==0 && axs_cachekeeper_gurd_receipt_projection(report())!=nil,
         @"invalid history neither fabricates old action nor reexports private fields");
-    background();await(^BOOL {return [operation()[@"phase"] isEqual:@"observed"];},@"invalid saved history does not prevent fresh validated event");
+    background();await(^BOOL {return [operation()[@"reason"] isEqual:@"scopeUnproven"];},@"invalid saved history does not bypass the production scope gate");
     require([operation()[@"event"] isEqual:@1],@"rejected history cannot forge event sequence");
 }
 static void runRestoreOrdering(void) {
@@ -335,15 +355,15 @@ static void runRestoreOrdering(void) {
     dispatch_sync(axs_cachekeeper_gurd_report_queue,^{});pump(.05);
     require(taskBegins==0,@"pending restore cannot register lifecycle or acquire a task");
     expectRestoredBeforeTask=YES;dispatch_semaphore_signal(releaseRestoreQueue);initialized();
-    await(^BOOL {return [operation()[@"event"] isEqual:@2] && [operation()[@"phase"] isEqual:@"observed"];},@"earliest lifecycle callback follows saved restore and admits event2");
-    require(atomic_load(&submissions)==1 && [receipt()[@"operations"][0][@"runtimeInfo"] isEqual:savedReceipt[@"runtimeInfo"]],@"registration-time lifecycle preserves producer history without duplicate submission");
+    await(^BOOL {return [operation()[@"event"] isEqual:@2] && [operation()[@"reason"] isEqual:@"scopeUnproven"];},@"earliest lifecycle callback follows restore and fails closed on event2");
+    require(atomic_load(&submissions)==0 && [receipt()[@"operations"][0][@"runtimeInfo"] isEqual:savedReceipt[@"runtimeInfo"]],@"registration-time lifecycle preserves history without host submission");
 }
 static void runStartupBackground(void) {
     savedReceipt=axs_cachekeeper_gurd_export_fixture();require([savedReceipt writeToFile:reportPath() atomically:YES],@"background startup saved history written");
     applicationState=UIApplicationStateBackground;expectRestoredBeforeTask=YES;configure(YES);initialized();
-    await(^BOOL {return [operation()[@"event"] isEqual:@2] && [operation()[@"phase"] isEqual:@"observed"];},
-        @"already-background startup catches lifecycle after restore");
-    require(taskBegins==1 && atomic_load(&submissions)==1,@"startup catchup creates exactly one event");
+    await(^BOOL {return [operation()[@"event"] isEqual:@2] && [operation()[@"reason"] isEqual:@"scopeUnproven"];},
+        @"already-background startup catches lifecycle and fails closed after restore");
+    require(taskBegins==1 && atomic_load(&submissions)==0,@"startup catchup creates one blocked event and no host submission");
 }
 static void runReportFailure(void) {
     configure(YES);initialized();
@@ -357,7 +377,7 @@ static void runReportFailure(void) {
     require([NSFileManager.defaultManager createDirectoryAtPath:[fixtureFolder stringByAppendingPathComponent:@"Status"] withIntermediateDirectories:YES attributes:nil error:NULL],@"repair owned Status fixture");
     require([context()[@"reportWritable"] boolValue],@"pending real report retries successfully");configure(YES);settled();
     require([context()[@"configuration"] isEqual:generation] && [receipt()[@"operations"] count]==events && atomic_load(&submissions)==0,@"report writability recovery alone is not new configuration");
-    foreground();background();await(^BOOL {return [operation()[@"phase"] isEqual:@"observed"];},@"new lifecycle after report repair permits actual action");
+    foreground();background();await(^BOOL {return [operation()[@"reason"] isEqual:@"scopeUnproven"];},@"new lifecycle after report repair still requires a production predicate proof");
 }
 static void runTask(NSString *scenario) {
     failTask=[scenario isEqual:@"invalid-task"];expireSynchronously=[scenario isEqual:@"sync-expire"];flipForeground=[scenario isEqual:@"foreground-task"];
@@ -367,7 +387,7 @@ static void runTask(NSString *scenario) {
     require(taskEnds==(failTask ? 0 : 1),@"unusable valid UIKit token is ended exactly once");
 }
 static void runStrict(void) {
-    configure(YES);initialized();background();await(^BOOL {return [operation()[@"phase"] isEqual:@"observed"];},@"strict case has actual producer receipt");settled();
+    configure(YES);initialized();background();await(^BOOL {return [operation()[@"reason"] isEqual:@"scopeUnproven"];},@"strict case has an actual fail-closed producer receipt");settled();
     NSMutableDictionary *private=[receipt() mutableCopy];private[@"home"]=fixtureHome;
     require(!axs_cachekeeper_gurd_receipt_projection(private),@"strict receipt rejects private path key");
     NSMutableDictionary *badOperation=[operation() mutableCopy];badOperation[@"fingerprint"]=@"private-owned-installation";

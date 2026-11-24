@@ -14,11 +14,18 @@ typedef void (^AxsCacheKeeperScanMetadataObserver)(const struct stat *info, NSAr
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth;
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth
            metadataObserver:(AxsCacheKeeperScanMetadataObserver)observer;
+// rootFD is borrowed; the cursor duplicates it and owns only its duplicate. path is retained for identity rechecks.
+// If path identity changes after construction, the cursor terminates partial without scanning the replacement.
+- (instancetype)initWithRootFD:(int)rootFD path:(NSURL *)path entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth;
+- (instancetype)initWithRootFD:(int)rootFD path:(NSURL *)path entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth
+              metadataObserver:(AxsCacheKeeperScanMetadataObserver)observer;
 #if defined(AXS_CACHEKEEPER_SCAN_TESTING)
 - (instancetype)initWithRoot:(NSURL *)root entryLimit:(NSUInteger)limit depthLimit:(NSUInteger)depth allocationLimit:(NSUInteger)allocationLimit;
 #endif
 - (void)advanceEntries:(NSUInteger)entries seconds:(NSTimeInterval)seconds;
 - (void)stopWithState:(NSString *)state;
+// Attempts every open DIR, returns the first close error, and permanently ends this cursor.
+- (int)closeWithErrorCode:(int *)errorCode;
 @property(nonatomic,readonly) NSDictionary *result;
 @property(nonatomic,readonly) NSString *state;
 @property(nonatomic,readonly) NSUInteger openDirectoryCount;
@@ -44,4 +51,6 @@ typedef void (^AxsCacheKeeperScanMetadataObserver)(const struct stat *info, NSAr
 #include <sys/stat.h>
 // Feed numeric boundary samples into the same production metadata accumulator.
 NSDictionary *axs_cachekeeper_scan_allocation_test_stats(const struct stat *samples,NSUInteger count,NSUInteger limit);
+// Inject one closedir failure after the real descriptor has been closed.
+void axs_cachekeeper_scan_test_close_error(int errorCode);
 #endif

@@ -51,13 +51,40 @@ static void ck_write_status_roundtrip(AxsCacheKeeperWriteObservation observation
         @"apiCompleted":@0,@"skipped":@0,@"pending":@0,@"updated":[NSDate dateWithTimeIntervalSince1970:120],
         @"bytesState":@"notMeasured",@"writeObservation":record};
     ck_write_status_require(axs_cachekeeper_image_cache_raw_projection(receipt)!=nil,"producer write observation remains valid inside the full public receipt");
+    ck_write_status_require([axs_cachekeeper_image_cache_message(receipt) containsString:@"SDWebImage 写入观测"],
+        "summary explicitly identifies the writer observation");
+    NSMutableDictionary *legacy=[receipt mutableCopy];[legacy removeObjectForKey:@"writeObservation"];
+    legacy[@"writesBlocked"]=@7;legacy[@"apiCompleted"]=@1;legacy[@"queued"]=@1;legacy[@"submitted"]=@1;legacy[@"pending"]=@0;
+    NSString *legacyMessage=axs_cachekeeper_image_cache_message(legacy);
+    ck_write_status_require([legacyMessage containsString:@"写入观测未记录"] && ![legacyMessage containsString:@"限制写盘 7 次"],
+        "legacy API completion and aggregate write counters cannot impersonate writer observation");
+    NSMutableDictionary *completionOnly=[legacy mutableCopy];[completionOnly removeObjectForKey:@"writeObservation"];
+    NSDictionary *completionExport=axs_cachekeeper_image_cache_projection(completionOnly);
+    ck_write_status_require(!completionExport[@"writeObservation"] && ![axs_cachekeeper_image_cache_message(completionOnly) containsString:@"data 1/1/0"],
+        "API completion never creates blocked writer evidence");
+    legacy[@"reason"]=@"appDisabled";
+    ck_write_status_require([axs_cachekeeper_image_cache_message(legacy) containsString:@"未开启"],
+        "specific disabled state remains visible without historical writer observations");
 }
 void axs_cachekeeper_run_write_status_tests(void) {
     AxsCacheKeeperWriteObservation observation={0};
     ck_write_status_roundtrip(observation);
+    NSDictionary *zeroReceipt=@{@"schemaVersion":@1,@"sdk":@"SDWebImage",@"state":@"ready",@"reason":@"none",
+        @"observed":@0,@"eligible":@0,@"restricted":@0,@"writesBlocked":@0,@"queued":@0,@"submitted":@0,
+        @"apiCompleted":@0,@"skipped":@0,@"pending":@0,@"updated":[NSDate dateWithTimeIntervalSince1970:120],
+        @"bytesState":@"notMeasured",@"writeObservation":axs_cachekeeper_write_observation_record(observation)};
+    ck_write_status_require([axs_cachekeeper_image_cache_message(zeroReceipt) containsString:@"本记录没有 SDWebImage 写入尝试观测"],
+        "zero-attempt observation does not claim a writer decision");
     uint64_t epoch=axs_cachekeeper_write_epoch_begin(&observation,1,1,true,2);
     axs_cachekeeper_write_observe(&observation,epoch,0,true);axs_cachekeeper_write_observe(&observation,epoch,1,true);
     ck_write_status_roundtrip(observation);
+    NSDictionary *blockedReceipt=@{@"schemaVersion":@1,@"sdk":@"SDWebImage",@"state":@"ready",@"reason":@"none",
+        @"observed":@0,@"eligible":@0,@"restricted":@0,@"writesBlocked":@2,@"queued":@0,@"submitted":@0,
+        @"apiCompleted":@0,@"skipped":@0,@"pending":@0,@"updated":[NSDate dateWithTimeIntervalSince1970:120],
+        @"bytesState":@"notMeasured",@"writeObservation":axs_cachekeeper_write_observation_record(observation)};
+    ck_write_status_require([axs_cachekeeper_image_cache_message(blockedReceipt) containsString:@"prevent data 1/1/0"] &&
+        [axs_cachekeeper_image_cache_message(blockedReceipt) containsString:@"prevent extended 1/1/0"],
+        "nonzero writer fixture reports the exact data and extended decisions");
     for (uint64_t i=2;i<=18;i++) axs_cachekeeper_write_epoch_begin(&observation,i,1,false,2);
     ck_write_status_require(observation.droppedEpochs==2,"fixture genuinely evicts two epochs");
     AxsCacheKeeperWriteCounts *counts=&observation.epochs[observation.count-1].writers[0];

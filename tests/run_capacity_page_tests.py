@@ -112,7 +112,7 @@ def main():
         return 2
     source = (root / "Prefs/DiagnosticsPage.m").read_text(encoding="utf-8")
     variants = [
-        ("stale-running", 'NSDictionary *capacity=frozen ? snapshot : wanted ? ([saved[@"epoch"] isEqual:wanted] ? saved : snapshot) : saved;',
+        ("stale-running", 'NSDictionary *capacity=saved;',
          'NSDictionary *capacity=snapshot ?: saved;',
          "testBackgroundReplacesCachedRunningWithSameEpochSavedTerminal",
          "D1 stopped page exports saved terminal instead of cached running"),
@@ -120,6 +120,10 @@ def main():
          '@"requestWrite":error ? @"failed" : @"saved"',
          "testFalseStopReturnWithoutNSErrorCannotClaimSaved",
          "D1 BOOL false cannot become saved when NSError is nil"),
+        ("old-report-export", 'self.exportButton.enabled=self.reportData && axs_cachekeeper_capacity_report_exportable(report) && !self.collecting && !self.sharing && !self.axs_cachekeeper_capacityEpoch;',
+         'self.exportButton.enabled=self.reportData && !self.collecting && !self.sharing && !self.axs_cachekeeper_capacityEpoch;',
+         "testExportRequiresCurrentTerminalSummaryBinding",
+         "旧容量绑定不能作为最新结果导出"),
     ]
     # Preserve the actual projects, build logs and xcresults even on setup failure.
     # CI uploads this one isolated directory; a failed build is never a RED.

@@ -24,6 +24,8 @@ METHODS = {
                       "D1 stopped page exports saved terminal instead of cached running"),
     "false-stop": ("testFalseStopReturnWithoutNSErrorCannotClaimSaved",
                    "D1 BOOL false cannot become saved when NSError is nil"),
+    "old-report-export": ("testExportRequiresCurrentTerminalSummaryBinding",
+                          "旧容量绑定不能作为最新结果导出"),
 }
 
 
@@ -139,6 +141,17 @@ def execute(scenario):
 
 
 class CapacityOrchestrationTests(unittest.TestCase):
+    def test_capacity_export_is_bound_to_latest_terminal_epoch(self):
+        source = (ROOT / "Prefs/DiagnosticsPage.m").read_text(encoding="utf-8-sig")
+        status = (ROOT / "AxsCacheKeeperCapacityStatus.h").read_text(encoding="utf-8-sig")
+        self.assertIn("axs_cachekeeper_capacity_summary_binding", status)
+        self.assertIn("axs_cachekeeper_capacity_summary_is_current", status)
+        self.assertIn("axs_cachekeeper_capacity_report_exportable", source)
+        self.assertIn("summaryBinding", status)
+        self.assertIn("terminalFinishedAt", status)
+        self.assertIn("page.axs_cachekeeper_capacityPendingStop=nil", source)
+        self.assertIn("capacityMeasurement", source)
+
     def test_cold_discovery_can_complete_after_125_seconds(self):
         result = execute("cold-success")
         self.assertEqual(result["code"], 0, "cold discovery must allow the observed 125-second startup")
@@ -148,7 +161,7 @@ class CapacityOrchestrationTests(unittest.TestCase):
         self.assertEqual([item["steps"][-1]["stage"] for item in result["running"]], ["discovery", "boot", "bootstatus"])
         self.assertTrue(all(item["steps"][-1]["state"] == "running" for item in result["running"]))
         self.assertEqual(result["commands"], [("discovery", 300), ("boot", 60), ("bootstatus", 420)] +
-                         [(name + ":" + stage, budget) for name in ["stale-running", "false-stop", "green"]
+                         [(name + ":" + stage, budget) for name in ["stale-running", "false-stop", "old-report-export", "green"]
                           for stage, budget in [("generate", 60), ("build", 600), ("test", 420), ("summary", 60)]])
 
     def test_preparation_failures_keep_evidence_and_never_start_tests(self):

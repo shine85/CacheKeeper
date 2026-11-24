@@ -2,6 +2,7 @@
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperImageLegacySource.h"
 #import "AxsCacheKeeperImageMachOObservation.h"
+#import "AxsCacheKeeperGurdStatus.h"
 #include <fcntl.h>
 #include <unistd.h>
 #include <dlfcn.h>
@@ -14,6 +15,21 @@ static const struct {uintptr_t offset;size_t length;const char *sha256;} AxsCach
     {564613572,1328,"70368d13cdfedfe4988857c56cc1c72725c81be583776a32398a251cfe02c016"},
     {564686120,4860,"62bd2a6f8ddf3f259f866e4e3381d7a55d5dcf6d4e3d09d4ccdcc031f9f5f196"},
 };
+static NSString *axs_cachekeeper_gurd_root_identity(NSArray *identity) {
+ if(![identity isKindOfClass:NSArray.class] || !identity.count) return @"unavailable";
+ NSArray *leaf=identity.lastObject;
+ if(![leaf isKindOfClass:NSArray.class] || leaf.count!=2) return @"unavailable";
+ const uint64_t value[2]={(uint64_t)[leaf[0] longLongValue],(uint64_t)[leaf[1] unsignedLongLongValue]};
+ unsigned char digest[CC_SHA256_DIGEST_LENGTH];if(!CC_SHA256((const unsigned char *)value,sizeof(value),digest)) return @"unavailable";
+ char hex[CC_SHA256_DIGEST_LENGTH*2+1];for(NSUInteger i=0;i<CC_SHA256_DIGEST_LENGTH;i++) snprintf(hex+i*2,3,"%02x",digest[i]);
+ return [NSString stringWithUTF8String:hex];
+}
+static NSDictionary *axs_cachekeeper_gurd_unproven_scope(NSArray *identity) {
+ return @{ @"state":@"scopeUnproven",@"hostBundle":@"com.ss.iphone.ugc.Aweme",@"hostVersion":@"41.2.0",
+  @"hostBuild":@"412021",@"hostIdentity":@"aweme-core-window-set-v1",@"candidateSource":@"unavailable",
+  @"predicateVersion":@"unavailable",@"rootIdentity":axs_cachekeeper_gurd_root_identity(identity),
+  @"candidateCount":@0,@"candidateDigest":@"",@"excludedCount":@0,@"exclusionDigest":@"" };
+}
 static NSArray *axs_cachekeeper_gurd_path_identity(NSString *home,NSString *relative,int *rootFD) {
  if(rootFD) *rootFD=-1;
  if(![home isKindOfClass:NSString.class] || !home.isAbsolutePath || !axs_cachekeeper_relative_path(relative)) {errno=EINVAL;return nil;}
@@ -121,14 +137,27 @@ static NSString *axs_cachekeeper_gurd_identity(NSDictionary *context,IMP origina
   Class kit=objc_getClass("IESGurdKit");
   if(!((BOOL (*)(id,SEL))methods[0])(kit,sel_registerName("enable")) || !((BOOL (*)(id,SEL))methods[1])(kit,sel_registerName("didSetup"))) {if(reason) *reason=@"hostNotReady";return nil;}
   id root=((id (*)(id,SEL))methods[2])(objc_getClass("IESGurdFilePaths"),sel_registerName("cacheRootDirectoryPath"));
-  return axs_cachekeeper_gurd_bind_root(root,context[@"home"],context[@"installation"],reason);
+  NSDictionary *binding=axs_cachekeeper_gurd_bind_root(root,context[@"home"],context[@"installation"],reason);
+  if(!binding) return nil;
+  NSMutableDictionary *result=[binding mutableCopy];result[@"scopeProof"]=axs_cachekeeper_gurd_unproven_scope(binding[@"identity"]);return result;
  } @catch(NSException *exception) {(void)exception;if(reason) *reason=@"sourceException";return nil;}
 }
 - (NSString *)validateBinding:(NSDictionary *)binding context:(NSDictionary *)context {
  NSString *failure=axs_cachekeeper_gurd_identity(context,NULL);if(failure) return failure;
- return axs_cachekeeper_gurd_binding_reason(binding,context[@"home"],context[@"installation"]);
+ failure=axs_cachekeeper_gurd_binding_reason(binding,context[@"home"],context[@"installation"]);if(failure) return failure;
+ // The authenticated entry point and fixed code windows do not prove the full
+ // per-resource clean/retain predicate. Production therefore remains fail-closed.
+ if(!axs_cachekeeper_gurd_scope_proof_projection(binding[@"scopeProof"]) ||
+    ![binding[@"scopeProof"][ @"state"] isEqual:@"complete"] ||
+    ![binding[@"scopeProof"][ @"candidateSource"] isEqual:@"productionPredicateV1"]) return @"scopeUnproven";
+ return nil;
 }
 - (BOOL)submitBinding:(NSDictionary *)binding context:(NSDictionary *)context authorization:(BOOL (^)(void))authorization reason:(NSString **)reason {
+ if(!axs_cachekeeper_gurd_scope_proof_projection(binding[@"scopeProof"]) ||
+    ![binding[@"scopeProof"][ @"state"] isEqual:@"complete"] ||
+    ![binding[@"scopeProof"][ @"candidateSource"] isEqual:@"productionPredicateV1"]) {
+  if(reason) *reason=@"scopeUnproven";return NO;
+ }
  // Re-read setup and the actual host root immediately before the verified call;
  // never convert a prepared path or caller directory selection into host scope.
  NSString *failure=nil;NSDictionary *current=[self prepareWithContext:context reason:&failure];

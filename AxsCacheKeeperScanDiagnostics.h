@@ -49,8 +49,8 @@ static inline NSDictionary *axs_cachekeeper_scan_diagnostics_projection(id value
     NSDictionary *allowed=@{
         @"containerState":@[@"available",@"noHome",@"invalidHome",@"rootMissing",@"unreadable",@"notObserved"],
         @"scope":@[@"home",@"group"],
-        @"stage":@[@"containerResolve",@"rootStat",@"rootOpen",@"rootRecheck",@"listChildren",@"entryStat",@"enumerate"],
-        @"reason":@[@"noHome",@"invalidHome",@"rootMissing",@"permissionDenied",@"readFailure",@"enumeratorUnavailable",@"identityChanged"],
+        @"stage":@[@"containerResolve",@"rootStat",@"rootOpen",@"rootRecheck",@"listChildren",@"entryStat",@"enumerate",@"closeDirectory"],
+        @"reason":@[@"noHome",@"invalidHome",@"rootMissing",@"permissionDenied",@"readFailure",@"enumeratorUnavailable",@"identityChanged",@"closeFailure"],
         @"errorDomain":@[@"none",@"posix",@"cocoa",@"other"]};
     if (![allowed[@"containerState"] containsObject:value[@"containerState"] ?: NSNull.null]) return nil;
     NSMutableDictionary *out=[@{@"containerState":value[@"containerState"]} mutableCopy];

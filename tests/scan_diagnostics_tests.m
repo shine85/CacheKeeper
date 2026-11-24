@@ -31,6 +31,74 @@ static NSDictionary *axs_cachekeeper_scan_test_export(NSString *folder, id diagn
     return report;
 }
 
+static NSDictionary *axs_cachekeeper_scan_test_export_history(NSString *folder, NSArray *recent) {
+    NSDictionary *scan=@{@"updated":[NSDate dateWithTimeIntervalSince1970:100],@"rows":@[],@"recentScans":recent};
+    axs_cachekeeper_scan_test_write(folder,scan);
+    AxsCacheKeeperDiagnostics *session=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:folder];
+    NSDictionary *report=[session reportWithApps:@[@{@"id":@"app.swiftgram.ios",@"version":@"1.0"}] environment:@{}];
+    axs_cachekeeper_scan_test_check([report[@"apps"] count]==1,@"history report includes exact Swiftgram bundle");
+    return report;
+}
+
+static NSDictionary *axs_cachekeeper_scan_test_merged_history_failure(void) {
+    NSDictionary *stages=@{@0:@"containerResolve",@1:@"rootStat",@2:@"rootOpen",@3:@"rootRecheck",
+        @4:@"listChildren",@5:@"entryStat",@6:@"enumerate",@7:@"closeDirectory"};
+    NSMutableDictionary *aggregate=axs_cachekeeper_scan_diagnostics_new();
+    aggregate[@"containerState"]=@"unreadable";aggregate[@"discoveryComplete"]=@NO;aggregate[@"measurementComplete"]=@NO;
+    for (NSUInteger index=0;index<17;index++) {
+        NSUInteger stageIndex=index%8;NSString *scope=index<8 ? @"home" : @"group";
+        NSString *reason=index==16 ? @"permissionDenied" : @"readFailure";
+        NSString *domain=@"posix";NSInteger code=index==16 ? EACCES : ENOENT;
+        NSMutableDictionary *source=axs_cachekeeper_scan_diagnostics_new();
+        source[@"containerState"]=@"unreadable";source[@"discoveryComplete"]=@NO;source[@"measurementComplete"]=@NO;
+        source[@"statErrors"]=@1;
+        axs_cachekeeper_scan_error(source,scope,stages[@(stageIndex)],reason,domain,code,1);
+        axs_cachekeeper_scan_merge(aggregate,source);
+        if (!index) axs_cachekeeper_scan_merge(aggregate,source);
+    }
+    return aggregate;
+}
+
+static void axs_cachekeeper_scan_test_history_export(NSString *folder) {
+    NSDictionary *failure=axs_cachekeeper_scan_test_merged_history_failure();
+    NSDictionary *current=@{@"updated":[NSDate dateWithTimeIntervalSince1970:100],@"home":@"/private/swiftgram-home-canary",
+        @"rows":@[],@"scanDiagnosticsState":@"available",@"scanDiagnostics":failure,
+        @"error":@"swiftgram-error-canary"};
+    NSDictionary *legacy=@{@"updated":[NSDate dateWithTimeIntervalSince1970:90],@"home":@"/private/legacy-home-canary",
+        @"rows":@[@{@"path":@"/private/swiftgram-row-path-canary",@"bytes":@17,@"complete":@NO}],
+        @"error":@"swiftgram-legacy-error-canary"};
+    NSDictionary *report=axs_cachekeeper_scan_test_export_history(folder,@[current,legacy]);
+    NSArray *recent=report[@"apps"][0][@"scan"][ @"data"][ @"recentScans"];
+    NSDictionary *exported=recent[0];
+    axs_cachekeeper_scan_test_check(recent.count==2 && [exported[@"scanDiagnosticsState"] isEqual:@"available"] &&
+        [exported[@"scanDiagnostics"][ @"errors"][0][ @"stage"] isEqual:@"containerResolve"] &&
+        [exported[@"scanDiagnostics"][ @"errors"][0][ @"errorDomain"] isEqual:@"posix"] &&
+        [exported[@"scanDiagnostics"][ @"errors"][0][ @"errorCode"] isEqual:@ENOENT] &&
+        [exported[@"scanDiagnostics"][ @"errors"][0][ @"count"] isEqual:@2] &&
+        [exported[@"scanDiagnostics"][ @"errorsTruncated"] boolValue] &&
+        [exported[@"scanDiagnostics"][ @"omittedErrorCount"] isEqual:@1] &&
+        [exported[@"scanDiagnostics"][ @"statErrors"] isEqual:@18],
+        @"real merged Swiftgram failures retain count and truncation through history export");
+    axs_cachekeeper_scan_test_check([recent[1][@"scanDiagnosticsState"] isEqual:@"unknown"] &&
+        !recent[1][@"scanDiagnostics"] && !recent[1][@"scanDiagnostics"][ @"errors"],
+        @"legacy Swiftgram history exports unknown without synthetic success or zero errors");
+    NSData *jsonData=[NSJSONSerialization dataWithJSONObject:report options:0 error:nil];
+    NSString *json=jsonData ? [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] : nil;
+    axs_cachekeeper_scan_test_check(jsonData && ![json containsString:@"swiftgram-home-canary"] &&
+        ![json containsString:@"legacy-home-canary"] && ![json containsString:@"swiftgram-error-canary"] &&
+        ![json containsString:@"swiftgram-legacy-error-canary"] && ![json containsString:@"swiftgram-row-path-canary"],
+        @"real history export drops absolute home and row paths and free-text errors");
+    NSMutableArray *oversized=[NSMutableArray new];
+    for (NSUInteger index=0;index<6;index++) [oversized addObject:@{@"updated":[NSDate dateWithTimeIntervalSince1970:80+index],@"home":@"/private/history-home-canary",@"rows":@[]}];
+    report=axs_cachekeeper_scan_test_export_history(folder,oversized);recent=report[@"apps"][0][@"scan"][@"data"][@"recentScans"];
+    axs_cachekeeper_scan_test_check(recent.count==4 && [recent.firstObject[@"scanDiagnosticsState"] isEqual:@"unknown"],
+        @"real export bounds legacy rounds to four and marks each missing diagnostic unknown");
+    jsonData=[NSJSONSerialization dataWithJSONObject:report options:0 error:nil];
+    json=jsonData ? [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] : nil;
+    axs_cachekeeper_scan_test_check(jsonData && ![json containsString:@"history-home-canary"],
+        @"bounded legacy export redacts the historical absolute path");
+}
+
 static NSDictionary *axs_cachekeeper_scan_test_data(NSDictionary *report) {
     return report[@"apps"][0][@"scan"][@"data"];
 }
@@ -330,6 +398,7 @@ int main(int argc, const char *argv[]) {
             [fm createDirectoryAtPath:folder withIntermediateDirectories:NO attributes:nil error:nil], @"fixture directory must be new");
         if ([mode isEqual:@"missing-home"]) axs_cachekeeper_scan_test_missing_home(folder);
         else if ([mode isEqual:@"export"]) axs_cachekeeper_scan_test_export_boundary(folder);
+        else if ([mode isEqual:@"history-export"]) axs_cachekeeper_scan_test_history_export(folder);
         else if ([mode isEqual:@"measurement"]) axs_cachekeeper_scan_test_measurement(folder);
         else axs_cachekeeper_scan_test_check(NO,@"unsupported fixture mode");
     }

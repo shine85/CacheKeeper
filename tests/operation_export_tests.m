@@ -77,6 +77,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     NSDictionary *report=read();NSArray *apps=report[@"apps"];
     NSDictionary *aImage=apps[0][@"imageDiskCache"][@"data"],*aWeb=apps[0][@"webKitDiskCache"][@"data"];
     NSDictionary *bImage=apps[1][@"imageDiskCache"][@"data"],*bWeb=apps[1][@"webKitDiskCache"][@"data"];
+    oxcheck([aImage[@"apiCompleted"] isEqual:@1] && !aImage[@"writeObservation"] && !bImage[@"writeObservation"],
+        @"SDWebImage API completion never fabricates writer attempts or blocked evidence");
     if (pendingScenario) {
         oxcheck([aWeb[@"state"] isEqual:@"submitted"] && [aWeb[@"pending"] isEqual:@1] && [aWeb[@"completed"] isEqual:@0] &&
             [aWeb[@"operationHistory"][@"processes"][0][@"actions"][0][@"state"] isEqual:@"submitted"],@"saved pending export never invents API completion or interruption");

@@ -56,6 +56,25 @@ def main():
             if result.returncode != 1 or failures != [expected]:
                 raise RuntimeError(f"RED {name} must fail only its named assertion; exit={result.returncode}")
             print(f"Verified scan history RED: {name}", flush=True)
+        old = '[recent addObject:axs_cachekeeper_recent_scan_entry(currentHistoryEntry) ?: @{@"updated":updated,@"rows":rows,@"scanDiagnosticsState":@"invalid"}];'
+        if product.count(old) != 1:
+            raise RuntimeError("RED history omitted-error mutation anchor changed")
+        source = pathlib.Path(directory) / "history-omitted-errors-red.m"
+        source.write_text(product.replace(old, old + ' if(recent.count) { NSMutableDictionary *prior=[recent[0] mutableCopy]; NSMutableDictionary *diagnostics=[prior[@"scanDiagnostics"] mutableCopy]; diagnostics[@"omittedErrorCount"]=@0; prior[@"scanDiagnostics"]=diagnostics; recent[0]=prior; }'), encoding="utf-8")
+        binary = pathlib.Path(directory) / "history-omitted-errors-red"
+        fixture = pathlib.Path(directory) / "history-omitted-errors-red-fixture"
+        fixture.mkdir()
+        subprocess.run([*flags, "-I" + str(root), str(root / "tests/scan_history_tests.m"),
+                        str(source), str(root / "AxsCacheKeeperDirectories.m"), "-o", str(binary)],
+                       check=True, timeout=60)
+        result = subprocess.run([str(binary), str(fixture)], capture_output=True, text=True, timeout=60)
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        failures = [line for line in result.stderr.splitlines() if line.startswith("FAIL:")]
+        expected = "FAIL: scan history: Swiftgram service publication retains truncated diagnostics and omitted-error count across rounds"
+        if result.returncode != 1 or failures != [expected]:
+            raise RuntimeError(f"RED history omitted-error count must fail its named assertion; exit={result.returncode}")
+        print("Verified scan history RED: omitted-error count", flush=True)
         anchor = "NSArray *publishing=ready;"
         if product.count(anchor) != 1:
             raise RuntimeError("RED coalescing mutation anchor changed")

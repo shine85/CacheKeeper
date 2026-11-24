@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 #import "../AxsCacheKeeperDiagnostics.h"
 #import "../AxsCacheKeeperCleanupHistory.h"
+#import "../AxsCacheKeeperCapacityStatus.h"
 
 static void dxcheck(BOOL condition, NSString *message) {
     if (!condition) { fprintf(stderr,"FAIL: diagnostics: %s\n",message.UTF8String);exit(1); }
@@ -373,10 +374,30 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     dxwrite(folder,@"Status/test.active.imagecache.plist",imageCache);
     NSDictionary *imageExport=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"imageDiskCache"];
     dxcheck([imageExport[@"state"] isEqual:@"available"] && [imageExport[@"data"][@"updated"] isEqual:@100] &&
-        [imageExport[@"data"][@"writesBlocked"] isEqual:@4] && [imageExport[@"data"][@"apiCompleted"] isEqual:@1] &&
+        !imageExport[@"data"][@"writesBlocked"] && [imageExport[@"data"][@"apiCompleted"] isEqual:@1] &&
         [imageExport[@"data"][@"skipped"] isEqual:@1] && !imageExport[@"data"][@"bytes"] &&
         [NSJSONSerialization dataWithJSONObject:imageExport options:0 error:nil]!=nil,
-        @"图片缓存导出区分写入拦截、API完成与执行前取消，不虚构删除文件数和释放字节");
+        @"legacy image export keeps API completion but omits unverified blocked-write aggregates");
+    dxcheck(!imageExport[@"data"][@"writeObservation"],@"legacy API completion receipt keeps missing writer observation absent");
+    AxsCacheKeeperWriteObservation noWriterAttempts={0};
+    NSMutableDictionary *zeroObservationImage=[imageCache mutableCopy];
+    zeroObservationImage[@"writeObservation"]=axs_cachekeeper_write_observation_record(noWriterAttempts);
+    dxwrite(folder,@"Status/test.active.imagecache.plist",zeroObservationImage);
+    NSDictionary *zeroObservationExport=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"imageDiskCache"];
+    dxcheck([zeroObservationExport[@"state"] isEqual:@"available"] && !zeroObservationExport[@"data"][@"writesBlocked"] &&
+        ![zeroObservationExport[@"data"][@"writeObservation"][ @"epochs"] count],
+        @"a valid zero-attempt writer observation cannot authenticate the lifetime blocked aggregate");
+    AxsCacheKeeperWriteObservation blockedObservation={0};
+    uint64_t blockedEpoch=axs_cachekeeper_write_epoch_begin(&blockedObservation,1,1,true,2);
+    axs_cachekeeper_write_observe(&blockedObservation,blockedEpoch,0,true);
+    NSMutableDictionary *observedImage=[imageCache mutableCopy];
+    observedImage[@"writeObservation"]=axs_cachekeeper_write_observation_record(blockedObservation);
+    dxwrite(folder,@"Status/test.active.imagecache.plist",observedImage);
+    NSDictionary *observedExport=dxapp([session reportWithApps:@[] environment:@{}],@"test.active")[@"imageDiskCache"];
+    dxcheck([observedExport[@"data"][@"writeObservation"][ @"epochs"][0][ @"data"][ @"blocked"] isEqual:@1] &&
+        !observedExport[@"data"][@"writesBlocked"],
+        @"validated writer epochs are the sole exported blocked-write evidence");
+    imageCache=[imageCache mutableCopy];
     for (NSDictionary *change in @[@{@"url":@"private-image-canary"},@{@"pending":@1},@{@"writesBlocked":@YES},@{@"eligible":@3}]) {
         NSMutableDictionary *invalidImage=[imageCache mutableCopy];[invalidImage addEntriesFromDictionary:change];
         dxwrite(folder,@"Status/test.active.imagecache.plist",invalidImage);
@@ -536,5 +557,17 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     dxwrite(folder,@"Status/test.active.auto.plist",@{@"removed":@900});
     dxcheck([[session reportWithApps:@[@{@"id":@"test.active"}] environment:@{}][@"apps"][0][@"cleanup"][@"data"][@"lastEffectiveCleanup"]
         isEqual:@{@"state":@"notRecorded"}],@"旧累计数据不能导出伪造的最近实际清理");
-    printf("PASS: diagnostic saved-record aggregation, privacy, fixed progress, missing records and zero filesystem writes\n");
+    NSDictionary *terminal=@{@"epoch":@"A0274912-2134-4AD8-8E0A-C91B9DCB104F",@"state":@"partial",@"finishedAt":@102};
+    NSDictionary *binding=@{@"epoch":terminal[@"epoch"],@"terminalState":terminal[@"state"],@"terminalFinishedAt":@102,@"summarizedAt":@103};
+    NSDictionary *bound=axs_cachekeeper_capacity_summary_binding(binding,terminal);
+    NSDictionary *measurement=@{@"schemaVersion":@1,@"state":@"notMeasured"};
+    dxcheck([bound[@"state"] isEqual:@"current"] && [bound[@"summarizedAt"] isEqual:@103],@"closed projection marks a same-epoch summary after terminal time current");
+    NSMutableDictionary *badBinding=[binding mutableCopy];badBinding[@"summarizedAt"]=@101;
+    dxcheck([axs_cachekeeper_capacity_summary_binding(badBinding,terminal)[@"state"] isEqual:@"stale"],@"summary before terminal time is stale");
+    badBinding=[binding mutableCopy];badBinding[@"epoch"]=NSUUID.UUID.UUIDString;
+    dxcheck([axs_cachekeeper_capacity_summary_binding(badBinding,terminal)[@"state"] isEqual:@"stale"],@"mismatched summary epoch is stale");
+    dxcheck([axs_cachekeeper_capacity_summary_binding(nil,terminal)[@"state"] isEqual:@"unknown"],@"legacy summary binding remains unknown");
+    NSDictionary *summary=axs_cachekeeper_capacity_report_measurement(measurement,104);
+    dxcheck([summary[@"state"] isEqual:@"notMeasured"] && !summary[@"summaryBinding"],@"not-measured report remains an explicit empty state");
+    printf("PASS: diagnostic saved-record aggregation, capacity epoch binding, privacy, fixed progress, missing records and zero filesystem writes\n");
 }

@@ -224,7 +224,7 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
         @"com.apple.inventory.system":siscan(@[@{@"path":@"Library/Logs",@"bytes":@300,@"complete":@YES}],date,YES)};
     siput(folder,@"snapshots.plist",scans);
     NSDictionary *image=@{@"schemaVersion":@1,@"sdk":@"SDWebImage",@"state":@"apiCompleted",@"reason":@"none",
-        @"observed":@1,@"eligible":@1,@"restricted":@0,@"writesBlocked":@0,@"queued":@1,@"submitted":@1,
+        @"observed":@1,@"eligible":@1,@"restricted":@0,@"writesBlocked":@4,@"queued":@1,@"submitted":@1,
         @"apiCompleted":@1,@"skipped":@0,@"pending":@0,@"updated":date,@"bytesState":@"notMeasured"};
     NSDictionary *web=@{@"schemaVersion":@1,@"requested":@YES,@"timedOut":@NO,@"state":@"completed",@"reason":@"none",
         @"persistentStores":@1,@"nonPersistentStores":@0,@"submitted":@1,@"completed":@1,@"pending":@0,@"updated":date,@"bytesState":@"notMeasured"};
@@ -266,8 +266,12 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
             @{@"state":@"available",@"data":@{}},@{@"state":@"available",@"data":@{}},raw,^NSString *(NSString *path){return path;});
         return siapp(result,@"test.inventory.alpha")[@"sdkReceipts"][@"imageDiskCache"];
     };
-    sicheck([rawSummary(image)[@"receiptState"] isEqual:@"apiCompleted"] && [rawSummary(image)[@"sourceUpdated"] isEqual:@120],
+    sicheck([rawSummary(image)[@"receiptState"] isEqual:@"apiCompleted"] && [rawSummary(image)[@"sourceUpdated"] isEqual:@120] &&
+        !rawSummary(image)[@"writesBlocked"],
         @"inventory summarizes original saved SDK receipt before export transformation");
+    sicheck(rawSummary(image)[@"apiCompleted"] && !rawSummary(image)[@"writesBlocked"] &&
+        !rawSummary(image)[@"writeObservation"],
+        @"legacy inventory keeps API completion while writer evidence remains unknown");
     NSMutableDictionary *withRejection=[image mutableCopy];
     withRejection[@"instanceAdmission"]=@{@"schemaVersion":@1,@"initializerReturns":@2,@"registered":@1,@"unregistered":@1,@"released":@0,@"overflow":@NO,@"unregisteredReasons":@{@"sdkMethodsChanged":@1},@"liveReasons":@{@"none":@1}};
     NSDictionary *sdkRejection=@{@"schemaVersion":@1,@"state":@"recorded",@"initializerOrdinal":@2,@"check":@{@"schemaVersion":@1,@"accepted":@NO,@"cause":@"methodCount",@"methodIndex":@0,@"methodsCount":@24}};
@@ -285,9 +289,11 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
     NSDictionary *writeObservation=axs_cachekeeper_write_observation_record(writeCounts);
     NSMutableDictionary *withWrites=[image mutableCopy];withWrites[@"writeObservation"]=writeObservation;
     sicheck([rawSummary(withWrites)[@"writeObservation"] isEqual:writeObservation] &&
-        [imageCapability(withWrites)[@"writeObservation"] isEqual:writeObservation],
+        !rawSummary(withWrites)[@"writesBlocked"] && [imageCapability(withWrites)[@"writeObservation"] isEqual:writeObservation] &&
+        !imageCapability(withWrites)[@"writesBlocked"],
         @"inventory and capability preserve the same validated writer epochs without a second counter source");
-    sicheck(!rawSummary(image)[@"writeObservation"] && !imageCapability(image)[@"writeObservation"],
+    sicheck(!rawSummary(image)[@"writeObservation"] && !imageCapability(image)[@"writeObservation"] &&
+        !imageCapability(image)[@"writesBlocked"] && imageCapability(image)[@"apiCompleted"],
         @"legacy summaries never fabricate zero writer epochs");
     NSMutableDictionary *badWrites=[writeObservation mutableCopy];badWrites[@"privateKey"]=@"private-writer-canary";
     withWrites[@"writeObservation"]=badWrites;

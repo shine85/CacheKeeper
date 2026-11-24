@@ -37,6 +37,13 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
 @property(nonatomic) NSUInteger generation,token;
 @property(nonatomic,strong) NSDictionary *context,*binding;
 @property(nonatomic,strong) NSMutableDictionary *operation;
+@property(nonatomic,strong) NSDictionary *scopeProof;
+@property(nonatomic,strong) AxsCacheKeeperScanCursor *cursor;
+@property(nonatomic,strong) NSMutableDictionary *sampleInodes;
+@property(nonatomic) uint64_t sampleLogicalBytes,sampleAllocatedBytes,sampleFiles,sampleEntries;
+@property(nonatomic) int sampleRootFD,sampleErrorCode;
+@property(nonatomic) NSTimeInterval sampleDeadline;
+@property(nonatomic,copy) NSString *sampleFailure,*samplePhase;
 @property(nonatomic) BOOL finished,entered;
 @property(nonatomic) BOOL expired;
 @end
@@ -56,6 +63,8 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
  _Atomic(unsigned long) _event;
  BOOL _eventStarted;
  NSUInteger _sampleEntryLimit;
+ NSUInteger _sampleSliceEntries;
+ uint64_t _sampleCounterLimit;
  NSTimeInterval _sampleSeconds;
  NSMutableArray *_operations;
  NSString *_state,*_reason;
@@ -68,7 +77,7 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
  beginTask:(NSUInteger (^)(void (^expiration)(void)))begin endTask:(void (^)(NSUInteger task))end observer:(void (^)(NSDictionary *))observer {
  if(!(self=[super init])) return nil;
  _provider=[provider copy];_source=source ?: [AxsCacheKeeperGurdSource new];_begin=[begin copy];_end=[end copy];_observer=[observer copy];
- _queue=dispatch_queue_create("dev.local.cachekeeper.gurd",DISPATCH_QUEUE_SERIAL);dispatch_queue_set_specific(_queue,(__bridge const void *)self,(__bridge void *)self,NULL);_operations=[NSMutableArray new];_state=@"idle";_reason=@"none";_sampleEntryLimit=200000;_sampleSeconds=4;_lastUpdated=NSDate.date;
+ _queue=dispatch_queue_create("dev.local.cachekeeper.gurd",DISPATCH_QUEUE_SERIAL);dispatch_queue_set_specific(_queue,(__bridge const void *)self,(__bridge void *)self,NULL);_operations=[NSMutableArray new];_state=@"idle";_reason=@"none";_sampleEntryLimit=200000;_sampleSliceEntries=128;_sampleSeconds=4;_sampleCounterLimit=9007199254740991ULL;_lastUpdated=NSDate.date;
  _commitLock=[NSObject new];_runtimeInfo=axs_cachekeeper_runtime_info();atomic_init(&_generation,1);atomic_init(&_background,NO);atomic_init(&_startedConfiguration,NSUIntegerMax);atomic_init(&_event,0);return self;
 }
 - (NSDictionary *)axs_cachekeeper_snapshot {
@@ -112,6 +121,13 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
 }
 - (void)axs_cachekeeper_finish:(AxsCacheKeeperGurdRun *)run reason:(NSString *)reason {
  if(run.finished) return;run.finished=YES;
+ NSString *samplePhase=run.samplePhase;
+ NSString *sampleState=reason ? @"cancelled" : (run.sampleFailure ?: run.cursor.state);
+ [self axs_cachekeeper_sample_close:run];
+ if(samplePhase && run.operation) {
+  NSDictionary *partial=[self axs_cachekeeper_sample_snapshot:run state:run.sampleFailure ?: sampleState ?: @"cancelled"];
+  run.operation[[samplePhase isEqual:@"before"] ? @"before" : @"after"]=partial;run.sampleInodes=nil;run.samplePhase=nil;
+ }
  BOOL submitted=[run.operation[@"submission"] isEqual:@"submitted"] || run.entered;
  if(reason) {
   run.operation[@"reason"]=reason;
@@ -130,89 +146,133 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
   if(NSThread.isMainThread) _end(token);else dispatch_async(dispatch_get_main_queue(),^{self->_end(token);});
  }
 }
-- (NSDictionary *)axs_cachekeeper_sample:(AxsCacheKeeperGurdRun *)run {
- NSString *reason=[self axs_cachekeeper_gate:run];if(reason) return axs_cachekeeper_gurd_no_sample();
- int rootFD=axs_cachekeeper_gurd_open_root(run.binding);if(rootFD<0) {int code=errno;return @{@"state":code==ESTALE ? @"identityChanged" : @"readError",@"files":@0,@"logicalBytes":@0,@"allocatedBytes":@0,@"entries":@0,@"errorCode":@(MIN(MAX(code,0),255))};}
- NSArray *leaf=[run.binding[@"identity"] lastObject];
- __block __weak AxsCacheKeeperScanCursor *weakCursor=nil;
- __block NSString *failure=nil;__block int failureCode=0;__block uint64_t logical=0,allocated=0,files=0,entries=0;
- NSMutableDictionary *inodes=[NSMutableDictionary new];
- AxsCacheKeeperScanCursor *cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:[NSURL fileURLWithPath:run.binding[@"root"]] entryLimit:_sampleEntryLimit depthLimit:64
- metadataObserver:^(const struct stat *info,NSArray<NSData *> *components) {
-  entries++;
-  if(!components.count && (info->st_dev!=[leaf[0] longLongValue] || info->st_ino!=[leaf[1] unsignedLongLongValue])) failure=@"identityChanged";
-  if(S_ISLNK(info->st_mode)) failure=@"linkEncountered";
-  else if(!S_ISDIR(info->st_mode) && !S_ISREG(info->st_mode)) failure=@"invalidMetadata";
-  if(!failure && S_ISREG(info->st_mode)) failure=axs_cachekeeper_gurd_verify_file(rootFD,info,components,&failureCode);
-  if(!failure && S_ISREG(info->st_mode)) {
-   const uint64_t identity[]={(uint64_t)info->st_dev,(uint64_t)info->st_ino};NSData *key=[NSData dataWithBytes:identity length:sizeof(identity)];
-   NSArray *value=@[@(info->st_size),@(info->st_blocks),@(info->st_nlink),@(info->st_mtimespec.tv_sec),@(info->st_mtimespec.tv_nsec),@(info->st_ctimespec.tv_sec),@(info->st_ctimespec.tv_nsec)];
-   NSArray *old=inodes[key];uint64_t bytes=(uint64_t)info->st_blocks*512;
-   if(info->st_size<0 || info->st_blocks<0 || (uint64_t)info->st_blocks>9007199254740991ULL/512 ||
-    (old && ![old isEqual:value]) || (uint64_t)info->st_size>9007199254740991ULL-logical || (!old && bytes>9007199254740991ULL-allocated)) failure=@"invalidMetadata";
-   else if(!old && inodes.count>=65536) failure=@"inodeLimit";
-   else {logical+=(uint64_t)info->st_size;files++;if(!old) {inodes[key]=value;allocated+=bytes;}}
-  }
-  if(failure && weakCursor) [weakCursor stopWithState:failure];
- }];
- weakCursor=cursor;if(failure) [cursor stopWithState:failure];
- NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+_sampleSeconds;
- while([cursor.state isEqual:@"running"]) {
-  if([self axs_cachekeeper_gate:run]) {[cursor stopWithState:@"cancelled"];break;}
-  if(NSProcessInfo.processInfo.systemUptime>=deadline) {[cursor stopWithState:@"timeLimit"];break;}
-  [cursor advanceEntries:512 seconds:.025];
- }
- if(!failure) {NSString *rootReason=axs_cachekeeper_gurd_binding_reason(run.binding,run.context[@"home"],run.context[@"installation"]);if(rootReason) {failure=[rootReason isEqual:@"rootUnavailable"] ? @"readError" : @"identityChanged";failureCode=[failure isEqual:@"readError"] ? errno : ESTALE;}}
- if(close(rootFD) && !failure) {failure=@"readError";failureCode=errno;}
- NSString *state=failure ?: cursor.state ?: @"readError";
- NSArray *errors=cursor.result[@"scanDiagnostics"][@"errors"];NSUInteger code=failureCode>0 ? (NSUInteger)failureCode : [errors.firstObject[@"errorCode"] unsignedIntegerValue];
- return @{@"state":state,@"files":@(files),@"logicalBytes":@(logical),@"allocatedBytes":@(allocated),@"entries":@(entries),@"errorCode":@(MIN(code,(NSUInteger)255))};
+- (NSDictionary *)axs_cachekeeper_sample_snapshot:(AxsCacheKeeperGurdRun *)run state:(NSString *)state {
+ return @{@"state":state ?: @"readError",@"files":@(run.sampleFiles),@"logicalBytes":@(run.sampleLogicalBytes),
+  @"allocatedBytes":@(run.sampleAllocatedBytes),@"entries":@(run.sampleEntries),@"errorCode":@(MIN(MAX(run.sampleErrorCode,0),255))};
 }
-- (void)axs_cachekeeper_observe_after:(AxsCacheKeeperGurdRun *)run {
- if(run.finished) return;NSString *reason=[self axs_cachekeeper_gate:run];if(reason) {[self axs_cachekeeper_finish:run reason:reason];return;}
- NSDictionary *after=[self axs_cachekeeper_sample:run];run.operation[@"after"]=after;
- reason=[self axs_cachekeeper_gate:run];if(!reason && ![after[@"state"] isEqual:@"complete"]) reason=@"afterSampleFailed";
+- (void)axs_cachekeeper_sample_close:(AxsCacheKeeperGurdRun *)run {
+ if(run.cursor) {int closeCode=0;if([run.cursor closeWithErrorCode:&closeCode]) {run.sampleFailure=@"closeError";run.sampleErrorCode=closeCode;}run.cursor=nil;}
+ if(run.sampleRootFD>=0) {if(close(run.sampleRootFD)) {run.sampleFailure=@"closeError";run.sampleErrorCode=errno;}run.sampleRootFD=-1;}
+}
+- (void)axs_cachekeeper_sample_finish:(AxsCacheKeeperGurdRun *)run {
+ NSString *phase=run.samplePhase;
+ if(!run.sampleFailure) {
+  NSString *rootReason=axs_cachekeeper_gurd_binding_reason(run.binding,run.context[@"home"],run.context[@"installation"]);
+  if(rootReason) {run.sampleFailure=[rootReason isEqual:@"rootUnavailable"] ? @"readError" : @"identityChanged";run.sampleErrorCode=[run.sampleFailure isEqual:@"readError"] ? errno : ESTALE;}
+ }
+ NSString *state=run.sampleFailure ?: run.cursor.state ?: @"readError";
+ if([state isEqual:@"readError"] && [run.cursor.result[@"scanDiagnostics"][@"errors"].firstObject[@"stage"] isEqual:@"closeDirectory"]) state=@"closeError";
+ [self axs_cachekeeper_sample_close:run];
+ if(run.sampleFailure) state=run.sampleFailure;
+ NSDictionary *sample=[self axs_cachekeeper_sample_snapshot:run state:run.sampleFailure ?: state];
+ run.sampleInodes=nil;run.samplePhase=nil;
+ if([phase isEqual:@"before"]) {
+  run.operation[@"before"]=sample;
+  NSString *reason=[self axs_cachekeeper_gate:run];if(!reason && ![sample[@"state"] isEqual:@"complete"]) reason=@"beforeSampleFailed";
+  if(reason) {[self axs_cachekeeper_finish:run reason:reason];return;}
+  BOOL returned=NO;
+  @try {returned=[_source submitBinding:run.binding context:run.context authorization:^BOOL {
+   if([self axs_cachekeeper_gate:run]) return NO;
+   @synchronized(self->_commitLock) {
+    if(run.generation!=atomic_load(&self->_generation) || !atomic_load(&self->_background)) return NO;
+    run.entered=YES;run.operation[@"submission"]=@"enteredUnknown";return YES;
+   }
+  } reason:&reason];} @catch(NSException *exception) {(void)exception;reason=@"hostException";}
+  if(!returned) {[self axs_cachekeeper_finish:run reason:reason ?: @"revoked"];return;}
+  run.operation[@"submission"]=@"submitted";run.operation[@"phase"]=@"submitted";run.operation[@"observation"]=@"pending";_state=@"submitted";[self axs_cachekeeper_record:run];
+  reason=[self axs_cachekeeper_gate:run];if(reason) {[self axs_cachekeeper_finish:run reason:reason];return;}
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),_queue,^{[self axs_cachekeeper_start_sample:run phase:@"after"];});return;
+ }
+ run.operation[@"after"]=sample;
+ NSString *reason=[self axs_cachekeeper_gate:run];if(!reason && ![sample[@"state"] isEqual:@"complete"]) reason=@"afterSampleFailed";
  if(reason) {[self axs_cachekeeper_finish:run reason:reason];return;}
- NSDictionary *before=run.operation[@"before"];uint64_t b=[before[@"logicalBytes"] unsignedLongLongValue],a=[after[@"logicalBytes"] unsignedLongLongValue];
- uint64_t ba=[before[@"allocatedBytes"] unsignedLongLongValue],aa=[after[@"allocatedBytes"] unsignedLongLongValue];
+ NSDictionary *before=run.operation[@"before"];uint64_t b=[before[@"logicalBytes"] unsignedLongLongValue],a=[sample[@"logicalBytes"] unsignedLongLongValue];
+ uint64_t ba=[before[@"allocatedBytes"] unsignedLongLongValue],aa=[sample[@"allocatedBytes"] unsignedLongLongValue];
  run.operation[@"observation"]=(a<b || aa<ba) ? @"reduced" : (a>b || aa>ba) ? @"increased" : @"unchanged";
  run.operation[@"logicalDecrease"]=@(b>a ? b-a : 0);run.operation[@"allocatedDecrease"]=@(ba>aa ? ba-aa : 0);run.operation[@"phase"]=@"observed";
  [self axs_cachekeeper_finish:run reason:nil];
+}
+- (void)axs_cachekeeper_start_sample:(AxsCacheKeeperGurdRun *)run phase:(NSString *)phase {
+ if(run.finished) return;NSString *reason=[self axs_cachekeeper_gate:run];if(reason) {[self axs_cachekeeper_finish:run reason:reason];return;}
+ run.samplePhase=[phase copy];run.sampleFailure=nil;run.sampleErrorCode=0;run.sampleLogicalBytes=0;run.sampleAllocatedBytes=0;run.sampleFiles=0;run.sampleEntries=0;run.sampleInodes=[NSMutableDictionary new];
+ run.sampleDeadline=NSProcessInfo.processInfo.systemUptime+_sampleSeconds;
+ int rootFD=axs_cachekeeper_gurd_open_root(run.binding);if(rootFD<0) {int code=errno;run.sampleFailure=code==ESTALE ? @"identityChanged" : @"readError";run.sampleErrorCode=code;run.cursor=nil;run.sampleRootFD=-1;[self axs_cachekeeper_sample_finish:run];return;}
+ run.sampleRootFD=rootFD;
+ NSArray *leaf=[run.binding[@"identity"] lastObject];
+ __block __weak AxsCacheKeeperScanCursor *weakCursor=nil;
+ AxsCacheKeeperScanCursor *cursor=[[AxsCacheKeeperScanCursor alloc] initWithRootFD:rootFD path:[NSURL fileURLWithPath:run.binding[@"root"]] entryLimit:_sampleEntryLimit depthLimit:64
+ metadataObserver:^(const struct stat *info,NSArray<NSData *> *components) {
+  run.sampleEntries++;
+  if(!components.count && (info->st_dev!=[leaf[0] longLongValue] || info->st_ino!=[leaf[1] unsignedLongLongValue])) run.sampleFailure=@"identityChanged";
+  if(S_ISLNK(info->st_mode)) run.sampleFailure=@"linkEncountered";
+  else if(!S_ISDIR(info->st_mode) && !S_ISREG(info->st_mode)) run.sampleFailure=@"invalidMetadata";
+  if(!run.sampleFailure && S_ISREG(info->st_mode)) run.sampleFailure=axs_cachekeeper_gurd_verify_file(run.sampleRootFD,info,components,&run.sampleErrorCode);
+  if(!run.sampleFailure && S_ISREG(info->st_mode)) {
+   const uint64_t identity[]={(uint64_t)info->st_dev,(uint64_t)info->st_ino};NSData *key=[NSData dataWithBytes:identity length:sizeof(identity)];
+   NSArray *value=@[@(info->st_size),@(info->st_blocks),@(info->st_nlink),@(info->st_mtimespec.tv_sec),@(info->st_mtimespec.tv_nsec),@(info->st_ctimespec.tv_sec),@(info->st_ctimespec.tv_nsec)];
+   NSArray *old=run.sampleInodes[key];uint64_t size=info->st_size<0 ? 0 : (uint64_t)info->st_size;
+   uint64_t blocks=info->st_blocks<0 ? 0 : (uint64_t)info->st_blocks;
+   BOOL overflow=info->st_size<0 || info->st_blocks<0 || blocks>UINT64_MAX/512 || blocks>self->_sampleCounterLimit/512 ||
+    run.sampleLogicalBytes>self->_sampleCounterLimit || size>self->_sampleCounterLimit-run.sampleLogicalBytes ||
+    run.sampleAllocatedBytes>self->_sampleCounterLimit || (!old && blocks*512>self->_sampleCounterLimit-run.sampleAllocatedBytes);
+   if(overflow) {run.sampleFailure=@"invalidMetadata";run.sampleErrorCode=EOVERFLOW;}
+   else if(old && ![old isEqual:value]) {run.sampleFailure=@"invalidMetadata";run.sampleErrorCode=ESTALE;}
+   else if(!old && run.sampleInodes.count>=65536) run.sampleFailure=@"inodeLimit";
+   else {run.sampleLogicalBytes+=size;run.sampleFiles++;if(!old) {run.sampleInodes[key]=value;run.sampleAllocatedBytes+=blocks*512;}}
+  }
+  if(run.sampleFailure && weakCursor) [weakCursor stopWithState:run.sampleFailure];
+ }];
+ weakCursor=cursor;run.cursor=cursor;if(run.sampleFailure) [cursor stopWithState:run.sampleFailure];
+ run.operation[@"phase"]=[phase isEqual:@"before"] ? @"samplingBefore" : @"submitted";[self axs_cachekeeper_record:run];
+ [self axs_cachekeeper_sample_slice:run];
+}
+- (void)axs_cachekeeper_sample_slice:(AxsCacheKeeperGurdRun *)run {
+ if(run.finished) return;NSString *reason=[self axs_cachekeeper_gate:run];
+ if(reason) {if(run.cursor && [run.cursor.state isEqual:@"running"]) [run.cursor stopWithState:@"cancelled"];[self axs_cachekeeper_finish:run reason:reason];return;}
+ if([run.cursor.state isEqual:@"running"] && _sampleSeconds>0 && NSProcessInfo.processInfo.systemUptime>=run.sampleDeadline)
+  [run.cursor stopWithState:@"timeLimit"];
+ if([run.cursor.state isEqual:@"running"] && _sampleSeconds==0) [run.cursor stopWithState:@"timeLimit"];
+ if([run.cursor.state isEqual:@"running"]) [run.cursor advanceEntries:_sampleSliceEntries seconds:.025];
+ if([run.cursor.state isEqual:@"running"] && _sampleSeconds>0 && NSProcessInfo.processInfo.systemUptime<run.sampleDeadline) {
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_MSEC),_queue,^{[self axs_cachekeeper_sample_slice:run];});return;
+ }
+ if([run.cursor.state isEqual:@"running"]) [run.cursor stopWithState:@"timeLimit"];
+ if([run.cursor.state isEqual:@"readError"]) {
+  NSArray *errors=run.cursor.result[@"scanDiagnostics"][@"errors"];NSDictionary *error=errors.firstObject;
+  if(!run.sampleErrorCode) run.sampleErrorCode=[error[@"errorCode"] intValue];
+  if(!run.sampleFailure) run.sampleFailure=[error[@"stage"] isEqual:@"closeDirectory"] ? @"closeError" : @"readError";
+ }
+ [self axs_cachekeeper_sample_finish:run];
+}
+- (NSDictionary *)axs_cachekeeper_production_scope_for_binding:(NSDictionary *)binding {
+ NSDictionary *sourceProof=binding[@"scopeProof"];
+#if defined(AXS_CACHEKEEPER_GURD_TESTING)
+ if(axs_cachekeeper_gurd_scope_proof_projection(sourceProof) && [sourceProof[@"state"] isEqual:@"complete"] &&
+    [sourceProof[@"candidateSource"] isEqual:@"testFixture"]) return [sourceProof copy];
+#endif
+ // This producer authenticates the fixed entry point, but the host clean/retain
+ // predicate is still unproven. Discard any caller-supplied positive claim.
+ if(![sourceProof isKindOfClass:NSDictionary.class] || ![sourceProof[@"state"] isEqual:@"scopeUnproven"])
+  return axs_cachekeeper_gurd_scope_unproven_default();
+ if(!axs_cachekeeper_gurd_scope_proof_projection(sourceProof)) return axs_cachekeeper_gurd_scope_unproven_default();
+ return [sourceProof copy];
 }
 - (void)axs_cachekeeper_prepare:(AxsCacheKeeperGurdRun *)run {
  _run=run;_state=@"running";_reason=@"none";[self axs_cachekeeper_record:run];
  NSString *reason=[self axs_cachekeeper_gate:run];if(reason) {[self axs_cachekeeper_finish:run reason:reason];return;}
  @try {run.binding=[_source prepareWithContext:run.context reason:&reason];} @catch(NSException *exception) {(void)exception;reason=@"sourceException";}
  if(!reason && !run.binding) reason=@"sourceUnavailable";
+ if(!reason) {run.scopeProof=[self axs_cachekeeper_production_scope_for_binding:run.binding];run.operation[@"scopeProof"]=run.scopeProof;
+  if(![run.scopeProof[@"state"] isEqual:@"complete"]) reason=@"scopeUnproven";}
  if(!reason) reason=[self axs_cachekeeper_gate:run];if(reason) {[self axs_cachekeeper_finish:run reason:reason];return;}
- run.operation[@"phase"]=@"samplingBefore";[self axs_cachekeeper_record:run];
- NSDictionary *before=[self axs_cachekeeper_sample:run];run.operation[@"before"]=before;
- reason=[self axs_cachekeeper_gate:run];if(!reason && ![before[@"state"] isEqual:@"complete"]) reason=@"beforeSampleFailed";
- if(reason) {[self axs_cachekeeper_finish:run reason:reason];return;}
- BOOL returned=NO;
- @try {
-  returned=[_source submitBinding:run.binding context:run.context authorization:^BOOL {
-   if([self axs_cachekeeper_gate:run]) return NO;
-   // Revocation and the entered boundary use the same lock. Later revocation
-   // is an interrupted submitted attempt, never an unsubmitted cancellation.
-   @synchronized(self->_commitLock) {
-    if(run.generation!=atomic_load(&self->_generation) || !atomic_load(&self->_background)) return NO;
-    run.entered=YES;run.operation[@"submission"]=@"enteredUnknown";return YES;
-   }
-  } reason:&reason];
- } @catch(NSException *exception) {(void)exception;reason=@"hostException";}
- if(!returned) {[self axs_cachekeeper_finish:run reason:reason ?: @"revoked"];return;}
- run.operation[@"submission"]=@"submitted";run.operation[@"phase"]=@"submitted";run.operation[@"observation"]=@"pending";_state=@"submitted";[self axs_cachekeeper_record:run];
- reason=[self axs_cachekeeper_gate:run];if(reason) {[self axs_cachekeeper_finish:run reason:reason];return;}
- // This timer samples an operation window; it is never a host completion signal.
- dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),_queue,^{[self axs_cachekeeper_observe_after:run];});
+ [self axs_cachekeeper_start_sample:run phase:@"before"];
 }
 - (void)didEnterBackground {
  NSAssert(NSThread.isMainThread,@"Gurd lifecycle is main-thread confined");
  atomic_store(&_background,YES);if(_eventStarted) return;_eventStarted=YES;
  NSUInteger generation=atomic_load(&_generation);
  NSUInteger event=atomic_fetch_add(&_event,1)+1;
- AxsCacheKeeperGurdRun *run=[AxsCacheKeeperGurdRun new];run.generation=generation;
+ AxsCacheKeeperGurdRun *run=[AxsCacheKeeperGurdRun new];run.generation=generation;run.sampleRootFD=-1;
  @synchronized(_commitLock) {_platformRun=run;}
  __weak AxsCacheKeeperGurdCache *weakSelf=self;
  // Acquire platform time before any provider IO or source preparation. A synchronous
@@ -228,7 +288,7 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
   NSDictionary *context=usable && self->_provider ? self->_provider() : nil;run.context=context;
   if(usable && generation==atomic_load(&self->_generation) && atomic_load(&self->_background)) atomic_store(&self->_startedConfiguration,axs_cachekeeper_gurd_integer(context[@"configuration"],9007199254740991ULL) ? [context[@"configuration"] unsignedIntegerValue] : NSUIntegerMax);
   run.operation=[@{@"event":@(event),@"runtimeInfo":axs_cachekeeper_runtime_info(),@"configuration":axs_cachekeeper_gurd_integer(context[@"configuration"],9007199254740991ULL) ? context[@"configuration"] : @0,
-   @"phase":@"preparing",@"reason":@"none",@"submission":@"notSubmitted",@"hostCompletion":@"notProvided",@"observation":@"notObserved",@"before":axs_cachekeeper_gurd_no_sample(),
+   @"phase":@"preparing",@"reason":@"none",@"submission":@"notSubmitted",@"hostCompletion":@"notProvided",@"observation":@"notObserved",@"scopeProof":axs_cachekeeper_gurd_scope_unproven_default(),@"before":axs_cachekeeper_gurd_no_sample(),
    @"after":axs_cachekeeper_gurd_no_sample(),@"logicalDecrease":@0,@"allocatedDecrease":@0,@"physicalUniqueReclaimed":@"notMeasured"} mutableCopy];
   NSString *reason=usable ? [self axs_cachekeeper_basic_reason:context] : @"noBackgroundTime";
   if(reason) [self axs_cachekeeper_finish:run reason:reason];else [self axs_cachekeeper_prepare:run];
@@ -302,6 +362,12 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
 #if defined(AXS_CACHEKEEPER_GURD_TESTING)
 - (void)axs_cachekeeper_setSampleEntryLimit:(NSUInteger)entries seconds:(NSTimeInterval)seconds {
  dispatch_sync(_queue,^{self->_sampleEntryLimit=MIN(entries,(NSUInteger)200000);self->_sampleSeconds=MIN(MAX(seconds,0),4);});
+}
+- (void)axs_cachekeeper_setSampleSliceEntries:(NSUInteger)entries {
+ dispatch_sync(_queue,^{self->_sampleSliceEntries=MAX((NSUInteger)1,MIN(entries,(NSUInteger)512));});
+}
+- (void)axs_cachekeeper_setSampleCounterLimit:(uint64_t)limit {
+ dispatch_sync(_queue,^{self->_sampleCounterLimit=MIN(limit,9007199254740991ULL);});
 }
 #endif
 

@@ -11,6 +11,7 @@
 - (void)axs_cachekeeper_capacity_background:(NSNotification *)notification;
 - (void)axs_cachekeeper_collect;
 - (void)axs_cachekeeper_capacity_text:(NSDictionary *)result;
+- (void)axs_cachekeeper_refresh;
 - (BOOL)axs_cachekeeper_capacity_write_stop:(NSString *)epoch error:(NSError **)error;
 @end
 @interface AxsCacheKeeperCapacityPageFixture : AxsCacheKeeperDiagnosticsPage
@@ -213,9 +214,130 @@
     XCTAssertTrue([receipt writeToFile:path atomically:YES]);[self.page axs_cachekeeper_collect];[self drainCollectionQueue];
     NSDictionary *report=[NSJSONSerialization JSONObjectWithData:[self.page valueForKey:@"reportData"] options:0 error:NULL];
     XCTAssertEqualObjects(report[@"capacityMeasurement"][@"epoch"],epoch);XCTAssertEqualObjects(report[@"capacityMeasurement"][@"updatedAt"],@102);
+    XCTAssertEqualObjects(report[@"capacityMeasurement"][@"summaryBinding"][@"state"],@"stale",@"a frozen epoch superseded by another saved epoch stays stale after summary");
+    XCTAssertFalse(((UIButton *)[self.page valueForKey:@"exportButton"]).enabled,@"stale frozen capacity cannot be exported as current");
     XCTAssertEqualObjects(report[@"capacityMeasurement"][@"sourceSampledAt"],@100);XCTAssertEqualObjects(report[@"capacityMeasurement"][@"finishedAt"],@102);
     XCTAssertEqualObjects(report[@"capacityMeasurement"][@"roots"][0][@"measurement"],original);
     XCTAssertEqualObjects(original[@"logicalBytes"],@8192);XCTAssertGreaterThan([original[@"allocatedBytes"] unsignedLongLongValue],0u);
+}
+- (void)testSameEpochNewerTerminalInvalidatesFrozenSummary {
+    NSString *epoch=NSUUID.UUID.UUIDString;
+    NSMutableDictionary *snapshot=[[self savedMeasurement:epoch] mutableCopy];
+    snapshot[@"summaryBinding"]=@{@"state":@"current",@"epoch":epoch,@"terminalState":@"complete",
+        @"terminalFinishedAt":@102,@"summarizedAt":@103};
+    [self.page setValue:snapshot forKey:@"axs_cachekeeper_capacitySnapshot"];
+    [self.page setValue:nil forKey:@"axs_cachekeeper_capacityEpoch"];
+    [self.page setValue:nil forKey:@"axs_cachekeeper_capacityPendingStop"];
+    NSMutableDictionary *replacement=[snapshot mutableCopy];
+    replacement[@"updatedAt"]=@200;replacement[@"finishedAt"]=@200;
+    XCTAssertTrue([replacement writeToFile:[self.folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);
+    NSDictionary *capacity=[self collectedCapacity];
+    XCTAssertEqualObjects(capacity[@"state"],@"complete");
+    XCTAssertEqualObjects(capacity[@"summaryBinding"][@"state"],@"stale");
+    XCTAssertFalse(((UIButton *)[self.page valueForKey:@"exportButton"]).enabled);
+}
+- (void)testSameEpochTerminalStateChangeInvalidatesFrozenSummary {
+    NSString *epoch=NSUUID.UUID.UUIDString;
+    NSMutableDictionary *snapshot=[[self savedMeasurement:epoch] mutableCopy];
+    snapshot[@"summaryBinding"]=@{@"state":@"current",@"epoch":epoch,@"terminalState":@"complete",
+        @"terminalFinishedAt":@102,@"summarizedAt":@103};
+    [self.page setValue:snapshot forKey:@"axs_cachekeeper_capacitySnapshot"];
+    [self.page setValue:nil forKey:@"axs_cachekeeper_capacityEpoch"];
+    [self.page setValue:nil forKey:@"axs_cachekeeper_capacityPendingStop"];
+    NSMutableDictionary *replacement=[snapshot mutableCopy];replacement[@"state"]=@"partial";
+    XCTAssertTrue([replacement writeToFile:[self.folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);
+    NSDictionary *capacity=[self collectedCapacity];
+    XCTAssertEqualObjects(capacity[@"epoch"],epoch);
+    XCTAssertEqualObjects(capacity[@"state"],@"partial");
+    XCTAssertEqualObjects(capacity[@"finishedAt"],@102);
+    XCTAssertEqualObjects(capacity[@"summaryBinding"][@"state"],@"stale");
+    XCTAssertFalse(((UIButton *)[self.page valueForKey:@"exportButton"]).enabled);
+}
+- (void)testNewSavedTerminalAfterFrozenEpochCanBeResummarized {
+    NSString *epoch=NSUUID.UUID.UUIDString,*replacementEpoch=NSUUID.UUID.UUIDString;
+    NSMutableDictionary *frozen=[[self savedMeasurement:epoch] mutableCopy];
+    frozen[@"summaryBinding"]=@{@"state":@"current",@"epoch":epoch,@"terminalState":@"complete",
+        @"terminalFinishedAt":@102,@"summarizedAt":@103};
+    [self.page setValue:frozen forKey:@"axs_cachekeeper_capacitySnapshot"];
+    [self.page setValue:nil forKey:@"axs_cachekeeper_capacityEpoch"];
+    [self.page setValue:nil forKey:@"axs_cachekeeper_capacityPendingStop"];
+    NSMutableDictionary *replacement=[[self savedMeasurement:replacementEpoch] mutableCopy];
+    replacement[@"updatedAt"]=@200;replacement[@"finishedAt"]=@200;
+    NSMutableDictionary *superseded=[[self savedMeasurement:epoch] mutableCopy];
+    superseded[@"terminalHistory"]=@{@"limit":@16,@"omittedCount":@0,@"records":@[@{@"epoch":epoch,@"state":@"cancelled",
+        @"startedAt":@101,@"finishedAt":@150,@"resultPublication":@"notSaved"}]};
+    replacement[@"terminalHistory"]=superseded[@"terminalHistory"];
+    XCTAssertTrue([replacement writeToFile:[self.folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);
+    NSDictionary *capacity=[self collectedCapacity];
+    XCTAssertEqualObjects(capacity[@"state"],@"complete");
+    XCTAssertEqualObjects(capacity[@"epoch"],replacement[@"epoch"]);
+    XCTAssertEqualObjects(capacity[@"epoch"],replacementEpoch);
+    XCTAssertEqualObjects(capacity[@"summaryBinding"][@"state"],@"current");
+    XCTAssertTrue(((UIButton *)[self.page valueForKey:@"exportButton"]).enabled);
+}
+- (void)testNewMeasurementInvalidatesPreviousReportAndStopReceipt {
+    NSString *first=[self cacheRunningMeasurement];
+    [self.page axs_cachekeeper_capacity_background:nil];
+    [self.page setValue:[NSJSONSerialization dataWithJSONObject:@{ @"capacityMeasurement":@{ @"state":@"running", @"epoch":first } } options:0 error:NULL] forKey:@"reportData"];
+    XCTAssertNotNil([self.page valueForKey:@"axs_cachekeeper_capacityPendingStop"]);
+    [self.page axs_cachekeeper_capacity_action];
+    NSString *second=[self request][@"epoch"];
+    XCTAssertNotEqualObjects(second,first);
+    XCTAssertNil([self.page valueForKey:@"reportData"]);
+    XCTAssertNil([self.page valueForKey:@"axs_cachekeeper_capacitySnapshot"]);
+    XCTAssertNil([self.page valueForKey:@"axs_cachekeeper_capacityPendingStop"],@"新测量不能把旧 epoch 的取消回执带入新报告");
+}
+- (void)testExportRequiresCurrentTerminalSummaryBinding {
+    NSString *epoch=NSUUID.UUID.UUIDString;
+    NSDictionary *capacity=@{ @"schemaVersion":@1, @"state":@"complete", @"epoch":epoch,
+        @"summaryBinding":@{ @"state":@"stale" } };
+    [self.page setValue:[NSJSONSerialization dataWithJSONObject:@{ @"capacityMeasurement":capacity } options:0 error:NULL] forKey:@"reportData"];
+    [self.page axs_cachekeeper_refresh];
+    XCTAssertFalse(((UIButton *)[self.page valueForKey:@"exportButton"]).enabled,@"旧容量绑定不能作为最新结果导出");
+    NSMutableDictionary *current=[capacity mutableCopy];
+    current[@"finishedAt"]=@102;
+    current[@"summaryBinding"]=@{ @"state":@"current", @"epoch":epoch, @"terminalState":@"complete",
+        @"terminalFinishedAt":@102, @"summarizedAt":@103 };
+    [self.page setValue:[NSJSONSerialization dataWithJSONObject:@{ @"capacityMeasurement":current } options:0 error:NULL] forKey:@"reportData"];
+    [self.page axs_cachekeeper_refresh];
+    XCTAssertTrue(((UIButton *)[self.page valueForKey:@"exportButton"]).enabled);
+    NSDictionary *running=@{@"schemaVersion":@1,@"state":@"running",@"epoch":epoch,@"summaryBinding":@{@"state":@"unknown"}};
+    [self.page setValue:[NSJSONSerialization dataWithJSONObject:@{@"capacityMeasurement":running} options:0 error:NULL] forKey:@"reportData"];
+    [self.page axs_cachekeeper_refresh];
+    XCTAssertFalse(((UIButton *)[self.page valueForKey:@"exportButton"]).enabled,@"running capacity cannot be exported after active request becomes unconfirmed");
+}
+- (void)testTerminalMeasurementRequiresSummaryAndCarriesItsEpoch {
+    [self.page axs_cachekeeper_capacity_action];NSString *epoch=[self request][@"epoch"];
+    NSDictionary *terminal=[self savedMeasurement:epoch];
+    XCTAssertTrue([terminal writeToFile:[self.folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);
+    [self.page axs_cachekeeper_capacity_poll];[self drainCollectionQueue];
+    XCTAssertNil([self.page valueForKey:@"reportData"],@"terminal observation alone is not a summary");
+    [self.page axs_cachekeeper_collect];[self drainCollectionQueue];
+    NSDictionary *report=[NSJSONSerialization JSONObjectWithData:[self.page valueForKey:@"reportData"] options:0 error:NULL];
+    NSDictionary *capacity=report[@"capacityMeasurement"],*binding=capacity[@"summaryBinding"];
+    XCTAssertEqualObjects(capacity[@"epoch"],epoch);
+    XCTAssertEqualObjects(binding[@"state"],@"current");
+    XCTAssertEqualObjects(binding[@"epoch"],epoch);
+    XCTAssertEqualObjects(binding[@"terminalState"],capacity[@"state"]);
+    XCTAssertEqualObjects(binding[@"terminalFinishedAt"],capacity[@"finishedAt"]);
+    XCTAssertGreaterThanOrEqual([binding[@"summarizedAt"] doubleValue],[binding[@"terminalFinishedAt"] doubleValue]);
+    XCTAssertTrue(((UIButton *)[self.page valueForKey:@"exportButton"]).enabled);
+}
+- (void)testLateCollectionCannotReplaceNewEpochState {
+    dispatch_queue_t queue=[self.page valueForKey:@"collectionQueue"];
+    dispatch_semaphore_t gate=dispatch_semaphore_create(0);
+    dispatch_async(queue,^{dispatch_semaphore_wait(gate,DISPATCH_TIME_FOREVER);});
+    [self.page axs_cachekeeper_collect];
+    NSUInteger staleGeneration=[[self.page valueForKey:@"generation"] unsignedIntegerValue];
+    NSString *newEpoch=NSUUID.UUID.UUIDString;
+    [self.page setValue:@(staleGeneration+1) forKey:@"generation"];
+    [self.page setValue:newEpoch forKey:@"axs_cachekeeper_capacityEpoch"];
+    [self.page setValue:@{ @"schemaVersion":@1, @"epoch":newEpoch, @"state":@"running" } forKey:@"axs_cachekeeper_capacitySnapshot"];
+    [self.page setValue:nil forKey:@"reportData"];
+    dispatch_semaphore_signal(gate);[self drainCollectionQueue];
+    XCTAssertNil([self.page valueForKey:@"reportData"]);
+    XCTAssertEqualObjects([self.page valueForKey:@"axs_cachekeeper_capacityEpoch"],newEpoch);
+    XCTAssertEqualObjects([self.page valueForKey:@"axs_cachekeeper_capacitySnapshot"][ @"epoch" ],newEpoch);
 }
 - (NSString *)cacheRunningMeasurement {
     [self.page axs_cachekeeper_capacity_action];NSString *epoch=[self request][@"epoch"];
@@ -309,6 +431,7 @@
     XCTAssertTrue([saved writeToFile:[self.folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);
     NSDictionary *capacity=[self collectedCapacity],*error=[capacity[@"roots"][0][@"measurement"][@"cursorErrors"][@"errors"] firstObject];
     XCTAssertEqualObjects(error[@"errorCode"],@5);XCTAssertEqualObjects(error[@"stage"],@"enumerate");XCTAssertNil(error[@"scope"]);XCTAssertNil(error[@"path"]);
+    XCTAssertNotEqualObjects(capacity[@"summaryBinding"][@"state"],@"current",@"unconfirmed stop remains non-current");
 }
 - (void)testLatePollReplyCannotRestoreStoppedRunningSnapshot {
     NSString *epoch=[self cacheRunningMeasurement];[self.page axs_cachekeeper_capacity_poll];

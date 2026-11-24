@@ -40,7 +40,8 @@ static NSDictionary *axs_cachekeeper_inventory_sdk(id wrapper,BOOL image) {
     if (!time) return @{@"state":@"invalid"};
     out[@"receiptState"]=projected[@"state"];out[@"sourceUpdated"]=time;
     if (!image) out[@"liveProcessState"]=@"unknown";
-    for (NSString *key in image ? @[@"observed",@"eligible",@"restricted",@"writesBlocked",@"queued",@"submitted",@"apiCompleted",@"skipped",@"pending"] : @[@"persistentStores",@"nonPersistentStores",@"submitted",@"completed",@"pending"])
+    for (NSString *key in image ? @[@"observed",@"eligible",@"restricted",@"queued",@"submitted",@"apiCompleted",@"skipped",@"pending"] :
+        @[@"persistentStores",@"nonPersistentStores",@"submitted",@"completed",@"pending"])
         if (axs_cachekeeper_inventory_count(projected[key])) out[key]=projected[key];
     for (NSString *key in @[@"runtimeInfo",@"discoveryCheck",@"runtimeSourceObservation",@"sdkMethodsRejectionObservation",@"installedRuntimeRelation",@"installationCheck",@"reason"]) if (projected[key]) out[key]=projected[key];
     if (image && projected[@"writeObservation"]) out[@"writeObservation"]=projected[@"writeObservation"];
@@ -89,7 +90,7 @@ NSDictionary *axs_cachekeeper_capabilities(NSDictionary *raw,NSString *panelVers
                 for (NSString *field in @[@"complete",@"coverageComplete",@"measurementComplete"]) if (axs_cachekeeper_input_boolean(data[field])) entry[field]=@([data[field] boolValue]);
                 NSDictionary *progress=axs_cachekeeper_scan_progress_projection(data[@"scanProgress"]),*diagnostics=axs_cachekeeper_scan_diagnostics_projection(data[@"scanDiagnostics"]);
                 if (progress) entry[@"scanProgress"]=progress;if (diagnostics) entry[@"scanDiagnostics"]=diagnostics;
-            } else for (NSString *field in @[@"state",@"reason",@"discoveryCheck",@"runtimeSourceObservation",@"sdkMethodsRejectionObservation",@"installedRuntimeRelation",@"installationCheck",@"prevent",@"applied",@"submitted",@"completed",@"apiCompleted",@"pending",@"observed",@"eligible",@"restricted",@"writesBlocked"])
+            } else for (NSString *field in @[@"state",@"reason",@"discoveryCheck",@"runtimeSourceObservation",@"sdkMethodsRejectionObservation",@"installedRuntimeRelation",@"installationCheck",@"prevent",@"applied",@"submitted",@"completed",@"apiCompleted",@"pending",@"observed",@"eligible",@"restricted"])
                 if (data[field]) entry[field]=data[field];
             if ([key isEqual:@"network"]) entry[@"actionState"]=data[@"policyObservation"] ?: ([data[@"prevent"] boolValue] ? ([data[@"applied"] boolValue] ? @"restrictionReported" : @"restrictionNotApplied") : ([data[@"applied"] boolValue] ? @"unrestrictedOrRestoreReported" : @"restorePending"));
             if ([key isEqual:@"image"] || [key isEqual:@"webKit"]) entry[@"actionState"]=data[@"state"];

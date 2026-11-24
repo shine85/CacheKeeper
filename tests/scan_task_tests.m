@@ -3,6 +3,8 @@
 #import "../AxsCacheKeeperScanTask.h"
 #import "../AxsCacheKeeperRecords.h"
 #import "../AxsCacheKeeperDirectories.h"
+#include <fcntl.h>
+#include <errno.h>
 #include <unistd.h>
 
 static void axs_cachekeeper_test_check(BOOL ok, const char *message) { if (!ok) {fprintf(stderr,"FAIL: scan tasks: %s\n",message);exit(1);} }
@@ -49,10 +51,35 @@ int main(int argc, const char **argv) { @autoreleasepool {
     axs_cachekeeper_test_check([cursor.state isEqual:@"identityChanged"] && ![cursor.result[@"complete"] boolValue],"replaced root cannot complete");
     NSString *empty=[base stringByAppendingPathComponent:@"empty"];axs_cachekeeper_test_directory(empty);
     cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:[NSURL fileURLWithPath:empty] entryLimit:10 depthLimit:64];[cursor advanceEntries:10 seconds:1];axs_cachekeeper_test_check([cursor.state isEqual:@"complete"] && [cursor.result[@"bytes"] unsignedLongLongValue]==0,"empty directory completes");
+    NSString *anchored=[base stringByAppendingPathComponent:@"anchored"];axs_cachekeeper_test_directory(anchored);
+    axs_cachekeeper_test_file([anchored stringByAppendingPathComponent:@"kept"],7);
+    int rootFD=open(anchored.fileSystemRepresentation,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    axs_cachekeeper_test_check(rootFD>=0,"open anchored root descriptor");
+    AxsCacheKeeperScanCursor *anchoredCursor=[[AxsCacheKeeperScanCursor alloc] initWithRootFD:rootFD path:[NSURL fileURLWithPath:anchored] entryLimit:100 depthLimit:64];
+    axs_cachekeeper_test_check(anchoredCursor.state && close(rootFD)==0,"cursor duplicates borrowed root descriptor");
+    [anchoredCursor advanceEntries:1 seconds:1];
+    axs_cachekeeper_test_check([anchoredCursor.state isEqual:@"running"] && [anchoredCursor.result[@"bytes"] unsignedLongLongValue]==7,
+        "cursor reads original tree through duplicate after caller closes root descriptor");
+    axs_cachekeeper_test_check([NSFileManager.defaultManager moveItemAtPath:anchored toPath:[anchored stringByAppendingString:@"-old"] error:nil],"move anchored root");
+    axs_cachekeeper_test_directory(anchored);axs_cachekeeper_test_file([anchored stringByAppendingPathComponent:@"replacement"],1000);
+    [anchoredCursor advanceEntries:100 seconds:1];
+    axs_cachekeeper_test_check([anchoredCursor.state isEqual:@"identityChanged"] && ![anchoredCursor.result[@"complete"] boolValue] &&
+        [anchoredCursor.result[@"bytes"] unsignedLongLongValue]==7 && anchoredCursor.openDirectoryCount==0,
+        "fd cursor never scans replacement path and closes its owned duplicate");
     cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:[NSURL fileURLWithPath:[base stringByAppendingPathComponent:@"absent"]] entryLimit:10 depthLimit:64];axs_cachekeeper_test_check([cursor.state isEqual:@"readError"] && ![cursor.result[@"complete"] boolValue],"missing root reports error");
     cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:[NSURL fileURLWithPath:tree] entryLimit:10000 depthLimit:1];[cursor advanceEntries:10 seconds:1];axs_cachekeeper_test_check([cursor.state isEqual:@"depthLimit"] && cursor.openDirectoryCount==0,"depth limit is partial and releases resources");
     cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:[NSURL fileURLWithPath:tree] entryLimit:10000 depthLimit:64];[cursor advanceEntries:3 seconds:1];[cursor stopWithState:@"timeLimit"];
     axs_cachekeeper_test_check([cursor.result[@"scanDiagnostics"][@"timeBudgetExceeded"] boolValue] && ![cursor.result[@"complete"] boolValue] && cursor.openDirectoryCount==0,"task time stop is terminal partial");
+    int closeError=-1;cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:[NSURL fileURLWithPath:tree] entryLimit:10000 depthLimit:64];
+    axs_cachekeeper_test_check([cursor closeWithErrorCode:&closeError]==0 && closeError==0 && [cursor.state isEqual:@"cancelled"] &&
+        ![cursor.result[@"scanDiagnostics"][@"measurementComplete"] boolValue] && cursor.openDirectoryCount==0,
+        "explicitly closing a running cursor is cancelled and never complete");
+    cursor=[[AxsCacheKeeperScanCursor alloc] initWithRoot:[NSURL fileURLWithPath:tree] entryLimit:10000 depthLimit:64];
+    axs_cachekeeper_scan_test_close_error(EIO);
+    axs_cachekeeper_test_check([cursor closeWithErrorCode:&closeError]==-1 && closeError==EIO && [cursor.state isEqual:@"readError"] &&
+        ![cursor.result[@"complete"] boolValue] && [cursor.result[@"scanDiagnostics"][@"errors"][0][@"stage"] isEqual:@"closeDirectory"] &&
+        [cursor.result[@"scanDiagnostics"][@"errors"][0][@"errorCode"] intValue]==EIO && cursor.openDirectoryCount==0,
+        "explicit close failure is returned, diagnosed and terminal");
     NSString *wide=[base stringByAppendingPathComponent:@"wide"];axs_cachekeeper_test_directory(wide);
     for(NSUInteger i=0;i<270;i++) axs_cachekeeper_test_directory([wide stringByAppendingPathComponent:[NSString stringWithFormat:@"d%lu",(unsigned long)i]]);
     NSDictionary *discovery=nil;NSArray *targets=axs_cachekeeper_bounded_scan_targets([NSURL fileURLWithPath:wide],@{},NO,&discovery);

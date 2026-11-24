@@ -45,6 +45,8 @@ def main() -> int:
             "export": "FAIL: scan diagnostics: valid scanDiagnostics must survive real report export",
         }
         if not args.expect_red:
+            cases["history-export"] = ""
+        if not args.expect_red:
             cases["measurement"] = ""
         failed = False
         for mode, expected in cases.items():

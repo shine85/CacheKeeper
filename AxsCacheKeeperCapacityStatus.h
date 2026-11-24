@@ -127,6 +127,37 @@ static inline NSDictionary *axs_cachekeeper_capacity_client_stop(id value) {
     } else if ([value[@"confirmation"] isEqual:@"terminalHistoryObserved"]) return nil;
     return [out copy];
 }
+static inline NSDictionary *axs_cachekeeper_capacity_summary_binding(id value,id terminal) {
+    if (!value) return @{ @"state":@"unknown" };
+    if (![value isKindOfClass:NSDictionary.class] || !([value count]==4 || [value count]==5) ||
+        (value[@"state"] && ![value[@"state"] isEqual:@"current"]) || !axs_cachekeeper_capacity_epoch(value[@"epoch"]) ||
+        ![@[@"complete",@"partial",@"cancelled",@"interrupted",@"unavailable"] containsObject:value[@"terminalState"]] ||
+        !axs_cachekeeper_capacity_number(value[@"terminalFinishedAt"]) || !axs_cachekeeper_capacity_number(value[@"summarizedAt"]))
+        return @{ @"state":@"stale" };
+    if (![terminal isKindOfClass:NSDictionary.class] || !axs_cachekeeper_capacity_epoch(terminal[@"epoch"]) ||
+        ![@[@"complete",@"partial",@"cancelled",@"interrupted",@"unavailable"] containsObject:terminal[@"state"]] ||
+        !axs_cachekeeper_capacity_number(terminal[@"finishedAt"])) return @{ @"state":@"stale" };
+    BOOL current=[value[@"epoch"] isEqual:terminal[@"epoch"]] && [value[@"terminalState"] isEqual:terminal[@"state"]] &&
+        [value[@"terminalFinishedAt"] isEqual:terminal[@"finishedAt"]] && [value[@"summarizedAt"] doubleValue]>=[terminal[@"finishedAt"] doubleValue];
+    if (!current) return @{ @"state":@"stale" };
+    return @{ @"state":@"current",@"epoch":value[@"epoch"],@"terminalState":value[@"terminalState"],
+        @"terminalFinishedAt":value[@"terminalFinishedAt"],@"summarizedAt":value[@"summarizedAt"] };
+}
+static inline BOOL axs_cachekeeper_capacity_summary_is_current(id report) {
+    if (![report isKindOfClass:NSDictionary.class]) return NO;
+    NSDictionary *capacity=report[@"capacityMeasurement"],*binding=capacity[@"summaryBinding"];
+    if (![capacity isKindOfClass:NSDictionary.class] || ![binding isKindOfClass:NSDictionary.class] || ![binding[@"state"] isEqual:@"current"]) return NO;
+    NSDictionary *terminal=@{ @"epoch":capacity[@"epoch"] ?: NSNull.null,@"state":capacity[@"state"] ?: NSNull.null,
+        @"finishedAt":capacity[@"finishedAt"] ?: NSNull.null };
+    return [[axs_cachekeeper_capacity_summary_binding(binding,terminal) objectForKey:@"state"] isEqual:@"current"];
+}
+static inline BOOL axs_cachekeeper_capacity_report_exportable(id report) {
+    if (![report isKindOfClass:NSDictionary.class]) return NO;
+    NSDictionary *capacity=report[@"capacityMeasurement"];
+    if (![capacity isKindOfClass:NSDictionary.class]) return YES;
+    if ([@[@"notMeasured",@"invalid"] containsObject:capacity[@"state"]]) return YES;
+    return axs_cachekeeper_capacity_summary_is_current(report);
+}
 static inline BOOL axs_cachekeeper_capacity_token(id value) {
     if (![value isKindOfClass:NSString.class] || ![value hasPrefix:@"resource-"]) return NO;
     NSString *suffix=[value substringFromIndex:9];
@@ -241,6 +272,8 @@ static inline NSDictionary *axs_cachekeeper_capacity_projection(id value) {
         [out[@"lifecycle"][@"previousObservedEpoch"] isEqual:value[@"epoch"]]) return invalid;
     if (running ? value[@"finishedAt"]!=nil : !axs_cachekeeper_capacity_number(value[@"finishedAt"])) return invalid;
     if (!running) out[@"finishedAt"]=value[@"finishedAt"];
+    NSDictionary *terminal=running ? nil : @{ @"epoch":value[@"epoch"],@"state":state,@"finishedAt":value[@"finishedAt"] };
+    out[@"summaryBinding"]=running ? @{ @"state":@"unknown" } : axs_cachekeeper_capacity_summary_binding(value[@"summaryBinding"],terminal);
     // Wall-clock jumps do not change the monotonic traversal budget or validity.
     if ([value[@"totalRoots"] unsignedLongLongValue]>4096 ||
         ![value[@"excludedBundles"] isEqual:@[@"com.tencent.qy.xin"]] ||
@@ -310,6 +343,10 @@ static inline NSDictionary *axs_cachekeeper_capacity_projection(id value) {
     for (NSDictionary *root in roots) for (NSString *owner in root[@"owners"]) if (![entryIds[owner] containsObject:root[@"id"]]) return invalid;
     for (NSString *key in @[@"epoch",@"state",@"excludedBundles",@"deletionAuthorization",@"physicalUniqueBytes",@"reclaimableBytes",@"freshness",@"measurementWindow",@"installationMatch"]) out[key]=value[key];
     out[@"registry"]=registry;out[@"roots"]=roots;out[@"entries"]=entries;return [out copy];
+}
+static inline NSDictionary *axs_cachekeeper_capacity_report_measurement(id value,uint64_t summarizedAt) {
+    (void)summarizedAt;
+    return axs_cachekeeper_capacity_projection(value);
 }
 static inline void axs_cachekeeper_capacity_io_error(NSError **error,NSInteger code) {
     if (error) *error=[NSError errorWithDomain:@"AxsCacheKeeperCapacityIO" code:code userInfo:nil];

@@ -217,6 +217,9 @@ static inline NSDictionary *axs_cachekeeper_image_cache_raw_projection(id value)
 static inline NSDictionary *axs_cachekeeper_image_cache_projection_with_aliases(id value,NSMutableDictionary *aliases) {
     NSDictionary *raw=axs_cachekeeper_image_cache_raw_projection(value);if (!raw) return nil;
     NSMutableDictionary *result=[raw mutableCopy];
+    // The cumulative blocked counter outlives the bounded writer epochs and
+    // cannot be attributed to the strict writer observation in this export.
+    [result removeObjectForKey:@"writesBlocked"];
     if (!result[@"sdkMethodsRejectionObservation"]) result[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
     if (raw[@"operationHistory"]) {
         NSDictionary *history=axs_cachekeeper_operation_history_projection(raw[@"operationHistory"],aliases);
@@ -294,7 +297,17 @@ static inline NSString *axs_cachekeeper_image_cache_message(id value) {
     if (messages[record[@"reason"]]) return messages[record[@"reason"]];
     if ([record[@"state"] isEqual:@"notObserved"]) return @"尚未观察到 APP 实际创建的已适配图片缓存";
     if ([record[@"pending"] unsignedIntegerValue]) return @"图片缓存清理已排队，执行前再次核对授权";
-    return [NSString stringWithFormat:@"已适配 %@ 个实例，限制写盘 %@ 次，清理 API 完成 %@ 次；释放空间未单独测量",
-        record[@"eligible"],record[@"writesBlocked"],record[@"apiCompleted"]];
+    if (!record[@"writeObservation"])
+        return [NSString stringWithFormat:@"SDWebImage 写入观测未记录；清理 API 累计完成 %@ 次；释放空间未单独测量",record[@"apiCompleted"]];
+    NSDictionary *observation=record[@"writeObservation"];
+    NSMutableArray *rows=[NSMutableArray new];
+    for (NSDictionary *epoch in observation[@"epochs"]) {
+        NSDictionary *data=epoch[@"data"],*extended=epoch[@"extended"];
+        if ([data[@"attempts"] unsignedLongLongValue] || [extended[@"attempts"] unsignedLongLongValue])
+            [rows addObject:[NSString stringWithFormat:@"%@ data %@/%@/%@, extended %@/%@/%@",epoch[@"mode"],data[@"attempts"],data[@"blocked"],data[@"allowed"],extended[@"attempts"],extended[@"blocked"],extended[@"allowed"]]];
+    }
+    NSString *writerSummary=rows.count ? [rows componentsJoinedByString:@"；"] : @"本记录没有 SDWebImage 写入尝试观测";
+    return [NSString stringWithFormat:@"SDWebImage 写入观测：%@；清理 API 累计完成 %@ 次；释放空间未单独测量",
+        writerSummary,record[@"apiCompleted"]];
 }
 #endif

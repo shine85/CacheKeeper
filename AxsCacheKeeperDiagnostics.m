@@ -79,6 +79,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
 @property(nonatomic,strong) NSMutableDictionary *aliases;
 @property(nonatomic,strong) NSSet *technicalNames;
 - (NSString *)axs_cachekeeper_path:(NSString *)path;
+- (NSDictionary *)axs_cachekeeper_recent_scan:(id)value;
 - (NSDictionary *)axs_cachekeeper_record:(NSDictionary *)record;
 - (NSDictionary *)axs_cachekeeper_pdf:(NSDictionary *)record;
 @end
@@ -113,6 +114,25 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
         [parts addObject:[NSString stringWithFormat:@"%@%@%@",prefix,[self axs_cachekeeper_alias:identity],suffix]];
     }
     return [parts componentsJoinedByString:@"/"];
+}
+- (NSDictionary *)axs_cachekeeper_recent_scan:(id)value {
+    if (![value isKindOfClass:NSDictionary.class] || ![value[@"updated"] isKindOfClass:NSDate.class] ||
+        ![value[@"rows"] isKindOfClass:NSArray.class]) return @{ @"scanDiagnosticsState":@"invalid" };
+    NSDictionary *projectedRows=[self axs_cachekeeper_record:@{@"rows":value[@"rows"]}];
+    NSMutableDictionary *entry=[@{@"updated":@([value[@"updated"] timeIntervalSince1970]),
+        @"rows":projectedRows[@"rows"] ?: @[]} mutableCopy];
+    if ([value[@"home"] isKindOfClass:NSString.class]) entry[@"home"]=[self axs_cachekeeper_path:value[@"home"]];
+    id diagnostics=value[@"scanDiagnostics"],state=value[@"scanDiagnosticsState"];
+    if (!diagnostics && !state) entry[@"scanDiagnosticsState"]=@"unknown";
+    else if ([state isEqual:@"unknown"] && !diagnostics) entry[@"scanDiagnosticsState"]=@"unknown";
+    else if ([state isEqual:@"invalid"]) entry[@"scanDiagnosticsState"]=@"invalid";
+    else {
+        NSDictionary *projected=axs_cachekeeper_scan_diagnostics_projection(diagnostics);
+        if ([state isEqual:@"available"] && projected) {
+            entry[@"scanDiagnosticsState"]=@"available";entry[@"scanDiagnostics"]=projected;
+        } else entry[@"scanDiagnosticsState"]=@"invalid";
+    }
+    return entry;
 }
 - (NSDictionary *)axs_cachekeeper_record:(NSDictionary *)record {
     if (![record isKindOfClass:NSDictionary.class]) return @{@"invalidRecord":@YES};
@@ -171,8 +191,14 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
     for (NSString *key in @[@"effectivePaths",@"discoveredPaths",@"excludedPaths",@"logPaths"]) if ([record[key] isKindOfClass:NSArray.class]) {
         NSMutableArray *paths=[NSMutableArray new];for (id path in record[key]) [paths addObject:[self axs_cachekeeper_path:path]];out[key]=paths;
     }
-    for (NSString *key in @[@"rows",@"previousRows",@"recentScans",@"largest",@"largestHardLinks",@"linkTwins",@"retainedSubtrees",@"tasks"]) if ([record[key] isKindOfClass:NSArray.class]) {
+    for (NSString *key in @[@"rows",@"previousRows",@"largest",@"largestHardLinks",@"linkTwins",@"retainedSubtrees",@"tasks"]) if ([record[key] isKindOfClass:NSArray.class]) {
         NSMutableArray *items=[NSMutableArray new];for (id item in record[key]) [items addObject:[self axs_cachekeeper_record:item]];out[key]=items;
+    }
+    if ([record[@"recentScans"] isKindOfClass:NSArray.class]) {
+        NSMutableArray *recent=[NSMutableArray new];NSArray *source=record[@"recentScans"];
+        NSUInteger start=source.count>4 ? source.count-4 : 0;
+        for (NSUInteger index=start;index<source.count;index++) [recent addObject:[self axs_cachekeeper_recent_scan:source[index]]];
+        out[@"recentScans"]=recent;
     }
     for (NSString *key in @[@"directories",@"reports"]) if ([record[key] isKindOfClass:NSDictionary.class]) {
         NSMutableArray *items=[NSMutableArray new];
@@ -347,7 +373,7 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
     return @{@"schemaVersion":@2,@"generatedAt":@(finished),@"environment":env,@"apps":exported,
         @"diagnosticChannel":AxsCacheKeeperDiagnosticChannelProjection(environment[@"diagnosticChannel"]),
         @"containerCoverage":axs_cachekeeper_container_coverage_projection(environment[@"containerCoverage"]),
-        @"capacityMeasurement":axs_cachekeeper_capacity_projection(environment[@"capacityMeasurement"]),
+        @"capacityMeasurement":axs_cachekeeper_capacity_report_measurement(environment[@"capacityMeasurement"],(uint64_t)finished),
         @"storageInventory":axs_cachekeeper_storage_inventory(environment[@"registryInventory"],states,directories,snapshots,savedSDKApps,
             ^NSString *(NSString *path){return [redactor axs_cachekeeper_path:path];}),
         @"searchUI":axs_cachekeeper_search_diagnostics_projection(environment[@"searchUI"]),

@@ -1,5 +1,6 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#import "AxsCacheKeeperScanDiagnostics.h"
 #include <sys/stat.h>
 
 // 只读档案；识别文件格式不等于证明可以删除。
@@ -18,11 +19,36 @@
 - (NSDictionary *)report;
 @end
 
+static inline NSDictionary *axs_cachekeeper_recent_scan_entry(id value) {
+    if (![value isKindOfClass:NSDictionary.class] || ![value[@"updated"] isKindOfClass:NSDate.class] ||
+        ![value[@"rows"] isKindOfClass:NSArray.class]) return nil;
+    NSMutableDictionary *entry=[@{@"updated":value[@"updated"],@"rows":value[@"rows"]} mutableCopy];
+    if ([value[@"home"] isKindOfClass:NSString.class]) entry[@"home"]=value[@"home"];
+    id diagnostics=value[@"scanDiagnostics"],state=value[@"scanDiagnosticsState"];
+    if (!diagnostics && !state) entry[@"scanDiagnosticsState"]=@"unknown";
+    else if ([state isEqual:@"unknown"] && !diagnostics) entry[@"scanDiagnosticsState"]=@"unknown";
+    else if ([state isEqual:@"invalid"]) entry[@"scanDiagnosticsState"]=@"invalid";
+    else {
+        NSDictionary *projected=axs_cachekeeper_scan_diagnostics_projection(diagnostics);
+        if ([state isEqual:@"available"] && projected) {
+            entry[@"scanDiagnosticsState"]=@"available";entry[@"scanDiagnostics"]=projected;
+        } else entry[@"scanDiagnosticsState"]=@"invalid";
+    }
+    return entry;
+}
 static inline NSArray *axs_cachekeeper_recent_scans(NSDictionary *previous) {
     NSMutableArray *recent=[NSMutableArray new];
-    if ([previous[@"recentScans"] isKindOfClass:NSArray.class]) [recent addObjectsFromArray:previous[@"recentScans"]];
-    if ([previous[@"updated"] isKindOfClass:NSDate.class] && [previous[@"rows"] isKindOfClass:NSArray.class])
-        [recent addObject:@{@"updated":previous[@"updated"],@"home":previous[@"home"] ?: @"",@"rows":previous[@"rows"]}];
+    if ([previous[@"recentScans"] isKindOfClass:NSArray.class])
+        for (id value in previous[@"recentScans"]) {NSDictionary *entry=axs_cachekeeper_recent_scan_entry(value);if(entry) [recent addObject:entry];}
+    if ([previous[@"updated"] isKindOfClass:NSDate.class] && [previous[@"rows"] isKindOfClass:NSArray.class]) {
+        NSMutableDictionary *current=[@{@"updated":previous[@"updated"],@"rows":previous[@"rows"]} mutableCopy];
+        if ([previous[@"home"] isKindOfClass:NSString.class]) current[@"home"]=previous[@"home"];
+        if (previous[@"scanDiagnostics"]) {current[@"scanDiagnosticsState"]=@"available";current[@"scanDiagnostics"]=previous[@"scanDiagnostics"];}
+        else if ([previous[@"scanDiagnosticsState"] isEqual:@"invalid"]) current[@"scanDiagnosticsState"]=@"invalid";
+        NSDictionary *entry=axs_cachekeeper_recent_scan_entry(current);
+        // Compare the closed projection so legacy normalization cannot duplicate its current round.
+        if (entry && ![recent.lastObject isEqual:entry]) [recent addObject:entry];
+    }
     while (recent.count>4) [recent removeObjectAtIndex:0];
     return recent;
 }
