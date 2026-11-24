@@ -1,0 +1,16 @@
+#pragma once
+#import <Foundation/Foundation.h>
+typedef NSUInteger UIBackgroundTaskIdentifier;
+typedef NS_ENUM(NSInteger, UIApplicationState) {
+    UIApplicationStateActive, UIApplicationStateInactive, UIApplicationStateBackground
+};
+extern const UIBackgroundTaskIdentifier UIBackgroundTaskInvalid;
+extern NSString * const UIApplicationDidBecomeActiveNotification;
+extern NSString * const UIApplicationDidEnterBackgroundNotification;
+@interface UIApplication : NSObject
++ (instancetype)sharedApplication;
+@property(nonatomic, readonly) NSTimeInterval backgroundTimeRemaining;
+@property(nonatomic, readonly) UIApplicationState applicationState;
+- (UIBackgroundTaskIdentifier)beginBackgroundTaskWithName:(NSString *)name expirationHandler:(void (^)(void))expiration;
+- (void)endBackgroundTask:(UIBackgroundTaskIdentifier)task;
+@end

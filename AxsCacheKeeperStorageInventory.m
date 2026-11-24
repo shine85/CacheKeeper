@@ -4,6 +4,7 @@
 #import "AxsCacheKeeperScanDiagnostics.h"
 #import "AxsCacheKeeperImageCacheStatus.h"
 #import "AxsCacheKeeperWebKitStatus.h"
+#import "AxsCacheKeeperGurdStatus.h"
 #import "AxsCacheKeeperHostEvidence.h"
 #import "AxsCacheKeeperRecords.h"
 #import "AxsCacheKeeperAllocation.h"
@@ -46,10 +47,20 @@ static NSDictionary *axs_cachekeeper_inventory_sdk(id wrapper,BOOL image) {
     if (image && !out[@"sdkMethodsRejectionObservation"]) out[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
     out[@"bytesState"]=@"notMeasured";return [out copy];
 }
+static NSDictionary *axs_cachekeeper_inventory_gurd(id wrapper) {
+    NSString *source=axs_cachekeeper_inventory_source(wrapper);
+    if (![source isEqual:@"available"]) return @{@"state":source};
+    NSDictionary *record=axs_cachekeeper_gurd_receipt_projection(wrapper[@"data"]);
+    if (!record) return @{@"state":@"invalid"};
+    return @{@"state":@"available",@"source":@"savedRecords",@"receiptState":record[@"state"],
+        @"sourceUpdated":@([record[@"updated"] timeIntervalSince1970]),@"runtimeInfo":record[@"runtimeInfo"],
+        @"restriction":record[@"restriction"],@"operations":record[@"operations"],
+        @"resourceContract":@"aweme412021WhitelistV1",@"effectVerification":@"scopeObservationOnly"};
+}
 // A pure view over this report's raw reads. Version and observation axes stay independent.
 NSDictionary *axs_cachekeeper_capabilities(NSDictionary *raw,NSString *panelVersion) {
     NSMutableDictionary *out=[NSMutableDictionary new];
-    for (NSString *key in @[@"standardDirectories",@"network",@"image",@"webKit",@"hostAutomatic",@"hostObserved"]) {
+    for (NSString *key in @[@"standardDirectories",@"network",@"image",@"webKit",@"gurd",@"hostAutomatic",@"hostObserved"]) {
         NSDictionary *envelope=raw[key];NSString *source=axs_cachekeeper_inventory_source(envelope);
         NSMutableDictionary *entry=[@{@"sourceState":source,@"observationScope":@"savedRecords",@"runtimeVersionState":@"notRecorded",@"resourceContract":@"notEstablishedByReceipt",@"effectVerification":@"notVerified"} mutableCopy];
         NSDictionary *data=nil;
@@ -57,6 +68,7 @@ NSDictionary *axs_cachekeeper_capabilities(NSDictionary *raw,NSString *panelVers
             if ([key isEqual:@"network"]) data=axs_cachekeeper_network_projection(envelope[@"data"]);
             else if ([key isEqual:@"image"]) data=axs_cachekeeper_image_cache_raw_projection(envelope[@"data"]);
             else if ([key isEqual:@"webKit"]) data=axs_cachekeeper_webkit_raw_projection(envelope[@"data"]);
+            else if ([key isEqual:@"gurd"]) data=axs_cachekeeper_gurd_receipt_projection(envelope[@"data"]);
             else if ([key isEqual:@"hostAutomatic"]) data=axs_cachekeeper_host_projection(envelope[@"data"]);
             else if ([key isEqual:@"hostObserved"]) data=axs_cachekeeper_host_observed_projection(envelope[@"data"]);
             else data=axs_cachekeeper_record_valid(envelope[@"data"],0) ? envelope[@"data"] : nil;
@@ -83,6 +95,10 @@ NSDictionary *axs_cachekeeper_capabilities(NSDictionary *raw,NSString *panelVers
             if ([key isEqual:@"image"] || [key isEqual:@"webKit"]) entry[@"actionState"]=data[@"state"];
             if ([key isEqual:@"image"] && data[@"writeObservation"]) entry[@"writeObservation"]=data[@"writeObservation"];
             if ([key isEqual:@"webKit"]) entry[@"liveProcessState"]=@"unknown";
+            if ([key isEqual:@"gurd"]) {
+                entry[@"actionState"]=data[@"state"];entry[@"restriction"]=data[@"restriction"];
+                entry[@"resourceContract"]=data[@"contract"];entry[@"effectVerification"]=@"scopeObservationOnly";
+            }
             if ([key isEqual:@"image"] && !entry[@"sdkMethodsRejectionObservation"]) entry[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
             if ([key isEqual:@"standardDirectories"]) entry[@"resourceContract"]=@"standardDirectoryRulesOnly";
         }
@@ -126,7 +142,7 @@ NSDictionary *axs_cachekeeper_storage_inventory(id registryInventory,NSDictionar
             @"selectionState":!selectionValid ? @"invalid" : selection ? selectionSource : [selectionSource isEqual:@"available"] ? @"missing" : selectionSource,
             @"configurationPresent":@(state!=nil),@"selectionPresent":@(selection!=nil),@"appEnabled":@(enabled),
             @"contractState":@"noResourceContract",@"observationMode":@"savedRecords",@"currentInstallationMatch":@"notChecked",
-            @"sdkReceipts":@{@"imageDiskCache":axs_cachekeeper_inventory_sdk(sdkRecords[bundle][@"imageDiskCache"],YES),@"webKitDiskCache":axs_cachekeeper_inventory_sdk(sdkRecords[bundle][@"webKitDiskCache"],NO)}} mutableCopy];
+            @"sdkReceipts":@{@"imageDiskCache":axs_cachekeeper_inventory_sdk(sdkRecords[bundle][@"imageDiskCache"],YES),@"webKitDiskCache":axs_cachekeeper_inventory_sdk(sdkRecords[bundle][@"webKitDiskCache"],NO),@"gurdCache":axs_cachekeeper_inventory_gurd(sdkRecords[bundle][@"gurdCache"])}} mutableCopy];
         if (registered[bundle]) entry[@"registry"]=registered[bundle];
         BOOL scanValid=[scan isKindOfClass:NSDictionary.class] && [scan[@"rows"] isKindOfClass:NSArray.class];
         entry[@"scanState"]=scan ? (scanValid ? @"savedObservation" : @"invalid") : [scanSource isEqual:@"available"] || [scanSource isEqual:@"missing"] ? @"notScanned" : scanSource;

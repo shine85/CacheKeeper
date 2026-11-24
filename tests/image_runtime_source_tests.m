@@ -658,6 +658,9 @@ static void axs_cachekeeper_runtime_recovery_race(AxsCacheKeeperImageCache *engi
 }
 #endif
 #if AXS_CACHEKEEPER_WRITE_OBSERVATION_TESTING
+#if AXS_CACHEKEEPER_DISABLED_IDENTITY_TESTING
+#import "image_runtime_context_fixture.h"
+#endif
 #import "image_write_observation_cases.h"
 #endif
 int main(int argc,const char *argv[]) {

@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import "AxsCacheKeeperImageWriteObservation.h"
 #import "../AxsCacheKeeperDiagnostics.h"
+#import "gurd_export_fixture.h"
 
 static void oecheck(BOOL condition, NSString *message) {
     if (!condition) {fprintf(stderr,"FAIL: observation export: %s\n",message.UTF8String);exit(1);}
@@ -81,6 +82,13 @@ int main(int argc,char **argv) { @autoreleasepool {
     oecheck([app[@"capabilities"][@"image"][@"effectVerification"] isEqual:@"notVerified"] &&
         [app[@"capabilities"][@"image"][@"resourceContract"] isEqual:@"notEstablishedByReceipt"] &&
         [inventoryImage[@"resourceContract"] isEqual:@"notEstablishedByReceipt"],@"forwarded writer decisions do not grant an effect or resource contract");
+    NSMutableDictionary *legacyWrites=[writeRecord mutableCopy];NSMutableArray *legacyRows=[NSMutableArray new];
+    for (NSDictionary *row in writeRecord[@"epochs"]) {NSMutableDictionary *old=[row mutableCopy];[old removeObjectForKey:@"identityState"];[legacyRows addObject:old];}
+    legacyWrites[@"schemaVersion"]=@1;legacyWrites[@"epochs"]=legacyRows;image[@"writeObservation"]=legacyWrites;
+    app=read();
+    oecheck([app[@"imageDiskCache"][@"data"][@"writeObservation"] isEqual:legacyWrites] &&
+        [app[@"capabilities"][@"image"][@"writeObservation"] isEqual:legacyWrites] && [inventoryImage[@"writeObservation"] isEqual:legacyWrites],
+        @"saved schema one writer evidence survives every export without invented identity state");
     for (NSString *field in @[@"scope",@"allowedMeaning",@"diskPersistence",@"privatePath"]) {
         NSMutableDictionary *bad=[writeRecord mutableCopy];bad[field]=@"observation-private-canary";image[@"writeObservation"]=bad;
         app=read();
@@ -89,7 +97,7 @@ int main(int argc,char **argv) { @autoreleasepool {
             [inventoryImage[@"state"] isEqual:@"invalid"] && !inventoryImage[@"writeObservation"] &&
             !app[@"capabilities"][@"image"][@"writeObservation"],@"unknown writer semantics reject all three saved receipt consumers");
     }
-    for (NSString *change in @[@"sum",@"disabled",@"duplicate",@"boolean",@"overflow",@"installation",@"unknown"]) {
+    for (NSString *change in @[@"sum",@"disabled",@"duplicate",@"boolean",@"overflow",@"installation",@"identityMissing",@"identityContradiction",@"unknown"]) {
         NSData *encoded=[NSPropertyListSerialization dataWithPropertyList:writeRecord format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
         NSMutableDictionary *bad=[NSPropertyListSerialization propertyListWithData:encoded options:NSPropertyListMutableContainersAndLeaves format:NULL error:nil];
         NSMutableDictionary *first=bad[@"epochs"][0],*second=bad[@"epochs"][1];
@@ -99,6 +107,8 @@ int main(int argc,char **argv) { @autoreleasepool {
         else if ([change isEqual:@"boolean"]) first[@"data"][@"allowed"]=@NO;
         else if ([change isEqual:@"overflow"]) first[@"data"][@"overflow"]=@YES;
         else if ([change isEqual:@"installation"]) second[@"installation"]=@0;
+        else if ([change isEqual:@"identityMissing"]) [second removeObjectForKey:@"identityState"];
+        else if ([change isEqual:@"identityContradiction"]) second[@"identityState"]=@"verified";
         else first[@"rawKey"]=@"observation-private-canary";
         image[@"writeObservation"]=bad;
         oecheck([read()[@"imageDiskCache"][@"state"] isEqual:@"invalid"],@"impossible counts or cross-epoch splice cannot pass saved receipt validation");
@@ -126,6 +136,32 @@ int main(int argc,char **argv) { @autoreleasepool {
     NSMutableDictionary *badIdentity=[identity mutableCopy];badIdentity[@"viewObservation"]=badView;
     image[@"installationCheck"]=installation(badIdentity);web[@"installationCheck"]=installation(badIdentity);app=read();
     oecheck([app[@"imageDiskCache"][@"state"] isEqual:@"invalid"] && [app[@"webKitDiskCache"][@"state"] isEqual:@"invalid"],@"both components reject private view fields");
+    // The actual three saved-record consumers must retain submission and measured
+    // scope change without upgrading either into host completion or physical release.
+    NSString *gurdPath=[status stringByAppendingPathComponent:@"test.observation.gurd.plist"];
+    NSMutableDictionary *gurd=[axs_cachekeeper_gurd_export_fixture() mutableCopy];
+    oecheck(axs_cachekeeper_gurd_receipt_projection(gurd)!=nil,@"valid Gurd producer fixture");
+    for (BOOL binary=NO;;binary=YES) {
+        NSData *serialized=[NSPropertyListSerialization dataWithPropertyList:gurd format:binary ? NSPropertyListBinaryFormat_v1_0 : NSPropertyListXMLFormat_v1_0 options:0 error:nil];
+        oecheck(serialized && [serialized writeToFile:gurdPath options:NSDataWritingAtomic error:nil],@"persist Gurd source receipt");
+        NSDictionary *report=[session reportWithApps:@[@{@"id":@"test.observation"}] environment:@{}];
+        NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:nil];
+        oecheck(json && [[NSData dataWithContentsOfFile:gurdPath] isEqual:serialized],@"Gurd JSON export leaves source bytes unchanged");
+        NSDictionary *decoded=[NSJSONSerialization JSONObjectWithData:json options:0 error:nil],*entry=nil;
+        for (NSDictionary *row in decoded[@"storageInventory"][@"entries"]) if ([row[@"bundle"] isEqual:@"test.observation"]) entry=row;
+        NSDictionary *record=decoded[@"apps"][0][@"gurdCache"][@"data"];
+        oecheck([record[@"operations"] isEqual:gurd[@"operations"]] && [record[@"updated"] isEqual:@1794800000],@"Gurd saved receipt survives JSON export");
+        oecheck([decoded[@"apps"][0][@"capabilities"][@"gurd"][@"restriction"] isEqual:@"unsupported"] &&
+            [entry[@"sdkReceipts"][@"gurdCache"][@"operations"] isEqual:gurd[@"operations"]],@"Gurd capability and inventory retain honest action semantics");
+        if (binary) break;
+    }
+    gurd[@"rawPath"]=@"observation-private-canary";
+    oecheck([gurd writeToFile:gurdPath atomically:YES],@"persist malformed Gurd record");
+    NSDictionary *gurdReport=[session reportWithApps:@[@{@"id":@"test.observation"}] environment:@{}];
+    oecheck([gurdReport[@"apps"][0][@"gurdCache"][@"state"] isEqual:@"invalid"] &&
+        [gurdReport[@"apps"][0][@"capabilities"][@"gurd"][@"sourceState"] isEqual:@"invalid"],@"Gurd unknown fields reject saved consumers");
+    NSData *gurdJSON=[NSJSONSerialization dataWithJSONObject:gurdReport options:0 error:nil];
+    oecheck(gurdJSON && ![[[NSString alloc] initWithData:gurdJSON encoding:NSUTF8StringEncoding] containsString:@"observation-private-canary"],@"Gurd malformed source does not leak private fields");
     NSMutableDictionary *legacyIdentity=[identity mutableCopy];legacyIdentity[@"schemaVersion"]=@1;[legacyIdentity removeObjectForKey:@"viewObservation"];
     NSMutableDictionary *legacyDiscovery=[discovery mutableCopy];legacyDiscovery[@"schemaVersion"]=@1;[legacyDiscovery removeObjectForKey:@"sourceCheck"];[legacyDiscovery removeObjectForKey:@"loadedRelation"];
     image[@"discoveryCheck"]=legacyDiscovery;image[@"installationCheck"]=installation(legacyIdentity);web[@"installationCheck"]=installation(legacyIdentity);app=read();

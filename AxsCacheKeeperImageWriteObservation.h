@@ -74,17 +74,18 @@ static inline NSDictionary *axs_cachekeeper_write_observation_record(AxsCacheKee
     for (unsigned i=0;i<observation.count && i<AXS_CACHEKEEPER_WRITE_EPOCH_CAP;i++) {
         AxsCacheKeeperWriteEpoch row=observation.epochs[i];if (row.mode>2) return nil;
         [epochs addObject:@{@"epoch":@(row.identifier),@"configuration":@(row.configuration),@"installation":@(row.installation),
+            @"identityState":row.enabled ? @"verified" : @"notRevalidated",
             @"enabled":@(row.enabled),@"mode":modes[row.mode],@"data":axs_cachekeeper_write_counts_record(row.writers[0]),
             @"extended":axs_cachekeeper_write_counts_record(row.writers[1])}];
     }
-    return @{@"schemaVersion":@1,@"scope":@"boundWriterDecisions",@"attemptBasis":@"dataAndKeyNonNil",@"allowedMeaning":@"originalCallForwarded",
+    return @{@"schemaVersion":@2,@"scope":@"boundWriterDecisions",@"attemptBasis":@"dataAndKeyNonNil",@"allowedMeaning":@"originalCallForwarded",
         @"diskPersistence":@"notMeasured",@"lastEpoch":@(observation.lastEpoch),@"droppedEpochs":@(observation.droppedEpochs),
         @"truncated":@((BOOL)(observation.droppedEpochs>0)),@"overflow":@(observation.overflow),@"epochs":[epochs copy],
         @"unattributed":@{@"data":axs_cachekeeper_write_counts_record(observation.unattributed[0]),@"extended":axs_cachekeeper_write_counts_record(observation.unattributed[1])}};
 }
 static inline NSDictionary *axs_cachekeeper_write_observation_projection(id value) {
     NSArray *keys=@[@"schemaVersion",@"scope",@"attemptBasis",@"allowedMeaning",@"diskPersistence",@"lastEpoch",@"droppedEpochs",@"truncated",@"overflow",@"epochs",@"unattributed"];
-    if (!axs_cachekeeper_write_keys(value,keys) || !axs_cachekeeper_write_number(value[@"schemaVersion"]) || ![value[@"schemaVersion"] isEqual:@1] ||
+    if (!axs_cachekeeper_write_keys(value,keys) || !axs_cachekeeper_write_number(value[@"schemaVersion"]) || ![@[@1,@2] containsObject:value[@"schemaVersion"]] ||
         ![value[@"scope"] isEqual:@"boundWriterDecisions"] || ![value[@"attemptBasis"] isEqual:@"dataAndKeyNonNil"] ||
         ![value[@"allowedMeaning"] isEqual:@"originalCallForwarded"] || ![value[@"diskPersistence"] isEqual:@"notMeasured"] ||
         !axs_cachekeeper_write_number(value[@"lastEpoch"]) || !axs_cachekeeper_write_number(value[@"droppedEpochs"]) ||
@@ -96,10 +97,13 @@ static inline NSDictionary *axs_cachekeeper_write_observation_projection(id valu
     if (dropped>last || last-dropped!=rows.count || (last && rows.count!=MIN(last,AXS_CACHEKEEPER_WRITE_EPOCH_CAP)) ||
         [value[@"truncated"] boolValue]!=(dropped>0) || ([value[@"overflow"] boolValue] && last!=AXS_CACHEKEEPER_WRITE_MAX)) return nil;
     NSMutableArray *epochs=[NSMutableArray new];uint64_t configuration=0,installation=0;NSDictionary *previous=nil;
+    BOOL identityRecorded=[value[@"schemaVersion"] isEqual:@2];
     for (NSUInteger i=0;i<rows.count;i++) {
         id row=rows[i];NSArray *rowKeys=@[@"epoch",@"configuration",@"installation",@"enabled",@"mode",@"data",@"extended"];
+        if (identityRecorded) rowKeys=[rowKeys arrayByAddingObject:@"identityState"];
         if (!axs_cachekeeper_write_keys(row,rowKeys) || !axs_cachekeeper_write_boolean(row[@"enabled"]) ||
             ![@[@"auto",@"clean",@"prevent"] containsObject:row[@"mode"]]) return nil;
+        if (identityRecorded && ![row[@"identityState"] isEqual:([row[@"enabled"] boolValue] ? @"verified" : @"notRevalidated")]) return nil;
         for (NSString *key in @[@"epoch",@"configuration",@"installation"]) if (!axs_cachekeeper_write_number(row[key])) return nil;
         uint64_t currentConfiguration=[row[@"configuration"] unsignedLongLongValue],currentInstallation=[row[@"installation"] unsignedLongLongValue];
         if ([row[@"epoch"] unsignedLongLongValue]!=dropped+i+1 || currentConfiguration<configuration || currentInstallation<installation) return nil;
@@ -110,8 +114,10 @@ static inline NSDictionary *axs_cachekeeper_write_observation_projection(id valu
             [row[@"enabled"] isEqual:previous[@"enabled"]] && [row[@"mode"] isEqual:previous[@"mode"]]) return nil;
         configuration=currentConfiguration;installation=currentInstallation;
         previous=row;
-        [epochs addObject:@{@"epoch":row[@"epoch"],@"configuration":row[@"configuration"],@"installation":row[@"installation"],
-            @"enabled":row[@"enabled"],@"mode":[row[@"mode"] copy],@"data":data,@"extended":extended}];
+        NSMutableDictionary *projected=[@{@"epoch":row[@"epoch"],@"configuration":row[@"configuration"],@"installation":row[@"installation"],
+            @"enabled":row[@"enabled"],@"mode":[row[@"mode"] copy],@"data":data,@"extended":extended} mutableCopy];
+        if (identityRecorded) projected[@"identityState"]=[row[@"identityState"] copy];
+        [epochs addObject:[projected copy]];
     }
     NSDictionary *data=axs_cachekeeper_write_counts_projection(value[@"unattributed"][@"data"]),*extended=axs_cachekeeper_write_counts_projection(value[@"unattributed"][@"extended"]);
     if (!data || !extended) return nil;

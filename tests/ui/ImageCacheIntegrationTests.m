@@ -1,6 +1,9 @@
 #import <XCTest/XCTest.h>
 #import <SDWebImage/SDWebImage.h>
 #import "../../AxsCacheKeeperImageCache.h"
+#if !AXS_CACHEKEEPER_IMAGE_LEGACY_RED
+#import "../../AxsCacheKeeperImageCoordinator.h"
+#endif
 #import "../../AxsCacheKeeperCleanupRules.h"
 #include <sys/stat.h>
 #import <objc/runtime.h>
@@ -12,6 +15,7 @@
 // Test fixture uses the existing observer/context boundaries; no product test-only scheduler.
 @interface AxsCacheKeeperImageCache (AxsCacheKeeperImageTestObserver)
 - (void)setObserver:(void (^)(NSDictionary *))observer;
+- (dispatch_queue_t)work;
 @end
 @interface AxsCacheKeeperImageTestCustomDisk : SDDiskCache
 @end
@@ -76,6 +80,57 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
 @property(nonatomic) NSUInteger refreshSequence;
 @end
 @implementation ImageCacheIntegrationTests
+- (void)testDelayedBackgroundPreparationActuallyRemovesSDKFiles {
+#if !AXS_CACHEKEEPER_IMAGE_LEGACY_RED
+    SDImageCache *owner=[self axs_cachekeeper_owner:@"delayed-runtime" config:nil];
+    [owner storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:@"stock"];
+    [self axs_cachekeeper_state:@{@"enabled":@NO,@"mode":@"clean"}];
+    XCTAssertEqualObjects(self.engine.receipt[@"eligible"],@0);
+    @synchronized(self) {self.context[@"appState"]=@{@"enabled":@YES,@"mode":@"clean",@"autoDiscover":@YES};}
+    __block NSUInteger begins=0,ends=0;
+    AxsCacheKeeperImageCoordinator *coordinator=[[AxsCacheKeeperImageCoordinator alloc] initWithCache:self.engine
+        beginBackground:^NSUInteger(void (^expiration)(void)){(void)expiration;begins++;return begins;}
+        endBackground:^(NSUInteger token){(void)token;ends++;} backgroundTime:^BOOL(NSUInteger token){return token!=0;}];
+    __weak AxsCacheKeeperImageCoordinator *weakCoordinator=coordinator;
+    [self.engine setObserver:^(NSDictionary *receipt){(void)receipt;dispatch_async(dispatch_get_main_queue(),^{[weakCoordinator receiptDidChange];});}];
+    XCTestExpectation *entered=[self expectationWithDescription:@"actual provider preparation held"];
+    dispatch_semaphore_t release=dispatch_semaphore_create(0);__block BOOL first=YES;
+    self.contextBarrier=^{if (first) {first=NO;[entered fulfill];dispatch_semaphore_wait(release,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC));}};
+    [coordinator didEnterBackground];[self waitForExpectations:@[entered] timeout:3];
+    XCTAssertEqual(begins,1u);XCTAssertEqual(ends,0u);
+    self.contextBarrier=nil;dispatch_semaphore_signal(release);
+    [self axs_cachekeeper_wait:^BOOL(NSDictionary *r){return [r[@"apiCompleted"] unsignedIntegerValue]==1 && [r[@"pending"] unsignedIntegerValue]==0;} description:@"delayed preparation actually clears SDK stock"];
+    XCTAssertNil([owner diskImageDataForKey:@"stock"]);
+    [coordinator receiptDidChange];XCTAssertEqual(ends,1u);
+#endif
+}
+- (void)testBackgroundPreparationRacesPreserveActualSDKFiles {
+#if !AXS_CACHEKEEPER_IMAGE_LEGACY_RED
+    SDImageCache *owner=[self axs_cachekeeper_owner:@"runtime-races" config:nil];
+    for (NSString *race in @[@"foreground",@"disable",@"expire"]) {
+        [self axs_cachekeeper_state:@{@"enabled":@YES,@"mode":@"clean",@"autoDiscover":@YES}];
+        [owner storeImageDataToDisk:[self axs_cachekeeper_payload] forKey:race];
+        __block void (^expire)(void);__block NSUInteger ends=0;
+        AxsCacheKeeperImageCoordinator *coordinator=[[AxsCacheKeeperImageCoordinator alloc] initWithCache:self.engine
+            beginBackground:^NSUInteger(void (^callback)(void)){expire=[callback copy];return 1;}
+            endBackground:^(NSUInteger token){(void)token;ends++;} backgroundTime:^BOOL(NSUInteger token){return token!=0;}];
+        XCTestExpectation *entered=[self expectationWithDescription:race];
+        dispatch_semaphore_t release=dispatch_semaphore_create(0);__block BOOL first=YES;
+        self.contextBarrier=^{if(first){first=NO;[entered fulfill];dispatch_semaphore_wait(release,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC));}};
+        [coordinator didEnterBackground];[self waitForExpectations:@[entered] timeout:3];
+        if ([race isEqual:@"foreground"]) [coordinator didBecomeActive];
+        else if ([race isEqual:@"expire"]) expire();
+        else { @synchronized(self){self.context[@"appState"]=@{@"enabled":@NO};self.context[@"installation"]=@"";}[coordinator configurationDidChange]; }
+        self.contextBarrier=nil;dispatch_semaphore_signal(release);
+        // Fence the actual worker and SDK queues without an extra refresh which
+        // would itself cancel the work and hide a broken lifecycle revocation.
+        dispatch_sync(self.engine.work,^{});dispatch_sync(owner.ioQueue,^{});dispatch_sync(self.engine.work,^{});
+        XCTAssertEqualObjects([owner diskImageDataForKey:race],[self axs_cachekeeper_payload]);
+        XCTAssertEqualObjects(self.engine.receipt[@"submitted"],@0);XCTAssertEqual(ends,1u);
+        @synchronized(self){self.context[@"installation"]=@"owned-fixture-install";}
+    }
+#endif
+}
 - (void)testActualWritesKeepSeparateConfigurationEvidenceAndRestoreFiles {
 #if !AXS_CACHEKEEPER_IMAGE_LEGACY_RED
     SDImageCache *owner=[self axs_cachekeeper_owner:@"write-epochs" config:nil];NSData *payload=[self axs_cachekeeper_payload];
@@ -94,10 +149,12 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     __block NSData *metadata=nil;
     dispatch_sync(owner.ioQueue,^{[owner.diskCache setExtendedData:nil forKey:@"seed"];[owner.diskCache setExtendedData:payload forKey:@"seed"];metadata=[owner.diskCache extendedDataForKey:@"seed"];});
     XCTAssertNil(metadata);
+    @synchronized(self) {self.context[@"installation"]=@"";}
     [self axs_cachekeeper_state:@{@"enabled":@NO,@"mode":@"prevent"}];
     XCTAssertEqualObjects(row(blocked)[@"data"][@"attempts"],@1);XCTAssertEqualObjects(row(blocked)[@"data"][@"blocked"],@1);
     XCTAssertEqualObjects(row(blocked)[@"extended"][@"attempts"],@1);XCTAssertEqualObjects(row(blocked)[@"extended"][@"blocked"],@1);
     NSNumber *disabled=epoch();
+    XCTAssertEqualObjects(row(disabled)[@"identityState"],@"notRevalidated");
     [owner storeImageDataToDisk:payload forKey:@"restored"];XCTAssertEqualObjects([owner diskImageDataForKey:@"restored"],payload);
     dispatch_sync(owner.ioQueue,^{[owner.diskCache setExtendedData:payload forKey:@"seed"];metadata=[owner.diskCache extendedDataForKey:@"seed"];});
     XCTAssertEqualObjects(metadata,payload);[self axs_cachekeeper_refresh];

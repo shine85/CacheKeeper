@@ -4,6 +4,7 @@
 #import "AxsCacheKeeperNetworkCache.h"
 #import "AxsCacheKeeperWebKitCache.h"
 #import "AxsCacheKeeperImageCacheRuntime.h"
+#import "AxsCacheKeeperGurdRuntime.h"
 #import "AxsCacheKeeperProbe.h"
 #import "AxsCacheKeeperHostEvidence.h"
 #import "AxsCacheKeeperRuntimeBuild.h"
@@ -48,6 +49,7 @@ static uint32_t axs_cachekeeper_refresh_network(void) {
         axs_cachekeeper_app_enabled(states[bundle]) && axs_cachekeeper_webkit_disk_cache_enabled(states[bundle]);
     axs_cachekeeper_configure_webkit(axs_cachekeeper_container_eligible,axs_cachekeeper_access,webKitAuthorized);
     axs_cachekeeper_configure_image_cache(axs_cachekeeper_container_eligible,axs_cachekeeper_access);
+    axs_cachekeeper_configure_gurd_cache(axs_cachekeeper_container_eligible,axs_cachekeeper_access);
     uint32_t diagnostic=!axs_cachekeeper_access ? axs_cachekeeper_probe_result(1,axs_cachekeeper_sandy_status) :
         (!readable ? axs_cachekeeper_probe_result(2,readError.code) : axs_cachekeeper_probe_result(3,0));
     BOOL prevent = readable && axs_cachekeeper_should_prevent(states[bundle]);

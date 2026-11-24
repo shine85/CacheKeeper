@@ -48,7 +48,8 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
                                     b'AxsCacheKeeperScanService', b'AxsCacheKeeperScanCursor',
                                     b'AxsCacheKeeperScanAllocation', b'AxsCacheKeeperWebKitCoordinator',
                                     b'AxsCacheKeeperCapacityRoot', b'AxsCacheKeeperCapacityService',
-                                    b'AxsCacheKeeperHostEvidenceServer'),
+                                    b'AxsCacheKeeperHostEvidenceServer', b'AxsCacheKeeperImageCoordinator',
+                                    b'AxsCacheKeeperGurdSource', b'AxsCacheKeeperGurdCache'),
             '/CacheKeeperPrefs': (b'AxsCacheKeeperSearchHitRouting', b'AxsCacheKeeperSearchInput',
                                     b'AxsCacheKeeperHostEvidenceClient'),
             '/ckrestore': (),
@@ -93,7 +94,8 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
                         b'AxsCacheKeeperRegrowingWindow', b'axs_cachekeeper_clock', b'ScanPageTests',
                         b'AxsCacheKeeperCapacityPageFixture', b'AxsCacheKeeperCapacityFinalValidationCursor',
                         b'CapacityPageTests',
-                        b'AxsCacheKeeperScanHostClient', b'axs_cachekeeper_scan_host_fail')):
+                        b'AxsCacheKeeperScanHostClient', b'axs_cachekeeper_scan_host_fail',
+                        b'AxsCacheKeeperGurdFixtureSource', b'FAIL: gurd:', b'FAIL: image-coordinator:')):
                     raise SystemExit(f'Test implementation leaked into binary: {suffix}')
             if architectures != {(0x100000c, 0), (0x100000c, 2)}:
                 raise SystemExit(f'Unexpected architectures: {suffix}')

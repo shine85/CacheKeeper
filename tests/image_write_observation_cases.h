@@ -56,6 +56,40 @@ static void axs_cachekeeper_runtime_pruned_writer(AxsCacheKeeperImageCache *engi
 }
 #endif
 static void axs_cachekeeper_runtime_write_observation(AxsCacheKeeperImageCache *engine,NSString *home,NSMutableDictionary *context) {
+#if AXS_CACHEKEEPER_DISABLED_IDENTITY_TESTING
+    __attribute__((objc_precise_lifetime)) SDImageCache *disabledOwner=[[SDImageCache alloc] initWithNamespace:@"disabled-identity"
+        diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+    axs_cachekeeper_runtime_refresh(engine);
+    [context setDictionary:axs_cachekeeper_runtime_disabled_context(home)];
+    axs_cachekeeper_runtime_refresh(engine);
+    [disabledOwner.diskCache setData:[NSData data] forKey:@"disabled"];
+    [disabledOwner.diskCache setExtendedData:[NSData data] forKey:@"disabled"];
+    dispatch_sync(engine.work,^{[engine axs_cachekeeper_publish];});
+    NSDictionary *disabledRow=[engine.receipt[@"writeObservation"][@"epochs"] lastObject];
+    axs_cachekeeper_runtime_require([disabledRow[@"enabled"] isEqual:@NO] &&
+        [disabledRow[@"data"][@"allowed"] isEqual:@1] && [disabledRow[@"extended"][@"allowed"] isEqual:@1],
+        "disabled real-context empty identity retains its own original-call evidence");
+    axs_cachekeeper_runtime_require([disabledRow[@"identityState"] isEqual:@"notRevalidated"] &&
+        [engine.receipt[@"eligible"] isEqual:@0] && [engine.receipt[@"restricted"] isEqual:@0] &&
+        atomic_load(&axs_cachekeeper_runtime_writes)==1 && atomic_load(&axs_cachekeeper_runtime_metadata)==1,
+        "disabled identity is explicitly unverified and grants no cleanup or writer restriction");
+    axs_cachekeeper_runtime_require(axs_cachekeeper_image_cache_raw_projection(engine.receipt)!=nil,"disabled identity receipt passes full strict projection");
+    NSNumber *disabledEpoch=disabledRow[@"epoch"];
+    context[@"valid"]=@NO;axs_cachekeeper_runtime_refresh(engine);
+    [disabledOwner.diskCache setData:[NSData data] forKey:@"invalid"];
+    context[@"valid"]=@YES;context[@"appState"]=@{@"enabled":@YES,@"mode":@"prevent"};
+    axs_cachekeeper_runtime_refresh(engine);
+    [disabledOwner.diskCache setData:[NSData data] forKey:@"enabled-without-identity"];
+    dispatch_sync(engine.work,^{[engine axs_cachekeeper_publish];});
+    NSDictionary *after=engine.receipt[@"writeObservation"];
+    axs_cachekeeper_runtime_require([after[@"lastEpoch"] isEqual:disabledEpoch] &&
+        [axs_cachekeeper_write_epoch(after,disabledEpoch) isEqual:disabledRow] &&
+        [after[@"unattributed"][@"data"][@"allowed"] isEqual:@2] &&
+        [engine.receipt[@"eligible"] isEqual:@0] && [engine.receipt[@"restricted"] isEqual:@0] &&
+        atomic_load(&axs_cachekeeper_runtime_writes)==3,
+        "invalid configuration or reenabled empty identity cannot inherit disabled attribution or authorization");
+    return;
+#endif
     SDDiskCache *disk;NSData *data=[NSData data];
 #if !AXS_CACHEKEEPER_WRITE_OBSERVATION_OLD
     axs_cachekeeper_run_write_status_tests();

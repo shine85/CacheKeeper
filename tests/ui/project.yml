@@ -118,6 +118,7 @@ targets:
       - path: ../../AxsCacheKeeperOperationInfo.m
       - path: ../../AxsCacheKeeperImageCache.m
       - path: ../../AxsCacheKeeperImageCacheRuntime.m
+      - path: ../../AxsCacheKeeperImageCoordinator.m
       - path: ../../AxsCacheKeeperCleanupRules.m
     dependencies:
       - target: InputHarness

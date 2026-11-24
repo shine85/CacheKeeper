@@ -11,16 +11,26 @@
 
 static AxsCacheKeeperImageCache *axs_cachekeeper_image_engine;
 static NSObject *axs_cachekeeper_image_context_lock;
-static BOOL axs_cachekeeper_image_access;
+static _Atomic(BOOL) axs_cachekeeper_image_access;
 static NSDictionary *axs_cachekeeper_image_installation;
 static NSMutableDictionary *axs_cachekeeper_image_pending_report;
 static BOOL axs_cachekeeper_image_report_writable=YES;
-static UIBackgroundTaskIdentifier axs_cachekeeper_image_background;
-static BOOL axs_cachekeeper_image_had_pending;
+static AxsCacheKeeperImageCoordinator *axs_cachekeeper_image_coordinator;
 static atomic_bool axs_cachekeeper_image_discovery_pending;
+static dispatch_queue_t axs_cachekeeper_image_policy_queue;
+static NSDictionary *axs_cachekeeper_image_policy_snapshot;
+static _Atomic(unsigned long) axs_cachekeeper_image_policy_generation;
+static NSUInteger axs_cachekeeper_image_notified_policy;
+static _Atomic(unsigned long) axs_cachekeeper_image_access_generation;
+// UIKit lifecycle owns these values; worker callbacks carry only policy tokens.
+static BOOL axs_cachekeeper_image_background;
+static NSUInteger axs_cachekeeper_image_lifecycle;
 extern void axs_cachekeeper_image_runtime_view_changed(void);
 
 static NSString *AxsCacheKeeperImageFolder(void) { return jbroot(@"/var/mobile/Library/CacheKeeper"); }
+static NSDictionary *AxsCacheKeeperImagePolicy(NSDictionary *context) {
+    return [context dictionaryWithValuesForKeys:@[@"valid",@"appState",@"selected",@"home",@"bundle",@"version",@"installation"]];
+}
 static void AxsCacheKeeperImageFlushReport(void) {
     if (!axs_cachekeeper_image_pending_report) return;
     NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
@@ -55,13 +65,14 @@ static NSDictionary *AxsCacheKeeperImageContext(void) {
             context[@"installationImage"]=axs_cachekeeper_installation_image_observation(
                 axs_cachekeeper_image_installation,NSBundle.mainBundle.bundleURL,version);
         }
+        // Retry state and sampled diagnostic timestamps are evidence, not policy.
+        NSDictionary *policy=AxsCacheKeeperImagePolicy(context);
+        if (![axs_cachekeeper_image_policy_snapshot isEqual:policy]) {
+            axs_cachekeeper_image_policy_snapshot=policy;
+            atomic_fetch_add(&axs_cachekeeper_image_policy_generation,1);
+        }
         return [context copy];
     }
-}
-static void AxsCacheKeeperImageEndBackground(void) {
-    if (axs_cachekeeper_image_background==UIBackgroundTaskInvalid) return;
-    UIBackgroundTaskIdentifier task=axs_cachekeeper_image_background;axs_cachekeeper_image_background=UIBackgroundTaskInvalid;
-    axs_cachekeeper_image_had_pending=NO;[UIApplication.sharedApplication endBackgroundTask:task];
 }
 static void AxsCacheKeeperImageDidLoad(const struct mach_header *header,intptr_t slide) {
     (void)header;(void)slide;
@@ -77,10 +88,9 @@ void axs_cachekeeper_configure_image_cache(BOOL containerEligible,BOOL configura
     if (!containerEligible) return;
     static dispatch_once_t once;
     dispatch_once(&once,^{
-        // UIKit exports this value; initialize it before any observer can finish a task.
-        axs_cachekeeper_image_background=UIBackgroundTaskInvalid;
         axs_cachekeeper_image_context_lock=[NSObject new];
         axs_cachekeeper_image_access=configurationAccess;
+        axs_cachekeeper_image_policy_queue=dispatch_queue_create("dev.local.cachekeeper.image.policy",DISPATCH_QUEUE_SERIAL);
         axs_cachekeeper_image_engine=[[AxsCacheKeeperImageCache alloc] initWithContextProvider:^NSDictionary *{return AxsCacheKeeperImageContext();}
             observer:^(NSDictionary *receipt) {
                 @synchronized(axs_cachekeeper_image_context_lock) {
@@ -90,11 +100,15 @@ void axs_cachekeeper_configure_image_cache(BOOL containerEligible,BOOL configura
                     else {axs_cachekeeper_image_report_writable=NO;NSLog(@"[CacheKeeper] 图片操作回执字段无效，保留待写历史");}
                 }
                 dispatch_async(dispatch_get_main_queue(),^{
-                    if ([receipt[@"pending"] unsignedIntegerValue]) axs_cachekeeper_image_had_pending=YES;
-                    else if (axs_cachekeeper_image_had_pending || [@[@"disabled",@"blocked",@"unsupported",@"notObserved"] containsObject:receipt[@"state"]])
-                        AxsCacheKeeperImageEndBackground();
+                    [axs_cachekeeper_image_coordinator receiptDidChange];
                 });
             }];
+        axs_cachekeeper_image_coordinator=[[AxsCacheKeeperImageCoordinator alloc] initWithCache:axs_cachekeeper_image_engine
+            beginBackground:^NSUInteger(void (^expiration)(void)) {
+                UIBackgroundTaskIdentifier task=[UIApplication.sharedApplication beginBackgroundTaskWithName:@"CacheKeeper.ImageDiskCache" expirationHandler:expiration];
+                return task==UIBackgroundTaskInvalid ? 0 : (NSUInteger)task+1;
+            } endBackground:^(NSUInteger token) {[UIApplication.sharedApplication endBackgroundTask:(UIBackgroundTaskIdentifier)(token-1)];}
+            backgroundTime:^BOOL(NSUInteger token) {return token && UIApplication.sharedApplication.applicationState==UIApplicationStateBackground && UIApplication.sharedApplication.backgroundTimeRemaining>1;}];
         NSString *receiptPath=[[AxsCacheKeeperImageFolder() stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[NSBundle.mainBundle.bundleIdentifier stringByAppendingString:@".imagecache.plist"]];
         [axs_cachekeeper_image_engine loadOperationHistoryFromPath:receiptPath];
         [axs_cachekeeper_image_engine startObserving];
@@ -103,19 +117,48 @@ void axs_cachekeeper_configure_image_cache(BOOL containerEligible,BOOL configura
         dispatch_async(dispatch_get_main_queue(),^{
             NSNotificationCenter *center=NSNotificationCenter.defaultCenter;
             [center addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
-                (void)note;[axs_cachekeeper_image_engine didBecomeActive];AxsCacheKeeperImageEndBackground();
+                (void)note;axs_cachekeeper_image_background=NO;axs_cachekeeper_image_lifecycle++;[axs_cachekeeper_image_coordinator didBecomeActive];
             }];
             [center addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
-                (void)note;
-                if ([axs_cachekeeper_image_engine.receipt[@"eligible"] unsignedIntegerValue] && axs_cachekeeper_image_background==UIBackgroundTaskInvalid)
-                    axs_cachekeeper_image_background=[UIApplication.sharedApplication beginBackgroundTaskWithName:@"CacheKeeper.ImageDiskCache" expirationHandler:^{
-                        [axs_cachekeeper_image_engine expireBackgroundTime];AxsCacheKeeperImageEndBackground();
-                    }];
-                BOOL time=axs_cachekeeper_image_background!=UIBackgroundTaskInvalid && UIApplication.sharedApplication.backgroundTimeRemaining>1;
-                [axs_cachekeeper_image_engine didEnterBackgroundWithTime:time];
+                (void)note;axs_cachekeeper_image_background=YES;axs_cachekeeper_image_lifecycle++;
+                [axs_cachekeeper_image_coordinator didEnterBackground];
             }];
         });
     });
-    @synchronized(axs_cachekeeper_image_context_lock) {axs_cachekeeper_image_access=configurationAccess;}
-    [axs_cachekeeper_image_engine refreshWithCompletion:nil];
+    // Never wait for provider filesystem/identity IO on a lifecycle caller.
+    BOOL accessChanged=atomic_exchange(&axs_cachekeeper_image_access,configurationAccess)!=configurationAccess;
+    NSUInteger accessGeneration=accessChanged ? atomic_fetch_add(&axs_cachekeeper_image_access_generation,1)+1 : atomic_load(&axs_cachekeeper_image_access_generation);
+    if (accessChanged) {
+        [axs_cachekeeper_image_engine refreshWithCompletion:nil];
+        void (^revoke)(void)=^{
+            if (accessGeneration!=atomic_load(&axs_cachekeeper_image_access_generation)) return;
+            [axs_cachekeeper_image_coordinator configurationDidChange];
+        };
+        if (NSThread.isMainThread) revoke();else dispatch_async(dispatch_get_main_queue(),revoke);
+    }
+    dispatch_async(axs_cachekeeper_image_policy_queue,^{
+        NSUInteger policy;NSDictionary *snapshot;
+        @synchronized(axs_cachekeeper_image_context_lock) {
+            (void)AxsCacheKeeperImageContext();
+            policy=atomic_load(&axs_cachekeeper_image_policy_generation);
+            snapshot=axs_cachekeeper_image_policy_snapshot;
+        }
+        dispatch_async(dispatch_get_main_queue(),^{
+            if (policy<=axs_cachekeeper_image_notified_policy) return;
+            axs_cachekeeper_image_notified_policy=policy;
+            // Inspect the context actually adopted by queued preparation, not a
+            // token sampled at UIKit entry or a later SDK execution provider.
+            NSUInteger lifecycle=axs_cachekeeper_image_lifecycle;
+            [axs_cachekeeper_image_engine performAfterPendingWork:^(NSDictionary *adopted,NSUInteger generation) {
+                BOOL applied=[AxsCacheKeeperImagePolicy(adopted) isEqual:snapshot];
+                dispatch_async(dispatch_get_main_queue(),^{
+                    if (policy!=atomic_load(&axs_cachekeeper_image_policy_generation) || policy!=axs_cachekeeper_image_notified_policy ||
+                        lifecycle!=axs_cachekeeper_image_lifecycle || ![axs_cachekeeper_image_engine isCurrentWorkGeneration:generation]) return;
+                    if (axs_cachekeeper_image_background && applied) return;
+                    [axs_cachekeeper_image_coordinator configurationDidChange];
+                    [axs_cachekeeper_image_engine refreshWithCompletion:nil];
+                });
+            }];
+        });
+    });
 }

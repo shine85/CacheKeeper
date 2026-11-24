@@ -10,6 +10,23 @@ static void ck_write_status_roundtrip(AxsCacheKeeperWriteObservation observation
     NSDictionary *record=axs_cachekeeper_write_observation_record(observation);
     ck_write_status_require(axs_cachekeeper_write_boolean(record[@"truncated"]),"producer truncation is a Foundation boolean at zero and after eviction");
     ck_write_status_require([axs_cachekeeper_write_observation_projection(record) isEqual:record],"actual producer record passes the strict observation projection");
+    if ([record[@"schemaVersion"] isEqual:@2]) {
+        NSMutableDictionary *legacy=[record mutableCopy];NSMutableArray *oldRows=[NSMutableArray new];
+        for (NSDictionary *row in record[@"epochs"]) {
+            ck_write_status_require([row[@"identityState"] isEqual:([row[@"enabled"] boolValue] ? @"verified" : @"notRevalidated")],"current epochs state whether identity was revalidated");
+            NSMutableDictionary *old=[row mutableCopy];[old removeObjectForKey:@"identityState"];[oldRows addObject:old];
+        }
+        legacy[@"schemaVersion"]=@1;legacy[@"epochs"]=oldRows;
+        ck_write_status_require([axs_cachekeeper_write_observation_projection(legacy) isEqual:legacy],"schema one stays readable without inventing identity verification");
+        if ([record[@"epochs"] count]) {
+            NSMutableDictionary *badIdentity=[record mutableCopy];NSMutableArray *badRows=[record[@"epochs"] mutableCopy];
+            NSMutableDictionary *badRow=[badRows[0] mutableCopy];badRow[@"identityState"]=[badRow[@"enabled"] boolValue] ? @"notRevalidated" : @"verified";
+            badRows[0]=badRow;badIdentity[@"epochs"]=badRows;
+            ck_write_status_require(!axs_cachekeeper_write_observation_projection(badIdentity),"contradictory identity claim is rejected");
+            [badRow removeObjectForKey:@"identityState"];
+            ck_write_status_require(!axs_cachekeeper_write_observation_projection(badIdentity),"schema two requires every identity state");
+        }
+    }
     for (NSNumber *format in @[@(NSPropertyListXMLFormat_v1_0),@(NSPropertyListBinaryFormat_v1_0)]) {
         NSError *error=nil;
         NSData *data=[NSPropertyListSerialization dataWithPropertyList:record format:format.unsignedIntegerValue options:0 error:&error];

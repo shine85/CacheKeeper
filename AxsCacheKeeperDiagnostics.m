@@ -9,6 +9,7 @@
 #import "AxsCacheKeeperInspectionStatus.h"
 #import "AxsCacheKeeperWebKitStatus.h"
 #import "AxsCacheKeeperImageCacheStatus.h"
+#import "AxsCacheKeeperGurdStatus.h"
 #import "AxsCacheKeeperStorageInventory.h"
 #import "AxsCacheKeeperCapacityStatus.h"
 #import "AxsCacheKeeperAllocation.h"
@@ -316,9 +317,17 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
                 app[@"imageDiskCache"]=@{@"state":@"available",@"data":imageCache};
             } else app[@"imageDiskCache"]=@{@"state":@"invalid"};
         } else app[@"imageDiskCache"]=[redactor axs_cachekeeper_record:imageRead];
+        NSDictionary *gurdRead=AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.gurd.plist",bundle]);
+        if ([gurdRead[@"state"] isEqual:@"available"]) {
+            NSMutableDictionary *gurd=[axs_cachekeeper_gurd_receipt_projection(gurdRead[@"data"]) mutableCopy];
+            if (gurd) {
+                gurd[@"updated"]=@([gurd[@"updated"] timeIntervalSince1970]);
+                app[@"gurdCache"]=@{@"state":@"available",@"data":gurd};
+            } else app[@"gurdCache"]=@{@"state":@"invalid"};
+        } else app[@"gurdCache"]=[redactor axs_cachekeeper_record:gurdRead];
         app[@"capabilities"]=axs_cachekeeper_capabilities(@{@"standardDirectories":scan ? @{@"state":@"available",@"data":scan} : @{@"state":[snapshots[@"state"] isEqual:@"available"] ? @"missing" : snapshots[@"state"]},
-            @"network":networkRead,@"image":imageRead,@"webKit":webKitRead,@"hostAutomatic":hostRead,@"hostObserved":observedRead},environment[@"pluginVersion"]);
-        [savedSDKApps addObject:@{@"bundle":bundle,@"webKitDiskCache":webKitRead,@"imageDiskCache":imageRead}];
+            @"network":networkRead,@"image":imageRead,@"webKit":webKitRead,@"gurd":gurdRead,@"hostAutomatic":hostRead,@"hostObserved":observedRead},environment[@"pluginVersion"]);
+        [savedSDKApps addObject:@{@"bundle":bundle,@"webKitDiskCache":webKitRead,@"imageDiskCache":imageRead,@"gurdCache":gurdRead}];
         [exported addObject:app];
         if (progress) progress(exported.count,bundles.count);
     }

@@ -127,10 +127,12 @@
     __block NSData *metadata=nil;
     dispatch_sync(owner.ioQueue,^{[owner.diskCache setExtendedData:nil forKey:@"seed"];[owner.diskCache setExtendedData:payload forKey:@"seed"];metadata=[owner.diskCache extendedDataForKey:@"seed"];});
     XCTAssertNil(metadata);
+    @synchronized(self) {self.context[@"installation"]=@"";}
     [self axs_cachekeeper_legacy_state:@{@"enabled":@NO,@"mode":@"prevent"}];
     XCTAssertEqualObjects(row(blocked)[@"data"][@"attempts"],@1);XCTAssertEqualObjects(row(blocked)[@"data"][@"blocked"],@1);
     XCTAssertEqualObjects(row(blocked)[@"extended"][@"attempts"],@1);XCTAssertEqualObjects(row(blocked)[@"extended"][@"blocked"],@1);
     NSNumber *disabled=epoch();
+    XCTAssertEqualObjects(row(disabled)[@"identityState"],@"notRevalidated");
     [owner storeImageDataToDisk:payload forKey:@"restored"];XCTAssertEqualObjects([owner diskImageDataForKey:@"restored"],payload);
     dispatch_sync(owner.ioQueue,^{[owner.diskCache setExtendedData:payload forKey:@"seed"];metadata=[owner.diskCache extendedDataForKey:@"seed"];});
     XCTAssertEqualObjects(metadata,payload);[self axs_cachekeeper_legacy_refresh];

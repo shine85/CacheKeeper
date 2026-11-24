@@ -30,6 +30,7 @@ def main():
         ("ImageCacheIntegrationTests", "ImageCacheLegacyIntegrationTests", 3),
         ("../../AxsCacheKeeperImageCache.m", "baseline/AxsCacheKeeperImageCache.m", 1),
         ("      - path: ../../AxsCacheKeeperImageCacheRuntime.m\n", "", 1),
+        ("      - path: ../../AxsCacheKeeperImageCoordinator.m\n", "", 1),
         ("AXS_CACHEKEEPER_IMAGE_TESTING=1", "AXS_CACHEKEEPER_IMAGE_TESTING=1 AXS_CACHEKEEPER_IMAGE_LEGACY_RED=1", 1),
     ]
     for before, after, count in replacements:

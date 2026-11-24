@@ -1,20 +1,28 @@
 #pragma once
 #import <Foundation/Foundation.h>
 #import "AxsCacheKeeperImageCacheStatus.h"
+#import "AxsCacheKeeperImageCoordinator.h"
 
 // Provider runs on private background queues and must be thread-safe. It returns the latest
 // validated configuration and in-memory installation identity, never image data or keys.
 typedef NSDictionary * (^AxsCacheKeeperImageContextProvider)(void);
-@interface AxsCacheKeeperImageCache : NSObject
+@interface AxsCacheKeeperImageCache : NSObject <AxsCacheKeeperImageLifecycle>
 - (instancetype)initWithContextProvider:(AxsCacheKeeperImageContextProvider)provider
                               observer:(void (^)(NSDictionary *receipt))observer;
 - (void)startObserving;
 // Coalesces loader notifications on the engine queue and publishes changed discovery state.
 - (void)requestDiscoveryRefresh;
+// FIFO fence only; completion runs off main after previously queued preparation.
+// Returns the last adopted context and generation without creating a refresh/event.
+- (void)performAfterPendingWork:(void (^)(NSDictionary *context, NSUInteger generation))completion;
+// Short synchronized read; never waits for provider or filesystem IO.
+- (BOOL)isCurrentWorkGeneration:(NSUInteger)generation;
 // Immediately suspends write gates and cancels work which has not entered the SDK API.
 - (void)refreshWithCompletion:(void (^)(void))completion;
 - (void)didBecomeActive;
 - (void)didEnterBackgroundWithTime:(BOOL)hasTime;
+// Completion means owner scheduling finished, not that SDK deletion completed.
+- (void)didEnterBackgroundWithTime:(BOOL)hasTime completion:(void (^)(void))completion;
 - (void)expireBackgroundTime;
 // Restore once before observation; malformed input is explicitly recorded as rejected.
 - (void)restoreOperationHistory:(id)history;

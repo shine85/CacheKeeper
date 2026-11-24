@@ -1087,7 +1087,8 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         if (generation!=self.generation) {axs_cachekeeper_operation_refresh(self.operationHistory,event,@"obsolete");return;}
         uint64_t epoch=0;id state=context[@"appState"];
         if ([context[@"valid"] boolValue] && axs_cachekeeper_state_valid(state) &&
-            [context[@"installation"] isKindOfClass:NSString.class] && [context[@"installation"] length]) {
+            (!axs_cachekeeper_app_enabled(state) ||
+             ([context[@"installation"] isKindOfClass:NSString.class] && [context[@"installation"] length]))) {
             NSString *mode=axs_cachekeeper_mode(state);unsigned code=[mode isEqual:@"clean"] ? 1 : [mode isEqual:@"prevent"] ? 2 : 0;
             @synchronized(self.writeLedger) {epoch=axs_cachekeeper_write_epoch_begin(&self.writeLedger->observation,generation,self.installationGeneration,axs_cachekeeper_app_enabled(state),code);}
         }
@@ -1114,6 +1115,17 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     [self axs_cachekeeper_publish];
     }
 }
+- (void)performAfterPendingWork:(void (^)(NSDictionary *,NSUInteger))completion {
+    if (!completion) return;
+    dispatch_async(self.work,^{
+        NSDictionary *context;NSUInteger generation;
+        @synchronized(self) {context=self.context;generation=self.generation;}
+        completion(context,generation);
+    });
+}
+- (BOOL)isCurrentWorkGeneration:(NSUInteger)generation {
+    @synchronized(self) {return self.generation==generation;}
+}
 - (void)refreshWithCompletion:(void (^)(void))completion {
     [self axs_cachekeeper_cancel];
     NSDictionary *context=[self axs_cachekeeper_operation_context];
@@ -1130,16 +1142,26 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     dispatch_async(self.work,^{self.reason=@"noBackgroundTime";[self axs_cachekeeper_publish];});
 }
 - (void)didEnterBackgroundWithTime:(BOOL)hasTime {
-    @synchronized(self) {self.foreground=NO;self.hasTime=hasTime;}
+    [self didEnterBackgroundWithTime:hasTime completion:nil];
+}
+- (void)didEnterBackgroundWithTime:(BOOL)hasTime completion:(void (^)(void))completion {
+    NSUInteger requestGeneration;
+    @synchronized(self) {self.foreground=NO;self.hasTime=hasTime;requestGeneration=self.generation;}
     NSDictionary *context=[self axs_cachekeeper_operation_context];
     dispatch_async(self.work,^{
         NSUInteger event=[self axs_cachekeeper_begin_event:@"background" context:context current:YES];
+        BOOL obsolete;@synchronized(self) {obsolete=requestGeneration!=self.generation || self.foreground;}
+        if (obsolete) {
+            axs_cachekeeper_operation_refresh(self.operationHistory,event,@"obsolete");
+            axs_cachekeeper_operation_finish(self.operationHistory,event);[self axs_cachekeeper_publish];
+            if (completion) completion();return;
+        }
         [self axs_cachekeeper_refresh_event:event];
         for (AxsCacheKeeperImageBinding *binding in [self axs_cachekeeper_bindings]) {
             if (binding.pending) {self.reason=@"inFlight";continue;}
             if (!binding.eligible) continue;
             NSUInteger generation;BOOL allowed;
-            @synchronized(self) {generation=self.generation;allowed=self.hasTime && !self.foreground;}
+            @synchronized(self) {generation=self.generation;allowed=requestGeneration==generation && self.hasTime && !self.foreground;}
             if (!allowed) {self.reason=@"noBackgroundTime";continue;}
             // Only this serial worker can create/finish events. Bind the child before
             // publishing pending state; reentrant observers can only enqueue later events.
@@ -1161,6 +1183,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         axs_cachekeeper_operation_event_reason(self.operationHistory,event,self.reason);
         axs_cachekeeper_operation_finish(self.operationHistory,event);
         [self axs_cachekeeper_publish];
+        if (completion) completion();
     });
 }
 - (void)axs_cachekeeper_execute:(AxsCacheKeeperImageBinding *)binding generation:(NSUInteger)generation event:(NSUInteger)event action:(NSUInteger)action {
