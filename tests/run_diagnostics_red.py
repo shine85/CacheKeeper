@@ -12,8 +12,14 @@ with tempfile.TemporaryDirectory(prefix="diagnostics-red-", dir=root / "tmp") as
     for name in ("AxsCacheKeeperDiagnostics.h", "AxsCacheKeeperDiagnostics.m"):
         (target / name).write_bytes(subprocess.check_output(
             ["git", "show", f"{baseline}:{name}"], cwd=root, timeout=15))
-    for name in ("AxsCacheKeeperPolicy.h", "AxsCacheKeeperCleanupHistory.h", "AxsCacheKeeperReleaseEvidenceStatus.h", "tests/diagnostics_tests.m"):
-        (target / name).write_bytes((root / name).read_bytes())
+    # Stage the project headers beside the historical implementation and test.
+    # Quoted relative imports must resolve to one physical copy; otherwise a
+    # temp header plus its root counterpart can redefine unguarded helpers.
+    for path in root.glob("AxsCacheKeeper*.h"):
+        if path.name == "AxsCacheKeeperDiagnostics.h":
+            continue
+        (target / path.name).write_bytes(path.read_bytes())
+    (target / "tests/diagnostics_tests.m").write_bytes((root / "tests/diagnostics_tests.m").read_bytes())
     (target / "main.m").write_text(
         '#import <Foundation/Foundation.h>\n'
         'extern void axs_cachekeeper_run_diagnostics_tests(NSString *fixture);\n'

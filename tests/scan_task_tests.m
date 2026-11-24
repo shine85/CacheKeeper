@@ -116,9 +116,12 @@ int main(int argc, const char **argv) { @autoreleasepool {
     NSDictionary *partial=axs_cachekeeper_test_read(folder,@"scan.plist");
     axs_cachekeeper_test_check([partial[@"previousRows"] isEqual:completed[@"rows"]],"first slice keeps pre-task history");
     NSArray *recent=partial[@"recentScans"];
+    axs_cachekeeper_test_check([recent isEqual:completed[@"recentScans"]],"running continuation keeps only previously completed history");
     for(NSUInteger i=0;i<10;i++) [service tick];
     NSDictionary *finished=axs_cachekeeper_test_read(folder,@"scan.plist");
-    axs_cachekeeper_test_check([finished[@"recentScans"] isEqual:recent] && [finished[@"previousRows"] isEqual:completed[@"rows"]],"continuations never append fake history");
+    axs_cachekeeper_test_check([finished[@"recentScans"] count]==[recent count]+1 &&
+        [[[finished[@"recentScans"] lastObject][@"scanDiagnosticsState"] description] isEqual:@"available"] &&
+        [finished[@"previousRows"] isEqual:completed[@"rows"]],"terminal completion appends one real history observation");
     NSMutableDictionary *privateProgress=[finished[@"scanProgress"] mutableCopy];privateProgress[@"privatePath"]=@"/private/secret";
     axs_cachekeeper_test_check(!axs_cachekeeper_scan_progress_projection(privateProgress)[@"privatePath"],"progress projection removes unknown private fields");
     NSMutableDictionary *malformed=[finished mutableCopy];[malformed removeObjectForKey:@"scanDiagnostics"];

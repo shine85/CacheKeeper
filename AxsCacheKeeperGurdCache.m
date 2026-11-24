@@ -161,7 +161,9 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
   if(rootReason) {run.sampleFailure=[rootReason isEqual:@"rootUnavailable"] ? @"readError" : @"identityChanged";run.sampleErrorCode=[run.sampleFailure isEqual:@"readError"] ? errno : ESTALE;}
  }
  NSString *state=run.sampleFailure ?: run.cursor.state ?: @"readError";
- if([state isEqual:@"readError"] && [run.cursor.result[@"scanDiagnostics"][@"errors"].firstObject[@"stage"] isEqual:@"closeDirectory"]) state=@"closeError";
+ NSArray *errors=run.cursor.result[@"scanDiagnostics"][@"errors"];
+ NSDictionary *firstError=[errors isKindOfClass:NSArray.class] ? errors.firstObject : nil;
+ if([state isEqual:@"readError"] && [firstError[@"stage"] isEqual:@"closeDirectory"]) state=@"closeError";
  [self axs_cachekeeper_sample_close:run];
  if(run.sampleFailure) state=run.sampleFailure;
  NSDictionary *sample=[self axs_cachekeeper_sample_snapshot:run state:run.sampleFailure ?: state];
@@ -206,7 +208,10 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
   if(!components.count && (info->st_dev!=[leaf[0] longLongValue] || info->st_ino!=[leaf[1] unsignedLongLongValue])) run.sampleFailure=@"identityChanged";
   if(S_ISLNK(info->st_mode)) run.sampleFailure=@"linkEncountered";
   else if(!S_ISDIR(info->st_mode) && !S_ISREG(info->st_mode)) run.sampleFailure=@"invalidMetadata";
-  if(!run.sampleFailure && S_ISREG(info->st_mode)) run.sampleFailure=axs_cachekeeper_gurd_verify_file(run.sampleRootFD,info,components,&run.sampleErrorCode);
+  if(!run.sampleFailure && S_ISREG(info->st_mode)) {
+   int errorCode=0;run.sampleFailure=axs_cachekeeper_gurd_verify_file(run.sampleRootFD,info,components,&errorCode);
+   if(run.sampleFailure) run.sampleErrorCode=errorCode;
+  }
   if(!run.sampleFailure && S_ISREG(info->st_mode)) {
    const uint64_t identity[]={(uint64_t)info->st_dev,(uint64_t)info->st_ino};NSData *key=[NSData dataWithBytes:identity length:sizeof(identity)];
    NSArray *value=@[@(info->st_size),@(info->st_blocks),@(info->st_nlink),@(info->st_mtimespec.tv_sec),@(info->st_mtimespec.tv_nsec),@(info->st_ctimespec.tv_sec),@(info->st_ctimespec.tv_nsec)];

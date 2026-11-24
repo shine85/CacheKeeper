@@ -333,8 +333,10 @@ static NSString *AxsCacheKeeperScanMessage(NSString *state) {
         @"scanDiagnostics":diagnostics} mutableCopy];
     NSString *home=[self.context[@"home"] path];if(home) currentHistoryEntry[@"home"]=home;
     NSMutableArray *recent=[axs_cachekeeper_recent_scans(self.old) mutableCopy];
-    [recent addObject:axs_cachekeeper_recent_scan_entry(currentHistoryEntry) ?: @{@"updated":updated,@"rows":rows,@"scanDiagnosticsState":@"invalid"}];
-    while(recent.count>4) [recent removeObjectAtIndex:0];
+    if(![self.state isEqual:@"running"]) {
+        [recent addObject:axs_cachekeeper_recent_scan_entry(currentHistoryEntry) ?: @{@"updated":updated,@"rows":rows,@"scanDiagnosticsState":@"invalid"}];
+        while(recent.count>4) [recent removeObjectAtIndex:0];
+    }
     NSMutableDictionary *groups=[NSMutableDictionary new];for(NSString *key in self.context[@"groups"]) groups[key]=[self.context[@"groups"][key] path];
     return @{@"bundle":self.bundle,@"token":self.token,@"home":home ?: @"",@"groups":groups,
         @"rows":rows,@"previousRows":self.old[@"rows"] ?: @[],@"recentScans":recent,

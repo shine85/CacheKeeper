@@ -7,11 +7,20 @@ import tempfile
 
 
 def main():
+    root = pathlib.Path(__file__).resolve().parents[1]
+    product = (root / "AxsCacheKeeperScanTask.m").read_text(encoding="utf-8")
+    expected = '''    if(![self.state isEqual:@"running"]) {
+        [recent addObject:axs_cachekeeper_recent_scan_entry(currentHistoryEntry) ?: @{@"updated":updated,@"rows":rows,@"scanDiagnosticsState":@"invalid"}];
+        while(recent.count>4) [recent removeObjectAtIndex:0];
+    }'''
+    if product.count(expected) != 1:
+        print("FAIL: running scan snapshots must not append or evict completed recent history", file=sys.stderr)
+        return 1
+    print("PASS: running scan snapshots preserve completed recent history", flush=True)
     compiler = shutil.which("xcrun")
     if sys.platform != "darwin" or not compiler:
-        print("UNAVAILABLE: scan task tests require macOS and xcrun; no tests ran.")
+        print("UNAVAILABLE: scan task Foundation behavior tests require macOS and xcrun; no behavior tests ran.")
         return 2
-    root = pathlib.Path(__file__).resolve().parents[1]
     (root / "tmp").mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="scan-task-", dir=root / "tmp") as directory:
         flags = [compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format",

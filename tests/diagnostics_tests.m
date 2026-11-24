@@ -3,6 +3,7 @@
 #import "../AxsCacheKeeperDiagnostics.h"
 #import "../AxsCacheKeeperCleanupHistory.h"
 #import "../AxsCacheKeeperCapacityStatus.h"
+#import "../AxsCacheKeeperImageWriteObservation.h"
 
 static void dxcheck(BOOL condition, NSString *message) {
     if (!condition) { fprintf(stderr,"FAIL: diagnostics: %s\n",message.UTF8String);exit(1); }

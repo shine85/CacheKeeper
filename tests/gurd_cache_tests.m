@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import "../AxsCacheKeeperGurdCache.h"
+#import "../AxsCacheKeeperScanTask.h"
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
@@ -95,7 +96,7 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
  check(source.submitted==2 && [cache.receipt[@"operations"] count]==2,@"same or delayed old configuration notification cannot retry a background event");
  [cache didBecomeActive];NSMutableDictionary *excluded=[context mutableCopy];excluded[@"appState"]=@{@"enabled":@YES,@"autoDiscover":@YES,@"excludedPaths":@[@"Library/Application Support/gurd_cache/kept"]};context=excluded;
  [cache didEnterBackground];waitFor(^BOOL {return eventFinished(3);});check(source.submitted==2,@"overlapping descendant exclusion blocks whole host call");
- [cache didBecomeActive];allowed=[context mutableCopy];allowed[@"appState"]=@{@"enabled":@YES,@"autoDiscover":@NO};allowed[@"selected"]=@[@"Library/Application Support/gurd_cache"];context=allowed;source.scopeProven=NO;
+ [cache didBecomeActive];NSMutableDictionary *unprovenContext=[context mutableCopy];unprovenContext[@"appState"]=@{@"enabled":@YES,@"autoDiscover":@NO};unprovenContext[@"selected"]=@[@"Library/Application Support/gurd_cache"];context=unprovenContext;source.scopeProven=NO;
  NSUInteger unprovenCalls=source.hostSubmitCalls;[cache didEnterBackground];waitFor(^BOOL {return eventFinished(4);});operation=[cache.receipt[@"operations"] lastObject];
  check([operation[@"reason"] isEqual:@"scopeUnproven"] && [operation[@"scopeProof"][@"state"] isEqual:@"scopeUnproven"] && source.hostSubmitCalls==unprovenCalls,@"unproven candidate scope never reaches host submit");
  source.scopeProven=YES;

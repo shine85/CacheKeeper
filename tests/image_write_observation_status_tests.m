@@ -82,8 +82,7 @@ void axs_cachekeeper_run_write_status_tests(void) {
         @"observed":@0,@"eligible":@0,@"restricted":@0,@"writesBlocked":@2,@"queued":@0,@"submitted":@0,
         @"apiCompleted":@0,@"skipped":@0,@"pending":@0,@"updated":[NSDate dateWithTimeIntervalSince1970:120],
         @"bytesState":@"notMeasured",@"writeObservation":axs_cachekeeper_write_observation_record(observation)};
-    ck_write_status_require([axs_cachekeeper_image_cache_message(blockedReceipt) containsString:@"prevent data 1/1/0"] &&
-        [axs_cachekeeper_image_cache_message(blockedReceipt) containsString:@"prevent extended 1/1/0"],
+    ck_write_status_require([axs_cachekeeper_image_cache_message(blockedReceipt) containsString:@"prevent data 1/1/0, extended 1/1/0"],
         "nonzero writer fixture reports the exact data and extended decisions");
     for (uint64_t i=2;i<=18;i++) axs_cachekeeper_write_epoch_begin(&observation,i,1,false,2);
     ck_write_status_require(observation.droppedEpochs==2,"fixture genuinely evicts two epochs");

@@ -33,7 +33,11 @@ static NSDictionary *axs_cachekeeper_scan_test_export(NSString *folder, id diagn
 
 static NSDictionary *axs_cachekeeper_scan_test_export_history(NSString *folder, NSArray *recent) {
     NSDictionary *scan=@{@"updated":[NSDate dateWithTimeIntervalSince1970:100],@"rows":@[],@"recentScans":recent};
-    axs_cachekeeper_scan_test_write(folder,scan);
+    NSError *error=nil;
+    NSData *data=[NSPropertyListSerialization dataWithPropertyList:@{@"app.swiftgram.ios":scan}
+        format:NSPropertyListBinaryFormat_v1_0 options:0 error:&error];
+    axs_cachekeeper_scan_test_check(data && [data writeToFile:[folder stringByAppendingPathComponent:@"snapshots.plist"]
+        options:NSDataWritingAtomic error:&error], @"Swiftgram history fixture must be writable");
     AxsCacheKeeperDiagnostics *session=[[AxsCacheKeeperDiagnostics alloc] initWithFolder:folder];
     NSDictionary *report=[session reportWithApps:@[@{@"id":@"app.swiftgram.ios",@"version":@"1.0"}] environment:@{}];
     axs_cachekeeper_scan_test_check([report[@"apps"] count]==1,@"history report includes exact Swiftgram bundle");
@@ -70,11 +74,10 @@ static void axs_cachekeeper_scan_test_history_export(NSString *folder) {
     NSDictionary *report=axs_cachekeeper_scan_test_export_history(folder,@[current,legacy]);
     NSArray *recent=report[@"apps"][0][@"scan"][ @"data"][ @"recentScans"];
     NSDictionary *exported=recent[0];
+    NSString *stageSequence=[[failure[@"errors"] valueForKey:@"stage"] componentsJoinedByString:@","];
     axs_cachekeeper_scan_test_check(recent.count==2 && [exported[@"scanDiagnosticsState"] isEqual:@"available"] &&
-        [exported[@"scanDiagnostics"][ @"errors"][0][ @"stage"] isEqual:@"containerResolve"] &&
-        [exported[@"scanDiagnostics"][ @"errors"][0][ @"errorDomain"] isEqual:@"posix"] &&
-        [exported[@"scanDiagnostics"][ @"errors"][0][ @"errorCode"] isEqual:@ENOENT] &&
-        [exported[@"scanDiagnostics"][ @"errors"][0][ @"count"] isEqual:@2] &&
+        [stageSequence isEqual:[[exported[@"scanDiagnostics"][ @"errors"] valueForKey:@"stage"] componentsJoinedByString:@","]] &&
+        [failure[@"errors"] isEqual:exported[@"scanDiagnostics"][ @"errors"]] &&
         [exported[@"scanDiagnostics"][ @"errorsTruncated"] boolValue] &&
         [exported[@"scanDiagnostics"][ @"omittedErrorCount"] isEqual:@1] &&
         [exported[@"scanDiagnostics"][ @"statErrors"] isEqual:@18],

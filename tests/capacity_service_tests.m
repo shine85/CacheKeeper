@@ -448,12 +448,14 @@ static void ckprojection(NSString *base) {
     record=[ckresult(folder) mutableCopy];record[@"updatedAt"]=@9007199254740992ULL;ckcheck([axs_cachekeeper_capacity_projection(record)[@"state"] isEqual:@"invalid"],"unsafe numeric value invalidates known field");
     record=[ckresult(folder) mutableCopy];record[@"updatedAt"]=@0;record[@"finishedAt"]=@0;ckcheck([axs_cachekeeper_capacity_projection(record)[@"state"] isEqual:@"complete"],"wall-clock correction does not invalidate monotonic measurement");
     record=[ckresult(folder) mutableCopy];NSString *summaryEpoch=record[@"epoch"];
-    NSDictionary *binding=@{@"epoch":summaryEpoch,@"terminalState":record[@"state"],@"terminalFinishedAt":record[@"finishedAt"],@"summarizedAt":@103};
+    uint64_t finishedAt=[record[@"finishedAt"] unsignedLongLongValue];
+    ckcheck(finishedAt>1,"service terminal fixture has a positive finishedAt");
+    NSDictionary *binding=@{@"epoch":summaryEpoch,@"terminalState":record[@"state"],@"terminalFinishedAt":record[@"finishedAt"],@"summarizedAt":@(finishedAt+1)};
     NSDictionary *closedBinding=axs_cachekeeper_capacity_summary_binding(binding,record);
     ckcheck([closedBinding[@"state"] isEqual:@"current"] && [closedBinding[@"epoch"] isEqual:summaryEpoch],"summary binds the same terminal epoch after finishedAt");
     NSMutableDictionary *wrong=[binding mutableCopy];wrong[@"epoch"]=NSUUID.UUID.UUIDString;
     ckcheck([axs_cachekeeper_capacity_summary_binding(wrong,record)[@"state"] isEqual:@"stale"],"summary from another epoch stays stale");
-    wrong=[binding mutableCopy];wrong[@"summarizedAt"]=@101;
+    wrong=[binding mutableCopy];wrong[@"summarizedAt"]=@(finishedAt-1);
     ckcheck([axs_cachekeeper_capacity_summary_binding(wrong,record)[@"state"] isEqual:@"stale"],"summary before terminal finish stays stale");
     wrong=[binding mutableCopy];wrong[@"terminalFinishedAt"]=@YES;
     ckcheck([axs_cachekeeper_capacity_summary_binding(wrong,record)[@"state"] isEqual:@"stale"],"boolean terminal time is rejected");
