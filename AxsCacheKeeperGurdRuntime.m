@@ -122,8 +122,7 @@ void axs_cachekeeper_configure_gurd_cache(BOOL containerEligible,BOOL configurat
         dispatch_async(axs_cachekeeper_gurd_report_queue,^{
             NSString *path=AxsCacheKeeperGurdReportPath();
             id saved=AxsCacheKeeperGurdLoadReport(path);
-            if (saved) [axs_cachekeeper_gurd_engine restoreReceipt:saved];
-            dispatch_async(dispatch_get_main_queue(),^{
+            [axs_cachekeeper_gurd_engine restoreReceipt:saved completion:^{
             NSNotificationCenter *center=NSNotificationCenter.defaultCenter;
             [center addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
                 (void)note;[axs_cachekeeper_gurd_engine didBecomeActive];
@@ -131,7 +130,11 @@ void axs_cachekeeper_configure_gurd_cache(BOOL containerEligible,BOOL configurat
             [center addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
                 (void)note;[axs_cachekeeper_gurd_engine didEnterBackground];
             }];
-            });
+            // A background notification may have arrived while history was read.
+            // Catch up from UIKit state; the engine deduplicates a callback already received.
+            if(UIApplication.sharedApplication.applicationState==UIApplicationStateBackground)
+                [axs_cachekeeper_gurd_engine didEnterBackground];
+            }];
         });
     });
     // UIKit must never wait for provider disk/installation IO under its lock.

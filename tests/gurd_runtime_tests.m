@@ -21,6 +21,8 @@ static void (^lastExpiration)(void);
 static NSDictionary *savedReceipt;
 static _Atomic(BOOL) blockNextIdentityValidation, identityValidationWaiting;
 static dispatch_semaphore_t identityValidationEntered, releaseIdentityValidation;
+static dispatch_semaphore_t restoreQueueEntered, releaseRestoreQueue;
+static IMP originalEngineInitializer;
 
 static void require(BOOL value, NSString *message) {
     if (!value) {fprintf(stderr,"FAIL: gurd-runtime: %s\n",message.UTF8String);exit(1);}
@@ -179,6 +181,23 @@ static void foreground(void) {applicationState=UIApplicationStateActive;[NSNotif
 static void settled(void) {pump(.15);(void)receipt();dispatch_sync(axs_cachekeeper_gurd_report_queue,^{});pump(.03);}
 static void initialized(void) {await(^BOOL {return axs_cachekeeper_gurd_engine!=nil;},@"real engine configured");settled();}
 
+// Hold the real engine FIFO before Runtime can enqueue history restoration.
+// This widens the startup race without replacing restoration or lifecycle logic.
+static id holdRestoreInitializer(id object,SEL selector,AxsCacheKeeperGurdContextProvider provider,
+    id<AxsCacheKeeperGurdHostSource> source,NSUInteger (^begin)(void (^)(void)),
+    void (^end)(NSUInteger),void (^observer)(NSDictionary *)) {
+    id engine=((id (*)(id,SEL,AxsCacheKeeperGurdContextProvider,id<AxsCacheKeeperGurdHostSource>,
+        NSUInteger (^)(void (^)(void)),void (^)(NSUInteger),void (^)(NSDictionary *)))originalEngineInitializer)
+        (object,selector,provider,source,begin,end,observer);
+    Ivar ivar=class_getInstanceVariable(AxsCacheKeeperGurdCache.class,"_queue");
+    dispatch_queue_t queue=(dispatch_queue_t)object_getIvar(engine,ivar);
+    require(queue!=nil,@"restore-ordering holds the actual engine FIFO");
+    dispatch_async(queue,^{dispatch_semaphore_signal(restoreQueueEntered);
+        require(dispatch_semaphore_wait(releaseRestoreQueue,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,
+            @"held startup restoration receives bounded release");});
+    return engine;
+}
+
 static void runEnabled(void) {
     configure(YES);initialized();
     NSDictionary *provider=context();
@@ -305,9 +324,26 @@ static void runRejectedRestore(void) {
 }
 static void runRestoreOrdering(void) {
     savedReceipt=axs_cachekeeper_gurd_export_fixture();require([savedReceipt writeToFile:reportPath() atomically:YES],@"ordering saved Status fixture written");
-    expectRestoredBeforeTask=YES;backgroundImmediatelyOnRegistration=YES;configure(YES);initialized();
+    restoreQueueEntered=dispatch_semaphore_create(0);releaseRestoreQueue=dispatch_semaphore_create(0);
+    Method initializer=class_getInstanceMethod(AxsCacheKeeperGurdCache.class,
+        @selector(initWithContextProvider:source:beginTask:endTask:observer:));
+    require(initializer!=NULL,@"production engine initializer exists");
+    originalEngineInitializer=method_setImplementation(initializer,(IMP)holdRestoreInitializer);
+    backgroundImmediatelyOnRegistration=YES;configure(YES);
+    require(dispatch_semaphore_wait(restoreQueueEntered,dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC))==0,
+        @"startup engine queue held before restore");
+    dispatch_sync(axs_cachekeeper_gurd_report_queue,^{});pump(.05);
+    require(taskBegins==0,@"pending restore cannot register lifecycle or acquire a task");
+    expectRestoredBeforeTask=YES;dispatch_semaphore_signal(releaseRestoreQueue);initialized();
     await(^BOOL {return [operation()[@"event"] isEqual:@2] && [operation()[@"phase"] isEqual:@"observed"];},@"earliest lifecycle callback follows saved restore and admits event2");
     require(atomic_load(&submissions)==1 && [receipt()[@"operations"][0][@"runtimeInfo"] isEqual:savedReceipt[@"runtimeInfo"]],@"registration-time lifecycle preserves producer history without duplicate submission");
+}
+static void runStartupBackground(void) {
+    savedReceipt=axs_cachekeeper_gurd_export_fixture();require([savedReceipt writeToFile:reportPath() atomically:YES],@"background startup saved history written");
+    applicationState=UIApplicationStateBackground;expectRestoredBeforeTask=YES;configure(YES);initialized();
+    await(^BOOL {return [operation()[@"event"] isEqual:@2] && [operation()[@"phase"] isEqual:@"observed"];},
+        @"already-background startup catches lifecycle after restore");
+    require(taskBegins==1 && atomic_load(&submissions)==1,@"startup catchup creates exactly one event");
 }
 static void runReportFailure(void) {
     configure(YES);initialized();
@@ -356,6 +392,7 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
     else if ([scenario isEqual:@"restore"]) runRestore();
     else if ([scenario isEqual:@"restore-invalid"]) runRejectedRestore();
     else if ([scenario isEqual:@"restore-ordering"]) runRestoreOrdering();
+    else if ([scenario isEqual:@"startup-background"]) runStartupBackground();
     else if ([scenario isEqual:@"report-failure"]) runReportFailure();
     else if ([@[@"invalid-task",@"sync-expire",@"foreground-task"] containsObject:scenario]) runTask(scenario);
     else if ([scenario isEqual:@"strict"]) runStrict();

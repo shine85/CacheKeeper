@@ -79,7 +79,7 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
  source.duringPrepare=^{NSMutableDictionary *changed=[context mutableCopy];changed[@"configuration"]=@2;context=changed;};
  [cache didEnterBackground];waitFor(^BOOL {return eventFinished(9);});check(source.submitted==3,@"provider config change after prepare prevents submission without notification");
  [cache didBecomeActive];source.duringPrepare=nil;[[NSMutableData dataWithLength:32] writeToFile:file atomically:YES];
- symlink("asset",[root stringByAppendingPathComponent:@"link"].fileSystemRepresentation);
+ check(symlink("asset",[root stringByAppendingPathComponent:@"link"].fileSystemRepresentation)==0,@"actual descendant symlink fixture created");
  [cache didEnterBackground];waitFor(^BOOL {return eventFinished(10);});operation=[cache.receipt[@"operations"] lastObject];
  check(source.submitted==3 && [operation[@"before"][@"state"] isEqual:@"linkEncountered"],@"real descendant symlink fails sample and blocks call");
  unlink([root stringByAppendingPathComponent:@"link"].fileSystemRepresentation);[cache didBecomeActive];

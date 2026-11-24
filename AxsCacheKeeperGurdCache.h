@@ -18,6 +18,9 @@ typedef NSDictionary * (^AxsCacheKeeperGurdContextProvider)(void);
 - (void)expireBackgroundTime;
 // Legacy records are bounded, retained as unknown; never infer submission or completion.
 - (void)restoreReceipt:(id)receipt;
+// Main-queue completion follows the engine's restore decision, including absent
+// or rejected history. Register lifecycle observers only after this boundary.
+- (void)restoreReceipt:(id)receipt completion:(void (^)(void))completion;
 #if defined(AXS_CACHEKEEPER_GURD_TESTING)
 - (void)axs_cachekeeper_setSampleEntryLimit:(NSUInteger)entries seconds:(NSTimeInterval)seconds;
 #endif

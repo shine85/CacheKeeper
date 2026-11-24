@@ -142,7 +142,7 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
   entries++;
   if(!components.count && (info->st_dev!=[leaf[0] longLongValue] || info->st_ino!=[leaf[1] unsignedLongLongValue])) failure=@"identityChanged";
   if(S_ISLNK(info->st_mode)) failure=@"linkEncountered";
-  if(!S_ISDIR(info->st_mode) && !S_ISREG(info->st_mode)) failure=@"invalidMetadata";
+  else if(!S_ISDIR(info->st_mode) && !S_ISREG(info->st_mode)) failure=@"invalidMetadata";
   if(!failure && S_ISREG(info->st_mode)) failure=axs_cachekeeper_gurd_verify_file(rootFD,info,components,&failureCode);
   if(!failure && S_ISREG(info->st_mode)) {
    const uint64_t identity[]={(uint64_t)info->st_dev,(uint64_t)info->st_ino};NSData *key=[NSData dataWithBytes:identity length:sizeof(identity)];
@@ -274,7 +274,15 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
  [self axs_cachekeeper_expire_generation:run.generation];[self axs_cachekeeper_end_platform_run:run];
 }
 - (void)restoreReceipt:(id)receipt {
+ [self restoreReceipt:receipt completion:nil];
+}
+- (void)restoreReceipt:(id)receipt completion:(void (^)(void))completion {
  dispatch_async(_queue,^{
+  [self axs_cachekeeper_restore_receipt:receipt];
+  if(completion) dispatch_async(dispatch_get_main_queue(),completion);
+ });
+}
+- (void)axs_cachekeeper_restore_receipt:(id)receipt {
   if(!receipt) return;
   NSDictionary *validated=axs_cachekeeper_gurd_receipt_projection(receipt);id history=validated[@"operations"];
   if(self->_run || self->_operations.count || !validated || ![history isKindOfClass:NSArray.class] || [history count]>16) {self->_reason=@"historyRejected";[self axs_cachekeeper_publish];return;}
@@ -290,7 +298,6 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
    [closed addObject:[restored copy]];atomic_store(&self->_event,MAX(atomic_load(&self->_event),[restored[@"event"] unsignedIntegerValue]));
   }
   self->_operations=closed;self->_lastUpdated=validated[@"updated"];self->_runtimeInfo=validated[@"runtimeInfo"];NSDictionary *snapshot=[self axs_cachekeeper_snapshot];if(self->_observer) dispatch_async(dispatch_get_main_queue(),^{self->_observer(snapshot);});
- });
 }
 #if defined(AXS_CACHEKEEPER_GURD_TESTING)
 - (void)axs_cachekeeper_setSampleEntryLimit:(NSUInteger)entries seconds:(NSTimeInterval)seconds {

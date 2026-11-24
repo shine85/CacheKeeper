@@ -20,6 +20,19 @@ def main():
             "-framework","Foundation",*[str(ROOT/p) for p in ("AxsCacheKeeperGurdCache.m","AxsCacheKeeperGurdSource.m",
             "AxsCacheKeeperScanTask.m","AxsCacheKeeperDirectories.m","AxsCacheKeeperOperationInfo.m","tests/gurd_cache_tests.m")],"-o",str(binary)],check=True,timeout=60)
         subprocess.run([str(binary),str(fixture)],check=True,timeout=60)
+        git=shutil.which("git")
+        if not git:raise RuntimeError("fixed 201 symlink RED requires git")
+        fixed=subprocess.run([git,"show","b176c581b44812a94c3a901674ddf7e1d7a1be36:AxsCacheKeeperGurdCache.m"],cwd=ROOT,capture_output=True,check=True,timeout=60).stdout
+        old=folder/"fixed201-gurd-cache.m";old.write_bytes(fixed)
+        fixed_binary=folder/"fixed201-gurd-cache-red";fixed_fixture=folder/"fixed201-symlink-red-fixture";fixed_fixture.mkdir()
+        subprocess.run([cc,"clang","-fobjc-arc","-fblocks","-Wall","-Wextra","-Werror=format",
+            "-Werror=implicit-function-declaration",'-DAXS_CACHEKEEPER_PACKAGE_VERSION="0.0.0-0.0"',"-DAXS_CACHEKEEPER_GURD_TESTING=1",
+            "-I"+str(ROOT),"-I"+str(ROOT/"tests/include"),"-framework","Foundation",str(old),
+            *[str(ROOT/p) for p in ("AxsCacheKeeperGurdSource.m","AxsCacheKeeperScanTask.m","AxsCacheKeeperDirectories.m","AxsCacheKeeperOperationInfo.m","tests/gurd_cache_tests.m")],"-o",str(fixed_binary)],check=True,timeout=60)
+        result=subprocess.run([str(fixed_binary),str(fixed_fixture)],capture_output=True,text=True,timeout=60)
+        if result.returncode!=1 or result.stdout.strip() or result.stderr.strip()!="FAIL: gurd: real descendant symlink fails sample and blocks call":
+            raise RuntimeError("fixed 201 symlink RED must fail only its exact assertion\n"+result.stdout+result.stderr)
+        print("PASS: fixed 201 Gurd symlink reaches exact behavioral RED")
         product=(ROOT/"AxsCacheKeeperGurdCache.m").read_text(encoding="utf-8")
         anchor='if(axs_cachekeeper_paths_overlap(relative,excluded)) return @"excludedOverlap";'
         if product.count(anchor)!=1:raise RuntimeError("ambiguous Gurd exclusion negative control")
