@@ -1,6 +1,22 @@
 import XCTest
 
 final class InputUITests: XCTestCase {
+    private func requireElement(_ element: XCUIElement, in app: XCUIApplication, stage: String) -> Bool {
+        guard element.waitForExistence(timeout: 5) else {
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "\(stage)-hierarchy"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+            let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            screenshot.name = "\(stage)-screen"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+            XCTFail("Navigation did not reach \(stage)")
+            return false
+        }
+        return true
+    }
+
     private func typeAndWaitForValue(_ text: String, into field: XCUIElement) -> Bool {
         var value = ""
         for character in text {
@@ -16,6 +32,7 @@ final class InputUITests: XCTestCase {
     }
 
     func testKeyboardInputCancelAndReturn() {
+        continueAfterFailure = false
         let app = XCUIApplication()
         app.launch()
         let field = app.textFields["CacheKeeperAppSearch"]
@@ -36,9 +53,17 @@ final class InputUITests: XCTestCase {
         field.typeText("\n")
         XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5), "Return must dismiss the keyboard")
         XCTAssertEqual(field.value as? String, "test.bundle")
-        app.buttons["诊断"].tap()
-        XCTAssertTrue(app.navigationBars["诊断采集"].waitForExistence(timeout: 5))
-        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let diagnostics = app.navigationBars.buttons["诊断"]
+        XCTAssertTrue(diagnostics.isHittable)
+        diagnostics.tap()
+        // The harness publishes this marker only after UIKit's real didShow callback.
+        guard requireElement(app.staticTexts["CacheKeeperTestSearchRoute"], in: app, stage: "diagnostics-shown") else { return }
+        XCTAssertTrue(app.buttons["汇总已保存诊断"].exists)
+        let back = app.navigationBars.buttons["缓存管家"]
+        guard requireElement(back, in: app, stage: "diagnostics-back-button") else { return }
+        XCTAssertTrue(back.isHittable)
+        back.tap()
+        guard requireElement(field, in: app, stage: "search-returned") else { return }
         XCTAssertEqual(field.value as? String, "test.bundle", "Navigation must preserve the query")
         field.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))

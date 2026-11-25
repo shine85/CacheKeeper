@@ -76,7 +76,7 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
             stage = RESULTS[result.name]
             result.mkdir(parents=True)
             suites.append(stage)
-            expected_timeout = 900 if stage == "Search" else 420
+            expected_timeout = 1200 if stage == "Search" else 420
             assert command[-2:] == ["-parallel-testing-enabled", "NO"]
             if stage == "WebKit":
                 assert "-only-testing:WebKitIntegrationTests" in command

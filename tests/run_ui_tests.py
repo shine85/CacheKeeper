@@ -13,10 +13,12 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUDGETS = dict(generate=60, discovery=300, boot=60, bootstatus=420,
-               search_red=1200, build=600, codesign=60, suite=420, search=900,
+               search_red=1200, build=600, codesign=60, suite=420, search=1200,
                legacy_red=1320, history_red=1200, export=60, archive=120)
 MAX_COMMANDS = 29
-RUNNER_BUDGET_SECONDS = 10700
+# Run 208 needed 792s for the serial probe/XCUI assertions before result finalization.
+# Leave a bounded finalization window without retrying or suppressing any failure.
+RUNNER_BUDGET_SECONDS = 11000
 GROUP_GRACE_SECONDS = 2
 CURRENT = "2de3a496eaf6df9a1312862adcfd54acd73c39c0"
 RESULTS = (("ScanPageTests.xcresult", "ScanPageScreenshots"),
