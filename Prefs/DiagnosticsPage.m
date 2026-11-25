@@ -277,7 +277,8 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     NSString *wanted=snapshot[@"epoch"] ?: stop[@"epoch"];
     NSDictionary *capacity=saved;
     NSString *savedState=[saved[@"state"] isKindOfClass:NSString.class] ? saved[@"state"] : @"";
-    BOOL staleFrozen=frozen && (![@[@"complete",@"partial",@"cancelled",@"interrupted",@"unavailable"] containsObject:savedState] ||
+    BOOL savedTerminal=[@[@"complete",@"partial",@"cancelled",@"interrupted",@"unavailable"] containsObject:savedState];
+    BOOL staleFrozen=frozen && (!savedTerminal ||
         ![saved[@"epoch"] isEqual:snapshot[@"epoch"]] || ![saved[@"state"] isEqual:snapshot[@"state"]] ||
         ![saved[@"finishedAt"] isEqual:snapshot[@"finishedAt"]]);
     BOOL savedSupersedesSnapshot=NO;
@@ -288,7 +289,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
         }
         savedSupersedesSnapshot |= [saved[@"lifecycle"][@"previousObservedEpoch"] isEqual:snapshot[@"epoch"]];
     }
-    if (frozen && !staleFrozen) capacity=saved;
+    if (frozen && savedTerminal && [saved[@"epoch"] isEqual:snapshot[@"epoch"]]) capacity=saved;
     else if (frozen && savedSupersedesSnapshot) capacity=saved;
     else if (frozen) capacity=snapshot;
     else if (wanted && ![saved[@"epoch"] isEqual:wanted]) capacity=snapshot;

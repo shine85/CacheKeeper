@@ -285,11 +285,17 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
  check(!axs_cachekeeper_gurd_sample_projection(badSample),@"complete sample cannot hide a read error");
  badSample=[emptySample mutableCopy];badSample[@"state"]=@"complete";badSample[@"files"]=@1;
  check(!axs_cachekeeper_gurd_sample_projection(badSample),@"file count cannot exceed observed entries");
- NSDictionary *legacy=@{@"event":@1,@"runtimeInfo":oldRuntime,@"configuration":@0,@"phase":@"legacyUnknown",@"reason":@"notRecorded",@"submission":@"notRecorded",@"hostCompletion":@"notRecorded",@"observation":@"notRecorded",@"before":emptySample,@"after":emptySample,@"logicalDecrease":@0,@"allocatedDecrease":@0,@"physicalUniqueReclaimed":@"notMeasured"};
+ NSDictionary *legacy=@{@"event":@1,@"runtimeInfo":oldRuntime,@"configuration":@0,@"phase":@"legacyUnknown",@"reason":@"notRecorded",@"submission":@"notRecorded",@"hostCompletion":@"notRecorded",@"observation":@"notRecorded",@"scopeProof":axs_cachekeeper_gurd_scope_unproven_default(),@"before":emptySample,@"after":emptySample,@"logicalDecrease":@0,@"allocatedDecrease":@0,@"physicalUniqueReclaimed":@"notMeasured"};
+ check(axs_cachekeeper_gurd_operation_projection(legacy)!=nil,@"legacy unknown fixture satisfies the closed operation schema before restoration");
  NSMutableDictionary *legacyReceipt=[cache.receipt mutableCopy];legacyReceipt[@"operations"]=@[legacy];
+ check(axs_cachekeeper_gurd_receipt_projection(legacyReceipt)!=nil,@"legacy unknown fixture satisfies the complete receipt schema before restoration");
  AxsCacheKeeperGurdCache *old=[[AxsCacheKeeperGurdCache alloc] initWithContextProvider:^{return context;} source:source beginTask:nil endTask:nil observer:nil];
- [old restoreReceipt:legacyReceipt];waitFor(^BOOL {return [old.receipt[@"operations"] count]==1;});
- check([old.receipt[@"operations"][0][@"submission"] isEqual:@"notRecorded"] && [old.receipt[@"operations"][0][@"hostCompletion"] isEqual:@"notRecorded"],@"old unknown receipt fields stay unknown");
+ __block BOOL legacyRestorationFinished=NO;
+ [old restoreReceipt:legacyReceipt completion:^{legacyRestorationFinished=YES;}];waitFor(^BOOL {return legacyRestorationFinished;});
+ check([old.receipt[@"operations"] isEqual:@[legacy]] &&
+  [old.receipt[@"operations"][0][@"scopeProof"][@"state"] isEqual:@"scopeUnproven"],@"old unknown receipt fields and unproven scope remain unchanged after restoration");
+ NSMutableDictionary *missingScope=[legacy mutableCopy];[missingScope removeObjectForKey:@"scopeProof"];
+ check(!axs_cachekeeper_gurd_operation_projection(missingScope),@"legacy operation without explicit scope proof is rejected by the closed schema");
  NSMutableDictionary *contradiction=[legacy mutableCopy];contradiction[@"submission"]=@"submitted";
  check(!axs_cachekeeper_gurd_operation_projection(contradiction),@"phase and submission contradictions rejected");
  legacyReceipt[@"operations"]=@[legacy,legacy];check(!axs_cachekeeper_gurd_receipt_projection(legacyReceipt),@"duplicate operation IDs rejected");

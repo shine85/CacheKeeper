@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import "../AxsCacheKeeperScanTask.h"
 #import "../AxsCacheKeeperRecords.h"
+#import "../AxsCacheKeeperInspection.h"
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
