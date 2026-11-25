@@ -26,6 +26,8 @@ METHODS = {
                    "D1 BOOL false cannot become saved when NSError is nil"),
     "old-report-export": ("testExportRequiresCurrentTerminalSummaryBinding",
                           "旧容量绑定不能作为最新结果导出"),
+    "export-latest-terminal": ("testExportActionRevalidatesLatestSavedCapacityBeforeSharing",
+                               "CAPACITY_EXPORT_LATEST: changed saved result must not reach sharing"),
 }
 
 
@@ -161,7 +163,7 @@ class CapacityOrchestrationTests(unittest.TestCase):
         self.assertEqual([item["steps"][-1]["stage"] for item in result["running"]], ["discovery", "boot", "bootstatus"])
         self.assertTrue(all(item["steps"][-1]["state"] == "running" for item in result["running"]))
         self.assertEqual(result["commands"], [("discovery", 300), ("boot", 60), ("bootstatus", 420)] +
-                         [(name + ":" + stage, budget) for name in ["stale-running", "false-stop", "old-report-export", "green"]
+                         [(name + ":" + stage, budget) for name in ["stale-running", "false-stop", "old-report-export", "export-latest-terminal", "green"]
                           for stage, budget in [("generate", 60), ("build", 600), ("test", 420), ("summary", 60)]])
 
     def test_preparation_failures_keep_evidence_and_never_start_tests(self):
@@ -255,7 +257,7 @@ class CapacityOrchestrationTests(unittest.TestCase):
         job_budget = int(re.search(r"^    timeout-minutes: (\d+)$", job, re.M)[1]) * 60
         step_budgets = [int(n) * 60 for n in re.findall(r"^        timeout-minutes: (\d+)$", job, re.M)]
         self.assertEqual(len(step_budgets), 4)
-        self.assertGreaterEqual(step_budgets[2], 300 + 60 + 420 + 3 * (60 + 600 + 420 + 60) + 120)
+        self.assertGreaterEqual(step_budgets[2], 300 + 60 + 420 + (len(METHODS) + 1) * (60 + 600 + 420 + 60) + 120)
         self.assertGreaterEqual(job_budget, sum(step_budgets) + 60)
         self.assertIn("needs: native", job)
         self.assertIn("if: always()", job)

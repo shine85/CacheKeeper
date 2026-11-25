@@ -12,6 +12,8 @@
 - (void)axs_cachekeeper_collect;
 - (void)axs_cachekeeper_capacity_text:(NSDictionary *)result;
 - (void)axs_cachekeeper_refresh;
+- (void)axs_cachekeeper_export;
+- (void)axs_cachekeeper_present_share_file:(NSURL *)file generation:(NSUInteger)generation;
 - (BOOL)axs_cachekeeper_capacity_write_stop:(NSString *)epoch error:(NSError **)error;
 @end
 @interface AxsCacheKeeperCapacityPageFixture : AxsCacheKeeperDiagnosticsPage
@@ -19,6 +21,10 @@
 @property(nonatomic,strong) XCTestExpectation *appeared;
 @property(nonatomic) BOOL rejectStopWithoutError;
 @property(nonatomic) BOOL successfulStopWithError;
+@property(nonatomic,strong) NSURL *sharedFile;
+@property(nonatomic,strong) UIActivityViewController *shareController;
+@property(nonatomic) NSUInteger sharePresentations;
+@property(nonatomic,copy) NSString *lastMessage;
 @end
 @implementation AxsCacheKeeperCapacityPageFixture
 - (NSString *)axs_cachekeeper_capacity_file:(NSString *)name {return [self.fixtureFolder stringByAppendingPathComponent:name];}
@@ -29,6 +35,17 @@
     return saved;
 }
 - (void)viewDidAppear:(BOOL)animated {[super viewDidAppear:animated];[self.appeared fulfill];self.appeared=nil;}
+- (void)axs_cachekeeper_message:(NSString *)message {self.lastMessage=message;}
+- (void)axs_cachekeeper_present_share_file:(NSURL *)file generation:(NSUInteger)generation {
+    self.sharedFile=file;[super axs_cachekeeper_present_share_file:file generation:generation];
+}
+- (void)presentViewController:(UIViewController *)controller animated:(BOOL)animated completion:(void (^)(void))completion {
+    if ([controller isKindOfClass:UIActivityViewController.class]) {
+        self.sharePresentations++;self.shareController=(UIActivityViewController *)controller;
+        if (completion) completion();return;
+    }
+    [super presentViewController:controller animated:animated completion:completion];
+}
 @end
 @interface AxsCacheKeeperCapacityCancelledPush : NSObject <UIViewControllerAnimatedTransitioning,UINavigationControllerDelegate>
 @property(nonatomic,strong) XCTestExpectation *returned;
@@ -85,6 +102,7 @@
     self.page=[AxsCacheKeeperCapacityPageFixture new];self.page.fixtureFolder=self.folder;[self.page loadViewIfNeeded];
 }
 - (void)tearDown {
+    if (self.page.shareController.completionWithItemsHandler) self.page.shareController.completionWithItemsHandler(nil,NO,nil,nil);
     [self.page axs_cachekeeper_capacity_stop];self.page=nil;
     self.window.hidden=YES;self.window.rootViewController=nil;[self.previousWindow makeKeyWindow];self.window=nil;
     [NSFileManager.defaultManager removeItemAtPath:self.folder error:NULL];[super tearDown];
@@ -328,6 +346,67 @@
     XCTAssertEqualObjects(binding[@"terminalFinishedAt"],capacity[@"finishedAt"]);
     XCTAssertGreaterThanOrEqual([binding[@"summarizedAt"] doubleValue],[binding[@"terminalFinishedAt"] doubleValue]);
     XCTAssertTrue(((UIButton *)[self.page valueForKey:@"exportButton"]).enabled);
+}
+- (void)testExportActionRevalidatesLatestSavedCapacityBeforeSharing {
+    [self showPage];
+    NSString *path=[self.folder stringByAppendingPathComponent:@"capacityResult.plist"];
+    for (NSString *change in @[@"epoch",@"running",@"finishedAt",@"state",@"missing",@"corrupt"]) {
+        [self.page setValue:nil forKey:@"axs_cachekeeper_capacitySnapshot"];
+        self.page.lastMessage=nil;self.page.sharedFile=nil;
+        NSString *epoch=NSUUID.UUID.UUIDString;
+        NSDictionary *terminal=[self savedMeasurement:epoch];
+        XCTAssertTrue([terminal writeToFile:path atomically:YES]);
+        NSDictionary *capacity=[self collectedCapacity];
+        XCTAssertEqualObjects(capacity[@"summaryBinding"][@"state"],@"current");
+        NSMutableDictionary *replacement=[terminal mutableCopy];
+        if ([change isEqual:@"epoch"]) replacement[@"epoch"]=NSUUID.UUID.UUIDString;
+        else if ([change isEqual:@"running"]) {replacement[@"state"]=@"running";[replacement removeObjectForKey:@"finishedAt"];}
+        else if ([change isEqual:@"finishedAt"]) {replacement[@"finishedAt"]=@200;replacement[@"updatedAt"]=@200;}
+        else if ([change isEqual:@"state"]) replacement[@"state"]=@"partial";
+        if ([change isEqual:@"missing"]) XCTAssertTrue([NSFileManager.defaultManager removeItemAtPath:path error:NULL]);
+        else if ([change isEqual:@"corrupt"]) XCTAssertTrue([[@"invalid-plist" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:path atomically:YES]);
+        else XCTAssertTrue([replacement writeToFile:path atomically:YES]);
+        [self.page axs_cachekeeper_export];[self drainCollectionQueue];
+        XCTAssertEqual(self.page.sharePresentations,0u,@"CAPACITY_EXPORT_LATEST: changed saved result must not reach sharing");
+        if (self.page.sharePresentations) return;
+        XCTAssertNil(self.page.sharedFile);XCTAssertNil([self.page valueForKey:@"reportData"]);
+        XCTAssertNil([self.page valueForKey:@"axs_cachekeeper_capacitySnapshot"]);
+        XCTAssertFalse([[self.page valueForKey:@"sharing"] boolValue]);
+        XCTAssertTrue([self.page.lastMessage containsString:@"重新汇总"]);
+        XCTAssertFalse(((UIButton *)[self.page valueForKey:@"exportButton"]).enabled);
+    }
+}
+- (void)testExportActionSharesLatestTerminalAndUnmeasuredReports {
+    [self showPage];
+    NSString *path=[self.folder stringByAppendingPathComponent:@"capacityResult.plist"];
+    for (NSString *state in @[@"complete",@"partial",@"notMeasured"]) {
+        [self.page setValue:nil forKey:@"axs_cachekeeper_capacitySnapshot"];
+        self.page.lastMessage=nil;self.page.sharedFile=nil;
+        NSString *epoch=NSUUID.UUID.UUIDString;
+        if ([state isEqual:@"notMeasured"]) XCTAssertTrue([NSFileManager.defaultManager removeItemAtPath:path error:NULL]);
+        else {
+            NSMutableDictionary *terminal=[[self savedMeasurement:epoch] mutableCopy];terminal[@"state"]=state;
+            XCTAssertTrue([terminal writeToFile:path atomically:YES]);
+        }
+        NSDictionary *capacity=[self collectedCapacity];XCTAssertEqualObjects(capacity[@"state"],state);
+        NSData *data=[self.page valueForKey:@"reportData"];NSUInteger count=self.page.sharePresentations;
+        [self.page axs_cachekeeper_export];[self drainCollectionQueue];
+        XCTAssertEqual(self.page.sharePresentations,count+1);XCTAssertNotNil(self.page.sharedFile);XCTAssertNil(self.page.lastMessage);
+        NSData *written=self.page.sharedFile ? [NSData dataWithContentsOfURL:self.page.sharedFile] : nil;
+        XCTAssertEqualObjects(written,data);
+        if (written) {
+            NSDictionary *report=[NSJSONSerialization JSONObjectWithData:written options:0 error:NULL];
+            XCTAssertEqualObjects(report[@"capacityMeasurement"][@"state"],state);
+            if (![state isEqual:@"notMeasured"]) {
+                XCTAssertEqualObjects(report[@"capacityMeasurement"][@"epoch"],epoch);
+                XCTAssertEqualObjects(report[@"capacityMeasurement"][@"summaryBinding"][@"state"],@"current");
+            }
+        }
+        XCTAssertNotNil(self.page.shareController.completionWithItemsHandler);
+        if (self.page.shareController.completionWithItemsHandler) self.page.shareController.completionWithItemsHandler(nil,NO,nil,nil);
+        XCTAssertFalse(self.page.sharedFile && [NSFileManager.defaultManager fileExistsAtPath:self.page.sharedFile.path]);
+        XCTAssertFalse([[self.page valueForKey:@"sharing"] boolValue]);self.page.shareController=nil;
+    }
 }
 - (void)testLateCollectionCannotReplaceNewEpochState {
     dispatch_queue_t queue=[self.page valueForKey:@"collectionQueue"];

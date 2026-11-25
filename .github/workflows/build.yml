@@ -60,10 +60,10 @@ jobs:
     needs: native
     if: inputs.native_only != true
     runs-on: macos-15-intel
-    # Discovery 300 + boot 60 + readiness 420 + 3*(generate 60 + build 600 +
-    # test 420 + summary 60) = 4200s/70m. Runner step adds 2m overhead;
-    # checkout 3 + tools 8 + runner 72 + upload 5 = 88m within this 90m job.
-    timeout-minutes: 90
+    # Discovery 300 + boot 60 + readiness 420 + 5*(generate 60 + build 600 +
+    # test 420 + summary 60) = 6480s/108m. Four exact REDs and the full GREEN
+    # fit runner 110m; checkout 3 + tools 8 + runner 110 + upload 5 = 126m.
+    timeout-minutes: 130
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: '1'
@@ -77,7 +77,7 @@ jobs:
         run: brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
 
       - name: 运行容量页面回归
-        timeout-minutes: 72
+        timeout-minutes: 110
         run: |
           python3 tests/test_capacity_page_orchestration.py
           python3 tests/run_capacity_page_tests.py

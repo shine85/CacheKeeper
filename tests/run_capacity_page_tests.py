@@ -124,6 +124,10 @@ def main():
          'self.exportButton.enabled=self.reportData && !self.collecting && !self.sharing && !self.axs_cachekeeper_capacityEpoch;',
          "testExportRequiresCurrentTerminalSummaryBinding",
          "旧容量绑定不能作为最新结果导出"),
+        ("export-latest-terminal", 'if (!latestMatches) {',
+         'if (NO && !latestMatches) {',
+         "testExportActionRevalidatesLatestSavedCapacityBeforeSharing",
+         "CAPACITY_EXPORT_LATEST: changed saved result must not reach sharing"),
     ]
     # Preserve the actual projects, build logs and xcresults even on setup failure.
     # CI uploads this one isolated directory; a failed build is never a RED.

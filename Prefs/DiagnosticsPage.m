@@ -408,8 +408,25 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     if (self.collecting || self.sharing || !self.reportData || !axs_cachekeeper_capacity_report_exportable(report) || self.axs_cachekeeper_capacityEpoch) return;
     self.sharing=YES;[self axs_cachekeeper_refresh];
     NSData *data=self.reportData;NSUInteger generation=self.generation;__weak typeof(self) weak=self;
+    NSString *capacityPath=[self axs_cachekeeper_capacity_file:@"capacityResult.plist"];
     // 只有用户明确点击导出才落盘，采集阶段只保留 NSData。
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+    dispatch_async(self.collectionQueue,^{
+        NSDictionary *capacity=[report[@"capacityMeasurement"] isKindOfClass:NSDictionary.class] ? report[@"capacityMeasurement"] : nil;
+        if (capacity && ![@[@"notMeasured",@"invalid"] containsObject:capacity[@"state"]]) {
+            NSError *readError=nil;
+            NSDictionary *latest=axs_cachekeeper_capacity_read_result(capacityPath,&readError);
+            BOOL latestMatches=!readError && [axs_cachekeeper_capacity_summary_binding(capacity[@"summaryBinding"],latest)[@"state"] isEqual:@"current"];
+            if (!latestMatches) {
+                dispatch_async(dispatch_get_main_queue(),^{
+                    AxsCacheKeeperDiagnosticsPage *page=weak;if (!page || page.generation!=generation) return;
+                    page.sharing=NO;page.reportData=nil;page.axs_cachekeeper_capacitySnapshot=nil;
+                    page.status=@"容量结果已变化、尚未完成或不可读取；请等待最新测量结束后重新汇总，再导出。";
+                    [page axs_cachekeeper_refresh];
+                    if (page.view.window && page.navigationController.topViewController==page) [page axs_cachekeeper_message:page.status];
+                });
+                return;
+            }
+        }
         NSError *error=nil;
         NSURL *file=[NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"CacheKeeper-diagnostics-%@.json",NSUUID.UUID.UUIDString]]];
         BOOL saved=[data writeToURL:file options:NSDataWritingAtomic error:&error];
@@ -421,17 +438,21 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
                 return;
             }
             if (!saved) {page.sharing=NO;[page axs_cachekeeper_refresh];[page axs_cachekeeper_message:[NSString stringWithFormat:@"报告保存失败（代码 %ld），请重试。",(long)error.code]];return;}
-            UIActivityViewController *share=[[UIActivityViewController alloc] initWithActivityItems:@[file] applicationActivities:nil];
-            share.popoverPresentationController.sourceView=page.exportButton;share.popoverPresentationController.sourceRect=page.exportButton.bounds;
-            share.completionWithItemsHandler=^(UIActivityType type,BOOL completed,NSArray *items,NSError *shareError) {
-                AxsCacheKeeperRemoveDiagnosticShare(file);
-                AxsCacheKeeperDiagnosticsPage *owner=weak;if (!owner || owner.generation!=generation) return;
-                owner.sharing=NO;[owner axs_cachekeeper_refresh];
-                if (shareError && owner.view.window) [owner axs_cachekeeper_message:[NSString stringWithFormat:@"分享失败（代码 %ld），可重新导出。",(long)shareError.code]];
-            };
-            [page presentViewController:share animated:YES completion:nil];
+            [page axs_cachekeeper_present_share_file:file generation:generation];
         });
     });
+}
+- (void)axs_cachekeeper_present_share_file:(NSURL *)file generation:(NSUInteger)generation {
+    UIActivityViewController *share=[[UIActivityViewController alloc] initWithActivityItems:@[file] applicationActivities:nil];
+    share.popoverPresentationController.sourceView=self.exportButton;share.popoverPresentationController.sourceRect=self.exportButton.bounds;
+    __weak typeof(self) weak=self;
+    share.completionWithItemsHandler=^(UIActivityType type,BOOL completed,NSArray *items,NSError *shareError) {
+        AxsCacheKeeperRemoveDiagnosticShare(file);
+        AxsCacheKeeperDiagnosticsPage *owner=weak;if (!owner || owner.generation!=generation) return;
+        owner.sharing=NO;[owner axs_cachekeeper_refresh];
+        if (shareError && owner.view.window) [owner axs_cachekeeper_message:[NSString stringWithFormat:@"分享失败（代码 %ld），可重新导出。",(long)shareError.code]];
+    };
+    [self presentViewController:share animated:YES completion:nil];
 }
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
