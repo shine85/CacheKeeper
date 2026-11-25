@@ -69,11 +69,12 @@ static void testProductionPredicateProofProjectionShape(void) {
  (void)binding;(void)context;(void)reason;_authorizing=YES;BOOL allowed=authorization();_authorizing=NO;if(!allowed) return NO;_submitted++;_hostSubmitCalls++;if(_duringSubmit) _duringSubmit();return YES;
 }
 @end
-static void waitFor(BOOL (^condition)(void)) {
+static void axs_cachekeeper_gurd_test_wait(BOOL (^condition)(void),const char *expression,int line) {
  NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+12;
  while(!condition() && NSProcessInfo.processInfo.systemUptime<deadline) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.01]];
- check(condition(),@"bounded async operation finishes");
+ check(condition(),[NSString stringWithFormat:@"bounded async operation finishes (line %d: %s)",line,expression]);
 }
+#define waitFor(...) axs_cachekeeper_gurd_test_wait((__VA_ARGS__),#__VA_ARGS__,__LINE__)
 int main(int argc,const char *argv[]) {@autoreleasepool {
 #if defined(AXS_CACHEKEEPER_GURD_FIXED201_SYMLINK)
  check(argc==2,@"temporary fixture argument");NSString *home=[NSString stringWithUTF8String:argv[1]];
@@ -261,10 +262,18 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
  check([restored.receipt[@"operations"] count]==[cache.receipt[@"operations"] count],@"saved receipt operations retain truthful unknown completion");
  check([restored.receipt[@"updated"] isEqual:cache.receipt[@"updated"]],@"restore preserves saved observation timestamp");
  check([restored.receipt[@"runtimeInfo"] isEqual:oldRuntime] && [restored.receipt[@"operations"][0][@"runtimeInfo"] isEqual:oldRuntime],@"restore preserves historical receipt and operation producers across package upgrades");
- [restored didEnterBackground];waitFor(^BOOL {return [restored.receipt[@"operations"] count]==oldOperations.count+1;});
- check([restored.receipt[@"operations"][0][@"runtimeInfo"] isEqual:oldRuntime] &&
- [restored.receipt[@"operations"] lastObject][@"runtimeInfo"] &&
- ![[restored.receipt[@"operations"] lastObject][@"runtimeInfo"] isEqual:oldRuntime],@"a new publication never relabels old operation producers");
+ check(oldOperations.count==16,@"eighteen completed events retain the sixteen newest operations before restoration");
+ NSUInteger nextEvent=[oldOperations.lastObject[@"event"] unsignedIntegerValue]+1;
+ [restored didEnterBackground];waitFor(^BOOL {return [[restored.receipt[@"operations"] lastObject][@"event"] unsignedIntegerValue]==nextEvent;});
+ NSArray *restoredOperations=restored.receipt[@"operations"];
+ check(restoredOperations.count==16 && [[restoredOperations subarrayWithRange:NSMakeRange(0,15)]
+  isEqual:[oldOperations subarrayWithRange:NSMakeRange(1,15)]],@"restored history evicts only the oldest event when a new event reaches its sixteen-operation bound");
+ NSDictionary *newOperation=restoredOperations.lastObject;
+ check([newOperation[@"phase"] isEqual:@"skipped"] && [newOperation[@"reason"] isEqual:@"noBackgroundTime"] &&
+  [newOperation[@"submission"] isEqual:@"notSubmitted"] && axs_cachekeeper_gurd_receipt_projection(restored.receipt),
+  @"restored engine publishes the next event with truthful no-background-time completion");
+ check([restoredOperations[0][@"runtimeInfo"] isEqual:oldRuntime] && newOperation[@"runtimeInfo"] &&
+ ![newOperation[@"runtimeInfo"] isEqual:oldRuntime],@"a new publication never relabels old operation producers");
  AxsCacheKeeperGurdSource *actual=[AxsCacheKeeperGurdSource new];reason=nil;
  check([actual prepareWithContext:context reason:&reason]==nil && [reason isEqual:@"unsupportedHost"],@"actual production source rejects nonhost process before getters");
  bad=[cache.receipt mutableCopy];bad[@"background"]=@1;check(!axs_cachekeeper_gurd_receipt_projection(bad),@"strict receipt rejects numeric fake Boolean");

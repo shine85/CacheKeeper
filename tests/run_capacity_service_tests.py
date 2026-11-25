@@ -102,6 +102,9 @@ def main():
                 raise RuntimeError("ambiguous service RED anchor: " + name)
             run(name, product.replace(before, after), case, failure)
         protocol_mutations = (
+            ("summary-binding-reprojection", 'if ([value count]==1 && ([value[@"state"] isEqual:@"unknown"] || [value[@"state"] isEqual:@"stale"]))',
+             'if (NO && [value count]==1 && ([value[@"state"] isEqual:@"unknown"] || [value[@"state"] isEqual:@"stale"]))',
+             "projection", "diagnostic summarization cannot invent a current binding"),
             ("summary-binding-fields", 'NSSet *keys=[NSSet setWithArray:[value allKeys]];\n'
              '    NSSet *required=[NSSet setWithArray:@[@"epoch",@"terminalState",@"terminalFinishedAt",@"summarizedAt"]];\n'
              '    NSMutableSet *withState=[required mutableCopy];[withState addObject:@"state"];\n'

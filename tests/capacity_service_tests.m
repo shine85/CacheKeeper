@@ -475,9 +475,34 @@ static void ckprojection(NSString *base) {
     ckcheck(axs_cachekeeper_capacity_summary_is_current(report) && axs_cachekeeper_capacity_report_exportable(report),"current summary is exportable only while bound to terminal measurement");
     NSDictionary *unbound=axs_cachekeeper_capacity_report_measurement(record,104);
     ckcheck([unbound[@"summaryBinding"][@"state"] isEqual:@"unknown"],"diagnostic summarization cannot invent a current binding");
+    ckcheck([record[@"summaryBinding"] isEqual:@{@"state":@"unknown"}] &&
+        !axs_cachekeeper_capacity_report_exportable(@{@"capacityMeasurement":unbound}),"saved measurement without summary remains unbound and not exportable");
     NSMutableDictionary *staleInput=[record mutableCopy];staleInput[@"summaryBinding"]=@{@"state":@"stale"};
     NSDictionary *preserved=axs_cachekeeper_capacity_report_measurement(staleInput,104);
     ckcheck([preserved[@"summaryBinding"][@"state"] isEqual:@"stale"],"diagnostic projection preserves an upstream stale binding");
+    for (NSString *state in @[@"unknown",@"stale"]) {
+        NSDictionary *closedState=@{@"state":state};
+        NSMutableDictionary *input=[record mutableCopy];input[@"summaryBinding"]=closedState;
+        NSDictionary *projected=input;
+        for (NSUInteger pass=0;pass<3;pass++) {
+            projected=axs_cachekeeper_capacity_report_measurement(projected,finishedAt+1+pass);
+            ckcheck([projected[@"state"] isEqual:record[@"state"]] && [projected[@"summaryBinding"] isEqual:closedState] &&
+                !axs_cachekeeper_capacity_report_exportable(@{@"capacityMeasurement":projected}),"closed unbound state survives repeated summaries without becoming exportable");
+        }
+        input[@"summaryBinding"]=@{@"state":state,@"extraPrivatePath":@"private-canary"};
+        NSDictionary *rejected=axs_cachekeeper_capacity_report_measurement(input,finishedAt+1);
+        ckcheck([rejected[@"summaryBinding"] isEqual:@{@"state":@"stale"}],"unbound binding state rejects and removes extra fields");
+    }
+    NSMutableDictionary *boundInput=[record mutableCopy];boundInput[@"summaryBinding"]=closedBinding;
+    NSDictionary *reprojected=boundInput;
+    for (NSUInteger pass=0;pass<3;pass++) {
+        reprojected=axs_cachekeeper_capacity_report_measurement(reprojected,finishedAt+1+pass);
+        ckcheck([reprojected[@"summaryBinding"] isEqual:closedBinding] &&
+            axs_cachekeeper_capacity_report_exportable(@{@"capacityMeasurement":reprojected}),"repeated summary preserves the original current binding evidence");
+    }
+    boundInput[@"summaryBinding"]=@{@"state":@"current"};
+    ckcheck([axs_cachekeeper_capacity_report_measurement(boundInput,finishedAt+1)[@"summaryBinding"] isEqual:@{@"state":@"stale"}],
+        "current state without terminal binding evidence stays stale");
     NSMutableDictionary *staleReport=[report mutableCopy];staleReport[@"capacityMeasurement"]=@{@"epoch":summaryEpoch,@"state":record[@"state"],@"finishedAt":record[@"finishedAt"],@"summaryBinding":@{@"state":@"stale"}};
     ckcheck(!axs_cachekeeper_capacity_report_exportable(staleReport),"stale measurement summary is not exportable");
     NSDictionary *runningReport=@{@"capacityMeasurement":@{@"schemaVersion":@1,@"state":@"running",@"epoch":summaryEpoch}};

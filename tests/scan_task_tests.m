@@ -112,6 +112,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
     axs_cachekeeper_test_wait_batch(service,folder);
     axs_cachekeeper_test_check([axs_cachekeeper_test_read(folder,@"batch.plist")[@"completed"] unsignedIntegerValue]==2,"batch finishes continued large task");
     NSDictionary *completed=axs_cachekeeper_test_read(folder,@"snapshots.plist")[@"large.app"];
+    // XML fixture receipts round dates to seconds; distinguish rounds by real file changes.
+    axs_cachekeeper_test_file([home stringByAppendingPathComponent:@"Library/Caches/history-new-entry"],9);
     axs_cachekeeper_test_request(folder,@"history",@"large.app",NO);[service tick];
     NSDictionary *partial=axs_cachekeeper_test_read(folder,@"scan.plist");
     axs_cachekeeper_test_check([partial[@"previousRows"] isEqual:completed[@"rows"]],"first slice keeps pre-task history");
@@ -128,6 +130,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
     axs_cachekeeper_test_check(historyTicks>0 && [finished[@"scanProgress"][@"state"] isEqual:@"complete"] &&
         [finished[@"complete"] boolValue],"large real scan completes within its bounded fixture deadline");
     NSArray *finishedHistory=finished[@"recentScans"];
+    axs_cachekeeper_test_check(![finished[@"rows"] isEqual:completed[@"rows"]],
+        "new history round measures the newly created cache file");
     NSUInteger retainedCount=MIN((NSUInteger)3,recent.count);
     axs_cachekeeper_test_check(finishedHistory.count==MIN((NSUInteger)4,recent.count+1) &&
         [[finishedHistory subarrayWithRange:NSMakeRange(0,retainedCount)]

@@ -130,6 +130,8 @@ static inline NSDictionary *axs_cachekeeper_capacity_client_stop(id value) {
 static inline NSDictionary *axs_cachekeeper_capacity_summary_binding(id value,id terminal) {
     if (!value) return @{ @"state":@"unknown" };
     if (![value isKindOfClass:NSDictionary.class]) return @{ @"state":@"stale" };
+    if ([value count]==1 && ([value[@"state"] isEqual:@"unknown"] || [value[@"state"] isEqual:@"stale"]))
+        return @{ @"state":value[@"state"] };
     NSSet *keys=[NSSet setWithArray:[value allKeys]];
     NSSet *required=[NSSet setWithArray:@[@"epoch",@"terminalState",@"terminalFinishedAt",@"summarizedAt"]];
     NSMutableSet *withState=[required mutableCopy];[withState addObject:@"state"];
