@@ -56,6 +56,9 @@ class NativeOrchestrationTests(unittest.TestCase):
         for name in re.findall(r'^#import "([^/]+\.h)"', (target / "tests/diagnostics_tests.m").read_text(encoding="utf-8"), re.MULTILINE):
             self.assertEqual((target / "tests" / name).read_bytes(), (ROOT / "tests" / name).read_bytes(),
                              "relocated diagnostic tests must retain their same-directory fixture")
+            for dependency in re.findall(r'^#import "([^"]+)"', (target / "tests" / name).read_text(encoding="utf-8"), re.MULTILINE):
+                self.assertTrue((ROOT / "tests" / dependency).is_file(),
+                                "fixture imports must resolve from their own directory without adding -I root")
 
     def test_first_failure_does_not_block_later_group(self):
         result, summary = self.run_batch([

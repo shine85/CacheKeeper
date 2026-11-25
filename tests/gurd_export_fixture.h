@@ -1,5 +1,5 @@
 #pragma once
-#import "AxsCacheKeeperGurdStatus.h"
+#import "../AxsCacheKeeperGurdStatus.h"
 
 // Producer-shaped receipt; external host execution is not simulated here.
 static NSDictionary *axs_cachekeeper_gurd_export_fixture(void) {
