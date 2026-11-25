@@ -5,10 +5,20 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <stdatomic.h>
+#include <string.h>
 static void check(BOOL ok,NSString *message) {if(!ok) {fprintf(stderr,"FAIL: gurd: %s\n",message.UTF8String);exit(1);}}
 #if !defined(AXS_CACHEKEEPER_GURD_FIXED201_SYMLINK)
 static IMP axs_cachekeeper_gurd_test_cursor_advance;
 static void (^axs_cachekeeper_gurd_test_did_advance)(AxsCacheKeeperScanCursor *cursor);
+static IMP axs_cachekeeper_gurd_test_uptime;
+static _Atomic(uint64_t) axs_cachekeeper_gurd_test_clock_offset;
+static NSTimeInterval axs_cachekeeper_gurd_test_real_uptime(void) {
+ return axs_cachekeeper_gurd_test_uptime ? ((NSTimeInterval (*)(id,SEL))axs_cachekeeper_gurd_test_uptime)(NSProcessInfo.processInfo,@selector(systemUptime)) : NSProcessInfo.processInfo.systemUptime;
+}
+static NSTimeInterval axs_cachekeeper_gurd_test_shifted_uptime(id process,SEL selector) {
+ return ((NSTimeInterval (*)(id,SEL))axs_cachekeeper_gurd_test_uptime)(process,selector)+atomic_load(&axs_cachekeeper_gurd_test_clock_offset);
+}
 static void axs_cachekeeper_gurd_test_observe_slice(id cursor,SEL selector,NSUInteger entries,NSTimeInterval seconds) {
  ((void (*)(id,SEL,NSUInteger,NSTimeInterval))axs_cachekeeper_gurd_test_cursor_advance)(cursor,selector,entries,seconds);
  // Observe on the engine queue after real IO; main-thread polling can miss a whole sample.
@@ -70,11 +80,99 @@ static void testProductionPredicateProofProjectionShape(void) {
 }
 @end
 static void axs_cachekeeper_gurd_test_wait(BOOL (^condition)(void),const char *expression,int line) {
+#if !defined(AXS_CACHEKEEPER_GURD_FIXED201_SYMLINK)
+ NSTimeInterval deadline=axs_cachekeeper_gurd_test_real_uptime()+12;
+ while(!condition() && axs_cachekeeper_gurd_test_real_uptime()<deadline) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.01]];
+#else
  NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+12;
  while(!condition() && NSProcessInfo.processInfo.systemUptime<deadline) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.01]];
+#endif
  check(condition(),[NSString stringWithFormat:@"bounded async operation finishes (line %d: %s)",line,expression]);
 }
 #define waitFor(...) axs_cachekeeper_gurd_test_wait((__VA_ARGS__),#__VA_ARGS__,__LINE__)
+#if !defined(AXS_CACHEKEEPER_GURD_FIXED201_SYMLINK)
+static void axs_cachekeeper_gurd_test_continuation(NSString *home) {
+ NSString *root=[home stringByAppendingPathComponent:@"Library/Application Support/gurd_cache"],*nested=[root stringByAppendingPathComponent:@"nested"];
+ check([NSFileManager.defaultManager createDirectoryAtPath:nested withIntermediateDirectories:YES attributes:nil error:nil],@"continuation fixture directory");
+ uint64_t allocated=0;
+ for(NSUInteger index=0;index<24;index++) {
+  NSString *file=[nested stringByAppendingPathComponent:[NSString stringWithFormat:@"asset-%lu",(unsigned long)index]];
+  check([[NSMutableData dataWithLength:index+1] writeToFile:file atomically:YES],@"continuation real file");
+  struct stat info;check(!lstat(file.fileSystemRepresentation,&info),@"continuation file metadata");allocated+=(uint64_t)info.st_blocks*512;
+ }
+ NSDictionary *context=@{@"valid":@YES,@"appState":@{@"enabled":@YES,@"mode":@"prevent",@"autoDiscover":@YES},@"selected":@[],@"installation":@"verified-fixture",@"home":home,@"bundle":@"com.ss.iphone.ugc.Aweme",@"version":@"41.2.0",@"build":@"412021",@"configuration":@1,@"reportWritable":@YES};
+ AxsCacheKeeperGurdFixtureSource *source=[AxsCacheKeeperGurdFixtureSource new];source.root=root;source.scopeProven=YES;
+ __block NSUInteger begun=0,ended=0;
+ __block void (^expiration)(void)=nil;
+ __block NSDictionary *published=nil;
+ AxsCacheKeeperGurdCache *cache=[[AxsCacheKeeperGurdCache alloc] initWithContextProvider:^{return context;} source:source
+  beginTask:^NSUInteger(void (^expire)(void)) {expiration=[expire copy];return ++begun;}
+  endTask:^(NSUInteger token) {check(NSThread.isMainThread && token==ended+1,@"continuation returns each exact platform token once on main");ended++;}
+  observer:^(NSDictionary *receipt) {published=receipt;}];
+ [cache axs_cachekeeper_setSampleSliceEntries:1];
+ Method advance=class_getInstanceMethod(AxsCacheKeeperScanCursor.class,@selector(advanceEntries:seconds:));
+ Method uptime=class_getInstanceMethod(NSProcessInfo.processInfo.class,@selector(systemUptime));
+ check(advance && uptime,@"continuation observes real cursor and monotonic clock boundaries");
+ atomic_store(&axs_cachekeeper_gurd_test_clock_offset,0);
+ axs_cachekeeper_gurd_test_uptime=method_setImplementation(uptime,(IMP)axs_cachekeeper_gurd_test_shifted_uptime);
+ axs_cachekeeper_gurd_test_cursor_advance=method_setImplementation(advance,(IMP)axs_cachekeeper_gurd_test_observe_slice);
+ __weak AxsCacheKeeperGurdCache *weakCache=cache;
+ for(NSUInteger mode=0;mode<4;mode++) {
+  __block AxsCacheKeeperScanCursor *beforeCursor=nil,*afterCursor=nil;
+  __block NSUInteger beforeSlices=0,afterSlices=0;
+  __block BOOL expired=NO;
+  NSUInteger submittedBefore=source.hostSubmitCalls,event=mode+1;
+  axs_cachekeeper_gurd_test_did_advance=^(AxsCacheKeeperScanCursor *cursor) {
+   BOOL before=[[[weakCache.receipt[@"operations"] lastObject][@"phase"] description] isEqual:@"samplingBefore"];
+   if(before) {if(!beforeCursor) beforeCursor=cursor;check(beforeCursor==cursor,@"before slices keep the same live cursor");beforeSlices++;}
+   else {if(!afterCursor) afterCursor=cursor;check(afterCursor==cursor,@"after slices keep the same live cursor");afterSlices++;}
+   // Advance only between actual IO slices: each cursor quantum keeps its own real time budget.
+   atomic_fetch_add(&axs_cachekeeper_gurd_test_clock_offset,5);
+   if(!expired && ((mode==2 && before && beforeSlices>=3) || (mode==3 && !before && afterSlices>=3))) {
+    expired=YES;dispatch_sync(dispatch_get_main_queue(),^{expiration();});
+   }
+  };
+  [cache didEnterBackground];
+  waitFor(^BOOL {return ended==event && [[published[@"operations"] lastObject][@"event"] unsignedIntegerValue]==event &&
+   [@[@"observed",@"skipped",@"cancelled",@"interruptedAfterSubmission"] containsObject:[published[@"operations"] lastObject][@"phase"]];});
+  axs_cachekeeper_gurd_test_did_advance=nil;
+  NSDictionary *operation=[cache.receipt[@"operations"] lastObject],*before=operation[@"before"],*after=operation[@"after"];
+  if(mode<2) {
+   check([before[@"state"] isEqual:@"complete"] && [after[@"state"] isEqual:@"complete"] &&
+    beforeSlices>4 && afterSlices>4,@"live cursor continues past legacy four-second deadline");
+   for(NSDictionary *sample in @[before,after]) check([sample[@"files"] isEqual:@24] && [sample[@"entries"] isEqual:@26] &&
+    [sample[@"logicalBytes"] isEqual:@300] && [sample[@"allocatedBytes"] unsignedLongLongValue]==allocated,
+    @"long-lived cursor retains exact real metadata without skipped or repeated entries");
+   check([operation[@"phase"] isEqual:@"observed"] && [operation[@"observation"] isEqual:@"unchanged"] &&
+    source.hostSubmitCalls==submittedBefore+1,@"two lifecycle-authorized complete observations submit once each");
+  } else if(mode==2) {
+   check(expired && [operation[@"phase"] isEqual:@"cancelled"] && [operation[@"submission"] isEqual:@"notSubmitted"] &&
+    [before[@"state"] isEqual:@"cancelled"] && beforeSlices>=3 && [before[@"entries"] unsignedIntegerValue]>1 &&
+    [before[@"entries"] unsignedIntegerValue]<26 && [before[@"files"] unsignedIntegerValue]>0 &&
+    [before[@"logicalBytes"] unsignedLongLongValue]>0 && [before[@"logicalBytes"] unsignedLongLongValue]<300 &&
+    source.hostSubmitCalls==submittedBefore,
+    @"expiration after a continued before slice retains partial evidence and makes zero host calls");
+  } else {
+   check(expired && [before[@"state"] isEqual:@"complete"] && [after[@"state"] isEqual:@"cancelled"] &&
+    afterSlices>=3 && [after[@"entries"] unsignedIntegerValue]>1 && [after[@"entries"] unsignedIntegerValue]<26 &&
+    [after[@"files"] unsignedIntegerValue]>0 && [after[@"logicalBytes"] unsignedLongLongValue]>0 && [after[@"logicalBytes"] unsignedLongLongValue]<300 &&
+    [operation[@"phase"] isEqual:@"interruptedAfterSubmission"] && [operation[@"observation"] isEqual:@"partial"] &&
+    [operation[@"logicalDecrease"] isEqual:@0] && [operation[@"allocatedDecrease"] isEqual:@0] && source.hostSubmitCalls==submittedBefore+1,
+    @"expiration after a continued after slice cannot claim completed observation or reclaimed bytes");
+  }
+  id run=[cache valueForKey:@"platformRun"];
+  check(run && beforeCursor.openDirectoryCount==0 && afterCursor.openDirectoryCount==0 &&
+   [[run valueForKey:@"sampleRootFD"] intValue]==-1,
+   @"continued and expired sampling releases cursor and held root descriptors");
+  check(axs_cachekeeper_gurd_receipt_projection(cache.receipt)!=nil,@"continued lifecycle receipt remains strict");
+  [cache didBecomeActive];
+ }
+ method_setImplementation(advance,axs_cachekeeper_gurd_test_cursor_advance);
+ method_setImplementation(uptime,axs_cachekeeper_gurd_test_uptime);axs_cachekeeper_gurd_test_uptime=NULL;
+ atomic_store(&axs_cachekeeper_gurd_test_clock_offset,0);
+ printf("PASS: gurd cursor continuation beyond four seconds and lifecycle partial closure\n");
+}
+#endif
 int main(int argc,const char *argv[]) {@autoreleasepool {
 #if defined(AXS_CACHEKEEPER_GURD_FIXED201_SYMLINK)
  check(argc==2,@"temporary fixture argument");NSString *home=[NSString stringWithUTF8String:argv[1]];
@@ -93,6 +191,7 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
  check(source.submitted==0 && [operation[@"before"][@"state"] isEqual:@"linkEncountered"],@"real descendant symlink fails sample and blocks call");
  printf("PASS: gurd isolated real-file symlink classification\n");
 #else
+ if(argc==3 && !strcmp(argv[2],"continuation")) {axs_cachekeeper_gurd_test_continuation([NSString stringWithUTF8String:argv[1]]);return 0;}
  testProductionPredicateProofProjectionShape();
  check(argc==2,@"temporary fixture argument");NSString *home=[NSString stringWithUTF8String:argv[1]];
  NSString *root=[home stringByAppendingPathComponent:@"Library/Application Support/gurd_cache"];
@@ -178,23 +277,25 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
  unlink([root stringByAppendingPathComponent:@"link"].fileSystemRepresentation);[cache didBecomeActive];
  __block AxsCacheKeeperScanCursor *partialCursor=nil;
  axs_cachekeeper_gurd_test_did_advance=^(AxsCacheKeeperScanCursor *cursor) {partialCursor=cursor;};
- [cache axs_cachekeeper_setSampleEntryLimit:2 seconds:4];[cache axs_cachekeeper_setSampleSliceEntries:1];[cache didEnterBackground];
+ [cache axs_cachekeeper_setSampleEntryLimit:2];[cache axs_cachekeeper_setSampleSliceEntries:1];[cache didEnterBackground];
  waitFor(^BOOL {return eventFinished(12);});operation=[cache.receipt[@"operations"] lastObject];axs_cachekeeper_gurd_test_did_advance=nil;
  check(source.submitted==3 && [operation[@"before"][@"state"] isEqual:@"entryLimit"] &&
   [operation[@"before"][@"entries"] unsignedLongLongValue]==3 && [partialCursor.state isEqual:@"entryLimit"] && partialCursor.openDirectoryCount==0,
   @"partial entry-limit sample keeps its lower bound, closes cursor handles and cannot authorize submit");
- [cache didBecomeActive];[cache axs_cachekeeper_setSampleEntryLimit:200000 seconds:0];[cache didEnterBackground];waitFor(^BOOL {return eventFinished(13);});
- operation=[cache.receipt[@"operations"] lastObject];check([operation[@"before"][@"state"] isEqual:@"timeLimit"] && source.submitted==3,@"actual sampler time budget is visible");
- [cache didBecomeActive];[cache axs_cachekeeper_setSampleEntryLimit:200000 seconds:4];
+ [cache didBecomeActive];[cache axs_cachekeeper_setSampleEntryLimit:0];[cache didEnterBackground];waitFor(^BOOL {return eventFinished(13);});
+ operation=[cache.receipt[@"operations"] lastObject];check([operation[@"before"][@"state"] isEqual:@"entryLimit"] &&
+  [operation[@"before"][@"entries"] isEqual:@1] && [operation[@"before"][@"files"] isEqual:@0] && source.submitted==3,
+  @"zero entry budget retains only the observed root and never submits");
+ [cache didBecomeActive];[cache axs_cachekeeper_setSampleEntryLimit:200000];
  source.duringSubmit=^{[weakCache expireBackgroundTime];};[cache didEnterBackground];waitFor(^BOOL {return eventFinished(14);});operation=[cache.receipt[@"operations"] lastObject];
  check(source.submitted==4 && [operation[@"phase"] isEqual:@"interruptedAfterSubmission"] && [operation[@"submission"] isEqual:@"submitted"],@"post submission expiry never lies about cancellation");
- [cache didBecomeActive];source.duringSubmit=nil;[cache axs_cachekeeper_setSampleEntryLimit:200000 seconds:4];[cache axs_cachekeeper_setSampleSliceEntries:1];
+ [cache didBecomeActive];source.duringSubmit=nil;[cache axs_cachekeeper_setSampleEntryLimit:200000];[cache axs_cachekeeper_setSampleSliceEntries:1];
  [cache didEnterBackground];waitFor(^BOOL {return [cache.receipt[@"operations"] count]>=15 && [[cache.receipt[@"operations"] lastObject][@"phase"] isEqual:@"submitted"];});
- [cache axs_cachekeeper_setSampleEntryLimit:0 seconds:4];waitFor(^BOOL {return eventFinished(15);});operation=[cache.receipt[@"operations"] lastObject];
+ [cache axs_cachekeeper_setSampleEntryLimit:0];waitFor(^BOOL {return eventFinished(15);});operation=[cache.receipt[@"operations"] lastObject];
  check([operation[@"phase"] isEqual:@"interruptedAfterSubmission"] && [operation[@"observation"] isEqual:@"partial"] &&
   [operation[@"after"][@"state"] isEqual:@"entryLimit"] && [operation[@"logicalDecrease"] unsignedLongLongValue]==0 &&
   [operation[@"allocatedDecrease"] unsignedLongLongValue]==0,@"after partial sample never reports observed decrease");
- [cache didBecomeActive];[[NSMutableData dataWithLength:1024] writeToFile:file atomically:YES];[cache axs_cachekeeper_setSampleEntryLimit:200000 seconds:4];[cache axs_cachekeeper_setSampleCounterLimit:100];
+ [cache didBecomeActive];[[NSMutableData dataWithLength:1024] writeToFile:file atomically:YES];[cache axs_cachekeeper_setSampleEntryLimit:200000];[cache axs_cachekeeper_setSampleCounterLimit:100];
  [cache didEnterBackground];waitFor(^BOOL {return eventFinished(16);});operation=[cache.receipt[@"operations"] lastObject];
  check([operation[@"before"][@"state"] isEqual:@"invalidMetadata"] && [operation[@"before"][@"errorCode"] intValue]==EOVERFLOW &&
   source.submitted==5,@"checked cumulative sample overflow preserves EOVERFLOW and blocks submission");

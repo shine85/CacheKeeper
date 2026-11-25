@@ -22,7 +22,7 @@ typedef NSDictionary * (^AxsCacheKeeperGurdContextProvider)(void);
 // or rejected history. Register lifecycle observers only after this boundary.
 - (void)restoreReceipt:(id)receipt completion:(void (^)(void))completion;
 #if defined(AXS_CACHEKEEPER_GURD_TESTING)
-- (void)axs_cachekeeper_setSampleEntryLimit:(NSUInteger)entries seconds:(NSTimeInterval)seconds;
+- (void)axs_cachekeeper_setSampleEntryLimit:(NSUInteger)entries;
 - (void)axs_cachekeeper_setSampleSliceEntries:(NSUInteger)entries;
 - (void)axs_cachekeeper_setSampleCounterLimit:(uint64_t)limit;
 #endif

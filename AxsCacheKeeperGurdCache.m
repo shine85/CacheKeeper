@@ -42,7 +42,6 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
 @property(nonatomic,strong) NSMutableDictionary *sampleInodes;
 @property(nonatomic) uint64_t sampleLogicalBytes,sampleAllocatedBytes,sampleFiles,sampleEntries;
 @property(nonatomic) int sampleRootFD,sampleErrorCode;
-@property(nonatomic) NSTimeInterval sampleDeadline;
 @property(nonatomic,copy) NSString *sampleFailure,*samplePhase;
 @property(nonatomic) BOOL finished,entered;
 @property(nonatomic) BOOL expired;
@@ -65,7 +64,6 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
  NSUInteger _sampleEntryLimit;
  NSUInteger _sampleSliceEntries;
  uint64_t _sampleCounterLimit;
- NSTimeInterval _sampleSeconds;
  NSMutableArray *_operations;
  NSString *_state,*_reason;
  NSDate *_lastUpdated;
@@ -77,7 +75,7 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
  beginTask:(NSUInteger (^)(void (^expiration)(void)))begin endTask:(void (^)(NSUInteger task))end observer:(void (^)(NSDictionary *))observer {
  if(!(self=[super init])) return nil;
  _provider=[provider copy];_source=source ?: [AxsCacheKeeperGurdSource new];_begin=[begin copy];_end=[end copy];_observer=[observer copy];
- _queue=dispatch_queue_create("dev.local.cachekeeper.gurd",DISPATCH_QUEUE_SERIAL);dispatch_queue_set_specific(_queue,(__bridge const void *)self,(__bridge void *)self,NULL);_operations=[NSMutableArray new];_state=@"idle";_reason=@"none";_sampleEntryLimit=200000;_sampleSliceEntries=128;_sampleSeconds=4;_sampleCounterLimit=9007199254740991ULL;_lastUpdated=NSDate.date;
+ _queue=dispatch_queue_create("dev.local.cachekeeper.gurd",DISPATCH_QUEUE_SERIAL);dispatch_queue_set_specific(_queue,(__bridge const void *)self,(__bridge void *)self,NULL);_operations=[NSMutableArray new];_state=@"idle";_reason=@"none";_sampleEntryLimit=200000;_sampleSliceEntries=128;_sampleCounterLimit=9007199254740991ULL;_lastUpdated=NSDate.date;
  _commitLock=[NSObject new];_runtimeInfo=axs_cachekeeper_runtime_info();atomic_init(&_generation,1);atomic_init(&_background,NO);atomic_init(&_startedConfiguration,NSUIntegerMax);atomic_init(&_event,0);return self;
 }
 - (NSDictionary *)axs_cachekeeper_snapshot {
@@ -197,7 +195,6 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
 - (void)axs_cachekeeper_start_sample:(AxsCacheKeeperGurdRun *)run phase:(NSString *)phase {
  if(run.finished) return;NSString *reason=[self axs_cachekeeper_gate:run];if(reason) {[self axs_cachekeeper_finish:run reason:reason];return;}
  run.samplePhase=[phase copy];run.sampleFailure=nil;run.sampleErrorCode=0;run.sampleLogicalBytes=0;run.sampleAllocatedBytes=0;run.sampleFiles=0;run.sampleEntries=0;run.sampleInodes=[NSMutableDictionary new];
- run.sampleDeadline=NSProcessInfo.processInfo.systemUptime+_sampleSeconds;
  int rootFD=axs_cachekeeper_gurd_open_root(run.binding);if(rootFD<0) {int code=errno;run.sampleFailure=code==ESTALE ? @"identityChanged" : @"readError";run.sampleErrorCode=code;run.cursor=nil;run.sampleRootFD=-1;[self axs_cachekeeper_sample_finish:run];return;}
  run.sampleRootFD=rootFD;
  NSArray *leaf=[run.binding[@"identity"] lastObject];
@@ -234,14 +231,11 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
 - (void)axs_cachekeeper_sample_slice:(AxsCacheKeeperGurdRun *)run {
  if(run.finished) return;NSString *reason=[self axs_cachekeeper_gate:run];
  if(reason) {if(run.cursor && [run.cursor.state isEqual:@"running"]) [run.cursor stopWithState:@"cancelled"];[self axs_cachekeeper_finish:run reason:reason];return;}
- if([run.cursor.state isEqual:@"running"] && _sampleSeconds>0 && NSProcessInfo.processInfo.systemUptime>=run.sampleDeadline)
-  [run.cursor stopWithState:@"timeLimit"];
- if([run.cursor.state isEqual:@"running"] && _sampleSeconds==0) [run.cursor stopWithState:@"timeLimit"];
  if([run.cursor.state isEqual:@"running"]) [run.cursor advanceEntries:_sampleSliceEntries seconds:.025];
- if([run.cursor.state isEqual:@"running"] && _sampleSeconds>0 && NSProcessInfo.processInfo.systemUptime<run.sampleDeadline) {
+ // A slice yields the queue; only lifecycle revocation or cursor limits end the sample.
+ if([run.cursor.state isEqual:@"running"]) {
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_MSEC),_queue,^{[self axs_cachekeeper_sample_slice:run];});return;
  }
- if([run.cursor.state isEqual:@"running"]) [run.cursor stopWithState:@"timeLimit"];
  if([run.cursor.state isEqual:@"readError"]) {
   NSArray *errors=run.cursor.result[@"scanDiagnostics"][@"errors"];NSDictionary *error=errors.firstObject;
   if(!run.sampleErrorCode) run.sampleErrorCode=[error[@"errorCode"] intValue];
@@ -365,8 +359,8 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
   self->_operations=closed;self->_lastUpdated=validated[@"updated"];self->_runtimeInfo=validated[@"runtimeInfo"];NSDictionary *snapshot=[self axs_cachekeeper_snapshot];if(self->_observer) dispatch_async(dispatch_get_main_queue(),^{self->_observer(snapshot);});
 }
 #if defined(AXS_CACHEKEEPER_GURD_TESTING)
-- (void)axs_cachekeeper_setSampleEntryLimit:(NSUInteger)entries seconds:(NSTimeInterval)seconds {
- dispatch_sync(_queue,^{self->_sampleEntryLimit=MIN(entries,(NSUInteger)200000);self->_sampleSeconds=MIN(MAX(seconds,0),4);});
+- (void)axs_cachekeeper_setSampleEntryLimit:(NSUInteger)entries {
+ dispatch_sync(_queue,^{self->_sampleEntryLimit=MIN(entries,(NSUInteger)200000);});
 }
 - (void)axs_cachekeeper_setSampleSliceEntries:(NSUInteger)entries {
  dispatch_sync(_queue,^{self->_sampleSliceEntries=MAX((NSUInteger)1,MIN(entries,(NSUInteger)512));});
