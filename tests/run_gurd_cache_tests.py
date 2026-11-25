@@ -26,9 +26,17 @@ def main():
         if not git:raise RuntimeError("fixed 201 symlink RED requires git")
         fixed=subprocess.run([git,"show","b176c581b44812a94c3a901674ddf7e1d7a1be36:AxsCacheKeeperGurdCache.m"],cwd=ROOT,capture_output=True,check=True,timeout=60).stdout
         old=folder/"fixed201-gurd-cache.m";old.write_bytes(fixed)
+        isolated=folder/"gurd-symlink-green";isolated_fixture=folder/"symlink-green-fixture";isolated_fixture.mkdir()
+        subprocess.run([cc,"clang","-fobjc-arc","-fblocks","-Wall","-Wextra","-Werror=format",
+            "-Werror=implicit-function-declaration",'-DAXS_CACHEKEEPER_PACKAGE_VERSION="0.0.0-0.0"',"-DAXS_CACHEKEEPER_GURD_TESTING=1","-DAXS_CACHEKEEPER_SCAN_TESTING=1",
+            "-DAXS_CACHEKEEPER_GURD_FIXED201_SYMLINK=1","-I"+str(ROOT),"-I"+str(ROOT/"tests/include"),"-framework","Foundation",
+            *[str(ROOT/p) for p in ("AxsCacheKeeperGurdCache.m","AxsCacheKeeperGurdSource.m","AxsCacheKeeperScanTask.m",
+                "AxsCacheKeeperDirectories.m","AxsCacheKeeperOperationInfo.m","tests/gurd_cache_tests.m")],"-o",str(isolated)],check=True,timeout=60)
+        subprocess.run([str(isolated),str(isolated_fixture)],check=True,timeout=60)
         fixed_binary=folder/"fixed201-gurd-cache-red";fixed_fixture=folder/"fixed201-symlink-red-fixture";fixed_fixture.mkdir()
         subprocess.run([cc,"clang","-fobjc-arc","-fblocks","-Wall","-Wextra","-Werror=format",
             "-Werror=implicit-function-declaration",'-DAXS_CACHEKEEPER_PACKAGE_VERSION="0.0.0-0.0"',"-DAXS_CACHEKEEPER_GURD_TESTING=1","-DAXS_CACHEKEEPER_SCAN_TESTING=1",
+            "-DAXS_CACHEKEEPER_GURD_FIXED201_SYMLINK=1",
             "-I"+str(ROOT),"-I"+str(ROOT/"tests/include"),"-framework","Foundation",str(old),
             *[str(ROOT/p) for p in ("AxsCacheKeeperGurdSource.m","AxsCacheKeeperScanTask.m","AxsCacheKeeperDirectories.m","AxsCacheKeeperOperationInfo.m","tests/gurd_cache_tests.m")],"-o",str(fixed_binary)],check=True,timeout=60)
         result=subprocess.run([str(fixed_binary),str(fixed_fixture)],capture_output=True,text=True,timeout=60)

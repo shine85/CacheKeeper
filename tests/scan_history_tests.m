@@ -148,6 +148,43 @@ int main(int argc,const char **argv) { @autoreleasepool {
     axs_cachekeeper_history_test_check(migratedLegacy.count==2 &&
         [migratedLegacy[1][@"scanDiagnosticsState"] isEqual:@"unknown"] && !migratedLegacy[1][@"scanDiagnostics"],
         "legacy top-level snapshot is appended once as unknown during history migration");
+    NSMutableDictionary *saturatedDiagnostics=[axs_cachekeeper_scan_diagnostics_new() mutableCopy];
+    saturatedDiagnostics[@"measurementComplete"]=@NO;
+    saturatedDiagnostics[@"enumerationErrors"]=@(UINT32_MAX);
+    saturatedDiagnostics[@"errors"]=[@[@{@"scope":@"home",@"stage":@"enumerate",@"reason":@"readFailure",
+        @"errorDomain":@"posix",@"errorCode":@(EIO),@"count":@(UINT32_MAX)}] mutableCopy];
+    axs_cachekeeper_scan_error(saturatedDiagnostics,@"home",@"enumerate",@"readFailure",@"posix",EIO,1);
+    NSDictionary *saturatedError=saturatedDiagnostics[@"errors"][0];
+    axs_cachekeeper_history_test_check([saturatedError[@"count"] unsignedLongLongValue]==UINT32_MAX &&
+        [saturatedDiagnostics[@"errorsTruncated"] boolValue] &&
+        [saturatedDiagnostics[@"omittedErrorCount"] unsignedLongLongValue]==1 &&
+        ![saturatedDiagnostics[@"measurementComplete"] boolValue] &&
+        axs_cachekeeper_scan_diagnostics_projection(saturatedDiagnostics),
+        "saturated repeated Swiftgram error count marks omitted lower bound and incomplete measurement");
+    NSMutableDictionary *saturatedAggregate=[axs_cachekeeper_scan_diagnostics_new() mutableCopy];
+    saturatedAggregate[@"entriesVisited"]=@(UINT32_MAX);
+    axs_cachekeeper_scan_count(saturatedAggregate,@"entriesVisited",1);
+    axs_cachekeeper_history_test_check([saturatedAggregate[@"entriesVisited"] unsignedLongLongValue]==UINT32_MAX &&
+        [saturatedAggregate[@"errorsTruncated"] boolValue] &&
+        ![saturatedAggregate[@"measurementComplete"] boolValue] &&
+        axs_cachekeeper_scan_diagnostics_projection(saturatedAggregate),
+        "saturated Swiftgram aggregate count remains explicitly incomplete");
+    axs_cachekeeper_scan_count(saturatedAggregate,@"entriesVisited",UINT64_MAX);
+    axs_cachekeeper_history_test_check([saturatedAggregate[@"entriesVisited"] unsignedLongLongValue]==UINT32_MAX &&
+        axs_cachekeeper_scan_diagnostics_projection(saturatedAggregate),
+        "large Swiftgram aggregate increment saturates without unsigned addition wrapping");
+    axs_cachekeeper_scan_error(saturatedDiagnostics,@"home",@"enumerate",@"readFailure",@"posix",EIO,UINT64_MAX);
+    axs_cachekeeper_history_test_check([saturatedDiagnostics[@"errors"][0][@"count"] unsignedLongLongValue]==UINT32_MAX &&
+        [saturatedDiagnostics[@"omittedErrorCount"] unsignedLongLongValue]==UINT32_MAX &&
+        axs_cachekeeper_scan_diagnostics_projection(saturatedDiagnostics),
+        "large repeated Swiftgram error increment preserves saturated retained and omitted counts");
+    NSMutableDictionary *largeInitialError=axs_cachekeeper_scan_diagnostics_new();
+    axs_cachekeeper_scan_error(largeInitialError,@"home",@"enumerate",@"readFailure",@"posix",EIO,UINT64_MAX);
+    axs_cachekeeper_history_test_check([largeInitialError[@"errors"][0][@"count"] unsignedLongLongValue]==UINT32_MAX &&
+        [largeInitialError[@"omittedErrorCount"] unsignedLongLongValue]==UINT32_MAX &&
+        [largeInitialError[@"errorsTruncated"] boolValue] && ![largeInitialError[@"measurementComplete"] boolValue] &&
+        axs_cachekeeper_scan_diagnostics_projection(largeInitialError),
+        "large first Swiftgram error retains a valid clipped count with explicit incomplete measurement");
     NSMutableDictionary *closedFailure=[axs_cachekeeper_scan_diagnostics_new() mutableCopy];
     closedFailure[@"containerState"]=@"unreadable";
     closedFailure[@"discoveryComplete"]=@NO;

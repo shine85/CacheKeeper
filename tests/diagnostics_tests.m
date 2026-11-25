@@ -59,7 +59,10 @@ static void dxruntime_receipts(Class cls,NSString *fixture) {
             dxwrite(folder,file,record);
             NSDictionary *before=dxfiles(folder),*report=[session reportWithApps:@[] environment:environment];
             NSMutableDictionary *expected=[record mutableCopy];expected[@"updated"]=source[3];
-            if (isImage) expected[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
+            if (isImage) {
+                [expected removeObjectForKey:@"writesBlocked"];
+                expected[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
+            }
             NSDictionary *exported=dxapp(report,@"test.runtime")[exportKey];
             dxcheck([exported isEqual:@{@"state":@"available",@"data":expected}],
                 @"新运行回执通过真实导出保留身份差异、各补采结果和代码来源，不被面板版本覆盖");
@@ -97,11 +100,17 @@ static void dxruntime_receipts(Class cls,NSString *fixture) {
         NSMutableDictionary *legacy=[source[2] mutableCopy];legacy[@"installationCheck"]=oldCheck;
         dxwrite(folder,file,legacy);
         NSMutableDictionary *expected=[legacy mutableCopy];expected[@"updated"]=source[3];
-        if (isImage) expected[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
+        if (isImage) {
+            [expected removeObjectForKey:@"writesBlocked"];
+            expected[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
+        }
         dxcheck([dxapp([session reportWithApps:@[] environment:environment],@"test.runtime")[exportKey] isEqual:@{@"state":@"available",@"data":expected}],
             @"旧安装失败详情完整可读且不补造 identity、补采、构建来源或 SDK 发现");
         dxwrite(folder,file,source[2]);expected=[source[2] mutableCopy];expected[@"updated"]=source[3];
-        if (isImage) expected[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
+        if (isImage) {
+            [expected removeObjectForKey:@"writesBlocked"];
+            expected[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
+        }
         dxcheck([dxapp([session reportWithApps:@[] environment:environment],@"test.runtime")[exportKey] isEqual:@{@"state":@"available",@"data":expected}],
             @"同一会话重读旧回执不沿用新证据，不补造安装检查、构建来源或 SDK 发现");
     }

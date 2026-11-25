@@ -411,11 +411,11 @@
     }
     if (path.section==0 && path.row==2) {
         UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
-        cell.textLabel.text=@"禁止网络磁盘缓存";
+        cell.textLabel.text=@"限制标准 NSURLCache";
         NSDictionary *states=[self axs_cachekeeper_display:@"appEnabled.plist"];
         UISwitch *toggle=[UISwitch new];toggle.on=axs_cachekeeper_url_cache_enabled(states[self.bundle]);
         toggle.enabled=axs_cachekeeper_wants_restriction(states[self.bundle]);
-        cell.detailTextLabel.text=toggle.enabled ? @"仅限标准 NSURLCache，可能增加流量；不改变内存缓存" : @"只清理模式不限制网络缓存；选项已保留";
+        cell.detailTextLabel.text=toggle.enabled ? @"仅限标准 NSURLCache；SDWebImage 已适配磁盘写入由当前模式控制。可能增加流量；不改变内存缓存" : @"只清理模式允许标准 NSURLCache 与 SDWebImage 原有写盘；选项已保留";
         NSDictionary *result=[self axs_cachekeeper_display:[NSString stringWithFormat:@"Status/%@.network.plist",self.bundle]];
         NSDictionary *network=axs_cachekeeper_network_projection(result);
         if (network) {

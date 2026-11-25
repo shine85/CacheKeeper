@@ -96,9 +96,17 @@ static inline NSMutableDictionary *axs_cachekeeper_scan_diagnostics_new(void) {
 }
 
 static inline void axs_cachekeeper_scan_count(NSMutableDictionary *diagnostics, NSString *key, uint64_t count) {
-    uint64_t total=[diagnostics[key] unsignedLongLongValue]+count;
-    diagnostics[key]=@(MIN(total,(uint64_t)UINT32_MAX));
-    if (total>UINT32_MAX) {diagnostics[@"errorsTruncated"]=@YES;diagnostics[@"measurementComplete"]=@NO;}
+    const uint64_t limit=(uint64_t)UINT32_MAX;
+    uint64_t previous=[diagnostics[key] unsignedLongLongValue];
+    BOOL saturated=previous>limit;
+    previous=MIN(previous,limit);
+    uint64_t room=limit-previous;
+    uint64_t retained=MIN(count,room);
+    diagnostics[key]=@(previous+retained);
+    if (saturated || count>room) {
+        diagnostics[@"errorsTruncated"]=@YES;
+        diagnostics[@"measurementComplete"]=@NO;
+    }
 }
 
 static inline void axs_cachekeeper_scan_error(NSMutableDictionary *diagnostics, NSString *scope, NSString *stage,
@@ -109,13 +117,27 @@ static inline void axs_cachekeeper_scan_error(NSMutableDictionary *diagnostics, 
         if ([known[@"scope"] isEqual:scope] && [known[@"stage"] isEqual:stage] && [known[@"reason"] isEqual:reason] &&
             [known[@"errorDomain"] isEqual:domain] && [known[@"errorCode"] integerValue]==code) {
             NSMutableDictionary *next=[known mutableCopy];
-            next[@"count"]=@(MIN([known[@"count"] unsignedLongLongValue]+count,(uint64_t)UINT32_MAX));
-            errors[index]=next;diagnostics[@"errors"]=errors;return;
+            const uint64_t limit=(uint64_t)UINT32_MAX;
+            uint64_t previous=MIN([known[@"count"] unsignedLongLongValue],limit),room=limit-previous;
+            uint64_t retained=MIN(count,room);
+            next[@"count"]=@(previous+retained);
+            errors[index]=next;diagnostics[@"errors"]=errors;
+            if (count>room) {
+                diagnostics[@"errorsTruncated"]=@YES;diagnostics[@"measurementComplete"]=@NO;
+                axs_cachekeeper_scan_count(diagnostics,@"omittedErrorCount",count-room);
+            }
+            return;
         }
     }
-    if (errors.count<AxsCacheKeeperScanErrorLimit)
-        [errors addObject:@{@"scope":scope,@"stage":stage,@"reason":reason,@"errorDomain":domain,@"errorCode":@(code),@"count":@(count)}];
-    else {diagnostics[@"errorsTruncated"]=@YES;axs_cachekeeper_scan_count(diagnostics,@"omittedErrorCount",count);}
+    if (errors.count<AxsCacheKeeperScanErrorLimit) {
+        const uint64_t limit=(uint64_t)UINT32_MAX;
+        uint64_t retained=MIN(count,limit);
+        [errors addObject:@{@"scope":scope,@"stage":stage,@"reason":reason,@"errorDomain":domain,@"errorCode":@(code),@"count":@(retained)}];
+        if (count>retained) {
+            diagnostics[@"errorsTruncated"]=@YES;diagnostics[@"measurementComplete"]=@NO;
+            axs_cachekeeper_scan_count(diagnostics,@"omittedErrorCount",count-retained);
+        }
+    } else {diagnostics[@"errorsTruncated"]=@YES;axs_cachekeeper_scan_count(diagnostics,@"omittedErrorCount",count);}
     diagnostics[@"errors"]=errors;
 }
 

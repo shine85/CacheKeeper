@@ -147,10 +147,15 @@
 }
 - (void)testRestrictionCopyNamesOnlyAdaptedDiskWriterScope {
     UITableViewCell *mode=[self.page tableView:self.page.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:1 inSection:0]];
+    UITableViewCell *urlCache=[self.page tableView:self.page.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:2 inSection:0]];
     UITableViewCell *image=[self.page tableView:self.page.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:6 inSection:0]];
     NSString *modeCopy=[mode.contentView.subviews description];
+    NSString *urlCacheCopy=[urlCache.textLabel.text stringByAppendingFormat:@" %@",urlCache.detailTextLabel.text];
     NSString *imageCopy=image.detailTextLabel.text;
     XCTAssertTrue([modeCopy containsString:@"SDWebImage"] || [imageCopy containsString:@"SDWebImage"]);
+    XCTAssertTrue([urlCacheCopy containsString:@"NSURLCache"]);
+    XCTAssertTrue([urlCacheCopy containsString:@"SDWebImage"]);
+    XCTAssertFalse([urlCacheCopy containsString:@"网络磁盘缓存"]);
     XCTAssertTrue([imageCopy containsString:@"磁盘写入"]);
     XCTAssertTrue([imageCopy containsString:@"未知"]);
     XCTAssertFalse([imageCopy containsString:@"禁止所有"]);

@@ -117,9 +117,24 @@ int main(int argc, const char **argv) { @autoreleasepool {
     axs_cachekeeper_test_check([partial[@"previousRows"] isEqual:completed[@"rows"]],"first slice keeps pre-task history");
     NSArray *recent=partial[@"recentScans"];
     axs_cachekeeper_test_check([recent isEqual:completed[@"recentScans"]],"running continuation keeps only previously completed history");
-    for(NSUInteger i=0;i<10;i++) [service tick];
+    id previousHistoryTail=recent.lastObject;
+    NSTimeInterval historyDeadline=NSProcessInfo.processInfo.systemUptime+20;
+    NSUInteger historyTicks=0;
+    while([axs_cachekeeper_test_read(folder,@"scan.plist")[@"scanProgress"][@"state"] isEqual:@"running"] &&
+          NSProcessInfo.processInfo.systemUptime<historyDeadline) {
+        [service tick];historyTicks++;
+    }
     NSDictionary *finished=axs_cachekeeper_test_read(folder,@"scan.plist");
-    axs_cachekeeper_test_check([finished[@"recentScans"] count]==[recent count]+1 &&
+    axs_cachekeeper_test_check(historyTicks>0 && [finished[@"scanProgress"][@"state"] isEqual:@"complete"] &&
+        [finished[@"complete"] boolValue],"large real scan completes within its bounded fixture deadline");
+    NSArray *finishedHistory=finished[@"recentScans"];
+    NSUInteger retainedCount=MIN((NSUInteger)3,recent.count);
+    axs_cachekeeper_test_check(finishedHistory.count==MIN((NSUInteger)4,recent.count+1) &&
+        [[finishedHistory subarrayWithRange:NSMakeRange(0,retainedCount)]
+            isEqual:[recent subarrayWithRange:NSMakeRange(recent.count-retainedCount,retainedCount)]] &&
+        ![finishedHistory.lastObject isEqual:previousHistoryTail] &&
+        [finishedHistory.lastObject[@"updated"] isEqual:finished[@"updated"]] &&
+        [finishedHistory.lastObject[@"rows"] isEqual:finished[@"rows"]] &&
         [[[finished[@"recentScans"] lastObject][@"scanDiagnosticsState"] description] isEqual:@"available"] &&
         [finished[@"previousRows"] isEqual:completed[@"rows"]],"terminal completion appends one real history observation");
     NSMutableDictionary *privateProgress=[finished[@"scanProgress"] mutableCopy];privateProgress[@"privatePath"]=@"/private/secret";

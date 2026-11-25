@@ -453,6 +453,7 @@ static void ckprojection(NSString *base) {
     NSDictionary *binding=@{@"epoch":summaryEpoch,@"terminalState":record[@"state"],@"terminalFinishedAt":record[@"finishedAt"],@"summarizedAt":@(finishedAt+1)};
     NSDictionary *closedBinding=axs_cachekeeper_capacity_summary_binding(binding,record);
     ckcheck([closedBinding[@"state"] isEqual:@"current"] && [closedBinding[@"epoch"] isEqual:summaryEpoch],"summary binds the same terminal epoch after finishedAt");
+    ckcheck([axs_cachekeeper_capacity_summary_binding(closedBinding,record) isEqual:closedBinding],"closed five-field binding survives reprojection");
     NSMutableDictionary *wrong=[binding mutableCopy];wrong[@"epoch"]=NSUUID.UUID.UUIDString;
     ckcheck([axs_cachekeeper_capacity_summary_binding(wrong,record)[@"state"] isEqual:@"stale"],"summary from another epoch stays stale");
     wrong=[binding mutableCopy];wrong[@"summarizedAt"]=@(finishedAt-1);
@@ -461,6 +462,14 @@ static void ckprojection(NSString *base) {
     ckcheck([axs_cachekeeper_capacity_summary_binding(wrong,record)[@"state"] isEqual:@"stale"],"boolean terminal time is rejected");
     wrong=[binding mutableCopy];wrong[@"extraPrivatePath"]=@"private-canary";
     ckcheck([axs_cachekeeper_capacity_summary_binding(wrong,record)[@"state"] isEqual:@"stale"],"unknown binding fields fail closed");
+    wrong=[binding mutableCopy];wrong[@"state"]=@"current";wrong[@"extraPrivatePath"]=@"private-canary";
+    ckcheck([axs_cachekeeper_capacity_summary_binding(wrong,record)[@"state"] isEqual:@"stale"],"unknown binding fields fail closed when state is present");
+    for (NSString *key in @[@"epoch",@"terminalState",@"terminalFinishedAt",@"summarizedAt"]) {
+        wrong=[closedBinding mutableCopy];[wrong removeObjectForKey:key];
+        ckcheck([axs_cachekeeper_capacity_summary_binding(wrong,record)[@"state"] isEqual:@"stale"],"missing required binding field fails closed");
+        wrong[@"extraPrivatePath"]=@"private-canary";
+        ckcheck([axs_cachekeeper_capacity_summary_binding(wrong,record)[@"state"] isEqual:@"stale"],"unknown field cannot replace a required binding field");
+    }
     ckcheck([axs_cachekeeper_capacity_summary_binding(nil,record)[@"state"] isEqual:@"unknown"],"legacy record without summary binding remains unknown");
     NSDictionary *report=@{@"capacityMeasurement":@{@"epoch":summaryEpoch,@"state":record[@"state"],@"finishedAt":record[@"finishedAt"],@"summaryBinding":closedBinding}};
     ckcheck(axs_cachekeeper_capacity_summary_is_current(report) && axs_cachekeeper_capacity_report_exportable(report),"current summary is exportable only while bound to terminal measurement");
@@ -625,7 +634,7 @@ int main(int argc,const char **argv) {
     @autoreleasepool {
         ckcheck(argc==3,"expected fixture directory and case");NSString *base=[NSString stringWithUTF8String:argv[1]],*name=[NSString stringWithUTF8String:argv[2]];
         if ([name isEqual:@"all"] || [name isEqual:@"private-layout"]) ckprivateLayout(base);
-        if ([name isEqual:@"all"] || [name isEqual:@"shared"]) ckshared(base);
+        if ([name isEqual:@"all"] || [name isEqual:@"shared"] || [name isEqual:@"projection"]) ckshared(base);
         if ([name isEqual:@"all"] || [name isEqual:@"cancel"]) ckcancel(base);
         if ([name isEqual:@"all"] || [name isEqual:@"save"]) cksave(base);
         if ([name isEqual:@"all"] || [name isEqual:@"restart"]) ckrestart(base);
@@ -644,7 +653,7 @@ int main(int argc,const char **argv) {
         if ([name isEqual:@"source-alias"]) cksourceAliasBeforeOpen(base);
         if ([name isEqual:@"all"] || [name isEqual:@"error-schema"]) ckerrorSchema(base);
         if ([name isEqual:@"all"]) {ckremovedRequest(base);ckrootBudget(base);ckproviderFailure(base);}
-        if ([name isEqual:@"all"]) ckprojection(base);
+        if ([name isEqual:@"all"] || [name isEqual:@"projection"]) ckprojection(base);
         puts("PASS: capacity service real metadata, request gates, shared aliases, cancellation, persistence and restart");
     }return 0;
 }

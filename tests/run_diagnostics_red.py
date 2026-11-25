@@ -1,9 +1,14 @@
 """Verify that the installed-app regression detects the old configuration-only report."""
 import pathlib
+import shutil
 import subprocess
+import sys
 import tempfile
 
 root = pathlib.Path(__file__).resolve().parents[1]
+if sys.platform != "darwin" or not shutil.which("xcrun"):
+    print("UNAVAILABLE: diagnostics baseline requires macOS and xcrun; no tests ran.")
+    raise SystemExit(2)
 baseline = "897259fcd3e846662379fbce97896ed8abfd76ff"
 (root / "tmp").mkdir(exist_ok=True)
 with tempfile.TemporaryDirectory(prefix="diagnostics-red-", dir=root / "tmp") as temp:
@@ -29,7 +34,7 @@ with tempfile.TemporaryDirectory(prefix="diagnostics-red-", dir=root / "tmp") as
     binary = target / "red-test"
     subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-I" + str(root), "-framework", "Foundation",
                     str(target / "main.m"), str(target / "AxsCacheKeeperDiagnostics.m"),
-                    str(target / "tests/diagnostics_tests.m"), "-o", str(binary)],
+                    str(target / "tests/diagnostics_tests.m"), str(root / "AxsCacheKeeperInstallation.m"), "-o", str(binary)],
                    check=True, timeout=60)
     result = subprocess.run([str(binary), str(target / "fixtures")], capture_output=True,
                             text=True, encoding="utf-8", timeout=60)

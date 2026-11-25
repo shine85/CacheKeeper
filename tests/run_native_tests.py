@@ -55,7 +55,7 @@ SCRIPT_GROUPS = (
     ("image-coordinator", "run_image_coordinator_tests.py", 195),
     ("image-disabled-identity", "run_image_disabled_identity_tests.py", 330),
     ("image-runtime-probe", "run_image_runtime_probe_tests.py", 390),
-    ("gurd-cache", "run_gurd_cache_tests.py", 435),
+    ("gurd-cache", "run_gurd_cache_tests.py", 600),
     ("gurd-runtime", "run_gurd_runtime_tests.py", 810),
     ("image-main-view", "run_image_main_view_tests.py", 480),
     ("image-source-observation", "run_image_source_observation_tests.py", 435),

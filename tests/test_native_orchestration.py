@@ -189,6 +189,9 @@ class NativeOrchestrationTests(unittest.TestCase):
         required = {"resource-layout": 60 + 60,
                     "image-effect": 2 * (60 + 30),
                     "image-source-observation": 60 + 4 * (60 + 30),
+                    # Scope contract, fixed-source retrieval, full GREEN,
+                    # isolated symlink GREEN/RED and exclusion RED.
+                    "gurd-cache": 30 + 60 + 4 * (60 + 60),
                     # C core, MRC helper, fixed-header RED/current GREEN,
                     # then fixed-producer RED/current writer integration.
                     "image-write-observation": (60 + 30) + 60 + (15 + 2 * (60 + 30)) + (15 + 2 * (60 + 60)),

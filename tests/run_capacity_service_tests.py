@@ -102,6 +102,11 @@ def main():
                 raise RuntimeError("ambiguous service RED anchor: " + name)
             run(name, product.replace(before, after), case, failure)
         protocol_mutations = (
+            ("summary-binding-fields", 'NSSet *keys=[NSSet setWithArray:[value allKeys]];\n'
+             '    NSSet *required=[NSSet setWithArray:@[@"epoch",@"terminalState",@"terminalFinishedAt",@"summarizedAt"]];\n'
+             '    NSMutableSet *withState=[required mutableCopy];[withState addObject:@"state"];\n'
+             '    if ((![keys isEqual:required] && ![keys isEqual:withState]) ||',
+             'if (!([value count]==4 || [value count]==5) ||', "projection", "unknown binding fields fail closed"),
             ("cursor-error-projection", 'out[@"cursorErrors"]=errors;', '/* precise RED: discard real cursor errors */',
              "cursor-errors", "real cursor error survives service schema and saved result"),
             ("cursor-error-counts", 'if (enumerated!=enumeration || statted!=stat) return nil;',

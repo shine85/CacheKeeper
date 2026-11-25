@@ -243,9 +243,11 @@ static void runEnabled(void) {
     require(atomic_load(&submissions)==0,@"removed selection leaves host submission at zero");
     writeConfiguration(enabledState(),selectedRoot());configure(YES);
     await(^BOOL {return [operation()[@"reason"] isEqual:@"scopeUnproven"] && [operation()[@"event"] unsignedIntegerValue]>1;},@"new selection is reevaluated but remains scopeUnproven");
-    void (^oldExpiration)(void)=[lastExpiration copy];foreground();
-    await(^BOOL {return [operation()[@"phase"] isEqual:@"cancelled"];},@"foreground closes the blocked operation truthfully");
-    NSDictionary *closed=operation();pump(2.1);require([operation() isEqual:closed],@"old delayed sample cannot revive foreground-revoked event");
+    void (^oldExpiration)(void)=[lastExpiration copy];NSDictionary *closed=operation();foreground();settled();
+    require([closed[@"reason"] isEqual:@"scopeUnproven"] && [closed[@"phase"] isEqual:@"skipped"] &&
+        [closed[@"submission"] isEqual:@"notSubmitted"] && [operation() isEqual:closed],
+        @"foreground does not rewrite an already finalized unproven operation");
+    pump(2.1);require([operation() isEqual:closed],@"old delayed sample cannot revive foreground-revoked event");
     writeConfiguration(@{@"enabled":@NO,@"mode":@"prevent"},selectedRoot());configure(YES);settled();
     unsigned long identityCalls=atomic_load(&snapshots)+atomic_load(&validations);
     provider=context();require([provider[@"installation"] isEqual:@""] && identityCalls==atomic_load(&snapshots)+atomic_load(&validations),@"disabled provider never reuses or samples installation identity");
