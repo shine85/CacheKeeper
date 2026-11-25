@@ -1,5 +1,6 @@
 """Real subprocess checks: fail-fast, swallowed exits, timeout conflation and unsafe dependencies."""
 import json
+import ast
 import os
 from pathlib import Path
 import shutil
@@ -38,6 +39,23 @@ class NativeOrchestrationTests(unittest.TestCase):
     def suite(self, name, code, timeout=3, dependencies=()):
         return {"name": name, "command": [sys.executable, "-c", code],
                 "timeout_seconds": timeout, "dependencies": dependencies}
+
+    def test_staged_diagnostics_source_keeps_its_local_fixture_headers(self):
+        source = (ROOT / "tests/run_diagnostics_red.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        copies = [node for node in tree.body if isinstance(node, ast.With)][0].body
+        stage = next(node for node in copies if isinstance(node, ast.For)
+                     and isinstance(node.target, ast.Name) and node.target.id == "name"
+                     and isinstance(node.iter, ast.Tuple)
+                     and any(isinstance(item, ast.Constant) and item.value == "diagnostics_tests.m" for item in node.iter.elts))
+        target = self.work / "staged"
+        (target / "tests").mkdir(parents=True)
+        exec(compile(ast.Module(body=[stage], type_ignores=[]), "diagnostics-fixture-stage", "exec"),
+             {"root": ROOT, "target": target})
+        import re
+        for name in re.findall(r'^#import "([^/]+\.h)"', (target / "tests/diagnostics_tests.m").read_text(encoding="utf-8"), re.MULTILINE):
+            self.assertEqual((target / "tests" / name).read_bytes(), (ROOT / "tests" / name).read_bytes(),
+                             "relocated diagnostic tests must retain their same-directory fixture")
 
     def test_first_failure_does_not_block_later_group(self):
         result, summary = self.run_batch([

@@ -24,7 +24,8 @@ with tempfile.TemporaryDirectory(prefix="diagnostics-red-", dir=root / "tmp") as
         if path.name == "AxsCacheKeeperDiagnostics.h":
             continue
         (target / path.name).write_bytes(path.read_bytes())
-    (target / "tests/diagnostics_tests.m").write_bytes((root / "tests/diagnostics_tests.m").read_bytes())
+    for name in ("diagnostics_tests.m", "gurd_export_fixture.h"):
+        (target / "tests" / name).write_bytes((root / "tests" / name).read_bytes())
     (target / "main.m").write_text(
         '#import <Foundation/Foundation.h>\n'
         'extern void axs_cachekeeper_run_diagnostics_tests(NSString *fixture);\n'
