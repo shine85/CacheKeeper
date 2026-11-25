@@ -155,6 +155,20 @@ int main(int argc,char **argv) { @autoreleasepool {
             [entry[@"sdkReceipts"][@"gurdCache"][@"operations"] isEqual:gurd[@"operations"]],@"Gurd capability and inventory retain honest action semantics");
         if (binary) break;
     }
+    gurd=[axs_cachekeeper_gurd_legacy_export_fixture() mutableCopy];
+    for (BOOL binary=NO;;binary=YES) {
+        NSData *serialized=[NSPropertyListSerialization dataWithPropertyList:gurd format:binary ? NSPropertyListBinaryFormat_v1_0 : NSPropertyListXMLFormat_v1_0 options:0 error:nil];
+        oecheck(serialized && [serialized writeToFile:gurdPath options:NSDataWritingAtomic error:nil],@"persist normalized legacy Gurd fixture in both encodings");
+        NSDictionary *report=[session reportWithApps:@[@{@"id":@"test.observation"}] environment:@{@"pluginVersion":@"0.7.2-211.1"}];
+        NSDictionary *app=report[@"apps"][0],*record=app[@"gurdCache"][@"data"],*entry=nil;
+        for(NSDictionary *row in report[@"storageInventory"][@"entries"]) if([row[@"bundle"] isEqual:@"test.observation"]) entry=row;
+        oecheck([record[@"schemaVersion"] isEqual:@2] && [record[@"operations"] count]==5 &&
+            [entry[@"sdkReceipts"][@"gurdCache"][@"operations"] isEqual:record[@"operations"]],@"all three consumers retain every migrated historical Gurd operation");
+        oecheck([app[@"capabilities"][@"gurd"][@"effectVerification"] isEqual:@"legacyScopeNotRecorded"] &&
+            [entry[@"sdkReceipts"][@"gurdCache"][@"effectVerification"] isEqual:@"legacyScopeNotRecorded"],@"capability and inventory share explicit missing historical scope evidence");
+        oecheck([NSJSONSerialization dataWithJSONObject:report options:0 error:nil] && [[NSData dataWithContentsOfFile:gurdPath] isEqual:serialized],@"legacy Gurd export stays JSON safe and never rewrites source bytes");
+        if(binary) break;
+    }
     gurd[@"rawPath"]=@"observation-private-canary";
     oecheck([gurd writeToFile:gurdPath atomically:YES],@"persist malformed Gurd record");
     NSDictionary *gurdReport=[session reportWithApps:@[@{@"id":@"test.observation"}] environment:@{}];

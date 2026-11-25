@@ -4,6 +4,7 @@
 #import "../AxsCacheKeeperCleanupHistory.h"
 #import "../AxsCacheKeeperCapacityStatus.h"
 #import "../AxsCacheKeeperImageWriteObservation.h"
+#import "gurd_export_fixture.h"
 
 static void dxcheck(BOOL condition, NSString *message) {
     if (!condition) { fprintf(stderr,"FAIL: diagnostics: %s\n",message.UTF8String);exit(1); }
@@ -24,6 +25,38 @@ static NSDictionary *dxfiles(NSString *folder) {
             files[path]=@[[NSData dataWithContentsOfFile:full],attributes[NSFileModificationDate]];
     }
     return files;
+}
+static void dxgurd_history(Class cls,NSString *fixture) {
+    NSString *folder=[fixture stringByAppendingPathComponent:@"diagnostics-gurd-history"];
+    dxcheck([NSFileManager.defaultManager createDirectoryAtPath:[folder stringByAppendingPathComponent:@"Status"] withIntermediateDirectories:YES attributes:nil error:nil],@"create Gurd saved-history fixture");
+    NSString *bundle=@"com.ss.iphone.ugc.Aweme";
+    dxwrite(folder,@"appEnabled.plist",@{bundle:@YES});
+    NSString *path=[folder stringByAppendingPathComponent:[NSString stringWithFormat:@"Status/%@.gurd.plist",bundle]];
+    NSDictionary *legacy=axs_cachekeeper_gurd_legacy_export_fixture();
+    for(NSNumber *format in @[@(NSPropertyListXMLFormat_v1_0),@(NSPropertyListBinaryFormat_v1_0)]) {
+        NSData *bytes=[NSPropertyListSerialization dataWithPropertyList:legacy format:format.unsignedIntegerValue options:0 error:nil];
+        dxcheck(bytes && [bytes writeToFile:path atomically:YES],@"write real XML or binary legacy receipt");
+        AxsCacheKeeperDiagnostics *session=[[cls alloc] initWithFolder:folder];
+        NSDictionary *result=[session reportWithApps:@[@{@"id":bundle}] environment:@{@"pluginVersion":@"0.7.2-211.1"}];
+        NSDictionary *app=dxapp(result,bundle),*gurd=app[@"gurdCache"][@"data"];
+        dxcheck([app[@"gurdCache"][@"state"] isEqual:@"available"] && [gurd[@"schemaVersion"] isEqual:@2] && [gurd[@"operations"] count]==5,@"legacy Gurd receipt exports all five operations through the versioned decoder");
+        for(NSUInteger i=0;i<5;i++) {
+            NSMutableDictionary *operation=[gurd[@"operations"][i] mutableCopy];
+            dxcheck([operation[@"scopeProof"] isEqual:@{@"state":@"notRecorded",@"source":@"legacyReceiptV1"}],@"legacy export records missing proof without inventing identity");
+            [operation removeObjectForKey:@"scopeProof"];
+            dxcheck([operation isEqual:legacy[@"operations"][i]],@"legacy export preserves the original observation and producer");
+        }
+        dxcheck([app[@"capabilities"][@"gurd"][@"effectVerification"] isEqual:@"legacyScopeNotRecorded"],@"capability summary cannot promote missing historical scope");
+        NSData *json=[NSJSONSerialization dataWithJSONObject:result options:0 error:nil];
+        dxcheck(json && [[NSData dataWithContentsOfFile:path] isEqual:bytes],@"diagnostic projection serializes without rewriting the source receipt");
+    }
+    NSMutableDictionary *bad=[legacy mutableCopy];bad[@"private-canary"]=@"user-content-canary";
+    dxcheck([bad writeToFile:path atomically:YES],@"write rejected history fixture");
+    AxsCacheKeeperDiagnostics *session=[[cls alloc] initWithFolder:folder];
+    NSDictionary *rejected=dxapp([session reportWithApps:@[] environment:@{}],bundle)[@"gurdCache"];
+    dxcheck([rejected[@"state"] isEqual:@"invalid"] && [rejected[@"rejection"][@"stage"] length]>0,@"invalid Gurd history includes a closed rejection stage");
+    NSData *json=[NSJSONSerialization dataWithJSONObject:rejected options:0 error:nil];
+    dxcheck(json && ![[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] containsString:@"canary"],@"Gurd rejection never exports raw private fields");
 }
 static void dxruntime_receipts(Class cls,NSString *fixture) {
     NSString *folder=[fixture stringByAppendingPathComponent:@"diagnostics-runtime-receipts"];
@@ -213,6 +246,7 @@ void axs_cachekeeper_run_diagnostics_tests(NSString *fixture) {
     dxcheck(cls!=Nil,@"应提供可调用的诊断采集实现");
     dxinventory(cls,fixture);
     dxruntime_receipts(cls,fixture);
+    dxgurd_history(cls,fixture);
     NSString *folder=[fixture stringByAppendingPathComponent:@"diagnostics"];
     dxcheck([NSFileManager.defaultManager createDirectoryAtPath:[folder stringByAppendingPathComponent:@"Status"] withIntermediateDirectories:YES attributes:nil error:nil],@"创建夹具");
     NSDictionary *states=@{@"test.active":@{@"enabled":@YES,@"mode":@"auto"},@"test.disabled":@{@"enabled":@NO},@"../invalid":@YES};

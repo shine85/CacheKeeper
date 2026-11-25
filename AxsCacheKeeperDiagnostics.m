@@ -345,11 +345,12 @@ static NSDictionary *AxsCacheKeeperDiagnosticChannelProjection(id value) {
         } else app[@"imageDiskCache"]=[redactor axs_cachekeeper_record:imageRead];
         NSDictionary *gurdRead=AxsCacheKeeperDiagnosticRead(self.folder,[NSString stringWithFormat:@"Status/%@.gurd.plist",bundle]);
         if ([gurdRead[@"state"] isEqual:@"available"]) {
-            NSMutableDictionary *gurd=[axs_cachekeeper_gurd_receipt_projection(gurdRead[@"data"]) mutableCopy];
+            NSDictionary *decoded=axs_cachekeeper_gurd_receipt_decode(gurdRead[@"data"]);
+            NSMutableDictionary *gurd=[decoded[@"data"] mutableCopy];
             if (gurd) {
                 gurd[@"updated"]=@([gurd[@"updated"] timeIntervalSince1970]);
                 app[@"gurdCache"]=@{@"state":@"available",@"data":gurd};
-            } else app[@"gurdCache"]=@{@"state":@"invalid"};
+            } else app[@"gurdCache"]=decoded;
         } else app[@"gurdCache"]=[redactor axs_cachekeeper_record:gurdRead];
         app[@"capabilities"]=axs_cachekeeper_capabilities(@{@"standardDirectories":scan ? @{@"state":@"available",@"data":scan} : @{@"state":[snapshots[@"state"] isEqual:@"available"] ? @"missing" : snapshots[@"state"]},
             @"network":networkRead,@"image":imageRead,@"webKit":webKitRead,@"gurd":gurdRead,@"hostAutomatic":hostRead,@"hostObserved":observedRead},environment[@"pluginVersion"]);

@@ -79,7 +79,7 @@ static NSString *axs_cachekeeper_gurd_verify_file(int root,const struct stat *ob
  _commitLock=[NSObject new];_runtimeInfo=axs_cachekeeper_runtime_info();atomic_init(&_generation,1);atomic_init(&_background,NO);atomic_init(&_startedConfiguration,NSUIntegerMax);atomic_init(&_event,0);return self;
 }
 - (NSDictionary *)axs_cachekeeper_snapshot {
- return @{@"schemaVersion":@1,@"updated":_lastUpdated,@"runtimeInfo":_runtimeInfo,@"family":@"gurd",@"contract":@"aweme412021WhitelistV1",@"state":_state,@"reason":_reason,
+ return @{@"schemaVersion":@2,@"updated":_lastUpdated,@"runtimeInfo":_runtimeInfo,@"family":@"gurd",@"contract":@"aweme412021WhitelistV1",@"state":_state,@"reason":_reason,
  @"restriction":@"unsupported",@"background":@(atomic_load(&_background)),@"operations":[_operations copy]};
 }
 - (NSDictionary *)receipt {if(dispatch_get_specific((__bridge const void *)self)) return [self axs_cachekeeper_snapshot];__block NSDictionary *result;dispatch_sync(_queue,^{result=[self axs_cachekeeper_snapshot];});return result;}

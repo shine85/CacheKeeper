@@ -335,6 +335,27 @@ static void runRestore(void) {
         [operation()[@"runtimeInfo"][@"packageVersion"] isEqual:@"0.0.0-0.0"] && [receipt()[@"runtimeInfo"] isEqual:operation()[@"runtimeInfo"]],@"old and new events retain separate producer attribution");
     require(axs_cachekeeper_gurd_receipt_projection(report())!=nil,@"mixed producer history saves with strict schema");
 }
+static void runLegacyRestore(void) {
+    writeConfiguration(@NO,selectedRoot());savedReceipt=axs_cachekeeper_gurd_legacy_export_fixture();
+    require([savedReceipt writeToFile:reportPath() atomically:YES],@"legacy saved receipt written before configure");
+    configure(YES);initialized();
+    require([receipt()[@"schemaVersion"] isEqual:@2] && [receipt()[@"operations"] count]==5 &&
+        [receipt()[@"updated"] isEqual:savedReceipt[@"updated"]] && [receipt()[@"runtimeInfo"] isEqual:savedReceipt[@"runtimeInfo"]],
+        @"legacy startup restores every operation with its original timestamp and producer");
+    for(NSUInteger i=0;i<5;i++) {
+        NSMutableDictionary *operation=[receipt()[@"operations"][i] mutableCopy];
+        require([operation[@"scopeProof"] isEqual:@{@"state":@"notRecorded",@"source":@"legacyReceiptV1"}],@"legacy startup marks absent scope evidence explicitly");
+        [operation removeObjectForKey:@"scopeProof"];
+        require([operation isEqual:savedReceipt[@"operations"][i]],@"legacy startup never rewrites original samples or failure reason");
+    }
+    require([report() isEqual:receipt()] && atomic_load(&submissions)==0,@"canonical restored history is saved without a host operation");
+    NSArray *history=[receipt()[@"operations"] copy];
+    writeConfiguration(enabledState(),selectedRoot());configure(YES);settled();background();
+    await(^BOOL {return [operation()[@"event"] isEqual:@6] && [operation()[@"reason"] isEqual:@"scopeUnproven"];},@"new event follows all five restored operations and still needs proven scope");settled();
+    require([[[receipt()[@"operations"] subarrayWithRange:NSMakeRange(0,5)] copy] isEqual:history] &&
+        atomic_load(&submissions)==0 && [NSFileManager.defaultManager fileExistsAtPath:fixtureFile] &&
+        axs_cachekeeper_gurd_receipt_projection(report())!=nil,@"mixed old and new history persists while the unproven host remains untouched");
+}
 static void runRejectedRestore(void) {
     NSMutableDictionary *bad=[axs_cachekeeper_gurd_export_fixture() mutableCopy];bad[@"rawPath"]=fixtureHome;
     require([bad writeToFile:reportPath() atomically:YES],@"malformed saved Status fixture written");
@@ -412,6 +433,7 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
     if ([scenario isEqual:@"enabled"]) runEnabled();
     else if ([@[@"disabled",@"malformed",@"build-mismatch",@"version-mismatch"] containsObject:scenario]) runBlocked(scenario);
     else if ([scenario isEqual:@"restore"]) runRestore();
+    else if ([scenario isEqual:@"restore-legacy"]) runLegacyRestore();
     else if ([scenario isEqual:@"restore-invalid"]) runRejectedRestore();
     else if ([scenario isEqual:@"restore-ordering"]) runRestoreOrdering();
     else if ([scenario isEqual:@"startup-background"]) runStartupBackground();

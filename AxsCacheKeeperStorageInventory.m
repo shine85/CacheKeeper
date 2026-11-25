@@ -51,12 +51,13 @@ static NSDictionary *axs_cachekeeper_inventory_sdk(id wrapper,BOOL image) {
 static NSDictionary *axs_cachekeeper_inventory_gurd(id wrapper) {
     NSString *source=axs_cachekeeper_inventory_source(wrapper);
     if (![source isEqual:@"available"]) return @{@"state":source};
-    NSDictionary *record=axs_cachekeeper_gurd_receipt_projection(wrapper[@"data"]);
-    if (!record) return @{@"state":@"invalid"};
+    NSDictionary *decoded=axs_cachekeeper_gurd_receipt_decode(wrapper[@"data"]);
+    NSDictionary *record=decoded[@"data"];
+    if (!record) return decoded;
     return @{@"state":@"available",@"source":@"savedRecords",@"receiptState":record[@"state"],
         @"sourceUpdated":@([record[@"updated"] timeIntervalSince1970]),@"runtimeInfo":record[@"runtimeInfo"],
         @"restriction":record[@"restriction"],@"operations":record[@"operations"],
-        @"resourceContract":@"aweme412021WhitelistV1",@"effectVerification":@"scopeObservationOnly"};
+        @"resourceContract":@"aweme412021WhitelistV1",@"effectVerification":axs_cachekeeper_gurd_scope_verification(record)};
 }
 // A pure view over this report's raw reads. Version and observation axes stay independent.
 NSDictionary *axs_cachekeeper_capabilities(NSDictionary *raw,NSString *panelVersion) {
@@ -69,7 +70,10 @@ NSDictionary *axs_cachekeeper_capabilities(NSDictionary *raw,NSString *panelVers
             if ([key isEqual:@"network"]) data=axs_cachekeeper_network_projection(envelope[@"data"]);
             else if ([key isEqual:@"image"]) data=axs_cachekeeper_image_cache_raw_projection(envelope[@"data"]);
             else if ([key isEqual:@"webKit"]) data=axs_cachekeeper_webkit_raw_projection(envelope[@"data"]);
-            else if ([key isEqual:@"gurd"]) data=axs_cachekeeper_gurd_receipt_projection(envelope[@"data"]);
+            else if ([key isEqual:@"gurd"]) {
+                NSDictionary *decoded=axs_cachekeeper_gurd_receipt_decode(envelope[@"data"]);data=decoded[@"data"];
+                if(decoded[@"rejection"]) entry[@"rejection"]=decoded[@"rejection"];
+            }
             else if ([key isEqual:@"hostAutomatic"]) data=axs_cachekeeper_host_projection(envelope[@"data"]);
             else if ([key isEqual:@"hostObserved"]) data=axs_cachekeeper_host_observed_projection(envelope[@"data"]);
             else data=axs_cachekeeper_record_valid(envelope[@"data"],0) ? envelope[@"data"] : nil;
@@ -98,7 +102,7 @@ NSDictionary *axs_cachekeeper_capabilities(NSDictionary *raw,NSString *panelVers
             if ([key isEqual:@"webKit"]) entry[@"liveProcessState"]=@"unknown";
             if ([key isEqual:@"gurd"]) {
                 entry[@"actionState"]=data[@"state"];entry[@"restriction"]=data[@"restriction"];
-                entry[@"resourceContract"]=data[@"contract"];entry[@"effectVerification"]=@"scopeObservationOnly";
+                entry[@"resourceContract"]=data[@"contract"];entry[@"effectVerification"]=axs_cachekeeper_gurd_scope_verification(data);
             }
             if ([key isEqual:@"image"] && !entry[@"sdkMethodsRejectionObservation"]) entry[@"sdkMethodsRejectionObservation"]=@{@"schemaVersion":@1,@"state":@"notRecorded"};
             if ([key isEqual:@"standardDirectories"]) entry[@"resourceContract"]=@"standardDirectoryRulesOnly";

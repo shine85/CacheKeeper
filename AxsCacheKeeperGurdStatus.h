@@ -50,49 +50,115 @@ static inline NSDictionary *axs_cachekeeper_gurd_sample_projection(id value) {
   for(NSString *key in @[@"files",@"logicalBytes",@"allocatedBytes",@"entries",@"errorCode"]) if([value[key] unsignedLongLongValue]) return nil;
  return [value copy];
 }
-static inline NSDictionary *axs_cachekeeper_gurd_operation_projection(id value) {
- NSArray *keys=@[@"event",@"runtimeInfo",@"configuration",@"phase",@"reason",@"submission",@"hostCompletion",@"observation",@"scopeProof",@"before",@"after",@"logicalDecrease",@"allocatedDecrease",@"physicalUniqueReclaimed"];
- if(!axs_cachekeeper_gurd_keys(value,keys) || !axs_cachekeeper_gurd_integer(value[@"event"],9007199254740991ULL) ||
- !axs_cachekeeper_runtime_info_projection(value[@"runtimeInfo"]) || !axs_cachekeeper_gurd_integer(value[@"configuration"],9007199254740991ULL) ||
+static inline NSArray *axs_cachekeeper_gurd_operation_keys(BOOL withScope) {
+ NSArray *keys=@[@"event",@"runtimeInfo",@"configuration",@"phase",@"reason",@"submission",@"hostCompletion",@"observation",@"before",@"after",@"logicalDecrease",@"allocatedDecrease",@"physicalUniqueReclaimed"];
+ return withScope ? [keys arrayByAddingObject:@"scopeProof"] : keys;
+}
+static inline BOOL axs_cachekeeper_gurd_legacy_runtime(id runtime) {
+ NSDictionary *valid=axs_cachekeeper_runtime_info_projection(runtime);
+ return valid && [@[@"0.7.2-201.1",@"0.7.2-202.1"] containsObject:valid[@"packageVersion"]];
+}
+static inline BOOL axs_cachekeeper_gurd_legacy_scope(id value) {
+ return axs_cachekeeper_gurd_keys(value,@[@"state",@"source"]) && [value[@"state"] isEqual:@"notRecorded"] &&
+  [value[@"source"] isEqual:@"legacyReceiptV1"];
+}
+// Legacy provenance is accepted only as historical evidence, never as a host binding proof.
+static inline NSString *axs_cachekeeper_gurd_operation_failure(id value,NSString **stage) {
+ *stage=@"operation";
+ if(!axs_cachekeeper_gurd_keys(value,axs_cachekeeper_gurd_operation_keys(YES))) return @"fields";
+ if(!axs_cachekeeper_runtime_info_projection(value[@"runtimeInfo"])) return @"runtimeInfo";
+ if(!axs_cachekeeper_gurd_integer(value[@"event"],9007199254740991ULL) || !axs_cachekeeper_gurd_integer(value[@"configuration"],9007199254740991ULL) ||
  ![@[@"preparing",@"samplingBefore",@"submitted",@"observed",@"skipped",@"cancelled",@"interruptedAfterSubmission",@"legacyUnknown"] containsObject:value[@"phase"]] ||
  !axs_cachekeeper_gurd_reason(value[@"reason"]) || ![@[@"notSubmitted",@"submitted",@"enteredUnknown",@"notRecorded"] containsObject:value[@"submission"]] ||
  ![@[@"notProvided",@"notRecorded"] containsObject:value[@"hostCompletion"]] ||
  ![@[@"pending",@"reduced",@"unchanged",@"increased",@"partial",@"notObserved",@"notRecorded"] containsObject:value[@"observation"]] ||
- ![value[@"physicalUniqueReclaimed"] isEqual:@"notMeasured"] || !axs_cachekeeper_gurd_scope_proof_projection(value[@"scopeProof"]) || !axs_cachekeeper_gurd_sample_projection(value[@"before"]) ||
- !axs_cachekeeper_gurd_sample_projection(value[@"after"]) || !axs_cachekeeper_gurd_integer(value[@"logicalDecrease"],9007199254740991ULL) ||
- !axs_cachekeeper_gurd_integer(value[@"allocatedDecrease"],9007199254740991ULL)) return nil;
+ ![value[@"physicalUniqueReclaimed"] isEqual:@"notMeasured"] || !axs_cachekeeper_gurd_integer(value[@"logicalDecrease"],9007199254740991ULL) ||
+ !axs_cachekeeper_gurd_integer(value[@"allocatedDecrease"],9007199254740991ULL)) return @"values";
+ BOOL legacy=axs_cachekeeper_gurd_legacy_scope(value[@"scopeProof"]);
+ *stage=@"scopeProof";
+ if(legacy ? !axs_cachekeeper_gurd_legacy_runtime(value[@"runtimeInfo"]) : !axs_cachekeeper_gurd_scope_proof_projection(value[@"scopeProof"]))
+  return legacy ? @"legacyRuntime" : @"proof";
+ *stage=@"operation";
+ if(legacy && [value[@"reason"] isEqual:@"scopeUnproven"]) return @"legacyReason";
+ for(NSString *key in @[@"before",@"after"]) {
+  *stage=key;
+  if(!axs_cachekeeper_gurd_sample_projection(value[key])) return @"sample";
+  if(legacy && [@[@"partial",@"closeError"] containsObject:value[key][@"state"]]) return @"legacySampleState";
+ }
+ *stage=@"operation";
  NSString *phase=value[@"phase"],*submission=value[@"submission"],*observation=value[@"observation"];
  if([phase isEqual:@"legacyUnknown"]) {
-  if(![submission isEqual:@"notRecorded"] || ![value[@"hostCompletion"] isEqual:@"notRecorded"] || ![observation isEqual:@"notRecorded"] || ![value[@"scopeProof"][@"state"] isEqual:@"scopeUnproven"] ||
-  ![value[@"before"][@"state"] isEqual:@"notRecorded"] || ![value[@"after"][@"state"] isEqual:@"notRecorded"]) return nil;
+  if(![submission isEqual:@"notRecorded"] || ![value[@"hostCompletion"] isEqual:@"notRecorded"] || ![observation isEqual:@"notRecorded"] || (!legacy && ![value[@"scopeProof"][@"state"] isEqual:@"scopeUnproven"]) ||
+  ![value[@"before"][@"state"] isEqual:@"notRecorded"] || ![value[@"after"][@"state"] isEqual:@"notRecorded"]) return @"semantics";
  } else {
-  if(![value[@"hostCompletion"] isEqual:@"notProvided"] || [submission isEqual:@"notRecorded"] || [observation isEqual:@"notRecorded"]) return nil;
-  if([@[@"preparing",@"samplingBefore",@"skipped",@"cancelled"] containsObject:phase] && (![submission isEqual:@"notSubmitted"] || ![observation isEqual:@"notObserved"])) return nil;
-  if([phase isEqual:@"submitted"] && (![submission isEqual:@"submitted"] || ![observation isEqual:@"pending"] || ![value[@"before"][@"state"] isEqual:@"complete"] || ![value[@"after"][@"state"] isEqual:@"notRecorded"])) return nil;
-  if([phase isEqual:@"observed"] && (![submission isEqual:@"submitted"] || ![@[@"reduced",@"unchanged",@"increased"] containsObject:observation] || ![value[@"reason"] isEqual:@"none"])) return nil;
-  if([phase isEqual:@"interruptedAfterSubmission"] && (![@[@"submitted",@"enteredUnknown"] containsObject:submission] || ![observation isEqual:@"partial"])) return nil;
+  if(![value[@"hostCompletion"] isEqual:@"notProvided"] || [submission isEqual:@"notRecorded"] || [observation isEqual:@"notRecorded"]) return @"semantics";
+  if([@[@"preparing",@"samplingBefore",@"skipped",@"cancelled"] containsObject:phase] && (![submission isEqual:@"notSubmitted"] || ![observation isEqual:@"notObserved"])) return @"semantics";
+  if([phase isEqual:@"submitted"] && (![submission isEqual:@"submitted"] || ![observation isEqual:@"pending"] || ![value[@"before"][@"state"] isEqual:@"complete"] || ![value[@"after"][@"state"] isEqual:@"notRecorded"])) return @"semantics";
+  if([phase isEqual:@"observed"] && (![submission isEqual:@"submitted"] || ![@[@"reduced",@"unchanged",@"increased"] containsObject:observation] || ![value[@"reason"] isEqual:@"none"])) return @"semantics";
+  if([phase isEqual:@"interruptedAfterSubmission"] && (![@[@"submitted",@"enteredUnknown"] containsObject:submission] || ![observation isEqual:@"partial"])) return @"semantics";
  }
 BOOL submitted=[value[@"submission"] isEqual:@"submitted"];
  BOOL measured=[@[@"reduced",@"unchanged",@"increased"] containsObject:value[@"observation"]];
- if(measured && (!submitted || ![value[@"scopeProof"][@"state"] isEqual:@"complete"] || ![value[@"before"][@"state"] isEqual:@"complete"] || ![value[@"after"][@"state"] isEqual:@"complete"])) return nil;
- if(!measured && ([value[@"logicalDecrease"] unsignedLongLongValue] || [value[@"allocatedDecrease"] unsignedLongLongValue])) return nil;
+ if(measured && (!submitted || (!legacy && ![value[@"scopeProof"][@"state"] isEqual:@"complete"]) || ![value[@"before"][@"state"] isEqual:@"complete"] || ![value[@"after"][@"state"] isEqual:@"complete"])) return @"measurement";
+ if(!measured && ([value[@"logicalDecrease"] unsignedLongLongValue] || [value[@"allocatedDecrease"] unsignedLongLongValue])) return @"measurement";
  if(measured) {
   uint64_t before=[value[@"before"][@"logicalBytes"] unsignedLongLongValue],after=[value[@"after"][@"logicalBytes"] unsignedLongLongValue];
   uint64_t ba=[value[@"before"][@"allocatedBytes"] unsignedLongLongValue],aa=[value[@"after"][@"allocatedBytes"] unsignedLongLongValue];
   NSString *observation=(after<before || aa<ba) ? @"reduced" : (after>before || aa>ba) ? @"increased" : @"unchanged";
   if(![value[@"observation"] isEqual:observation] || [value[@"logicalDecrease"] unsignedLongLongValue]!=(before>after ? before-after : 0) ||
-  [value[@"allocatedDecrease"] unsignedLongLongValue]!=(ba>aa ? ba-aa : 0)) return nil;
+  [value[@"allocatedDecrease"] unsignedLongLongValue]!=(ba>aa ? ba-aa : 0)) return @"measurement";
  }
- return [value copy];
+ return nil;
 }
-static inline NSDictionary *axs_cachekeeper_gurd_receipt_projection(id value) {
- if(!axs_cachekeeper_gurd_keys(value,@[@"schemaVersion",@"updated",@"runtimeInfo",@"family",@"contract",@"state",@"reason",@"restriction",@"background",@"operations"]) ||
- !axs_cachekeeper_gurd_integer(value[@"schemaVersion"],1) || [value[@"schemaVersion"] unsignedIntegerValue]!=1 ||
- ![value[@"updated"] isKindOfClass:NSDate.class] || !isfinite([value[@"updated"] timeIntervalSince1970]) || [value[@"updated"] timeIntervalSince1970]<=0 || !axs_cachekeeper_runtime_info_projection(value[@"runtimeInfo"]) ||
+static inline NSDictionary *axs_cachekeeper_gurd_operation_projection(id value) {
+ NSString *stage=nil;return axs_cachekeeper_gurd_operation_failure(value,&stage) ? nil : [value copy];
+}
+static inline NSDictionary *axs_cachekeeper_gurd_rejected(NSString *stage,NSString *code,NSNumber *index,id schema,id runtime) {
+ NSMutableDictionary *failure=[@{@"stage":stage,@"code":code} mutableCopy];
+ if(index) failure[@"operationIndex"]=index;
+ if(axs_cachekeeper_gurd_integer(schema,9007199254740991ULL)) failure[@"sourceSchemaVersion"]=schema;
+ NSDictionary *validRuntime=axs_cachekeeper_runtime_info_projection(runtime);if(validRuntime) failure[@"runtimeInfo"]=validRuntime;
+ return @{@"state":@"invalid",@"rejection":[failure copy]};
+}
+// A single reader accepts known historical schemas and returns canonical schema 2.
+static inline NSDictionary *axs_cachekeeper_gurd_receipt_decode(id value) {
+ if(![value isKindOfClass:NSDictionary.class]) return axs_cachekeeper_gurd_rejected(@"receipt",@"type",nil,nil,nil);
+ id schema=value[@"schemaVersion"],runtime=value[@"runtimeInfo"];
+ if(!axs_cachekeeper_gurd_keys(value,@[@"schemaVersion",@"updated",@"runtimeInfo",@"family",@"contract",@"state",@"reason",@"restriction",@"background",@"operations"]))
+  return axs_cachekeeper_gurd_rejected(@"receipt",@"fields",nil,schema,runtime);
+ if(!axs_cachekeeper_gurd_integer(schema,2) || [schema unsignedIntegerValue]<1)
+  return axs_cachekeeper_gurd_rejected(@"receipt",@"schemaVersion",nil,schema,runtime);
+ if(!axs_cachekeeper_runtime_info_projection(runtime)) return axs_cachekeeper_gurd_rejected(@"receipt",@"runtimeInfo",nil,schema,nil);
+ if(![value[@"updated"] isKindOfClass:NSDate.class] || !isfinite([value[@"updated"] timeIntervalSince1970]) || [value[@"updated"] timeIntervalSince1970]<=0 ||
  ![value[@"family"] isEqual:@"gurd"] || ![value[@"contract"] isEqual:@"aweme412021WhitelistV1"] ||
  ![@[@"idle",@"running",@"disabled",@"blocked",@"submitted",@"observed",@"interrupted"] containsObject:value[@"state"]] ||
  !axs_cachekeeper_gurd_reason(value[@"reason"]) || ![value[@"restriction"] isEqual:@"unsupported"] ||
- !axs_cachekeeper_gurd_bool(value[@"background"]) || ![value[@"operations"] isKindOfClass:NSArray.class] || [value[@"operations"] count]>16) return nil;
- NSUInteger previous=0;for(id operation in value[@"operations"]) {if(!axs_cachekeeper_gurd_operation_projection(operation) || [operation[@"event"] unsignedIntegerValue]<=previous) return nil;previous=[operation[@"event"] unsignedIntegerValue];}
- return [value copy];
+ !axs_cachekeeper_gurd_bool(value[@"background"]) || ![value[@"operations"] isKindOfClass:NSArray.class] || [value[@"operations"] count]>16)
+  return axs_cachekeeper_gurd_rejected(@"receipt",@"values",nil,schema,runtime);
+ NSMutableArray *operations=[NSMutableArray new];uint64_t previous=0;NSUInteger index=0;
+ for(id source in value[@"operations"]) {
+  id operation=source;id operationRuntime=[source isKindOfClass:NSDictionary.class] ? source[@"runtimeInfo"] : nil;
+  if(axs_cachekeeper_gurd_keys(source,axs_cachekeeper_gurd_operation_keys(NO))) {
+   if([schema unsignedIntegerValue]!=1) return axs_cachekeeper_gurd_rejected(@"operation",@"missingScopeProof",@(index),schema,operationRuntime);
+   if(!axs_cachekeeper_runtime_info_projection(operationRuntime)) return axs_cachekeeper_gurd_rejected(@"operation",@"runtimeInfo",@(index),schema,nil);
+   if(!axs_cachekeeper_gurd_legacy_runtime(operationRuntime)) return axs_cachekeeper_gurd_rejected(@"operation",@"legacyRuntime",@(index),schema,operationRuntime);
+   NSMutableDictionary *migrated=[source mutableCopy];migrated[@"scopeProof"]=@{@"state":@"notRecorded",@"source":@"legacyReceiptV1"};operation=migrated;
+  }
+  NSString *stage=nil,*code=axs_cachekeeper_gurd_operation_failure(operation,&stage);
+  if(code) return axs_cachekeeper_gurd_rejected(stage,code,@(index),schema,operationRuntime);
+  uint64_t event=[operation[@"event"] unsignedLongLongValue];
+  if(event<=previous) return axs_cachekeeper_gurd_rejected(@"operation",@"eventOrder",@(index),schema,operationRuntime);
+  previous=event;[operations addObject:[operation copy]];index++;
+ }
+ NSMutableDictionary *canonical=[value mutableCopy];canonical[@"schemaVersion"]=@2;canonical[@"operations"]=[operations copy];
+ return @{@"state":@"available",@"data":[canonical copy]};
+}
+static inline NSDictionary *axs_cachekeeper_gurd_receipt_projection(id value) {
+ return axs_cachekeeper_gurd_receipt_decode(value)[@"data"];
+}
+// Consumers call this only with canonical data from the decoder above.
+static inline NSString *axs_cachekeeper_gurd_scope_verification(NSDictionary *canonicalReceipt) {
+ for(NSDictionary *operation in canonicalReceipt[@"operations"])
+  if(axs_cachekeeper_gurd_legacy_scope(operation[@"scopeProof"])) return @"legacyScopeNotRecorded";
+ return @"scopeObservationOnly";
 }

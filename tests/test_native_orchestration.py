@@ -193,6 +193,8 @@ class NativeOrchestrationTests(unittest.TestCase):
                     # isolated symlink GREEN/RED and exclusion RED, then
                     # continuation GREEN plus fixed deadline source/compile/RED.
                     "gurd-cache": 30 + 60 + 4 * (60 + 60) + 4 * 60,
+                    "gurd-status": 5 * 60,
+                    "gurd-runtime": 5 * 60 + 2 * 60 + 15 * 20 + 4 * 20,
                     # C core, MRC helper, fixed-header RED/current GREEN,
                     # then fixed-producer RED/current writer integration.
                     "image-write-observation": (60 + 30) + 60 + (15 + 2 * (60 + 30)) + (15 + 2 * (60 + 60)),

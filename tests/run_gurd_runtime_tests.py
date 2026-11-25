@@ -1,7 +1,7 @@
 """Real Gurd Runtime integration; only platform/loaded-host ABI boundaries differ.
 
-Each child has a hard timeout <=60 seconds. Total runner budget is 780 seconds;
-the orchestrator should allow 810 seconds including Python startup and cleanup.
+Each child has a hard timeout <=60 seconds. Total runner budget is 810 seconds;
+the orchestrator should allow 840 seconds including Python startup and cleanup.
 UNAVAILABLE/exit 2 means no Foundation behavior or mutation result ran.
 """
 from pathlib import Path
@@ -13,10 +13,10 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-TOTAL_BUDGET_SECONDS = 780
+TOTAL_BUDGET_SECONDS = 810
 SCENARIOS = (
     "enabled", "disabled", "malformed", "build-mismatch", "version-mismatch",
-    "restore", "restore-invalid", "restore-ordering", "startup-background", "report-failure", "invalid-task", "sync-expire", "foreground-task", "strict",
+    "restore", "restore-legacy", "restore-invalid", "restore-ordering", "startup-background", "report-failure", "invalid-task", "sync-expire", "foreground-task", "strict",
 )
 PRODUCTION = (
     "AxsCacheKeeperGurdCache.m", "AxsCacheKeeperScanTask.m",
@@ -56,7 +56,7 @@ def main():
     def run(arguments, limit, **kwargs):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("Gurd Runtime total 780-second budget exhausted")
+            raise TimeoutError("Gurd Runtime total 810-second budget exhausted")
         return subprocess.run(arguments, timeout=min(limit, remaining), **kwargs)
 
     parent = ROOT / "tmp/implementation-201"
