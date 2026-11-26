@@ -65,6 +65,7 @@ SCRIPT_GROUPS = (
     ("scan-diagnostics", "run_scan_diagnostics_tests.py", 180),
     ("scan-task", "run_scan_task_tests.py", 420),
     ("host-evidence", "run_host_evidence_tests.py", 240),
+    ("host-preflight", "run_host_preflight_tests.py", 240),
     ("injection-conditions", "run_injection_conditions_tests.py", 360),
     ("hardlink", "run_hardlink_tests.py", 180),
     ("release-receipt", "run_release_receipt_tests.py", 300),

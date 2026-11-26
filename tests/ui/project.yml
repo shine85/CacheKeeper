@@ -32,6 +32,8 @@ targets:
       - path: ../../Prefs/SearchDiagnostics.m
       - path: ../../Prefs/SearchHitRouting.m
       - path: ../../Prefs/DiagnosticsPage.m
+      - path: ../../Prefs/HostPreflightPage.m
+      - path: ../../AxsCacheKeeperHostPreflight.m
       - path: ../../AxsCacheKeeperDiagnostics.m
       - path: ../../AxsCacheKeeperInjectionConditions.m
       - path: ../../AxsCacheKeeperStorageInventory.m
@@ -87,6 +89,7 @@ targets:
     sources:
       - path: ../../tests/ui/ScanPageTests.m
       - path: ../../tests/ui/CapacityPageTests.m
+      - path: ../../tests/ui/HostPreflightPageTests.m
       - path: ../../tests/ui/ScanHostEvidenceBoundary.m
       - path: ../../Prefs/InspectionPage.m
     dependencies:

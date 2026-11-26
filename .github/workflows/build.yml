@@ -34,6 +34,8 @@ jobs:
           set -o pipefail
           python3 tests/test_device_collection_portability.py -v 2>&1 | tee tmp/collection-results/portability.log
           python3 tests/test_device_collection_batch.py -v 2>&1 | tee tmp/collection-results/batch.log
+          python3 -m unittest tests.test_device_collection_resume -v 2>&1 | tee tmp/collection-results/resume.log
+          python3 -m unittest tests.test_device_collection_session tests.test_device_collection_session_cli tests.test_device_collection_diagnostics -v 2>&1 | tee tmp/collection-results/session.log
           python3 tests/test_device_sdk_incremental.py -v 2>&1 | tee tmp/collection-results/sdk.log
       - name: 保存集中采集回归日志
         if: always()

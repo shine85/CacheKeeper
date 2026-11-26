@@ -12,6 +12,7 @@ endif
 BUNDLE_NAME = CacheKeeperPrefs
 CacheKeeperPrefs_FILES = Prefs/Settings.m Prefs/SearchInput.m Prefs/ScanPage.m Prefs/InspectionPage.m Prefs/DiagnosticsPage.m AxsCacheKeeperDiagnostics.m AxsCacheKeeperAppList.m AxsCacheKeeperInstallation.m AxsCacheKeeperDiagnosticChannel.m
 CacheKeeperPrefs_FILES += Prefs/SearchDiagnostics.m
+CacheKeeperPrefs_FILES += Prefs/HostPreflightPage.m AxsCacheKeeperHostPreflight.m
 CacheKeeperPrefs_FILES += AxsCacheKeeperStorageInventory.m AxsCacheKeeperHostEvidence.m
 CacheKeeperPrefs_FILES += AxsCacheKeeperOperationInfo.m
 CacheKeeperPrefs_FILES += AxsCacheKeeperInjectionConditions.m

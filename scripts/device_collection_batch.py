@@ -6,6 +6,7 @@ load commands and requested unencrypted SDK technical metadata; app data is not 
 """
 import argparse
 import base64
+from collections import Counter
 import copy
 import datetime
 import hashlib
@@ -23,6 +24,13 @@ ROOT=Path(__file__).resolve().parents[1]
 SOURCE=ROOT/'scripts/device_collection_sources/resource_app_binding.py'
 SOURCE_SHA='b9c921e2c91ef6b0e6845cc7b5b39ca8086c8381ec4d2b55531bb8b2b26290cf'
 BUNDLE=re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,254}')
+STATIC_STATES=('collected','failed','attemptedOutcomeUnknown','notAttemptedConnection','notAttemptedBudget')
+SDK_PENDING_STATES={'notAttemptedBudget','notAttemptedConnection','notAttemptedLocalPreparationFailure',
+                    'notAttemptedLocalReceiptWriteFailure','notAttemptedParentChanged'}
+SDK_STATES=SDK_PENDING_STATES|{'notAttempted','notAttemptedUnspecified','notAttemptedMissingIdentity',
+                              'completeWithinRequestedSDKMetadata','partial','commandFailed','attemptedOutcomeUnknown',
+                              'localPreparationFailed','localReceiptWriteFailed','rejectedIncompleteOrInvalidReceipt'}
+RUN_ID=re.compile(r'(?:[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}|resume-[0-9a-f]{64})')
 RUNTIME_ADAPTERS={
     'com.ss.iphone.ugc.Aweme':('gurdReadiness','41.2.0','412021','ef0e0cba15dd3f35aab8c9b571693881'),
     'com.tencent.mqq':('qqResourceMetadata',None,None,None),
@@ -162,6 +170,156 @@ def write_sdk_receipt(directory,receipt):
     return directory/'receipt.json'
 
 
+def save_report(report,path):
+    report['summary']={state:sum(row['staticState']==state for row in report['apps']) for state in STATIC_STATES}
+    if report['sdkCollectionRequested']:
+        for row in report['apps']:
+            row.setdefault('sdkEvidence',dict(state='notAttempted' if row['staticState']=='collected' else 'notAttemptedMissingIdentity'))
+        report['sdkSummary']=dict(Counter(row['sdkEvidence']['state'] for row in report['apps']))
+        if report.get('mode')=='sdkResume':
+            report['sdkSummaryBySource']={source:dict(Counter(row['sdkEvidence']['state'] for row in report['apps']
+                                           if row['sdkEvidence'].get('evidenceSource')==source))
+                                         for source in ('historical','fresh')}
+    report['foregroundQueue']=[dict(bundle=row['bundle'],adapter=row.get('runtimeAdapter'),state=row['runtimeState'])
+                              for row in report['apps'] if row['runtimeState'].startswith('pending')]
+    atomic(path,report)
+
+
+def mark_sdk_pending(report,state):
+    # 只更新待尝试项；缺主身份、已失败和已保存的成功回执保持原状态。
+    for row in report['apps']:
+        if row.get('sdkEvidence',{}).get('state')=='notAttempted':row['sdkEvidence']=dict(state=state)
+
+
+def collect_sdk(tasks,report,output,deadline,clock,save,*,parent_unchanged=None):
+    import device_sdk_incremental as sdk
+    report['state']='collectingSDKMetadata';save()
+    for index,row in enumerate(report['apps']):
+        if row['staticState']!='collected' or row['sdkEvidence']['state']!='notAttempted':continue
+        if parent_unchanged is not None and not parent_unchanged():
+            mark_sdk_pending(report,'notAttemptedParentChanged');report['state']='parentChanged';save();return False
+        if deadline-clock()<155:
+            mark_sdk_pending(report,'notAttemptedBudget');report['budgetExhausted']=True
+            save();break
+        try:plan=sdk.prepare(row['identity'],raw_limit=2*1024*1024,seconds=120)
+        except (OSError,RuntimeError,ValueError) as error:
+            row['sdkEvidence']=dict(state='localPreparationFailed',errorType=type(error).__name__)
+            mark_sdk_pending(report,'notAttemptedLocalPreparationFailure')
+            report['state']='localPreparationFailed';save();return False
+        try:reply=tasks.task(plan['script'],125,until=min(deadline-30,clock()+125))
+        except (OSError,RuntimeError,ValueError) as error:
+            if isinstance(error,RuntimeError) and str(error)=='persistentTaskFailed':
+                row['sdkEvidence']=dict(state='commandFailed',reason='deviceCollectorExitedNonzero',evidenceSource='fresh')
+                save();continue
+            row['sdkEvidence']=dict(state='attemptedOutcomeUnknown',errorType=type(error).__name__,evidenceSource='fresh')
+            mark_sdk_pending(report,'notAttemptedConnection')
+            report['state']='interrupted';save();return False
+        try:result=sdk.parse(plan,reply)
+        except ValueError:
+            row['sdkEvidence']=dict(state='rejectedIncompleteOrInvalidReceipt',evidenceSource='fresh');save();continue
+        try:receipt_path=write_sdk_receipt(output/('sdk-'+str(index)),result.pop('receipt'))
+        except (OSError,RuntimeError,ValueError) as error:
+            row['sdkEvidence']=dict(state='localReceiptWriteFailed',errorType=type(error).__name__,evidenceSource='fresh')
+            mark_sdk_pending(report,'notAttemptedLocalReceiptWriteFailure')
+            report['state']='localReceiptWriteFailed';save();return False
+        row['sdkEvidence']=dict(result,receipt=receipt_path.relative_to(output).as_posix(),evidenceSource='fresh')
+        save()
+    if parent_unchanged is not None and not parent_unchanged():
+        mark_sdk_pending(report,'notAttemptedParentChanged');report['state']='parentChanged';save();return False
+    return True
+
+
+def load_resume_parent(path):
+    """只读取闭合 JSON；不读取回执对象、不加载传输、不追溯父链。"""
+    import device_sdk_incremental as sdk
+    path=Path(path).absolute()
+    if path.name!='collection.json' or path.is_symlink() or path.parent.is_symlink():raise ValueError('resumeParentPath')
+    raw=path.read_bytes()
+    if len(raw)>16*1024*1024:raise ValueError('resumeParentSize')
+    def unique_object(pairs):
+        result={}
+        for key,value in pairs:
+            if key in result:raise ValueError('resumeParentDuplicateKey')
+            result[key]=value
+        return result
+    report=json.loads(raw.decode('utf-8'),object_pairs_hook=unique_object)
+    if (type(report) is not dict or report.get('schemaVersion')!=1 or
+            type(report.get('runID')) is not str or not RUN_ID.fullmatch(report['runID']) or path.parent.name!=report['runID'] or
+            type(report.get('state')) is not str or report['state'] not in {'partial','interrupted','localPreparationFailed','localReceiptWriteFailed',
+                                       'metadataComplete','declaredStaticScopeComplete','parentChanged','sdkResumeComplete'} or
+            report.get('scope')!='allCurrentRegisteredApplicationMetadata' or report.get('sdkCollectionRequested') is not True or
+            any(report.get(key) is not False for key in ('runtimeExecuted','appLaunchExecuted','resourceDeletionExecuted'))):
+        raise ValueError('resumeParentReport')
+    rows=report.get('apps');count=report.get('membershipCount')
+    if type(rows) is not list or type(count) is not int or not 1<=count<=2000 or len(rows)!=count:raise ValueError('resumeParentMembership')
+    seen=set()
+    for row in rows:
+        if (type(row) is not dict or type(row.get('bundle')) is not str or not BUNDLE.fullmatch(row['bundle']) or
+                row['bundle'] in seen or row.get('staticState') not in STATIC_STATES or type(row.get('runtimeState')) is not str):
+            raise ValueError('resumeParentApp')
+        seen.add(row['bundle'])
+        if row['staticState']=='collected':
+            identity=sdk._identity(row.get('identity'))
+            if identity['bundle']!=row['bundle']:raise ValueError('resumeParentIdentity')
+        if 'sdkEvidence' not in row:continue
+        evidence=row['sdkEvidence']
+        if type(evidence) is not dict or type(evidence.get('state')) is not str or evidence['state'] not in SDK_STATES:raise ValueError('resumeParentSDKState')
+        if 'evidenceSource' in evidence and evidence['evidenceSource'] not in ('fresh','historical'):raise ValueError('resumeEvidenceSource')
+        references=sum(key in evidence for key in ('receipt','historicalReceipt'))
+        if references!=(1 if evidence['state'] in ('completeWithinRequestedSDKMetadata','partial') else 0):raise ValueError('resumeReceiptState')
+        for key in ('receipt','historicalReceipt'):
+            if key not in evidence:continue
+            value=evidence[key]
+            if key=='historicalReceipt':
+                if (type(value) is not dict or set(value)!={'runID','sha256','path'} or
+                        type(value['runID']) is not str or not RUN_ID.fullmatch(value['runID']) or
+                        type(value['sha256']) is not str or not re.fullmatch('[0-9a-f]{64}',value['sha256'])):
+                    raise ValueError('resumeHistoricalReceipt')
+                value=value['path']
+            if type(value) is not str or not re.fullmatch(r'sdk-[0-9]{1,4}/receipt\.json',value):raise ValueError('resumeReceiptPath')
+    expected={state:sum(row['staticState']==state for row in rows) for state in STATIC_STATES}
+    if report.get('summary')!=expected:raise ValueError('resumePrimarySummary')
+    if 'parent' in report:
+        parent=report['parent']
+        if (type(parent) is not dict or set(parent)!={'path','sha256'} or type(parent['sha256']) is not str or
+                not re.fullmatch('[0-9a-f]{64}',parent['sha256']) or type(parent['path']) is not str or
+                not re.fullmatch(r'\.\./(?:[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}|resume-[0-9a-f]{64})/collection\.json',parent['path'])):
+            raise ValueError('resumeParentReference')
+    if 'sdkSummary' in report and report['sdkSummary']!=dict(Counter(row.get('sdkEvidence',{}).get('state') for row in rows)):
+        raise ValueError('resumeSDKSummary')
+    return path,report,hashlib.sha256(raw).hexdigest()
+
+
+def resume(tasks,parent_path,*,seconds=1800,clock=time.monotonic):
+    if type(seconds) is not int or not 60<=seconds<=3600:raise ValueError('batchTotalBudget')
+    parent_path,parent,parent_sha=load_resume_parent(parent_path)
+    def unchanged():
+        try:return hashlib.sha256(parent_path.read_bytes()).hexdigest()==parent_sha
+        except OSError:return False
+    report=copy.deepcopy(parent)
+    for row in report['apps']:
+        evidence=row.setdefault('sdkEvidence',dict(state='notAttemptedUnspecified'))
+        evidence['evidenceSource']='historical'
+        if 'receipt' in evidence:
+            evidence['historicalReceipt']=dict(runID=parent['runID'],sha256=parent_sha,path=evidence.pop('receipt'))
+        if row['staticState']!='collected':evidence['state']='notAttemptedMissingIdentity'
+        elif evidence['state'] in SDK_PENDING_STATES:row['sdkEvidence']=dict(state='notAttempted')
+        elif evidence['state']=='notAttempted':evidence['state']='notAttemptedUnspecified'
+    if not any(row['sdkEvidence']['state']=='notAttempted' for row in report['apps']):raise ValueError('resumeNoPendingSDK')
+    if not unchanged():raise ValueError('resumeParentChanged')
+    run_id='resume-'+parent_sha;output=parent_path.parent.parent/run_id;output.mkdir(exist_ok=False)
+    report.update(runID=run_id,mode='sdkResume',parent=dict(path='../'+parent['runID']+'/collection.json',sha256=parent_sha),
+                  primaryIdentitySource='parentReport',
+                  session=tasks.session,state='collectingSDKMetadata',controllerWaitBudgetSeconds=seconds,
+                  membershipChanged='unverified',registrationMembershipStable='unverified')
+    for key in ('budgetExhausted','transportFailureType','addedDuringRun','removedDuringRun'):report.pop(key,None)
+    path=output/'collection.json';save=lambda:save_report(report,path)
+    if collect_sdk(tasks,report,output,clock()+seconds,clock,save,parent_unchanged=unchanged):
+        complete=all(row['staticState']=='collected' and row['sdkEvidence']['state']=='completeWithinRequestedSDKMetadata' for row in report['apps'])
+        report['state']='sdkResumeComplete' if complete else 'partial';save()
+    return report,path
+
+
 def collect(tasks,output_directory,*,seconds=1800,clock=time.monotonic,include_sdk=False):
     if type(seconds) is not int or not 60<=seconds<=3600:raise ValueError('batchTotalBudget')
     deadline=clock()+seconds
@@ -175,12 +333,7 @@ def collect(tasks,output_directory,*,seconds=1800,clock=time.monotonic,include_s
                 runtimeExecuted=False,appLaunchExecuted=False,resourceDeletionExecuted=False,sdkCollectionRequested=include_sdk,
                 remainingCapabilities=['privateClassAndABI','resourceContract','actualSpaceEffect','dataPreservation'])
     path=output/'collection.json'
-    def save():
-        report['summary']={state:sum(row['staticState']==state for row in report['apps']) for state in
-                           ('collected','failed','attemptedOutcomeUnknown','notAttemptedConnection','notAttemptedBudget')}
-        report['foregroundQueue']=[dict(bundle=row['bundle'],adapter=row.get('runtimeAdapter'),state=row['runtimeState'])
-                                   for row in report['apps'] if row['runtimeState'].startswith('pending')]
-        atomic(path,report)
+    save=lambda:save_report(report,path)
     save()
     try:current=members(tasks.task(membership_script(),25,until=min(deadline,clock()+25)))
     except (OSError,RuntimeError,ValueError) as error:
@@ -191,6 +344,7 @@ def collect(tasks,output_directory,*,seconds=1800,clock=time.monotonic,include_s
         if deadline-clock()<180:
             report['state']='partial';report['budgetExhausted']=True
             report['apps'].extend(dict(bundle=b,staticState='notAttemptedBudget',runtimeState='notAttempted') for b in current[offset:])
+            if include_sdk:mark_sdk_pending(report,'notAttemptedBudget')
             save();return report,path
         group=current[offset:offset+4]
         try:reply=tasks.task(batch_script(bindings,group),150,until=min(deadline-30,clock()+150))
@@ -198,6 +352,7 @@ def collect(tasks,output_directory,*,seconds=1800,clock=time.monotonic,include_s
             report['state']='interrupted';report['transportFailureType']=type(error).__name__
             report['apps'].extend(dict(bundle=b,staticState='attemptedOutcomeUnknown',runtimeState='notAttempted') for b in group)
             report['apps'].extend(dict(bundle=b,staticState='notAttemptedConnection',runtimeState='notAttempted') for b in current[offset+len(group):])
+            if include_sdk:mark_sdk_pending(report,'notAttemptedConnection')
             save();return report,path
         try:rows=parse_batch(bindings,group,reply)
         except ValueError:
@@ -205,34 +360,7 @@ def collect(tasks,output_directory,*,seconds=1800,clock=time.monotonic,include_s
         for row in rows:row['historicalEvidence']=classify_historical(row,baseline)
         report['apps'].extend(rows);save()
     if include_sdk:
-        import device_sdk_incremental as sdk
-        report['state']='collectingSDKMetadata';save()
-        for index,row in enumerate(report['apps']):
-            if row['staticState']!='collected':
-                row['sdkEvidence']=dict(state='notAttemptedMissingIdentity');continue
-            if deadline-clock()<155:
-                row['sdkEvidence']=dict(state='notAttemptedBudget');continue
-            try:plan=sdk.prepare(row['identity'],raw_limit=2*1024*1024,seconds=120)
-            except (OSError,RuntimeError,ValueError) as error:
-                row['sdkEvidence']=dict(state='localPreparationFailed',errorType=type(error).__name__)
-                report['state']='localPreparationFailed';save();return report,path
-            try:reply=tasks.task(plan['script'],125,until=min(deadline-30,clock()+125))
-            except (OSError,RuntimeError,ValueError) as error:
-                if isinstance(error,RuntimeError) and str(error)=='persistentTaskFailed':
-                    row['sdkEvidence']=dict(state='commandFailed',reason='deviceCollectorExitedNonzero')
-                    save();continue
-                row['sdkEvidence']=dict(state='attemptedOutcomeUnknown',errorType=type(error).__name__)
-                for remaining in report['apps'][index+1:]:remaining['sdkEvidence']=dict(state='notAttemptedConnection')
-                report['state']='interrupted';save();return report,path
-            try:result=sdk.parse(plan,reply)
-            except ValueError:
-                row['sdkEvidence']=dict(state='rejectedIncompleteOrInvalidReceipt');save();continue
-            try:receipt_path=write_sdk_receipt(output/('sdk-'+str(index)),result.pop('receipt'))
-            except (OSError,RuntimeError,ValueError) as error:
-                row['sdkEvidence']=dict(state='localReceiptWriteFailed',errorType=type(error).__name__)
-                report['state']='localReceiptWriteFailed';save();return report,path
-            row['sdkEvidence']=dict(result,receipt=receipt_path.relative_to(output).as_posix(),evidenceSource='fresh')
-            save()
+        if not collect_sdk(tasks,report,output,deadline,clock,save):return report,path
     try:after=members(tasks.task(membership_script(),25,until=min(deadline,clock()+25)))
     except (OSError,RuntimeError,ValueError):
         report['membershipChanged']='unverified';report['state']='partial'

@@ -1,4 +1,5 @@
 #import "DiagnosticsPage.h"
+#import "HostPreflightPage.h"
 #import "../AxsCacheKeeperDiagnostics.h"
 #import "../AxsCacheKeeperInstallation.h"
 #import "../AxsCacheKeeperDiagnosticChannel.h"
@@ -15,6 +16,7 @@
 @property(nonatomic,strong) UITextView *text;
 @property(nonatomic,strong) UIButton *collectButton;
 @property(nonatomic,strong) UIButton *exportButton;
+@property(nonatomic,strong) UIButton *axs_cachekeeper_hostPreflightButton;
 @property(nonatomic,strong) UIButton *axs_cachekeeper_capacityButton;
 @property(nonatomic,strong) NSTimer *axs_cachekeeper_capacityTimer;
 @property(nonatomic,copy) NSString *axs_cachekeeper_capacityEpoch;
@@ -81,13 +83,14 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     self.text.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody];self.text.adjustsFontForContentSizeCategory=YES;
     self.text.text=@"快速汇总安装快照与当前配置中 APP 的现有记录，包含新装未配置和已关闭的 APP。新装未配置 APP 保持禁用。每轮总数固定；不会自动检测目录或深度扫描。\n\n报告包含实际提供的 APP 名称、版本与构建号、插件版本、开关、目录统计、清理回执、网络状态、宿主自动／面板只读观察、按原始记录派生的统一能力摘要和已有深度档案。不会主动唤醒或探测全机 APP，也不会改变模式。宿主信号未经认证，不证明清理、写入限制或关闭恢复效果。每条记录保留原时间，缺失、损坏和覆盖不完整会明确标注。每次采集重新获取安装列表；安装信息仅反映本轮快照；未在快照中出现不代表已卸载，来源缺失或损坏会标记不可用。\n\n未知路径、账号和私人文件名会匿名化；不导出文件内容、原始日志或设备标识。搜索状态附带本次主页面最近 16 条几何、命中与编辑事件；不含输入文字。进入诊断前已冻结，不把切页收起键盘计为搜索异常。\n\n采集后只保留内存报告，不自动保存。手动点“导出报告”后，才生成临时分享文件；分享结束清理副本。只有你主动“存储到文件”的报告会保留。离开本页会释放内存报告。\n\n需要新数据时，在具体 APP 的目录页执行检测，再回来采集即可。";
     self.collectButton=[self axs_cachekeeper_button:@"汇总已保存诊断" action:@selector(axs_cachekeeper_collect)];
+    self.axs_cachekeeper_hostPreflightButton=[self axs_cachekeeper_button:@"五 APP 宿主集中预检 · 只读" action:@selector(axs_cachekeeper_host_preflight)];
     self.axs_cachekeeper_capacityButton=[self axs_cachekeeper_button:@"重新测量全容器占用 · 只读" action:@selector(axs_cachekeeper_capacity_action)];
     self.exportButton=[self axs_cachekeeper_button:@"导出报告" action:@selector(axs_cachekeeper_export)];
     self.progressLabel=[UILabel new];self.progressLabel.numberOfLines=0;
     self.progressLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody];self.progressLabel.adjustsFontForContentSizeCategory=YES;
     self.progressView=[[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
     self.progressView.accessibilityLabel=@"已读取的 APP 记录";
-    UIStackView *buttons=[[UIStackView alloc] initWithArrangedSubviews:@[self.progressLabel,self.progressView,self.axs_cachekeeper_capacityButton,self.collectButton,self.exportButton]];
+    UIStackView *buttons=[[UIStackView alloc] initWithArrangedSubviews:@[self.progressLabel,self.progressView,self.axs_cachekeeper_hostPreflightButton,self.axs_cachekeeper_capacityButton,self.collectButton,self.exportButton]];
     buttons.axis=UILayoutConstraintAxisVertical;buttons.spacing=8;
     for (UIView *view in @[self.text,buttons]) {view.translatesAutoresizingMaskIntoConstraints=NO;[self.view addSubview:view];}
     UILayoutGuide *safe=self.view.safeAreaLayoutGuide;
@@ -105,6 +108,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(axs_cachekeeper_capacity_background:) name:UIApplicationDidEnterBackgroundNotification object:nil];
     }
     if (self.axs_cachekeeper_pdfSession) {
+        [buttons removeArrangedSubview:self.axs_cachekeeper_hostPreflightButton];[self.axs_cachekeeper_hostPreflightButton removeFromSuperview];
         [buttons removeArrangedSubview:self.axs_cachekeeper_capacityButton];[self.axs_cachekeeper_capacityButton removeFromSuperview];
         self.title=@"定位 PDF · 只读";self.text.delegate=self;
         UIButton *cancel=[self axs_cachekeeper_button:@"停止并释放本次定位" action:@selector(axs_cachekeeper_pdf_cancel)];
@@ -136,11 +140,22 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     self.progressLabel.text=self.status;
     self.progressView.progress=self.total ? (float)self.completed/self.total : 0;
     self.collectButton.enabled=!self.collecting && !self.sharing && !self.axs_cachekeeper_capacityEpoch && (!self.axs_cachekeeper_pdfSession || self.axs_cachekeeper_pdfReady);
+    self.axs_cachekeeper_hostPreflightButton.enabled=!self.collecting && !self.sharing && !self.axs_cachekeeper_capacityEpoch && !self.axs_cachekeeper_pdfSession;
     NSDictionary *report=self.reportData ? [NSJSONSerialization JSONObjectWithData:self.reportData options:NSJSONReadingFragmentsAllowed error:NULL] : nil;
     self.exportButton.enabled=self.reportData && axs_cachekeeper_capacity_report_exportable(report) && !self.collecting && !self.sharing && !self.axs_cachekeeper_capacityEpoch;
     BOOL unconfirmedStop=self.axs_cachekeeper_capacityStopping && NSProcessInfo.processInfo.systemUptime-self.axs_cachekeeper_capacityStopStarted>=10;
     self.axs_cachekeeper_capacityButton.enabled=!self.collecting && !self.sharing && (!self.axs_cachekeeper_capacityStopping || unconfirmedStop);
     [self.axs_cachekeeper_capacityButton setTitle:unconfirmedStop ? @"放弃等待 · 停止尚未确认" : self.axs_cachekeeper_capacityEpoch ? @"停止全容器测量" : @"重新测量全容器占用 · 只读" forState:UIControlStateNormal];
+}
+- (void)axs_cachekeeper_host_preflight {
+    if (!self.axs_cachekeeper_hostPreflightButton.enabled) return;
+    NSString *directory=[self axs_cachekeeper_capacity_file:@"Status"];
+    NSString *version=[NSBundle bundleForClass:self.class].infoDictionary[@"CacheKeeperPackageVersion"] ?: @"unknown";
+    AxsCacheKeeperHostPreflightPage *page=[[AxsCacheKeeperHostPreflightPage alloc] initWithStatusDirectory:directory panelVersion:version];
+    if (!page) {[self axs_cachekeeper_message:@"宿主预检页面初始化失败，未发送请求。"];return;}
+    self.generation++;self.reportData=nil;
+    [self.navigationController pushViewController:page animated:YES];
+    [self axs_cachekeeper_refresh];
 }
 - (NSString *)axs_cachekeeper_capacity_file:(NSString *)name {
     return [jbroot(@"/var/mobile/Library/CacheKeeper") stringByAppendingPathComponent:name];

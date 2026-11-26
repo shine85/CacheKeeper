@@ -1,5 +1,6 @@
 """Actual Bash per-app isolation plus collector/protocol state regressions."""
 import base64
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -16,6 +17,49 @@ import device_collection_batch as batch
 
 def header():
     return struct.pack('<8I',0xfeedfacf,0x100000c,2,2,1,24,0,0)+struct.pack('<II',0x1b,24)+bytes.fromhex('11'*16)
+
+
+class SDKStateTasks:
+    """本地协议夹具：真实控制器/解析器运行，不执行传入的设备脚本。"""
+    session='1'*32
+    bundles=('a.complete','b.failed','c.stop','d.missing','e.pending','f.pending')
+
+    def __init__(self,mode):
+        self.mode=mode;self.now=0;self.groups=0;self.sdk_calls=0
+
+    def task(self,script,seconds,*,until=None):
+        if script==batch.membership_script():
+            return ''.join('CK_BATCH_MEMBER '+b+'\n' for b in self.bundles)+'CK_BATCH_MEMBERS_DONE\n'
+        if 'CK_BATCH_APP_BEGIN' in script:
+            if self.groups==1 and self.mode=='staticConnection':raise RuntimeError('connectionNotRunning')
+            group=self.bundles[self.groups*4:self.groups*4+4];self.groups+=1
+            frames=[]
+            for index,bundle in enumerate(group):
+                frames.append('CK_BATCH_APP_BEGIN '+str(index))
+                if bundle!='d.missing':
+                    frames.extend(('CK1792_APP_BINDING '+str(index)+' '+bundle+' 1 2 '+base64.b64encode(header()).decode(),
+                                   'CK1792_APP_BINDINGS_DONE'))
+                frames.append('CK_BATCH_APP_END '+str(index)+(' 1' if bundle=='d.missing' else ' 0'))
+            if self.mode=='staticBudget':self.now=1700
+            return '\n'.join(frames+['CK_BATCH_GROUP_DONE'])+'\n'
+        self.sdk_calls+=1
+        if self.sdk_calls==2:
+            if self.mode=='budget':self.now=1700
+            raise RuntimeError('persistentTaskFailed')
+        if self.sdk_calls==3 and self.mode=='connection':raise RuntimeError('connectionNotRunning')
+        if self.sdk_calls>3:raise AssertionError('controller attempted SDK after stopping')
+        bundle='a.complete' if self.sdk_calls==1 else 'c.stop'
+        data=header();encoded=base64.b64encode(data).decode();digest=hashlib.sha256(data).hexdigest()
+        frames=['CK_ALLAPP_TECH_136_V2_BEGIN',
+                'APP_BEGIN|a0001|'+base64.b64encode(bundle.encode()).decode()+'|'+'0'*64,
+                'APP_VERSION|0|MQ==|0|Mg==','INSTALLATION|currentRegistration','CONTAINERS_END|notCollected|0',
+                'IMAGE_BEGIN|a0001|PRIMARY','IDENTITY_BEFORE|1|2|33188|56|100|100',
+                'RANGE_BEGIN|header|0|56|'+digest,encoded,'RANGE_END|header','UUID|'+'11'*16,
+                'IDENTITY_AFTER|1|2|33188|56|100|100','IMAGE_END|headerOnlyStable']
+        names=('SDWebImage YYCache PINCache Kingfisher CocoaLumberjack YYKit Cache DKCache YYWebImage '
+               'CITICLog Loggerithm MJFLog VolcBaseLog TTSDKVolcLog TTSDKLivePullVolcLog glog hitlog vllog xlog').split()
+        frames.extend('FRAMEWORK_CHECK|'+name+'|absent' for name in names)
+        return '\n'.join(frames+['APP_END|identityStable','CK_ALLAPP_TECH_136_V2_END|1|1|56'])+'\n'
 
 
 class BatchTests(unittest.TestCase):
@@ -126,6 +170,67 @@ case "$2" in CFBundleIdentifier) echo b.good;; CFBundleShortVersionString) echo 
             self.assertEqual(report['apps'][0]['sdkEvidence']['state'],'commandFailed')
             self.assertEqual(report['apps'][1]['sdkEvidence']['state'],'completeWithinRequestedSDKMetadata')
             self.assertEqual(report['state'],'partial')
+
+    def test_sdk_budget_summary_is_separate_from_primary_identity_counts(self):
+        tasks=SDKStateTasks('budget')
+        with tempfile.TemporaryDirectory(prefix='batch-sdk-budget-',dir=ROOT/'tmp') as temp:
+            report,path=batch.collect(tasks,temp,clock=lambda:tasks.now,include_sdk=True)
+            self.assertEqual(report['state'],'partial')
+            self.assertEqual(report['summary']['collected'],5)
+            self.assertEqual(report['summary']['failed'],1)
+            self.assertEqual(report.get('sdkSummary'),{'completeWithinRequestedSDKMetadata':1,'commandFailed':1,
+                                                     'notAttemptedBudget':3,'notAttemptedMissingIdentity':1})
+            self.assertTrue(report.get('budgetExhausted'))
+            self.assertEqual(json.loads(path.read_text(encoding='utf-8')),report)
+            self.assertEqual(tasks.sdk_calls,2)
+
+    def test_identity_phase_stop_explains_why_sdk_collection_never_started(self):
+        for mode,pending_state in (('staticBudget','notAttemptedBudget'),('staticConnection','notAttemptedConnection')):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory(prefix='batch-sdk-unstarted-',dir=ROOT/'tmp') as temp:
+                tasks=SDKStateTasks(mode)
+                report,path=batch.collect(tasks,temp,clock=lambda:tasks.now,include_sdk=True)
+                self.assertEqual([row['sdkEvidence']['state'] for row in report['apps']],
+                                 [pending_state]*3+['notAttemptedMissingIdentity']*3)
+                self.assertEqual(report['sdkSummary'],{pending_state:3,'notAttemptedMissingIdentity':3})
+                self.assertEqual(tasks.sdk_calls,0)
+                self.assertEqual(json.loads(path.read_text(encoding='utf-8')),report)
+
+    def test_sdk_early_stop_labels_remaining_without_overwriting_success_or_failure(self):
+        import device_sdk_incremental as sdk
+        cases=(('connection','attemptedOutcomeUnknown','notAttemptedConnection','interrupted'),
+               ('prepare','localPreparationFailed','notAttemptedLocalPreparationFailure','localPreparationFailed'),
+               ('write','localReceiptWriteFailed','notAttemptedLocalReceiptWriteFailure','localReceiptWriteFailed'))
+        for mode,current_state,pending_state,batch_state in cases:
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory(prefix='batch-sdk-stop-',dir=ROOT/'tmp') as temp:
+                tasks=SDKStateTasks(mode);snapshots=[];original_receipt={}
+                real_prepare=sdk.prepare;real_atomic=batch.atomic
+                def prepare(identity,**kwargs):
+                    if mode=='prepare' and identity['bundle']=='c.stop':raise ValueError('fixture preparation failure')
+                    return real_prepare(identity,**kwargs)
+                def atomic(path,value):
+                    if mode=='write' and path.name=='receipt.json' and path.parent.name=='sdk-2':
+                        raise OSError('fixture receipt failure')
+                    real_atomic(path,value)
+                    if path.name=='collection.json':
+                        snapshots.append(json.loads(path.read_text(encoding='utf-8')))
+                    elif path.parent.name=='sdk-0':original_receipt[path]=path.read_text(encoding='utf-8')
+                with patch.object(sdk,'prepare',side_effect=prepare),patch.object(batch,'atomic',side_effect=atomic):
+                    report,path=batch.collect(tasks,temp,include_sdk=True)
+                self.assertEqual(report['state'],batch_state)
+                states=[row.get('sdkEvidence',{}).get('state') for row in report['apps']]
+                self.assertEqual(states,['completeWithinRequestedSDKMetadata','commandFailed',current_state,
+                                         'notAttemptedMissingIdentity',pending_state,pending_state])
+                self.assertEqual(report.get('sdkSummary'),{'completeWithinRequestedSDKMetadata':1,'commandFailed':1,
+                                                         current_state:1,'notAttemptedMissingIdentity':1,pending_state:2})
+                started=next(row for row in snapshots if row['state']=='collectingSDKMetadata')
+                self.assertEqual([row.get('sdkEvidence',{}).get('state') for row in started['apps']],
+                                 ['notAttempted']*3+['notAttemptedMissingIdentity']+['notAttempted']*2)
+                self.assertEqual(report['summary']['collected'],5)
+                self.assertEqual(report['summary']['failed'],1)
+                self.assertEqual(json.loads(path.read_text(encoding='utf-8')),report)
+                self.assertEqual(len(original_receipt),1)
+                for receipt,text in original_receipt.items():self.assertEqual(receipt.read_text(encoding='utf-8'),text)
+                self.assertEqual(tasks.sdk_calls,2 if mode=='prepare' else 3)
 
     def test_old_primary_match_does_not_grant_embedded_resource_reuse(self):
         row=dict(bundle='a.app',staticState='collected',identity=dict(version='1',build='2',uuid='a'*32))
