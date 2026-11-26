@@ -50,6 +50,11 @@ int main(void) {@autoreleasepool {
         @"overflow":@NO,@"unregisteredReasons":@{},@"liveReasons":@{@"queueIdentity":@1}};
     old[@"observed"]=@1;old[@"state"]=@"blocked";old[@"reason"]=@"unsupportedInstance";
     check([axs_cachekeeper_image_cache_message(old) containsString:@"队列身份已变化"],"queue change is distinguished from custom backend");
+    for (NSString *reason in @[@"installationChanged",@"pathChanged"]) {
+        NSMutableDictionary *terminal=[old[@"instanceAdmission"] mutableCopy];terminal[@"liveReasons"]=@{reason:@1};old[@"instanceAdmission"]=terminal;
+        check([axs_cachekeeper_image_cache_projection(old)[@"instanceAdmission"][@"liveReasons"] isEqual:@{reason:@1}],"terminal installation and directory identities survive the shared closed projection");
+        check([axs_cachekeeper_image_cache_message(old) containsString:[reason isEqual:@"installationChanged"] ? @"安装身份已变化" : @"缓存目录身份已变化"],"terminal identity wording keeps the first specific cause");
+    }
     [old removeObjectForKey:@"instanceAdmission"];
     check(![axs_cachekeeper_image_cache_message(old) containsString:@"自定义后端"],"legacy generic rejection does not invent a cause");
 

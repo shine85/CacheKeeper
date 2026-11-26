@@ -301,6 +301,11 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
     NSDictionary *sdkRejection=@{@"schemaVersion":@1,@"state":@"recorded",@"initializerOrdinal":@2,@"check":@{@"schemaVersion":@1,@"accepted":@NO,@"cause":@"methodCount",@"methodIndex":@0,@"methodsCount":@24}};
     withRejection[@"sdkMethodsRejectionObservation"]=sdkRejection;
     sicheck([rawSummary(withRejection)[@"sdkMethodsRejectionObservation"] isEqual:sdkRejection],@"inventory preserves closed frozen rejection diagnostic");
+    for (NSString *reason in @[@"installationChanged",@"pathChanged"]) {
+        NSMutableDictionary *terminal=[withRejection mutableCopy],*admission=[withRejection[@"instanceAdmission"] mutableCopy];
+        admission[@"liveReasons"]=@{reason:@1};terminal[@"instanceAdmission"]=admission;
+        sicheck([rawSummary(terminal)[@"state"] isEqual:@"available"] && [rawSummary(terminal)[@"sdkMethodsRejectionObservation"] isEqual:sdkRejection],@"inventory validates both terminal identity reasons without rejecting the saved receipt");
+    }
     sicheck([rawSummary(image)[@"sdkMethodsRejectionObservation"] isEqual:@{@"schemaVersion":@1,@"state":@"notRecorded"}],@"legacy inventory keeps rejection detail explicitly not recorded");
     NSDictionary *(^imageCapability)(NSDictionary *)=^NSDictionary *(NSDictionary *receipt) {
         return axs_cachekeeper_capabilities(@{@"image":@{@"state":@"available",@"data":receipt}},@"0.7.2")[@"image"];

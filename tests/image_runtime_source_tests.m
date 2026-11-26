@@ -50,8 +50,13 @@ static atomic_uint axs_cachekeeper_runtime_source_checks,axs_cachekeeper_runtime
 // Constructor fixture faults do not replace any IMP or relax an adapter gate.
 static unsigned axs_cachekeeper_runtime_constructor_fault;
 static atomic_uint axs_cachekeeper_runtime_getter_calls;
+static atomic_uint axs_cachekeeper_runtime_provider_reads;
 static BOOL axs_cachekeeper_runtime_forbid_getters;
 static BOOL axs_cachekeeper_runtime_defer_owner;
+static BOOL axs_cachekeeper_runtime_lazy_root;
+static unsigned axs_cachekeeper_runtime_remove_fault;
+static NSString *axs_cachekeeper_runtime_initial_home;
+static NSString *axs_cachekeeper_runtime_home(void) {return axs_cachekeeper_runtime_initial_home ?: NSHomeDirectory();}
 extern void axs_cachekeeper_runtime_enqueue_autorelease(id owner);
 static void axs_cachekeeper_runtime_deferred_owner(id owner) {
     // A legal SDK getter can create an autoreleased temporary that retains its
@@ -81,6 +86,7 @@ static void axs_cachekeeper_runtime_getter(void) {
 - (void)setExtendedData:(id)data forKey:(id)key;
 - (id)cachePathForKey:(id)key;
 - (id)cachePathForKey:(id)key inPath:(id)path;
+- (void)removeAllData;
 @end
 @interface SDMemoryCache : NSObject
 @property(nonatomic,strong) SDImageCacheConfig *config;
@@ -105,15 +111,32 @@ static void axs_cachekeeper_runtime_getter(void) {
 - (instancetype)initWithCachePath:(NSString *)path config:(SDImageCacheConfig *)config {
     if (!(self=[super init])) return nil;
     _diskCachePath=[path copy];_config=config;_fileManager=NSFileManager.defaultManager;
-    if (![_fileManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]) return nil;
+    if (!axs_cachekeeper_runtime_lazy_root && ![_fileManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]) return nil;
     return self;
 }
 - (void)commonInit {}
-- (void)removeAllData {atomic_fetch_add(&axs_cachekeeper_runtime_clears,1);}
+- (void)removeAllData {
+    atomic_fetch_add(&axs_cachekeeper_runtime_clears,1);
+    NSString *path=self.diskCachePath;
+    BOOL ok=YES;
+    if (axs_cachekeeper_runtime_remove_fault==1) ok=[self.fileManager removeItemAtPath:path error:nil];
+    if (axs_cachekeeper_runtime_remove_fault==2) {
+        NSString *parent=path.stringByDeletingLastPathComponent;
+        ok=[self.fileManager moveItemAtPath:parent toPath:[parent stringByAppendingString:@"-cleared"] error:nil] &&
+            [self.fileManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+    if (!ok) {fputs("FAIL: image-runtime-source: SDK clear fault performs its real filesystem transition\n",stderr);exit(1);}
+}
 - (id)cachePathForKey:(id)key {return [self cachePathForKey:key inPath:self.diskCachePath];}
 - (id)cachePathForKey:(id)key inPath:(id)path {(void)key;return path;}
 - (void)setData:(id)data forKey:(id)key {
     (void)data;(void)key;atomic_fetch_add(&axs_cachekeeper_runtime_writes,1);
+    if (axs_cachekeeper_runtime_lazy_root && data && key) {
+        if (![self.fileManager createDirectoryAtPath:self.diskCachePath withIntermediateDirectories:YES attributes:nil error:nil] ||
+            ![data writeToFile:[self.diskCachePath stringByAppendingPathComponent:key] atomically:YES]) {
+            fputs("FAIL: image-runtime-source: lazy SDK write creates its real root and file\n",stderr);exit(1);
+        }
+    }
 #if AXS_CACHEKEEPER_WRITE_OBSERVATION_TESTING
     void (^barrier)(void)=axs_cachekeeper_runtime_writer_barrier;if (barrier) barrier();
 #endif
@@ -215,7 +238,9 @@ static atomic_bool axs_cachekeeper_runtime_count_only_home;
 #define _dyld_get_image_header axs_cachekeeper_runtime_header
 #define _dyld_get_image_name axs_cachekeeper_runtime_name
 #define _dyld_get_image_vmaddr_slide axs_cachekeeper_runtime_slide
+#define NSHomeDirectory axs_cachekeeper_runtime_home
 #import "AxsCacheKeeperImageCache.m"
+#undef NSHomeDirectory
 #undef _dyld_get_image_header
 #undef _dyld_get_image_name
 #undef _dyld_get_image_vmaddr_slide
@@ -418,6 +443,113 @@ static void axs_cachekeeper_runtime_owner_pool(AxsCacheKeeperImageCache *engine,
     dispatch_semaphore_signal(finish);axs_cachekeeper_runtime_worker_fence(engine);
     axs_cachekeeper_runtime_defer_owner=NO;
 }
+#if !defined(AXS_CACHEKEEPER_MAIN_VIEW_BASELINE)
+static void axs_cachekeeper_runtime_startup(AxsCacheKeeperImageCache *engine,NSString *home,NSMutableDictionary *context,NSString *scenario) {
+    // Hold the production worker before first context adoption; provider reads
+    // and constructor identity capture remain in their real execution order.
+    BOOL negative=[scenario isEqual:@"startup-negative"];
+    NSString *root=[home stringByAppendingPathComponent:@"Library/Caches"];
+    axs_cachekeeper_runtime_require([NSFileManager.defaultManager createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil],"startup parent exists before the SDK constructor");
+    NSDictionary *valid=[context copy];
+    NSArray *faults=negative ? @[@"disk",@"memory",@"queue",@"path",@"ancestry",@"lazy-parent",@"lazy-symlink",@"lazy-permission",@"helper",@"rawIMP",@"released"] : @[@"none"];
+    for (NSString *fault in faults) {@autoreleasepool {
+        BOOL lazy=[scenario isEqual:@"startup-lazy"] || [fault hasPrefix:@"lazy-"];
+        dispatch_semaphore_t entered=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0);
+        dispatch_async(engine.work,^{dispatch_semaphore_signal(entered);dispatch_semaphore_wait(release,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));});
+        axs_cachekeeper_runtime_require(!dispatch_semaphore_wait(entered,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"startup worker is held before first context adoption");
+        if (!negative) axs_cachekeeper_runtime_require(!engine.context,"first startup has no adopted configuration");
+        engine.context=nil;[context setDictionary:valid];context[@"valid"]=@NO;[context removeObjectForKey:@"installation"];
+        [engine startObserving];axs_cachekeeper_image_runtime_view_changed();
+        axs_cachekeeper_runtime_lazy_root=lazy;
+        unsigned providerReads=atomic_load(&axs_cachekeeper_runtime_provider_reads);
+        __attribute__((objc_precise_lifetime)) SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:[@"startup-" stringByAppendingString:fault] diskCacheDirectory:root config:[SDImageCacheConfig new]];
+        axs_cachekeeper_runtime_require(atomic_load(&axs_cachekeeper_runtime_provider_reads)==providerReads,"constructor hook never invokes the configuration provider");
+        __weak SDImageCache *weakOwner=owner;
+        SDDiskCache *disk=owner.diskCache;SDMemoryCache *memory=owner.memoryCache;dispatch_queue_t queue=owner.ioQueue;NSString *path=owner.diskCachePath;
+        AxsCacheKeeperImageBinding *binding=[[engine axs_cachekeeper_bindings] lastObject];
+        axs_cachekeeper_runtime_require(binding && binding.awaitingMainView && !binding.invalidated && !objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey),"startup constructor creates only a closed observation");
+        unsigned writes=atomic_load(&axs_cachekeeper_runtime_writes),metadata=atomic_load(&axs_cachekeeper_runtime_metadata),clears=atomic_load(&axs_cachekeeper_runtime_clears);
+        if (!lazy) {[disk setData:[NSData data] forKey:@"waiting"];[disk setExtendedData:[NSData data] forKey:@"waiting"];}
+        Method helper=class_getClassMethod(AxsCacheKeeperRuntimeSourceHelper.class,@selector(axs_cachekeeper_sample));
+        Method writer=class_getInstanceMethod(SDDiskCache.class,@selector(setData:forKey:));IMP writerIMP=method_getImplementation(writer);
+        if ([fault isEqual:@"disk"]) owner.diskCache=[[SDDiskCache alloc] initWithCachePath:path config:owner.config];
+        if ([fault isEqual:@"memory"]) owner.memoryCache=[[SDMemoryCache alloc] initWithConfig:owner.config];
+        if ([fault isEqual:@"queue"]) owner.ioQueue=dispatch_queue_create("cachekeeper.startup.changed.queue",DISPATCH_QUEUE_SERIAL);
+        if ([fault isEqual:@"path"]) owner.diskCachePath=[path stringByAppendingPathComponent:@"changed"];
+        if ([fault isEqual:@"ancestry"]) {
+            axs_cachekeeper_runtime_require([NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@"-old"] error:nil] &&
+                [NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:NO attributes:nil error:nil],"startup original root is replaced with a different directory");
+        }
+        if ([fault isEqual:@"lazy-parent"]) {
+            axs_cachekeeper_runtime_require([NSFileManager.defaultManager moveItemAtPath:root toPath:[root stringByAppendingString:@"-old"] error:nil] &&
+                [NSFileManager.defaultManager createDirectoryAtPath:root withIntermediateDirectories:NO attributes:nil error:nil],"startup lazy parent is replaced before its missing leaf exists");
+        }
+        if ([fault isEqual:@"lazy-symlink"]) {
+            NSString *target=[path stringByAppendingString:@"-target"];
+            axs_cachekeeper_runtime_require([NSFileManager.defaultManager createDirectoryAtPath:target withIntermediateDirectories:NO attributes:nil error:nil] &&
+                !symlink(target.fileSystemRepresentation,path.fileSystemRepresentation),"startup missing leaf is replaced by a symlink");
+        }
+        if ([fault isEqual:@"lazy-permission"]) axs_cachekeeper_runtime_require(!chmod(root.fileSystemRepresentation,0),"startup parent access is revoked");
+        if ([fault isEqual:@"helper"]) method_setImplementation(helper,(IMP)axs_cachekeeper_runtime_changed_helper);
+        if ([fault isEqual:@"rawIMP"]) method_setImplementation(writer,axs_cachekeeper_image_data_original);
+        if ([fault isEqual:@"released"]) owner=nil;
+        dispatch_semaphore_signal(release);axs_cachekeeper_runtime_worker_fence(engine);axs_cachekeeper_runtime_worker_fence(engine);
+        if (!negative) {
+            axs_cachekeeper_runtime_require(!binding.invalidated && binding.awaitingMainView && !binding.eligible && !binding.restricted && !objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey),
+                "startup owner waits through unavailable first configuration instead of permanent invalidation");
+            context[@"valid"]=@YES;axs_cachekeeper_runtime_refresh(engine);
+            axs_cachekeeper_runtime_require(!binding.invalidated && binding.awaitingMainView && !binding.installation,"startup owner waits for its first verified installation");
+            context[@"installation"]=valid[@"installation"];context[@"appState"]=@{@"enabled":@NO};axs_cachekeeper_runtime_refresh(engine);
+            axs_cachekeeper_runtime_require(!binding.invalidated && binding.awaitingMainView && !binding.restricted && !objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey),"disabled first configuration cannot bind the waiting SDK");
+            [engine didEnterBackgroundWithTime:YES];axs_cachekeeper_runtime_worker_fence(engine);
+            axs_cachekeeper_runtime_require(atomic_load(&axs_cachekeeper_runtime_clears)==clears && ![engine.receipt[@"pending"] unsignedIntegerValue],"waiting startup never schedules or submits SDK cleanup");
+            [engine didBecomeActive];axs_cachekeeper_runtime_worker_fence(engine);
+        }
+        [context setDictionary:valid];axs_cachekeeper_runtime_refresh(engine);
+        if (negative) {
+            if (![fault isEqual:@"released"]) {
+                NSString *reason=[fault isEqual:@"disk"] ? @"configurationIdentity" : [fault isEqual:@"memory"] ? @"memoryIdentity" : [fault isEqual:@"queue"] ? @"queueIdentity" : [fault isEqual:@"path"] ? @"pathValueChanged" : ([fault isEqual:@"ancestry"] || [fault hasPrefix:@"lazy-"]) ? @"pathChanged" : @"sdkMethodsChanged";
+                axs_cachekeeper_runtime_require(binding.invalidated && !binding.eligible && !binding.restricted && !objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey),"startup mutation is permanently refused without disk association");
+                if ([fault isEqual:@"lazy-permission"]) axs_cachekeeper_runtime_require(!chmod(root.fileSystemRepresentation,0700),"startup parent access is restored after rejection");
+                owner.diskCache=disk;owner.memoryCache=memory;owner.ioQueue=queue;owner.diskCachePath=path;
+                method_setImplementation(helper,axs_cachekeeper_runtime_helper_original);method_setImplementation(writer,writerIMP);
+                axs_cachekeeper_runtime_refresh(engine);
+                axs_cachekeeper_runtime_require(binding.invalidated && !binding.eligible && [engine.receipt[@"instanceAdmission"][@"liveReasons"][reason] unsignedIntegerValue]>0,"startup terminal reason survives restoration and refresh");
+            } else axs_cachekeeper_runtime_require(!weakOwner && !binding.eligible && !objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey),"released startup owner is never retained or admitted");
+        } else {
+            if (lazy) {
+                axs_cachekeeper_runtime_require(binding.awaitingMainView && !binding.invalidated && !binding.eligible && !objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey),"missing leaf remains closed after first valid configuration");
+                [disk setData:[@"real-file" dataUsingEncoding:NSUTF8StringEncoding] forKey:@"created"];
+                axs_cachekeeper_runtime_require([NSFileManager.defaultManager fileExistsAtPath:[path stringByAppendingPathComponent:@"created"]],"original SDK write establishes its missing leaf");
+                axs_cachekeeper_runtime_refresh(engine);
+            }
+            axs_cachekeeper_runtime_require(!binding.awaitingMainView && !binding.invalidated && binding.eligible && binding.restricted && objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey)==binding,
+                "startup owner is fully admitted after first verified configuration and identity recheck");
+            [disk setData:[NSData data] forKey:@"restricted"];[disk setExtendedData:[NSData data] forKey:@"restricted"];
+            axs_cachekeeper_runtime_require(atomic_load(&axs_cachekeeper_runtime_writes)==writes+1 && atomic_load(&axs_cachekeeper_runtime_metadata)==metadata+(lazy ? 0 : 1) && atomic_load(&axs_cachekeeper_runtime_clears)==clears,"startup restriction follows admission while waiting never clears");
+            context[@"appState"]=@{@"enabled":@NO};axs_cachekeeper_runtime_refresh(engine);
+            [disk setData:[NSData data] forKey:@"disabled"];[disk setExtendedData:[NSData data] forKey:@"disabled"];
+            axs_cachekeeper_runtime_require(atomic_load(&axs_cachekeeper_runtime_writes)==writes+2 && atomic_load(&axs_cachekeeper_runtime_metadata)==metadata+(lazy ? 1 : 2),"startup disable restores both original writers");
+        }
+        axs_cachekeeper_runtime_lazy_root=NO;
+    }}
+    if ([scenario isEqual:@"startup"]) for (unsigned fault=1;fault<=2;fault++) {@autoreleasepool {
+        [context setDictionary:valid];axs_cachekeeper_runtime_refresh(engine);
+        __attribute__((objc_precise_lifetime)) SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:[NSString stringWithFormat:@"clear-%u",fault] diskCacheDirectory:root config:[SDImageCacheConfig new]];
+        axs_cachekeeper_runtime_refresh(engine);
+        AxsCacheKeeperImageBinding *binding=[[engine axs_cachekeeper_bindings] lastObject];
+        axs_cachekeeper_runtime_require(binding.eligible && binding.restricted,"clear transition starts from an admitted production owner");
+        axs_cachekeeper_runtime_remove_fault=fault;
+        dispatch_sync(owner.ioQueue,^{[owner.diskCache removeAllData];});
+        axs_cachekeeper_runtime_remove_fault=0;axs_cachekeeper_runtime_refresh(engine);
+        axs_cachekeeper_runtime_require(binding.invalidated && !binding.eligible && !binding.restricted &&
+            [engine.receipt[@"instanceAdmission"][@"liveReasons"][@"pathChanged"] unsignedIntegerValue]>0,"SDK clear missing root or changed ancestor retains terminal path identity reason");
+        axs_cachekeeper_runtime_require([NSFileManager.defaultManager createDirectoryAtPath:owner.diskCachePath withIntermediateDirectories:YES attributes:nil error:nil],"clear transition directory restored for terminal check");
+        axs_cachekeeper_runtime_refresh(engine);
+        axs_cachekeeper_runtime_require(binding.invalidated && !binding.eligible && binding.admissionReason==AxsCacheKeeperImageReasonParse("pathChanged"),"restoring a failed SDK clear directory cannot erase the first terminal reason");
+    }}
+}
+#endif
 static void axs_cachekeeper_runtime_main_view(AxsCacheKeeperImageCache *engine,NSString *home,NSMutableDictionary *context) {
     dispatch_semaphore_t entered=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0);
     dispatch_async(engine.work,^{dispatch_semaphore_signal(entered);dispatch_semaphore_wait(release,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));});
@@ -491,6 +623,8 @@ static void axs_cachekeeper_runtime_main_view(AxsCacheKeeperImageCache *engine,N
         changed.ioQueue=queue;context[@"installation"]=@"runtime-fixture";method_setImplementation(helper,axs_cachekeeper_runtime_helper_original);method_setImplementation(writer,writerIMP);
         axs_cachekeeper_runtime_refresh(engine);
         axs_cachekeeper_runtime_require(rejected.invalidated && !rejected.eligible && !rejected.restricted,"terminal waiting rejection never retries after member restoration");
+        NSString *terminal=[fault isEqual:@"queue"] ? @"queueIdentity" : [fault isEqual:@"installation"] ? @"installationChanged" : @"sdkMethodsChanged";
+        axs_cachekeeper_runtime_require([engine.receipt[@"instanceAdmission"][@"liveReasons"][terminal] unsignedIntegerValue]>0,"waiting terminal cause is preserved in the public admission receipt");
         changed=nil;
         }
         // Test-thread weak property reads may return autoreleased strong owners.
@@ -665,8 +799,8 @@ static void axs_cachekeeper_runtime_recovery_race(AxsCacheKeeperImageCache *engi
 #endif
 int main(int argc,const char *argv[]) {
     @autoreleasepool {
-        axs_cachekeeper_runtime_require(argc==2 && (!strcmp(argv[1],"fingerprint") || !strcmp(argv[1],"fingerprint-shifted") || !strcmp(argv[1],"sample") || !strcmp(argv[1],"pinned") || !strcmp(argv[1],"refresh") || !strcmp(argv[1],"admission") || !strcmp(argv[1],"owner-pool") || !strcmp(argv[1],"main-view") || !strcmp(argv[1],"recovery-race") || !strcmp(argv[1],"rediscovery") || !strcmp(argv[1],"write-observation")),"one isolated scenario is required");
-        axs_cachekeeper_runtime_real_main_gate=!strcmp(argv[1],"main-view") || !strcmp(argv[1],"recovery-race") || !strcmp(argv[1],"rediscovery");
+        axs_cachekeeper_runtime_require(argc==2 && (!strcmp(argv[1],"fingerprint") || !strcmp(argv[1],"fingerprint-shifted") || !strcmp(argv[1],"sample") || !strcmp(argv[1],"pinned") || !strcmp(argv[1],"refresh") || !strcmp(argv[1],"admission") || !strcmp(argv[1],"owner-pool") || !strcmp(argv[1],"main-view") || !strcmp(argv[1],"recovery-race") || !strcmp(argv[1],"rediscovery") || !strncmp(argv[1],"startup",7) || !strcmp(argv[1],"write-observation")),"one isolated scenario is required");
+        axs_cachekeeper_runtime_real_main_gate=!strcmp(argv[1],"main-view") || !strcmp(argv[1],"recovery-race") || !strcmp(argv[1],"rediscovery") || !strncmp(argv[1],"startup",7);
         axs_cachekeeper_runtime_shifted=!strcmp(argv[1],"fingerprint-shifted");
         axs_cachekeeper_runtime_fingerprinted=!strcmp(argv[1],"fingerprint") || axs_cachekeeper_runtime_shifted || axs_cachekeeper_runtime_real_main_gate;
         unsigned executables=0;
@@ -704,9 +838,17 @@ int main(int argc,const char *argv[]) {
         NSObject *contextLock=[NSObject new];
         NSMutableDictionary *context=[@{@"valid":@YES,@"appState":@{@"enabled":@YES,@"mode":@"auto",@"autoDiscover":@YES},
             @"selected":@[],@"home":home,@"bundle":@"cachekeeper.owned.runtime.fixture",@"version":@"1",@"installation":@"runtime-fixture",@"reportWritable":@YES} mutableCopy];
-        AxsCacheKeeperImageContextProvider provider=^NSDictionary *{@synchronized(contextLock) {return [context copy];}};
+        AxsCacheKeeperImageContextProvider provider=^NSDictionary *{atomic_fetch_add(&axs_cachekeeper_runtime_provider_reads,1);@synchronized(contextLock) {return [context copy];}};
         AxsCacheKeeperImageCache *engine=[[AxsCacheKeeperImageCache alloc] initWithContextProvider:provider observer:nil];
         if (!axs_cachekeeper_runtime_fingerprinted) [engine usePinnedLegacySDKForIntegrationTests];
+#if !defined(AXS_CACHEKEEPER_MAIN_VIEW_BASELINE)
+        if (!strncmp(argv[1],"startup",7)) {
+            axs_cachekeeper_runtime_initial_home=home;
+            axs_cachekeeper_runtime_startup(engine,home,context,[NSString stringWithUTF8String:argv[1]]);
+            axs_cachekeeper_runtime_require([NSFileManager.defaultManager removeItemAtPath:home error:nil],"startup fixture root removed");
+            printf("PASS: image-runtime-source fixture %s\n",argv[1]);return 0;
+        }
+#endif
         [engine startObserving];axs_cachekeeper_runtime_refresh(engine);
 #if AXS_CACHEKEEPER_WRITE_OBSERVATION_TESTING
         if (!strcmp(argv[1],"write-observation")) {

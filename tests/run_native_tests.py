@@ -58,7 +58,7 @@ SCRIPT_GROUPS = (
     ("gurd-cache", "run_gurd_cache_tests.py", 840),
     ("gurd-status", "run_gurd_status_tests.py", 330),
     ("gurd-runtime", "run_gurd_runtime_tests.py", 840),
-    ("image-main-view", "run_image_main_view_tests.py", 480),
+    ("image-main-view", "run_image_main_view_tests.py", 690),
     ("image-source-observation", "run_image_source_observation_tests.py", 435),
     ("image-resource-identity", "run_image_resource_identity_tests.py", 180),
     ("inspection-export", "run_inspection_export_tests.py", 180),

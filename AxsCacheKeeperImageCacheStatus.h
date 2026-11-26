@@ -21,6 +21,7 @@ typedef enum {
     AxsCacheKeeperImageReasonMemoryIdentity, AxsCacheKeeperImageReasonQueueIdentity,
     AxsCacheKeeperImageReasonPathValueChanged, AxsCacheKeeperImageReasonFileManagerIdentity,
     AxsCacheKeeperImageReasonQueueAttributesChanged, AxsCacheKeeperImageReasonInitialQueueAttributes,
+    AxsCacheKeeperImageReasonInstallationChanged, AxsCacheKeeperImageReasonPathChanged,
     AxsCacheKeeperImageReasonUnclassified, AxsCacheKeeperImageReasonCount
 } AxsCacheKeeperImageReason;
 static inline const char *AxsCacheKeeperImageReasonName(unsigned reason) {
@@ -29,7 +30,7 @@ static inline const char *AxsCacheKeeperImageReasonName(unsigned reason) {
         "pathType","ownerReleased","diskClass","configurationClass","configurationGetter","memoryClass",
         "memoryBackend","configurationIdentity","customFileManager","diskBackend","fileManagerClass","invalidated",
         "memoryIdentity","queueIdentity","pathValueChanged","fileManagerIdentity","queueAttributesChanged",
-        "initialQueueAttributes","unclassified"};
+        "initialQueueAttributes","installationChanged","pathChanged","unclassified"};
     return names[reason<AxsCacheKeeperImageReasonCount ? reason : AxsCacheKeeperImageReasonUnclassified];
 }
 static inline AxsCacheKeeperImageReason AxsCacheKeeperImageReasonParse(const char *name) {
@@ -240,7 +241,7 @@ static inline NSString *axs_cachekeeper_image_admission_reason_message(NSString 
         @"diskBackend":@"磁盘后端配置不符",@"fileManagerClass":@"文件管理器类型不符",@"invalidated":@"实例准入已失效",
         @"memoryIdentity":@"内存缓存身份已变化",@"queueIdentity":@"队列身份已变化",@"pathValueChanged":@"缓存路径值已变化",
         @"fileManagerIdentity":@"文件管理器身份已变化",@"queueAttributesChanged":@"队列属性已变化",
-        @"initialQueueAttributes":@"初始队列属性不受支持",@"notChecked":@"实例检查被前序门阻止",
+        @"initialQueueAttributes":@"初始队列属性不受支持",@"installationChanged":@"安装身份已变化",@"pathChanged":@"缓存目录身份已变化",@"notChecked":@"实例检查被前序门阻止",
         @"unclassified":@"实例检查未通过"};
     return messages[reason];
 }

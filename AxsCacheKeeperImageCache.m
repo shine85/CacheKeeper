@@ -364,6 +364,7 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
 @property(atomic,copy) NSString *home;
 @property(atomic,copy) NSString *installation;
 @property(atomic,copy) NSArray *identity;
+@property(nonatomic,copy) NSArray *initialParentIdentity; // Only a missing final SDK cache directory may appear later.
 @property(nonatomic,weak) AxsCacheKeeperImageCache *engine;
 @property(atomic) BOOL restricted;
 @property(nonatomic) BOOL eligible;
@@ -379,6 +380,12 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
 @end
 @implementation AxsCacheKeeperImageBinding
 @end
+static void AxsCacheKeeperImageInvalidate(AxsCacheKeeperImageBinding *binding,AxsCacheKeeperImageReason reason) {
+    @synchronized(binding) {
+        if (!binding.invalidated) binding.admissionReason=reason;
+        binding.invalidated=YES;binding.restricted=NO;binding.eligible=NO;binding.writeEpoch=0;
+    }
+}
 
 @interface AxsCacheKeeperImageCache () {
     AxsCacheKeeperImageAdmission _admission;
@@ -463,7 +470,7 @@ static BOOL AxsCacheKeeperImageSerialAttributes(id attributes) {
 static NSString *AxsCacheKeeperImageInstanceReasonForMainView(AxsCacheKeeperImageBinding *binding,BOOL *unavailable) {
     if (unavailable) *unavailable=NO;
     id owner=binding.owner;
-    if (binding.invalidated) return @"invalidated";
+    if (binding.invalidated) return [NSString stringWithUTF8String:AxsCacheKeeperImageReasonName(binding.admissionReason)];
     if (binding.awaitingMainView) return @"sdkMethodsChanged";
     if (binding.initialReason) return binding.initialReason;
     if (!owner) return @"ownerReleased";
@@ -552,22 +559,35 @@ static id AxsCacheKeeperImageInit(id object __attribute__((ns_consumed)),SEL sel
 
 // Resolves only the system-provided home alias. Every component below that root is opened
 // without following links. Identity includes each ancestor, not only the leaf inode.
-static NSArray *AxsCacheKeeperImagePathIdentity(NSString *home,NSString *relative,int *resultFD) {
+static NSArray *AxsCacheKeeperImagePathIdentityWithMissingLeaf(NSString *home,NSString *relative,int *resultFD,NSArray **missingParent) {
     if (resultFD) *resultFD=-1;
+    if (missingParent) *missingParent=nil;
     if (!home.length || !axs_cachekeeper_relative_path(relative)) return nil;
     int fd=open(home.stringByResolvingSymlinksInPath.fileSystemRepresentation,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
     if (fd<0) return nil;
     NSMutableArray *identity=[NSMutableArray new];struct stat status;
     if (fstat(fd,&status)) {close(fd);return nil;}
     [identity addObject:@[@(status.st_dev),@(status.st_ino)]];
-    for (NSString *part in relative.pathComponents) {
+    NSArray *parts=relative.pathComponents;
+    for (NSUInteger index=0;index<parts.count;index++) {
+        NSString *part=parts[index];
         int next=openat(fd,part.fileSystemRepresentation,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+        // Only a genuinely absent final component is a lazy SDK root. Retain
+        // its full existing ancestry; symlinks, absent parents and I/O fail closed.
+        if (next<0 && errno==ENOENT && missingParent && index+1==parts.count) {
+            struct stat leaf;
+            if (fstatat(fd,part.fileSystemRepresentation,&leaf,AT_SYMLINK_NOFOLLOW)<0 && errno==ENOENT)
+                *missingParent=[identity copy];
+        }
         close(fd);fd=next;
         if (fd<0 || fstat(fd,&status) || !S_ISDIR(status.st_mode)) {if (fd>=0) close(fd);return nil;}
         [identity addObject:@[@(status.st_dev),@(status.st_ino)]];
     }
     if (resultFD) *resultFD=fd;else close(fd);
     return identity;
+}
+static NSArray *AxsCacheKeeperImagePathIdentity(NSString *home,NSString *relative,int *resultFD) {
+    return AxsCacheKeeperImagePathIdentityWithMissingLeaf(home,relative,resultFD,NULL);
 }
 static NSArray<NSString *> *AxsCacheKeeperImageHomeBases(NSString *home) {
     if (![home isKindOfClass:NSString.class]) return @[];
@@ -667,10 +687,11 @@ static void AxsCacheKeeperImageRemoveAll(id disk,SEL selector) {
     if (!before) return;
     NSArray *after=AxsCacheKeeperImagePathIdentity(binding.home,binding.relative,NULL);
     @synchronized(binding) {
-        if (AxsCacheKeeperImageSameAncestors(before,after) && AxsCacheKeeperImageInstanceUnchanged(binding) &&
+        NSString *instanceReason=AxsCacheKeeperImageInstanceReason(binding);
+        if (AxsCacheKeeperImageSameAncestors(before,after) && !instanceReason &&
             (!binding.identity || [binding.identity isEqual:before] || [binding.identity isEqual:after]))
             binding.identity=after;
-        else {binding.invalidated=YES;binding.restricted=NO;}
+        else AxsCacheKeeperImageInvalidate(binding,instanceReason ? AxsCacheKeeperImageReasonParse(instanceReason.UTF8String) : AxsCacheKeeperImageReasonPathChanged);
     }
     // The SDK's legitimate clear recreates its root. Observe that exact transition, then reread
     // policy; an arbitrary path replacement never gets this identity-refresh privilege.
@@ -899,7 +920,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
             // An untracked owner might share any existing path. Stop all previously admitted
             // instances for this process instead of pretending that discovery is complete.
             self.capacityExceeded=YES;self.generation++;
-            for (AxsCacheKeeperImageBinding *item in self.bindings) @synchronized(item) {item.invalidated=YES;item.restricted=NO;item.writeEpoch=0;}
+            for (AxsCacheKeeperImageBinding *item in self.bindings) AxsCacheKeeperImageInvalidate(item,AxsCacheKeeperImageReasonInvalidated);
             AxsCacheKeeperImageAdmissionRecord(&_admission,AxsCacheKeeperImageReasonObservationLimit);
             [self axs_cachekeeper_schedule_refresh:@"imageLoad"];return NO;
         }
@@ -962,8 +983,13 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         AxsCacheKeeperImageReason reason=[self axs_cachekeeper_prepareBinding:binding owner:owner sourceReason:sourceReason attributes:attributes contract:contract];
         if (reason || binding.initialReason) {[self axs_cachekeeper_unregistered:reason ?: AxsCacheKeeperImageReasonSDKMethodsChanged methodsCheck:methodsCheck];return;}
         binding.admissionReason=AxsCacheKeeperImageReasonSDKMethodsChanged;
-        binding.installation=self.context[@"installation"];binding.home=self.context[@"home"];
-        binding.identity=AxsCacheKeeperImagePathIdentity(binding.home,binding.relative,NULL);
+        NSDictionary *context=self.context;
+        if ([context[@"valid"] boolValue] && [context[@"installation"] isKindOfClass:NSString.class] && [context[@"installation"] length])
+            binding.installation=context[@"installation"];
+        NSArray *parent=nil;
+        binding.identity=AxsCacheKeeperImagePathIdentityWithMissingLeaf(binding.home,binding.relative,NULL,&parent);
+        binding.initialParentIdentity=parent;
+        if (!binding.identity && !parent) AxsCacheKeeperImageInvalidate(binding,AxsCacheKeeperImageReasonPathChanged);
         // This is observation registration, never SDK admission. Keep no disk
         // association, queue token or active gate until a complete recheck succeeds.
         if ([self axs_cachekeeper_registerBinding:binding methodsCheck:methodsCheck]) [self requestDiscoveryRefresh];
@@ -984,17 +1010,14 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         __attribute__((objc_precise_lifetime)) id owner=binding.owner;
         if (!owner || !AxsCacheKeeperImageExecutable().header) continue;
         binding.restricted=NO;binding.eligible=NO;
-        if (self.capacityExceeded || ![binding.installation isKindOfClass:NSString.class] || !binding.installation.length ||
-            ![binding.installation isEqual:context[@"installation"]] || ![binding.home isEqual:context[@"home"]] ||
-            object_getClass(owner)!=axs_cachekeeper_image_class) {
-            binding.invalidated=YES;binding.admissionReason=AxsCacheKeeperImageReasonInvalidated;continue;
-        }
+        if (self.capacityExceeded) {AxsCacheKeeperImageInvalidate(binding,AxsCacheKeeperImageReasonInvalidated);continue;}
+        if (object_getClass(owner)!=axs_cachekeeper_image_class) {AxsCacheKeeperImageInvalidate(binding,AxsCacheKeeperImageReasonOwnerClass);continue;}
         BOOL unavailable=NO;NSDictionary *check=AxsCacheKeeperImageMethodsCheckSnapshotForMainView(NO,&unavailable);
         if (![check[@"accepted"] boolValue]) {
             // A new loader invalidation may race the check; real method/source
             // rejection is final for this waiting instance and is never relearned.
             if ([check[@"cause"] isEqual:@"legacyHelper"] && [check[@"helperStage"] isEqual:@"mainIdentity"] && [check[@"helperReason"] isEqual:@"notMainBase"] && unavailable && AxsCacheKeeperImageSavedMethodsUnchanged()) continue;
-            binding.invalidated=YES;binding.admissionReason=AxsCacheKeeperImageReasonSDKMethodsChanged;continue;
+            AxsCacheKeeperImageInvalidate(binding,AxsCacheKeeperImageReasonSDKMethodsChanged);continue;
         }
         // Compare the saved constructor members; never rebuild a baseline from
         // whatever queue/path/config the owner happens to expose after waiting.
@@ -1009,25 +1032,45 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
             // between checks is still a closed waiting view, not a new baseline.
             if (binding.admissionReason==AxsCacheKeeperImageReasonSDKMethodsChanged &&
                 unavailable && AxsCacheKeeperImageSavedMethodsUnchanged()) continue;
-            binding.invalidated=YES;continue;
+            AxsCacheKeeperImageInvalidate(binding,binding.admissionReason);continue;
+        }
+        if ([context[@"valid"] boolValue]) {
+            id installation=context[@"installation"];
+            if (binding.installation && [installation isKindOfClass:NSString.class] && [installation length] && ![binding.installation isEqual:installation]) {
+                AxsCacheKeeperImageInvalidate(binding,AxsCacheKeeperImageReasonInstallationChanged);continue;
+            }
+            if ([context[@"home"] isKindOfClass:NSString.class] && ![binding.home isEqual:context[@"home"]]) {
+                AxsCacheKeeperImageInvalidate(binding,AxsCacheKeeperImageReasonPathChanged);continue;
+            }
         }
         // Configuration can temporarily exclude a still-authentic owner. Keep
         // its closed observation slot so later configuration refresh can retry;
         // installation/member/path identity failures remain terminal above/below.
-        if (scope && ([@[@"scopeNotAuthorized",@"configurationInvalid",@"appDisabled"] containsObject:scope])) continue;
-        if (scope) {binding.invalidated=YES;continue;}
-        NSArray *identity=AxsCacheKeeperImagePathIdentity(context[@"home"],binding.relative,NULL);
-        if (!identity || ![binding.identity isEqual:identity]) {
-            binding.awaitingMainView=YES;binding.invalidated=YES;binding.admissionReason=AxsCacheKeeperImageReasonInvalidated;continue;
+        if (scope && ([@[@"scopeNotAuthorized",@"configurationInvalid",@"appDisabled",@"installationUnverified"] containsObject:scope])) continue;
+        if (scope) {AxsCacheKeeperImageInvalidate(binding,AxsCacheKeeperImageReasonParse(scope.UTF8String));continue;}
+        if (![binding.home isEqual:context[@"home"]]) {AxsCacheKeeperImageInvalidate(binding,AxsCacheKeeperImageReasonPathChanged);continue;}
+        NSArray *parent=nil;
+        NSArray *identity=AxsCacheKeeperImagePathIdentityWithMissingLeaf(binding.home,binding.relative,NULL,&parent);
+        if (binding.initialParentIdentity) {
+            NSArray *actualParent=identity.count>1 ? [identity subarrayWithRange:NSMakeRange(0,identity.count-1)] : parent;
+            if (![binding.initialParentIdentity isEqual:actualParent]) {AxsCacheKeeperImageInvalidate(binding,AxsCacheKeeperImageReasonPathChanged);continue;}
+            if (!binding.installation) binding.installation=context[@"installation"];
+            if (!identity) continue;
+        } else if (!identity || ![binding.identity isEqual:identity]) {
+            AxsCacheKeeperImageInvalidate(binding,AxsCacheKeeperImageReasonPathChanged);continue;
         }
+        // Nil means no valid installation has ever been adopted. Preserve the
+        // constructor home/members and bind this one identity only after validation.
+        if (!binding.installation) binding.installation=context[@"installation"];
         // FD work can overlap a further loader invalidation. Do not publish an
         // association until the live executable and saved methods remain valid.
         unavailable=NO;
         if (!AxsCacheKeeperImageExecutableForMainView(axs_cachekeeper_image_legacy_base,&unavailable).header) {
             binding.admissionReason=AxsCacheKeeperImageReasonSDKMethodsChanged;
             if (unavailable && AxsCacheKeeperImageSavedMethodsUnchanged()) continue;
-            binding.invalidated=YES;continue;
+            AxsCacheKeeperImageInvalidate(binding,AxsCacheKeeperImageReasonSDKMethodsChanged);continue;
         }
+        binding.identity=identity;binding.initialParentIdentity=nil;
         binding.awaitingMainView=NO;
         dispatch_queue_set_specific(binding.queue,AxsCacheKeeperImageQueueKey,(__bridge void *)binding,NULL);
         if (object_getClass(binding.disk)==axs_cachekeeper_disk_class) objc_setAssociatedObject(binding.disk,AxsCacheKeeperImageBindingKey,binding,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1067,7 +1110,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         NSString *relative=relativePaths[index]==NSNull.null ? nil : relativePaths[index];
         @synchronized(binding) {binding.restricted=NO;binding.writeEpoch=0;}binding.eligible=NO;
         NSString *reason=AxsCacheKeeperImageScopeReasonWithRelative(context,binding,relative);
-        if (reason) binding.admissionReason=binding.initialReason ? AxsCacheKeeperImageReasonParse(binding.initialReason.UTF8String) : AxsCacheKeeperImageReasonNotChecked;
+        if (reason && !binding.invalidated) binding.admissionReason=binding.initialReason ? AxsCacheKeeperImageReasonParse(binding.initialReason.UTF8String) : AxsCacheKeeperImageReasonNotChecked;
         if (!reason && !AxsCacheKeeperImageInstanceUnchanged(binding)) reason=@"unsupportedInstance";
         NSArray *identity=!reason && relative ? AxsCacheKeeperImagePathIdentity(context[@"home"],relative,NULL) : nil;
         if (!reason && (!identity || (binding.identity && ![binding.identity isEqual:identity]))) reason=@"pathChanged";

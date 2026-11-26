@@ -15,6 +15,15 @@ spec.loader.exec_module(runner)
 
 
 class ImageRuntimeOrchestrationTests(unittest.TestCase):
+    def test_startup_red_rejects_a_green_or_unrelated_failure(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            runner.verify_case("startup-red", "startup", subprocess.CompletedProcess([], 1, "", runner.STARTUP_RED))
+        for result in (subprocess.CompletedProcess([], 0, "PASS: image-runtime-source fixture startup", ""),
+                       subprocess.CompletedProcess([], 1, "", "unrelated failure"),
+                       subprocess.CompletedProcess([], 2, "", runner.STARTUP_RED)):
+            with self.assertRaises(AssertionError):
+                runner.verify_case("startup-red", "startup", result)
+
     def test_red_requires_exact_failure_and_cannot_accept_green(self):
         with contextlib.redirect_stdout(io.StringIO()):
             runner.verify_case("pool-red", "owner-pool", subprocess.CompletedProcess([], 1, "", runner.OWNER_POOL_RED))

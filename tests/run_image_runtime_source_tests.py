@@ -23,6 +23,8 @@ MEMBER_RED = "FAIL: image-runtime-source: released disk member is not misreporte
 OWNER_POOL_GATE = '- (void)axs_cachekeeper_refresh_event:(NSUInteger)event {\n    // End SDK getter temporaries before completion or the next state transition,\n    // including direct refreshes within a still-running worker item.\n    @autoreleasepool {'
 REDISCOVERY_RED = "FAIL: image-runtime-source: unchanged discovery revalidates the previously admitted owner after main-view rejection"
 MAIN_VIEW_RED = "FAIL: image-runtime-source: constructor owner survives revoked main view and is fully readmitted by discovery"
+STARTUP_RED = "FAIL: image-runtime-source: startup owner waits through unavailable first configuration instead of permanent invalidation"
+STARTUP_BASELINE = "f6581498c7d4277daa22f777b4f82d7253b4be2f"
 MAIN_METADATA_GATE = 'return index==0 ? bundle.bundleIdentifier : bundle.infoDictionary[index==1 ? @"CFBundleShortVersionString" : @"CFBundleVersion"];'
 MAIN_LAYOUT_GATE = 'return AxsCacheKeeperImageLegacyLayoutCheck(base,executable.slide,layout);'
 OWNER_POOL_RED = "INFO: release live=1 observed=1 released=0 expected=1\nFAIL: image-runtime-source: weak owner release is recorded once without retention"
@@ -30,6 +32,7 @@ OWNER_POOL_RED = "INFO: release live=1 observed=1 released=0 expected=1\nFAIL: i
 
 def verify_case(role, scenario, result):
     red = {
+        ("startup-red", "startup"): (STARTUP_RED, "216.1 first-context startup RED through actual constructor and worker"),
         ("rediscovery-red", "rediscovery"): (REDISCOVERY_RED, "197.1 admitted-owner rediscovery RED through actual main executable gate"),
         ("view-red", "main-view"): (MAIN_VIEW_RED, "193.1 constructor owner loss RED through actual main executable gate"),
         ("pool-red", "owner-pool"): (OWNER_POOL_RED, "owner pool RED inside actual refresh with deferred SDK getter reference"),
@@ -70,10 +73,10 @@ def run(main_view=False) -> int:
     if sys.platform != "darwin" or not compiler:
         print("UNAVAILABLE: image runtime helper regression requires macOS and xcrun; no tests ran.")
         return 2
-    # Main-view: 4 compiles <=60s, 2 fixed-source reads <=30s, 5 runs <=30s.
-    # Internal 465s and wrapper 480s each retain 15s reporting overhead;
+    # Main-view: 5 compiles <=60s, 3 fixed-source reads <=30s, 9 runs <=30s.
+    # Internal 675s and wrapper 690s each retain 15s reporting overhead;
     # the existing runtime group retains its 225s/240s budgets.
-    deadline = time.monotonic() + (465 if main_view else 225)
+    deadline = time.monotonic() + (675 if main_view else 225)
     def remaining(maximum):
         seconds = deadline - time.monotonic()
         if seconds <= 0:
@@ -82,7 +85,7 @@ def run(main_view=False) -> int:
     source = (ROOT / "AxsCacheKeeperImageCache.m").read_text(encoding="utf-8-sig")
     if any(source.count(gate) != 1 for gate in (GATE, REFRESH_GATE, ADMISSION_GATE, MEMBER_GATE, OWNER_POOL_GATE)):
         raise SystemExit("FAIL: ambiguous runtime helper gate mutation")
-    workspace = ROOT / "tmp/feedback-1792"
+    workspace = ROOT / "tmp/image-startup-20261126" if main_view else ROOT / "tmp/feedback-1792"
     workspace.mkdir(parents=True, exist_ok=True)
     failures = []
     with tempfile.TemporaryDirectory(prefix="image-runtime-source-", dir=workspace) as directory:
@@ -90,7 +93,7 @@ def run(main_view=False) -> int:
         subprocess.run([compiler, "clang", "-fno-objc-arc", "-Wall", "-Wextra", "-Werror=format",
                         "-c", str(ROOT / "tests/image_runtime_autorelease_fixture.m"), "-o", str(helper)],
                        cwd=ROOT, check=True, timeout=remaining(60))
-        for role in (("view-red", "rediscovery-red", "green") if main_view else ("pool-red", "member-red", "red", "green")):
+        for role in (("view-red", "rediscovery-red", "startup-red", "green") if main_view else ("pool-red", "member-red", "red", "green")):
             folder = Path(directory) / role
             folder.mkdir()
             candidate = source.replace(GATE, "    if (NO) helpers=^NSDictionary *{") if role == "red" else source
@@ -101,6 +104,9 @@ def run(main_view=False) -> int:
                 candidate = baseline.stdout
             if role == "rediscovery-red":
                 baseline = subprocess.run(["git", "show", "a6f7c47b5e7b9c37f4697d085ecc6a2368b8c085:AxsCacheKeeperImageCache.m"], cwd=ROOT, capture_output=True, text=True, encoding="utf8", check=True, timeout=remaining(30))
+                candidate = baseline.stdout
+            if role == "startup-red":
+                baseline = subprocess.run(["git", "show", STARTUP_BASELINE + ":AxsCacheKeeperImageCache.m"], cwd=ROOT, capture_output=True, text=True, encoding="utf8", check=True, timeout=remaining(30))
                 candidate = baseline.stdout
             if role == "pool-red":
                 candidate = candidate.replace(OWNER_POOL_GATE, '- (void)axs_cachekeeper_refresh_event:(NSUInteger)event {\n    {')
@@ -138,7 +144,7 @@ def run(main_view=False) -> int:
                 failures.append(f"{role}/compile")
                 print(f"FAIL: image-runtime-source {role} compile: {error}", file=sys.stderr, flush=True)
                 continue
-            scenarios = (("main-view",) if role == "view-red" else ("rediscovery",) if role == "rediscovery-red" else ("main-view", "recovery-race", "rediscovery")) if main_view else ("owner-pool",) if role == "pool-red" else ("admission",) if role == "member-red" else ("fingerprint", "fingerprint-shifted", "pinned", "refresh", "sample", "admission") + (("owner-pool",) if role == "green" else ())
+            scenarios = (("main-view",) if role == "view-red" else ("rediscovery",) if role == "rediscovery-red" else ("startup",) if role == "startup-red" else ("main-view", "recovery-race", "rediscovery", "startup", "startup-lazy", "startup-negative")) if main_view else ("owner-pool",) if role == "pool-red" else ("admission",) if role == "member-red" else ("fingerprint", "fingerprint-shifted", "pinned", "refresh", "sample", "admission") + (("owner-pool",) if role == "green" else ())
             failures.extend(run_cases(binary, role, scenarios, remaining))
     if failures:
         print("FAIL: image-runtime-source cases: " + ", ".join(failures), file=sys.stderr, flush=True)

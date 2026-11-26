@@ -126,6 +126,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     NSString *firstFile=@"test.operation.a.imagecache.plist";
     NSMutableDictionary *first=records[firstFile];
     NSDictionary *validAdmission=first[@"instanceAdmission"];
+    for (NSString *reason in @[@"installationChanged",@"pathChanged"]) {
+        NSMutableDictionary *terminal=[validAdmission mutableCopy];terminal[@"liveReasons"]=@{reason:@1};first[@"instanceAdmission"]=terminal;
+        oxcheck([read()[@"apps"][0][@"imageDiskCache"][@"data"][@"instanceAdmission"][@"liveReasons"] isEqual:@{reason:@1}],@"terminal image identity reasons survive actual diagnostics JSON export");
+    }
+    first[@"instanceAdmission"]=validAdmission;
     NSMutableDictionary *badAdmission=[validAdmission mutableCopy];badAdmission[@"path"]=@"operation-private-canary";
     first[@"instanceAdmission"]=badAdmission;
     oxcheck([read()[@"apps"][0][@"imageDiskCache"][@"state"] isEqual:@"invalid"],@"private admission field rejects entire saved receipt");
