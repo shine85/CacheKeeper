@@ -303,8 +303,13 @@ static inline NSString *axs_cachekeeper_image_cache_message(id value) {
     NSMutableArray *rows=[NSMutableArray new];
     for (NSDictionary *epoch in observation[@"epochs"]) {
         NSDictionary *data=epoch[@"data"],*extended=epoch[@"extended"];
-        if ([data[@"attempts"] unsignedLongLongValue] || [extended[@"attempts"] unsignedLongLongValue])
-            [rows addObject:[NSString stringWithFormat:@"%@ data %@/%@/%@, extended %@/%@/%@",epoch[@"mode"],data[@"attempts"],data[@"blocked"],data[@"allowed"],extended[@"attempts"],extended[@"blocked"],extended[@"allowed"]]];
+        if ([data[@"attempts"] unsignedLongLongValue] || [extended[@"attempts"] unsignedLongLongValue]) {
+            NSString *payload=[observation[@"schemaVersion"] isEqual:@3] ?
+                [NSString stringWithFormat:@"；非空 data %@/%@/%@, extended %@/%@/%@；空 data %@/%@/%@, extended %@/%@/%@",
+                    data[@"nonemptyAttempts"],data[@"nonemptyBlocked"],data[@"nonemptyAllowed"],extended[@"nonemptyAttempts"],extended[@"nonemptyBlocked"],extended[@"nonemptyAllowed"],
+                    data[@"emptyAttempts"],data[@"emptyBlocked"],data[@"emptyAllowed"],extended[@"emptyAttempts"],extended[@"emptyBlocked"],extended[@"emptyAllowed"]] : @"；空/非空写入未区分";
+            [rows addObject:[NSString stringWithFormat:@"%@ data %@/%@/%@, extended %@/%@/%@%@",epoch[@"mode"],data[@"attempts"],data[@"blocked"],data[@"allowed"],extended[@"attempts"],extended[@"blocked"],extended[@"allowed"],payload]];
+        }
     }
     NSString *writerSummary=rows.count ? [rows componentsJoinedByString:@"；"] : @"本记录没有 SDWebImage 写入尝试观测";
     return [NSString stringWithFormat:@"SDWebImage 写入观测：%@；清理 API 累计完成 %@ 次；释放空间未单独测量",

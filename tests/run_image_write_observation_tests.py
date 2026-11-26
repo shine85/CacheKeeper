@@ -12,6 +12,20 @@ BASELINE = "56d4b0f9cf5d4386f6eb411771b43f61ccc23e04"
 STATUS_BASELINE = "2b450ec6a2a584bee2e46ffdc6bdeddce3132924"
 EXPECTED = "FAIL: image-runtime-source: actual nonnil writers publish separate attempted and blocked evidence"
 STATUS_RED = "FAIL: image-write-status: producer truncation is a Foundation boolean at zero and after eviction"
+PAYLOAD_BASELINE = "5cab9ce8115b6e6f73c33de6e5e339f66c157833"
+PAYLOAD_RED = "FAIL: image-runtime-source: actual hooks distinguish empty and nonempty payload decisions"
+SOURCE_HASHES = {
+    BASELINE: "4a2ea7001e780da0483816eca0c17b5381f4045c2410f8172c024147fcdb96db",
+    PAYLOAD_BASELINE: "578ba43325601b6a9c2af4b3d3d4b97661cbc88e3a09c9fd041648bd65e986e7",
+    STATUS_BASELINE: "4c0d52e9da4f6a029bdefde98ff8da2dcd21fe5e88ece8264130030608e94605",
+}
+
+
+def fixed_source(revision, name):
+    source = subprocess.check_output(["git", "show", f"{revision}:{name}"], cwd=ROOT, timeout=15)
+    if hashlib.sha256(source).hexdigest() != SOURCE_HASHES[revision]:
+        raise RuntimeError("write observation baseline source hash mismatch")
+    return source
 
 
 def core(compiler, output):
@@ -27,7 +41,7 @@ def status_cases(compiler, output):
         folder = output / role
         folder.mkdir()
         name = "AxsCacheKeeperImageWriteObservation.h"
-        source = subprocess.check_output(["git", "show", f"{STATUS_BASELINE}:{name}"], cwd=ROOT, timeout=15) if role == "status-red" else (ROOT / name).read_bytes()
+        source = fixed_source(STATUS_BASELINE, name) if role == "status-red" else (ROOT / name).read_bytes()
         (folder / name).write_bytes(source)
         # Keep the including header beside the chosen producer; otherwise its
         # quoted import silently selects the current root header in the RED.
@@ -74,25 +88,28 @@ def main():
         status_cases(compiler, output)
         helper = output / "autorelease.o"
         subprocess.run([compiler, "clang", "-fno-objc-arc", "-c", str(ROOT / "tests/image_runtime_autorelease_fixture.m"), "-o", str(helper)], check=True, timeout=60)
-        for role in ("red", "green"):
+        for role in ("red", "payload-red", "payload-green", "green"):
             folder = output / role
             folder.mkdir()
-            source = subprocess.check_output(["git", "show", f"{BASELINE}:AxsCacheKeeperImageCache.m"], cwd=ROOT, timeout=15) if role == "red" else (ROOT / "AxsCacheKeeperImageCache.m").read_bytes()
+            baseline = BASELINE if role == "red" else PAYLOAD_BASELINE if role == "payload-red" else None
+            source = fixed_source(baseline, "AxsCacheKeeperImageCache.m") if baseline else (ROOT / "AxsCacheKeeperImageCache.m").read_bytes()
             (folder / "AxsCacheKeeperImageCache.m").write_bytes(source)
             print(f"INFO: write-observation {role} producer SHA256 {hashlib.sha256(source).hexdigest()}", flush=True)
             binary = folder / "writer-tests"
             subprocess.run([compiler, "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror=format", "-Werror=implicit-function-declaration",
                 "-DAXS_CACHEKEEPER_IMAGE_TESTING=1", "-DAXS_CACHEKEEPER_WRITE_OBSERVATION_TESTING=1",
                 *(["-DAXS_CACHEKEEPER_WRITE_OBSERVATION_OLD=1"] if role == "red" else []),
+                *(["-DAXS_CACHEKEEPER_WRITE_PAYLOAD_TESTING=1"] if role.startswith("payload-") else []),
                 "-I"+str(folder), "-I"+str(ROOT), "-framework", "Foundation",
                 str(ROOT / "tests/image_runtime_source_tests.m"), str(ROOT / "AxsCacheKeeperCleanupRules.m"),
                 str(ROOT / "tests/image_write_observation_status_tests.m"),
                 str(ROOT / "AxsCacheKeeperOperationInfo.m"), str(helper), "-o", str(binary)], check=True, timeout=60)
             result = subprocess.run([str(binary), "write-observation"], capture_output=True, text=True, encoding="utf-8", timeout=60)
-            if role == "red":
-                if result.returncode != 1 or result.stdout.strip() or result.stderr.strip() != EXPECTED:
+            if role in ("red", "payload-red"):
+                expected = EXPECTED if role == "red" else PAYLOAD_RED
+                if result.returncode != 1 or result.stdout.strip() or result.stderr.strip() != expected:
                     raise RuntimeError("incorrect write observation RED\n"+result.stdout+result.stderr)
-                print("PASS: fixed producer reaches exact missing writer evidence RED", flush=True)
+                print("PASS: fixed producer reaches exact writer evidence RED: " + expected, flush=True)
             elif result.returncode or result.stderr.strip() or result.stdout.strip() != "PASS: image-runtime-source fixture write-observation":
                 raise RuntimeError("write observation GREEN failed\n"+result.stdout+result.stderr)
             else:

@@ -6,6 +6,7 @@
 #import "../AxsCacheKeeperStorageInventory.h"
 
 #if !AXS_CACHEKEEPER_STORAGE_INVENTORY_RED
+#import "gurd_export_fixture.h"
 // Instrument only call boundaries; the real inline policy and production aggregation still run.
 static NSUInteger sieffectiveCalls,siexclusionCalls,siselectedCalls;
 static NSArray *sieffective(NSArray *selected,id state,NSArray *discovered) {
@@ -255,6 +256,29 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
     sicheck([apps count]==2 && [registry[@"entries"] count]==3,@"system metadata does not widen display filtering");
     sicheck([[inventory[@"entries"] valueForKey:@"bundle"] isEqual:@[@"com.apple.inventory.system",@"test.inventory.alpha",@"test.inventory.beta",@"test.inventory.configured"]],@"bundle union sorted and deduplicated");
     NSDictionary *a=siapp(inventory,@"test.inventory.alpha"),*b=siapp(inventory,@"test.inventory.beta"),*s=siapp(inventory,@"com.apple.inventory.system");
+    sicheck(![[report[@"apps"] valueForKey:@"bundle"] containsObject:@"com.apple.inventory.system"],@"registered system entry remains outside saved receipt reads");
+    for (NSString *key in @[@"imageDiskCache",@"webKitDiskCache",@"gurdCache"])
+        sicheck([s[@"sdkReceipts"][key][@"state"] isEqual:@"notObserved"],@"unread registered entry has no observed SDK receipt");
+    sicheck([a[@"sdkReceipts"][@"gurdCache"][@"state"] isEqual:@"missing"] &&
+        [b[@"sdkReceipts"][@"gurdCache"][@"state"] isEqual:@"missing"],@"read but absent Gurd receipt stays missing");
+    NSDictionary *(^gurdSummary)(id)=^NSDictionary *(id wrapper) {
+        NSMutableDictionary *raw=[@{@"bundle":@"test.inventory.alpha"} mutableCopy];
+        if (wrapper) raw[@"gurdCache"]=wrapper;
+        NSDictionary *result=axs_cachekeeper_storage_inventory(nil,@{@"state":@"available",@"data":states},
+            @{@"state":@"available",@"data":@{}},@{@"state":@"available",@"data":@{}},@[raw],^NSString *(NSString *path){return path;});
+        return siapp(result,@"test.inventory.alpha")[@"sdkReceipts"][@"gurdCache"];
+    };
+    sicheck([gurdSummary(nil) isEqual:@{@"state":@"notObserved"}],@"absent Gurd wrapper is unobserved, not corrupt");
+    for (id malformed in @[NSNull.null,@"invalid-wrapper",@[],@{},@{@"state":@"unknown"},
+        @{@"state":@"available"},@{@"state":@"available",@"data":NSNull.null},@{@"state":@"available",@"data":@{}}])
+        sicheck([gurdSummary(malformed)[@"state"] isEqual:@"invalid"],@"present malformed Gurd wrapper remains invalid");
+    for (NSString *state in @[@"missing",@"unreadable",@"invalid"])
+        sicheck([gurdSummary(@{@"state":state}) isEqual:@{@"state":state}],@"observed Gurd source failures keep their classification");
+    NSDictionary *gurd=axs_cachekeeper_gurd_receipt_decode(axs_cachekeeper_gurd_export_fixture())[@"data"];
+    NSDictionary *gurdResult=gurdSummary(@{@"state":@"available",@"data":gurd});
+    sicheck([gurdResult[@"state"] isEqual:@"available"] && [gurdResult[@"operations"] isEqual:gurd[@"operations"]] &&
+        [gurdResult[@"runtimeInfo"] isEqual:gurd[@"runtimeInfo"]] && [gurdResult[@"effectVerification"] isEqual:@"scopeObservationOnly"],
+        @"valid Gurd receipt preserves history and unproven effect");
     sicheck([a[@"sdkReceipts"][@"imageDiskCache"][@"receiptState"] isEqual:@"apiCompleted"] &&
         [a[@"sdkReceipts"][@"webKitDiskCache"][@"receiptState"] isEqual:@"completed"] &&
         [a[@"sdkReceipts"][@"webKitDiskCache"][@"resourceContract"] isEqual:@"notEstablishedByReceipt"] &&

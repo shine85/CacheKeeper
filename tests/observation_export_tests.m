@@ -70,9 +70,9 @@ int main(int argc,char **argv) { @autoreleasepool {
     // production Diagnostics/Inventory and JSON without becoming persistence proof.
     AxsCacheKeeperWriteObservation writes={0};
     uint64_t writeEpoch=axs_cachekeeper_write_epoch_begin(&writes,1,1,true,2);
-    axs_cachekeeper_write_observe(&writes,writeEpoch,0,true);axs_cachekeeper_write_observe(&writes,writeEpoch,1,true);
+    axs_cachekeeper_write_observe_payload(&writes,writeEpoch,0,true,YES);axs_cachekeeper_write_observe_payload(&writes,writeEpoch,1,true,NO);
     writeEpoch=axs_cachekeeper_write_epoch_begin(&writes,2,1,false,2);
-    axs_cachekeeper_write_observe(&writes,writeEpoch,0,false);
+    axs_cachekeeper_write_observe_payload(&writes,writeEpoch,0,false,YES);
     NSDictionary *writeRecord=axs_cachekeeper_write_observation_record(writes);
     image[@"writeObservation"]=writeRecord;
     app=read();
@@ -82,13 +82,23 @@ int main(int argc,char **argv) { @autoreleasepool {
     oecheck([app[@"capabilities"][@"image"][@"effectVerification"] isEqual:@"notVerified"] &&
         [app[@"capabilities"][@"image"][@"resourceContract"] isEqual:@"notEstablishedByReceipt"] &&
         [inventoryImage[@"resourceContract"] isEqual:@"notEstablishedByReceipt"],@"forwarded writer decisions do not grant an effect or resource contract");
-    NSMutableDictionary *legacyWrites=[writeRecord mutableCopy];NSMutableArray *legacyRows=[NSMutableArray new];
-    for (NSDictionary *row in writeRecord[@"epochs"]) {NSMutableDictionary *old=[row mutableCopy];[old removeObjectForKey:@"identityState"];[legacyRows addObject:old];}
-    legacyWrites[@"schemaVersion"]=@1;legacyWrites[@"epochs"]=legacyRows;image[@"writeObservation"]=legacyWrites;
-    app=read();
-    oecheck([app[@"imageDiskCache"][@"data"][@"writeObservation"] isEqual:legacyWrites] &&
-        [app[@"capabilities"][@"image"][@"writeObservation"] isEqual:legacyWrites] && [inventoryImage[@"writeObservation"] isEqual:legacyWrites],
-        @"saved schema one writer evidence survives every export without invented identity state");
+    oecheck([inventoryImage[@"writeObservation"][@"epochs"][0][@"data"][@"nonemptyBlocked"] isEqual:@1] &&
+        [inventoryImage[@"writeObservation"][@"epochs"][0][@"extended"][@"emptyBlocked"] isEqual:@1],@"payload observations survive every real saved receipt export");
+    for(NSNumber *schema in @[@1,@2]) {
+        NSData *encoded=[NSPropertyListSerialization dataWithPropertyList:writeRecord format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+        NSMutableDictionary *legacyWrites=[NSPropertyListSerialization propertyListWithData:encoded options:NSPropertyListMutableContainersAndLeaves format:NULL error:nil];
+        legacyWrites[@"schemaVersion"]=schema;[legacyWrites removeObjectForKey:@"payloadBasis"];[legacyWrites removeObjectForKey:@"unclassifiedMeaning"];
+        NSMutableArray *rows=[legacyWrites[@"epochs"] mutableCopy];[rows addObject:legacyWrites[@"unattributed"]];
+        for(NSMutableDictionary *row in rows) {
+            if([schema isEqual:@1]) [row removeObjectForKey:@"identityState"];
+            for(NSString *writer in @[@"data",@"extended"]) for(NSString *key in @[@"nonemptyAttempts",@"nonemptyAllowed",@"nonemptyBlocked",@"emptyAttempts",@"emptyAllowed",@"emptyBlocked"])
+                [row[writer] removeObjectForKey:key];
+        }
+        image[@"writeObservation"]=legacyWrites;app=read();
+        oecheck([app[@"imageDiskCache"][@"data"][@"writeObservation"] isEqual:legacyWrites] &&
+            [app[@"capabilities"][@"image"][@"writeObservation"] isEqual:legacyWrites] && [inventoryImage[@"writeObservation"] isEqual:legacyWrites],
+            @"saved schema one and two survive every export without invented identity or payload evidence");
+    }
     for (NSString *field in @[@"scope",@"allowedMeaning",@"diskPersistence",@"privatePath"]) {
         NSMutableDictionary *bad=[writeRecord mutableCopy];bad[field]=@"observation-private-canary";image[@"writeObservation"]=bad;
         app=read();

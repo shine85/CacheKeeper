@@ -124,13 +124,18 @@
     XCTAssertEqualObjects(row(clean)[@"data"][@"allowed"],@1);XCTAssertEqualObjects(row(clean)[@"extended"][@"allowed"],@1);
     NSNumber *blocked=epoch();
     [owner storeImageDataToDisk:payload forKey:@"blocked"];XCTAssertNil([owner diskImageDataForKey:@"blocked"]);
+    dispatch_sync(owner.ioQueue,^{[owner.diskCache setData:[NSData data] forKey:@"empty-blocked"];[owner.diskCache setExtendedData:[NSData data] forKey:@"seed"];});
+    XCTAssertNil([owner diskImageDataForKey:@"empty-blocked"]);
     __block NSData *metadata=nil;
     dispatch_sync(owner.ioQueue,^{[owner.diskCache setExtendedData:nil forKey:@"seed"];[owner.diskCache setExtendedData:payload forKey:@"seed"];metadata=[owner.diskCache extendedDataForKey:@"seed"];});
     XCTAssertNil(metadata);
     @synchronized(self) {self.context[@"installation"]=@"";}
     [self axs_cachekeeper_legacy_state:@{@"enabled":@NO,@"mode":@"prevent"}];
-    XCTAssertEqualObjects(row(blocked)[@"data"][@"attempts"],@1);XCTAssertEqualObjects(row(blocked)[@"data"][@"blocked"],@1);
-    XCTAssertEqualObjects(row(blocked)[@"extended"][@"attempts"],@1);XCTAssertEqualObjects(row(blocked)[@"extended"][@"blocked"],@1);
+    for(NSString *writer in @[@"data",@"extended"]) {
+        XCTAssertEqualObjects(row(blocked)[writer][@"attempts"],@2);XCTAssertEqualObjects(row(blocked)[writer][@"blocked"],@2);
+        XCTAssertEqualObjects(row(blocked)[writer][@"nonemptyAttempts"],@1);XCTAssertEqualObjects(row(blocked)[writer][@"nonemptyBlocked"],@1);
+        XCTAssertEqualObjects(row(blocked)[writer][@"emptyAttempts"],@1);XCTAssertEqualObjects(row(blocked)[writer][@"emptyBlocked"],@1);
+    }
     NSNumber *disabled=epoch();
     XCTAssertEqualObjects(row(disabled)[@"identityState"],@"notRevalidated");
     [owner storeImageDataToDisk:payload forKey:@"restored"];XCTAssertEqualObjects([owner diskImageDataForKey:@"restored"],payload);
@@ -138,6 +143,12 @@
     XCTAssertEqualObjects(metadata,payload);[self axs_cachekeeper_legacy_refresh];
     XCTAssertEqualObjects(row(disabled)[@"enabled"],@NO);XCTAssertEqualObjects(row(disabled)[@"data"][@"allowed"],@1);
     XCTAssertEqualObjects(row(disabled)[@"extended"][@"allowed"],@1);XCTAssertEqualObjects(row(disabled)[@"data"][@"blocked"],@0);
+    for(NSString *writer in @[@"data",@"extended"]) {
+        XCTAssertEqualObjects(row(clean)[writer][@"nonemptyAllowed"],@1);
+        XCTAssertEqualObjects(row(disabled)[writer][@"nonemptyAllowed"],@1);
+        XCTAssertEqualObjects(row(disabled)[writer][@"nonemptyBlocked"],@0);
+        XCTAssertEqualObjects(row(disabled)[writer][@"emptyAttempts"],@0);
+    }
     XCTAssertEqualObjects(self.engine.receipt[@"writeObservation"][@"allowedMeaning"],@"originalCallForwarded");
     XCTAssertEqualObjects(self.engine.receipt[@"writeObservation"][@"diskPersistence"],@"notMeasured");
 #endif

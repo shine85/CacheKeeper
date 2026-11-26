@@ -5,6 +5,41 @@ static NSDictionary *axs_cachekeeper_write_epoch(NSDictionary *observation,NSNum
     for (NSDictionary *row in observation[@"epochs"]) if ([row[@"epoch"] isEqual:identifier]) return row;
     return nil;
 }
+#if AXS_CACHEKEEPER_WRITE_PAYLOAD_TESTING
+static void axs_cachekeeper_runtime_payload_observation(AxsCacheKeeperImageCache *engine,NSString *home,NSMutableDictionary *context) {
+    __attribute__((objc_precise_lifetime)) SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"payload-observation"
+        diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
+    axs_cachekeeper_runtime_refresh(engine);
+    NSData *payload=[@"nonempty" dataUsingEncoding:NSUTF8StringEncoding],*empty=[NSData data];
+    [owner.diskCache setData:empty forKey:@"empty"];[owner.diskCache setExtendedData:empty forKey:@"empty"];
+    [owner.diskCache setData:payload forKey:@"payload"];[owner.diskCache setExtendedData:payload forKey:@"payload"];
+    dispatch_sync(engine.work,^{[engine axs_cachekeeper_publish];});
+    NSDictionary *row=[engine.receipt[@"writeObservation"][@"epochs"] lastObject];
+    for(NSString *writer in @[@"data",@"extended"]) {
+        NSDictionary *counts=row[writer];
+        axs_cachekeeper_runtime_require([counts[@"attempts"] isEqual:@2] && [counts[@"blocked"] isEqual:@2] &&
+            [counts[@"emptyAttempts"] isEqual:@1] && [counts[@"emptyBlocked"] isEqual:@1] &&
+            [counts[@"nonemptyAttempts"] isEqual:@1] && [counts[@"nonemptyBlocked"] isEqual:@1],
+            "actual hooks distinguish empty and nonempty payload decisions");
+    }
+    NSDictionary *frozen=row;NSNumber *identifier=row[@"epoch"];
+    context[@"appState"]=@{@"enabled":@NO,@"mode":@"prevent"};axs_cachekeeper_runtime_refresh(engine);
+    [owner.diskCache setData:empty forKey:@"empty"];[owner.diskCache setExtendedData:empty forKey:@"empty"];
+    [owner.diskCache setData:payload forKey:@"payload"];[owner.diskCache setExtendedData:payload forKey:@"payload"];
+    [owner.diskCache setData:nil forKey:@"nil"];[owner.diskCache setExtendedData:nil forKey:@"nil"];
+    [owner.diskCache setData:payload forKey:nil];[owner.diskCache setExtendedData:payload forKey:nil];
+    dispatch_sync(engine.work,^{[engine axs_cachekeeper_publish];});
+    NSDictionary *observation=engine.receipt[@"writeObservation"];row=[observation[@"epochs"] lastObject];
+    for(NSString *writer in @[@"data",@"extended"]) {
+        NSDictionary *counts=row[writer];
+        axs_cachekeeper_runtime_require([counts[@"attempts"] isEqual:@2] && [counts[@"allowed"] isEqual:@2] &&
+            [counts[@"emptyAllowed"] isEqual:@1] && [counts[@"nonemptyAllowed"] isEqual:@1] &&
+            [counts[@"nonemptyBlocked"] isEqual:@0],"disabled hooks forward exact empty and nonempty attempts while nil is uncounted");
+    }
+    axs_cachekeeper_runtime_require([axs_cachekeeper_write_epoch(observation,identifier) isEqual:frozen] &&
+        axs_cachekeeper_image_cache_raw_projection(engine.receipt)!=nil,"payload attribution preserves prior epochs and the strict receipt");
+}
+#endif
 #if !AXS_CACHEKEEPER_WRITE_OBSERVATION_OLD
 void axs_cachekeeper_run_write_status_tests(void);
 static void axs_cachekeeper_runtime_pruned_writer(AxsCacheKeeperImageCache *engine,NSString *home,NSMutableDictionary *context) {
@@ -56,6 +91,9 @@ static void axs_cachekeeper_runtime_pruned_writer(AxsCacheKeeperImageCache *engi
 }
 #endif
 static void axs_cachekeeper_runtime_write_observation(AxsCacheKeeperImageCache *engine,NSString *home,NSMutableDictionary *context) {
+#if AXS_CACHEKEEPER_WRITE_PAYLOAD_TESTING
+    axs_cachekeeper_runtime_payload_observation(engine,home,context);return;
+#endif
 #if AXS_CACHEKEEPER_DISABLED_IDENTITY_TESTING
     __attribute__((objc_precise_lifetime)) SDImageCache *disabledOwner=[[SDImageCache alloc] initWithNamespace:@"disabled-identity"
         diskCacheDirectory:[home stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
@@ -187,7 +225,7 @@ static void axs_cachekeeper_runtime_write_observation(AxsCacheKeeperImageCache *
     @synchronized(binding.writeLedger) {
         AxsCacheKeeperWriteObservation *ledger=&binding.writeLedger->observation;
         AxsCacheKeeperWriteCounts *counts=&ledger->epochs[ledger->count-1].writers[0];
-        *counts=(AxsCacheKeeperWriteCounts){AXS_CACHEKEEPER_WRITE_MAX-1,AXS_CACHEKEEPER_WRITE_MAX-1,0,false};
+        *counts=(AxsCacheKeeperWriteCounts){.attempts=AXS_CACHEKEEPER_WRITE_MAX-1,.allowed=AXS_CACHEKEEPER_WRITE_MAX-1};
     }
     [disk setData:data forKey:@"last-exact"];[disk setData:data forKey:@"overflow"];
     dispatch_sync(engine.work,^{[engine axs_cachekeeper_publish];});

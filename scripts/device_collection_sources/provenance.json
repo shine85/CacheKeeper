@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "scope": "Reused technical metadata collectors only; no device data, credentials or runtime assets.",
+  "resource_app_binding.py": {
+    "source": "resource_app_binding.py (1792 collector)",
+    "sourceSHA256": "b9c921e2c91ef6b0e6845cc7b5b39ca8086c8381ec4d2b55531bb8b2b26290cf",
+    "changes": "byte-identical"
+  },
+  "device-batch-template.sh": {
+    "source": "device-batch-template.sh (136 collector)",
+    "sourceSHA256": "9f9f7c73862e07c78e4587539534d3554d15d65ed09b2b5c9b9a771660a53a1f",
+    "changes": "byte-identical; current adapter removes container and ALog readers before execution"
+  },
+  "sdk_receipt.py": {
+    "source": "device_batch.py (136 collector)",
+    "sourceSHA256": "55573f8649debfb6374ccec2680b92a493d28a5693d4d73a56501047ba472833",
+    "retainedFunctions": [
+      "digest",
+      "need",
+      "metadata_section",
+      "macho_layout",
+      "check_image",
+      "check_app",
+      "parse_text"
+    ],
+    "changes": "Removed historical preparation/CLI/assets; fat_table rejected as already required by incremental adapter",
+    "SHA256": "95e5f4d6df4821a09d1089a3eb9cb90143d5832f5e98a3a0621b9a3be102e4c9"
+  },
+  "report_io.py": {
+    "source": "persistent_device_ssh.atomic",
+    "changes": "Retained report publication behavior without importing transport"
+  },
+  "../device_collection_transport.py": {
+    "source": "qq_persistent_bridge.checked_state/QueueTasks.task/_result/checked_script",
+    "changes": "Static task interface only, injected existing transport module and its BASE; no authentication, server, secret transfer or batch upload"
+  }
+}

@@ -218,7 +218,7 @@ class NativeOrchestrationTests(unittest.TestCase):
                     "gurd-runtime": 5 * 60 + 2 * 60 + 15 * 20 + 4 * 20,
                     # C core, MRC helper, fixed-header RED/current GREEN,
                     # then fixed-producer RED/current writer integration.
-                    "image-write-observation": (60 + 30) + 60 + (15 + 2 * (60 + 30)) + (15 + 2 * (60 + 60)),
+                    "image-write-observation": (60 + 30) + 60 + (15 + 2 * (60 + 30)) + (2 * 15 + 4 * (60 + 60)),
                     "scaled-representation-geometry": 2 * (60 + 30)}
         budgets = {name: budget for name, _, budget in run_native_tests.SCRIPT_GROUPS}
         for name, command_seconds in required.items():

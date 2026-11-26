@@ -20,8 +20,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  collection:
+    name: 集中采集真实脚本与干净目录回归
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: 获取源码
+        uses: actions/checkout@v4
+      - name: 验证静态采集链路
+        timeout-minutes: 4
+        run: |
+          mkdir -p tmp/collection-results
+          set -o pipefail
+          python3 tests/test_device_collection_portability.py -v 2>&1 | tee tmp/collection-results/portability.log
+          python3 tests/test_device_collection_batch.py -v 2>&1 | tee tmp/collection-results/batch.log
+          python3 tests/test_device_sdk_incremental.py -v 2>&1 | tee tmp/collection-results/sdk.log
+      - name: 保存集中采集回归日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collection-test-log
+          path: tmp/collection-results/*.log
+          if-no-files-found: warn
+
   native:
     name: 全部原生回归与结果汇总
+    needs: collection
     runs-on: macos-15-intel
     # The image fixture adds a separate MRC object; its group permits all four
     # native variants plus that compilation before publishing its result.

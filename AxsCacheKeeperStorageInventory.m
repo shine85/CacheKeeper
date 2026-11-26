@@ -49,6 +49,7 @@ static NSDictionary *axs_cachekeeper_inventory_sdk(id wrapper,BOOL image) {
     out[@"bytesState"]=@"notMeasured";return [out copy];
 }
 static NSDictionary *axs_cachekeeper_inventory_gurd(id wrapper) {
+    if (!wrapper) return @{@"state":@"notObserved"};
     NSString *source=axs_cachekeeper_inventory_source(wrapper);
     if (![source isEqual:@"available"]) return @{@"state":source};
     NSDictionary *decoded=axs_cachekeeper_gurd_receipt_decode(wrapper[@"data"]);

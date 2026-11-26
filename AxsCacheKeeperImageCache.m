@@ -493,7 +493,7 @@ static BOOL AxsCacheKeeperImageInstanceUnchanged(AxsCacheKeeperImageBinding *bin
     binding.admissionReason=reason ? AxsCacheKeeperImageReasonParse(reason.UTF8String) : AxsCacheKeeperImageReasonNone;
     return !reason;
 }
-static BOOL AxsCacheKeeperImageBlocksWrite(id disk,unsigned writer) {
+static BOOL AxsCacheKeeperImageBlocksWrite(id disk,unsigned writer,BOOL nonempty) {
     AxsCacheKeeperImageBinding *binding=objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey);
     if (!binding) return NO;
     AxsCacheKeeperImageCache *engine=binding.engine;
@@ -511,14 +511,14 @@ static BOOL AxsCacheKeeperImageBlocksWrite(id disk,unsigned writer) {
         if (blocked && binding.blockedWrites<AXS_CACHEKEEPER_WRITE_MAX) binding.blockedWrites++;
         AxsCacheKeeperImageWriteLedger *ledger=binding.writeLedger;
         if (engine && binding.disk==disk && ledger) @synchronized(ledger) {
-            axs_cachekeeper_write_observe(&ledger->observation,sameEpoch ? epoch : 0,writer,blocked);
+            axs_cachekeeper_write_observe_payload(&ledger->observation,sameEpoch ? epoch : 0,writer,blocked,nonempty);
         }
         return blocked;
     }
 }
 static void AxsCacheKeeperImageSetData(id disk,SEL selector,id data,id key) {
     IMP original;@synchronized(AxsCacheKeeperImageCache.class) {original=axs_cachekeeper_image_data_original;}
-    if (!data || !key || !AxsCacheKeeperImageBlocksWrite(disk,0)) {
+    if (!data || !key || !AxsCacheKeeperImageBlocksWrite(disk,0,[data length]>0)) {
         ((void (*)(id,SEL,id,id))original)(disk,selector,data,key);
         AxsCacheKeeperImageBinding *binding=objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey);
         if (data && key) [binding.engine axs_cachekeeper_observeCreatedRoot:binding];
@@ -527,7 +527,7 @@ static void AxsCacheKeeperImageSetData(id disk,SEL selector,id data,id key) {
 static void AxsCacheKeeperImageSetExtendedData(id disk,SEL selector,id data,id key) {
     IMP original;@synchronized(AxsCacheKeeperImageCache.class) {original=axs_cachekeeper_image_extended_original;}
     // nil removes existing metadata in the SDK; it is not an added cache write.
-    if (!data || !key || !AxsCacheKeeperImageBlocksWrite(disk,1)) ((void (*)(id,SEL,id,id))original)(disk,selector,data,key);
+    if (!data || !key || !AxsCacheKeeperImageBlocksWrite(disk,1,[data length]>0)) ((void (*)(id,SEL,id,id))original)(disk,selector,data,key);
 }
 static id AxsCacheKeeperImageInit(id object __attribute__((ns_consumed)),SEL selector,id space,id directory,id config) __attribute__((ns_returns_retained));
 static id AxsCacheKeeperImageInit(id object __attribute__((ns_consumed)),SEL selector,id space,id directory,id config) {
