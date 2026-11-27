@@ -22,6 +22,7 @@ README='''# 五 APP 离线准备报告包
 手机执行器不可用；本包不包含服务器、设备命令、附加脚本或二进制对象，也不要求逐 APP 操作。
 运行时取证和效果验证均未执行。静态范围完成不等于缓存适配完成、删除授权或真实空间效果。
 session.json 中的 missingRequirements 是尚待证明的条件，不是已经验证的行为。
+capabilityGate 逐 APP 输出 ready/blockedByCapability；缺少私有资源执行器会阻断整批就绪。可选 phaseReports 将已保存的 prevent/clean/disabled 阶段归一化进本包，不会重扫或执行 APP。
 manifest.json 记录本包其余两个固定成员的字节长度与 SHA256。
 '''
 
@@ -156,7 +157,30 @@ def _receipt(directory,evidence,identity,observed):
     return dict(receiptSHA256=sha,verifiedObjectRanges=ranges,verifiedBytes=total,identityBinding=binding['state'],checks=sdk)
 
 
-def prepare_session(report_path,output_path,*,diagnostics_path=None,baseline_path=None):
+def _phase_specs(values):
+    result=[]
+    for value in values:
+        parts=value.split('=',2)
+        _need(len(parts) in (2,3),'sessionPhaseArgument')
+        result.append(tuple(parts))
+    return result
+
+
+def _capability_gate(apps):
+    rows=[]
+    for app in apps:
+        # Current product exposes only static metadata and unauthenticated host self-report.
+        # Neither is a private resource-operation executor for these apps.
+        blocked=[dict(requirement=item,state='blockedByCapability') for item in app['missingRequirements']]
+        ready=not blocked
+        rows.append(dict(bundle=app['bundle'],overall='ready' if ready else 'blockedByCapability',
+                         availableEvidence=['savedStaticMetadata','hostSelfReportWhenPresent'],
+                         blockedCapabilities=blocked,executionAvailable=ready))
+    execution_available=all(row['executionAvailable'] for row in rows)
+    return dict(state='ready' if execution_available else 'blocked',executionAvailable=execution_available,apps=rows)
+
+
+def prepare_session(report_path,output_path,*,diagnostics_path=None,baseline_path=None,phase_reports=()):
     """返回离线 ZIP 摘要。校验失败不创建输出；现有输出由 xb 拒绝覆盖。"""
     output=Path(output_path).absolute()
     if output.exists() or output.is_symlink():raise FileExistsError(output)
@@ -182,6 +206,10 @@ def prepare_session(report_path,output_path,*,diagnostics_path=None,baseline_pat
         document=dict(schemaVersion=1,kind='cachekeeper.offlinePreparation',state='preparedOnly',scope='scopePreparedOnly',
                       executionAvailable=False,effectVerification='notPerformed',runtimeExecuted=False,appLaunchExecuted=False,
                       resourceDeletionExecuted=False,sourceReportSHA256=sha,apps=apps)
+        document['capabilityGate']=_capability_gate(apps)
+        if phase_reports:
+            from device_collection_phase_report import analyze_phase_reports
+            document['phaseReports']=analyze_phase_reports(_phase_specs(phase_reports))
         if diagnostics_path is not None:
             from device_collection_diagnostics import analyze_diagnostics
             document['diagnostics']=analyze_diagnostics(diagnostics_path,baseline_path,bundles=[item[1] for item in APPS])

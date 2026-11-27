@@ -15,10 +15,12 @@ def main(argv=None):
                         help='Existing persistent_device_ssh.py; reads its authenticated session without reconnecting.')
     mode=parser.add_mutually_exclusive_group()
     mode.add_argument('--resume',type=Path,help='Terminal collection.json; collect only explicitly unattempted SDK metadata.')
-    mode.add_argument('--prepare-session',type=Path,help='Offline only: prepare a five-app report ZIP from terminal collection.json.')
+    mode.add_argument('--prepare-session',type=Path,help='Offline only: prepare a five-app report ZIP from terminal collection.json; optional --phase-report inputs are normalized into it.')
     parser.add_argument('--output',type=Path,help='New ZIP path; required only with --prepare-session.')
     parser.add_argument('--diagnostics',type=Path,help='Saved diagnostic JSON to analyze in the offline session.')
     parser.add_argument('--baseline-diagnostics',type=Path,help='Previous saved diagnostic JSON; requires --diagnostics.')
+    parser.add_argument('--phase-report',action='append',default=[],metavar='STAGE=JSON[=SHA256]',
+                        help='Attach a saved phase report to the offline package; repeat for prevent/clean/disabled.')
     args=parser.parse_args(argv)
     if args.prepare_session:
         if args.output is None or args.transport_adapter is not None:
@@ -27,13 +29,14 @@ def main(argv=None):
             parser.error('--baseline-diagnostics requires --diagnostics')
         from device_collection_session import prepare_session
         try:summary=prepare_session(args.prepare_session,args.output,
-                                    diagnostics_path=args.diagnostics,baseline_path=args.baseline_diagnostics)
+                                    diagnostics_path=args.diagnostics,baseline_path=args.baseline_diagnostics,
+                                    phase_reports=args.phase_report)
         except (OSError,ValueError) as error:
             print(json.dumps(dict(state='sessionPreparationFailed',errorType=type(error).__name__),ensure_ascii=False),file=sys.stderr)
             return 2
         print(json.dumps(summary,ensure_ascii=False,indent=2))
         return 0
-    if args.output is not None or args.diagnostics is not None or args.baseline_diagnostics is not None:
+    if args.output is not None or args.diagnostics is not None or args.baseline_diagnostics is not None or args.phase_report:
         parser.error('--output and diagnostic inputs are only valid with --prepare-session')
     if args.resume:
         try:load_resume_parent(args.resume)

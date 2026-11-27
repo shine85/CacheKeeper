@@ -20,6 +20,8 @@ PORTABLE_C_GROUPS = frozenset(("resource-layout", "image-effect", "image-admissi
 # commands retain their <=60 second timeout in their actual test runners.
 SCRIPT_GROUPS = (
     ("runtime-diagnostic-assets", "test_runtime_diagnostic_assets.py", 60),
+    ("collection-session", "run_collection_session_tests.py", 60),
+    ("image-collection", "run_image_collection_tests.py", 180),
     ("qq-resource-schema", "../test_qq_method_schema.py", 60),
     ("qq-resource-code", "../test_qq_image_code.cjs", 60),
     ("presentation-red", "run_presentation_red.py", 180),

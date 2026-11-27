@@ -36,6 +36,8 @@ jobs:
           python3 tests/test_device_collection_batch.py -v 2>&1 | tee tmp/collection-results/batch.log
           python3 -m unittest tests.test_device_collection_resume -v 2>&1 | tee tmp/collection-results/resume.log
           python3 -m unittest tests.test_device_collection_session tests.test_device_collection_session_cli tests.test_device_collection_diagnostics -v 2>&1 | tee tmp/collection-results/session.log
+          python3 -m unittest tests.test_collection_session_lifecycle_source tests.test_image_collection_source -v 2>&1 | tee tmp/collection-results/preferences-session.log
+          python3 -m unittest tests.test_device_collection_phase_report tests.test_device_collection_manifest -v 2>&1 | tee tmp/collection-results/phase-report.log
           python3 tests/test_device_sdk_incremental.py -v 2>&1 | tee tmp/collection-results/sdk.log
       - name: 保存集中采集回归日志
         if: always()

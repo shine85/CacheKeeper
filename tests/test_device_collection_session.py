@@ -91,8 +91,10 @@ class SessionTests(unittest.TestCase):
             self.assertEqual([row['sdk']['state'] for row in package['apps']],
                              ['completeWithinRequestedSDKMetadata','partial','attemptedOutcomeUnknown','notAttemptedMissingIdentity','notObservedInReport'])
             self.assertEqual(package['state'],'preparedOnly');self.assertEqual(package['scope'],'scopePreparedOnly')
+            self.assertEqual(package['capabilityGate']['state'],'blocked')
+            self.assertFalse(package['capabilityGate']['executionAvailable'])
             self.assertEqual(set(package),{'schemaVersion','kind','state','scope','executionAvailable','effectVerification',
-                                          'runtimeExecuted','appLaunchExecuted','resourceDeletionExecuted','sourceReportSHA256','apps'})
+                                          'runtimeExecuted','appLaunchExecuted','resourceDeletionExecuted','sourceReportSHA256','apps','capabilityGate'})
             self.assertFalse(package['executionAvailable']);self.assertEqual(package['effectVerification'],'notPerformed')
             self.assertIn('离线准备报告包',readme)
             for key in ('runtimeExecuted','appLaunchExecuted','resourceDeletionExecuted'):self.assertFalse(package[key])

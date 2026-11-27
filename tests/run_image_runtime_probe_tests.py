@@ -26,7 +26,7 @@ def main():
         flags=[compiler,"clang","-fobjc-arc","-fblocks","-Wall","-Wextra","-Werror=format","-Werror=implicit-function-declaration","-DAXS_CACHEKEEPER_IMAGE_TESTING=1",'-DAXS_CACHEKEEPER_PACKAGE_VERSION="0.0.0-0.0"',"-I"+str(ROOT/"tests/image_runtime_context_platform"),"-I"+str(ROOT),"-I"+str(ROOT/"tests"),"-framework","Foundation"]
         sources=[str(ROOT/p) for p in ("tests/image_runtime_probe_tests.m","AxsCacheKeeperCleanupRules.m","AxsCacheKeeperOperationInfo.m","AxsCacheKeeperImageCoordinator.m")]+[str(helper)]
         binary=folder/"image-probes";run(flags+sources+["-o",str(binary)],check=True)
-        for scenario in ("same","changed","access","installation","delayed","rapid","late-provider"):
+        for scenario in ("same","changed","access","installation","delayed","rapid","late-provider","collection"):
             home=folder/scenario;home.mkdir();result=run([str(binary),scenario,str(home)],20,capture_output=True,text=True)
             if result.returncode or result.stdout.strip()!=f"PASS: image-runtime-probe {scenario}":raise RuntimeError(result.stdout+result.stderr)
             print(result.stdout,end="")

@@ -120,7 +120,7 @@ def main():
          '@"requestWrite":error ? @"failed" : @"saved"',
          "testFalseStopReturnWithoutNSErrorCannotClaimSaved",
          "D1 BOOL false cannot become saved when NSError is nil"),
-        ("old-report-export", 'self.exportButton.enabled=self.reportData && axs_cachekeeper_capacity_report_exportable(report) && !self.collecting && !self.sharing && !self.axs_cachekeeper_capacityEpoch;',
+        ("old-report-export", 'self.exportButton.enabled=self.reportData && exportable && !self.collecting && !self.sharing && !self.axs_cachekeeper_capacityEpoch;',
          'self.exportButton.enabled=self.reportData && !self.collecting && !self.sharing && !self.axs_cachekeeper_capacityEpoch;',
          "testExportRequiresCurrentTerminalSummaryBinding",
          "旧容量绑定不能作为最新结果导出"),
@@ -149,7 +149,7 @@ def main():
 int main(int argc,char **argv) { @autoreleasepool {return UIApplicationMain(argc,argv,nil,NSStringFromClass(AxsCacheKeeperCapacityHost.class));} }
 ''', encoding="utf-8")
         modules = ["Diagnostics", "InjectionConditions", "StorageInventory", "HostEvidence", "HostPreflight", "OperationInfo",
-                   "AppList", "Installation", "DiagnosticChannel", "PDFSession", "PDFInspection"]
+                   "AppList", "Installation", "DiagnosticChannel", "PDFSession", "PDFInspection", "CollectionSession", "ImageCollection"]
 
         def run(name, product, method=None, expected=None):
             stage = output / name
@@ -167,7 +167,7 @@ int main(int argc,char **argv) { @autoreleasepool {return UIApplicationMain(argc
             spec = {"name": "CapacityPage", "options": {"bundleIdPrefix": "dev.local.cachekeeper.capacity", "deploymentTarget": {"iOS": "16.0"}},
                     "settings": {"base": {"CLANG_ENABLE_OBJC_ARC": True, "GENERATE_INFOPLIST_FILE": True, "CODE_SIGN_IDENTITY": "-"}},
                     "targets": {
-                        "CapacityHost": {"type": "application", "platform": "iOS", "sources": [str(host), str(copied), str(root / "Prefs/HostPreflightPage.m")] +
+                        "CapacityHost": {"type": "application", "platform": "iOS", "sources": [str(host), str(copied), str(root / "Prefs/HostPreflightPage.m"), str(root / "Prefs/ImageCollectionPage.m")] +
                                          [str(root / ("AxsCacheKeeper" + module + ".m")) for module in modules], "settings": {"base": settings}},
                         "CapacityPageTests": {"type": "bundle.unit-test", "platform": "iOS", "sources": [str(root / "tests/ui/CapacityPageTests.m")],
                                               "dependencies": [{"target": "CapacityHost"}], "settings": {"base": settings}}},

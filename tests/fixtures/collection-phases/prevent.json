@@ -1,0 +1,115 @@
+{
+  "apps": [
+    {
+      "build": "2",
+      "bundle": "com.baidu.netdisk",
+      "cleanup": {
+        "data": {
+          "cleanupHistory": {
+            "rounds": []
+          }
+        },
+        "state": "available"
+      },
+      "hostObserved": {
+        "data": {
+          "data": {
+            "runtimeInfo": {
+              "packageVersion": "0.7.2-216.1"
+            },
+            "updated": 1
+          }
+        },
+        "state": "available"
+      },
+      "imageDiskCache": {
+        "data": {
+          "operationHistory": {
+            "historyTruncated": false,
+            "processes": [
+              {
+                "actions": [],
+                "events": [
+                  {
+                    "configurationGeneration": 2,
+                    "eventID": 1,
+                    "reason": "none",
+                    "started": 11,
+                    "state": "finished",
+                    "trigger": "imageLoad"
+                  }
+                ]
+              }
+            ]
+          },
+          "state": "available",
+          "writeObservation": {
+            "droppedEpochs": 0,
+            "epochs": [
+              {
+                "configuration": 2,
+                "data": {
+                  "allowed": 1,
+                  "attempts": 30,
+                  "blocked": 29,
+                  "nonemptyAllowed": 1,
+                  "nonemptyAttempts": 30,
+                  "nonemptyBlocked": 29,
+                  "overflow": false
+                },
+                "enabled": true,
+                "epoch": 2,
+                "identityState": "verified",
+                "installation": 1,
+                "mode": "prevent"
+              }
+            ],
+            "truncated": false
+          }
+        },
+        "state": "available"
+      },
+      "name": "SECRET_NAME",
+      "version": "1"
+    },
+    {
+      "bundle": "com.ss.iphone.ugc.Aweme",
+      "gurdCache": {
+        "data": {
+          "operations": [
+            {
+              "event": 1,
+              "phase": "skipped",
+              "reason": "scopeUnproven",
+              "runtimeInfo": {
+                "packageVersion": "0.7.2-217.1"
+              },
+              "scopeProof": {
+                "candidateCount": 0,
+                "state": "scopeUnproven"
+              },
+              "submission": "notSubmitted"
+            }
+          ]
+        },
+        "state": "available"
+      }
+    }
+  ],
+  "capacityMeasurement": {
+    "freshness": "savedObservationUnverified",
+    "installationMatch": "notRevalidatedAtExport",
+    "sourceSampledAt": 1,
+    "state": "partial"
+  },
+  "collection": {
+    "mode": "savedRecords",
+    "rescanned": false
+  },
+  "environment": {
+    "pluginVersion": "0.7.2-217.1"
+  },
+  "fixture": "synthetic-minimal-schema-regression-not-device-evidence",
+  "generatedAt": 20,
+  "schemaVersion": 2
+}

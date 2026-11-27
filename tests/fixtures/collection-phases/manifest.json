@@ -1,0 +1,14 @@
+{
+  "prevent": {
+    "file": "prevent.json",
+    "sha256": "6bd16cb8ce252c6c452b1ff6ece171195979c9f462f02cba3468ffa64d0f29ac"
+  },
+  "clean": {
+    "file": "clean.json",
+    "sha256": "144da5735675b30757b717c87a0261570aabbf4e8f9c1894ebf9428b5848a95e"
+  },
+  "disabled": {
+    "file": "disabled.json",
+    "sha256": "7e4fbd8f436d487c8c3eee3c6534f1c8a9ab74185242e6240b99d9befdff3a99"
+  }
+}

@@ -5,6 +5,7 @@
 #import <UIKit/UIKit.h>
 #import "AxsCacheKeeperInstallation.h"
 static NSString *probeHome,*probeFolder,*probeIdentity=@"probe-installation";
+static NSString *probeBundle=@"cachekeeper.owned.runtime.fixture";
 static UIApplicationState probeState=UIApplicationStateActive;
 static NSUInteger probeBegins,probeEnds;
 static atomic_uint probeIdentityCalls;
@@ -18,7 +19,7 @@ static NSString *probeHomeDirectory(void) {return probeHome;}
 @end
 @implementation AxsCacheKeeperProbeBundle
 + (instancetype)mainBundle {static id instance;static dispatch_once_t once;dispatch_once(&once,^{instance=[self new];});return instance;}
-- (NSString *)bundleIdentifier {return @"cachekeeper.owned.runtime.fixture";}
+- (NSString *)bundleIdentifier {return probeBundle;}
 - (NSURL *)bundleURL {return [NSURL fileURLWithPath:probeHome];}
 - (id)objectForInfoDictionaryKey:(NSString *)key {(void)key;return @"1";}
 @end
@@ -62,7 +63,7 @@ static void probeAwait(BOOL (^condition)(void),const char *message) {
     axs_cachekeeper_runtime_require(condition(),message);
 }
 static void probeWrite(BOOL enabled,NSArray *selected) {
-    NSString *bundle=@"cachekeeper.owned.runtime.fixture";
+    NSString *bundle=probeBundle;
     axs_cachekeeper_runtime_require([@{bundle:@{@"enabled":@(enabled),@"mode":@"auto",@"autoDiscover":@NO}} writeToFile:[probeFolder stringByAppendingPathComponent:@"appEnabled.plist"] atomically:YES] &&
         [@{bundle:selected} writeToFile:[probeFolder stringByAppendingPathComponent:@"directories.plist"] atomically:YES],"probe real policy plists written");
 }
@@ -75,6 +76,7 @@ static void probeBackground(void) {probeState=UIApplicationStateBackground;[NSNo
 static void probeForeground(void) {probeState=UIApplicationStateActive;[NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidBecomeActiveNotification object:nil];}
 int main(int argc,const char *argv[]) {@autoreleasepool {
     axs_cachekeeper_runtime_require(argc==3,"probe scenario and temporary home supplied");probeHome=[NSString stringWithUTF8String:argv[2]];probeFolder=[probeHome stringByAppendingPathComponent:@"shared"];
+    if (!strcmp(argv[1],"collection")) probeBundle=@"com.baidu.netdisk";
     axs_cachekeeper_runtime_require([NSFileManager.defaultManager createDirectoryAtPath:[probeFolder stringByAppendingPathComponent:@"Status"] withIntermediateDirectories:YES attributes:nil error:nil],"probe configuration directory created");
     for(uint32_t i=0;i<_dyld_image_count();i++) if(_dyld_get_image_header(i)->filetype==MH_EXECUTE) axs_cachekeeper_runtime_main_header=_dyld_get_image_header(i);
     axs_cachekeeper_runtime_fingerprinted=YES;axs_cachekeeper_runtime_helper_original=method_getImplementation(class_getClassMethod(AxsCacheKeeperRuntimeSourceHelper.class,@selector(axs_cachekeeper_sample)));
@@ -82,6 +84,63 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
     AxsCacheKeeperImageCache *engine=axs_cachekeeper_image_engine;
     __attribute__((objc_precise_lifetime)) SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"probe" diskCacheDirectory:[probeHome stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
     probeAwait(^BOOL {return [engine.receipt[@"eligible"] unsignedIntegerValue]==1;},"probe actual host owner is admitted");
+    if (!strcmp(argv[1],"collection")) {
+        NSString *statesPath=[probeFolder stringByAppendingPathComponent:@"appEnabled.plist"];
+        NSDictionary *baseState=@{@"enabled":@YES,@"mode":@"prevent",@"autoDiscover":@NO};
+        axs_cachekeeper_runtime_require([@{probeBundle:baseState} writeToFile:statesPath atomically:YES],"collection real prevent baseline saved");
+        axs_cachekeeper_configure_image_cache(YES,YES);
+        probeAwait(^BOOL{return [engine.receipt[@"restricted"] unsignedIntegerValue]==1;},"collection original prevent applied");
+        [owner.diskCache setData:[@"old" dataUsingEncoding:NSUTF8StringEncoding] forKey:@"old-count"];
+        NSTimeInterval now=NSDate.date.timeIntervalSince1970;
+        NSDictionary *base=@{@"bundle":probeBundle,@"appState":baseState,@"selected":@[@"Library/Caches"]};
+        NSMutableDictionary *request=[@{@"schemaVersion":@1,@"sessionID":@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",@"requestID":@"11111111111111111111111111111111",
+            @"bundle":probeBundle,@"phase":@"prevent",@"step":@1,@"issuedAt":@(now),@"expiresAt":@(now+1),
+            @"baselineSHA256":axs_cachekeeper_image_collection_baseline(base),@"processFirstObserved":axs_cachekeeper_runtime_info()[@"firstObserved"]} mutableCopy];
+        axs_cachekeeper_runtime_require(axs_cachekeeper_capacity_atomic_write(request,probeFolder,@"imageCollectionRequest.plist",4096,NULL),"real dedicated lease request saved");
+        probeBackground();
+        probeAwait(^BOOL{return [engine.receipt[@"imageCollection"][@"requestID"] isEqual:request[@"requestID"]];},"natural background adopts actual image lease");
+        NSDictionary *ack=engine.receipt[@"imageCollection"],*first=nil;
+        for (NSDictionary *row in engine.receipt[@"writeObservation"][@"epochs"]) if ([ack[@"epochs"] containsObject:row[@"epoch"]]) first=row;
+        axs_cachekeeper_runtime_require(first && [first[@"data"][@"nonemptyAttempts"] unsignedIntegerValue]==0,"new same-mode request never borrows prior writer counts");
+        probeAwait(^BOOL{return [engine.receipt[@"imageCollection"][@"disposition"] isEqual:@"expired"];},"lease expires and engine re-adopts original configuration");
+        axs_cachekeeper_runtime_require([engine.receipt[@"restricted"] unsignedIntegerValue]==1,"expired overlay restores true base prevent rather than permanent fail-open");
+        NSString *oldRequest=request[@"requestID"];
+        NSData *before=[NSData dataWithContentsOfFile:statesPath];
+        request[@"phase"]=@"disabled";request[@"step"]=@3;request[@"requestID"]=@"33333333333333333333333333333333";
+        request[@"issuedAt"]=@(NSDate.date.timeIntervalSince1970);request[@"expiresAt"]=@(NSDate.date.timeIntervalSince1970+30);
+        axs_cachekeeper_runtime_require(axs_cachekeeper_capacity_atomic_write(request,probeFolder,@"imageCollectionRequest.plist",4096,NULL),"disabled image-only request saved");
+        axs_cachekeeper_configure_image_cache(YES,YES);
+        probeAwait(^BOOL{return [engine.receipt[@"imageCollection"][@"phase"] isEqual:@"disabled"] && [engine.receipt[@"state"] isEqual:@"disabled"];},"disabled overlay acknowledged");
+        NSUInteger newGeneration=engine.generation;
+        [engine requestCollectionExpiryRefresh:oldRequest];probePump(.1);
+        axs_cachekeeper_runtime_require(engine.generation==newGeneration,"late expiry timer cannot revoke a newer request");
+        axs_cachekeeper_runtime_require([engine.context[@"installation"] length]>0 && [[NSData dataWithContentsOfFile:statesPath] isEqual:before],"effective disabled still validates original installation without writing config");
+        probeWrite(NO,@[]);axs_cachekeeper_configure_image_cache(YES,YES);
+        probeAwait(^BOOL{return [engine.receipt[@"imageCollection"][@"disposition"] isEqual:@"configurationChanged"];},"user base change revokes active overlay");
+        axs_cachekeeper_runtime_require([@{probeBundle:baseState} writeToFile:statesPath atomically:YES],"restore original fixture base after revocation");
+        axs_cachekeeper_runtime_require([@{probeBundle:@[@"Library/Caches"]} writeToFile:[probeFolder stringByAppendingPathComponent:@"directories.plist"] atomically:YES],"restore original fixture scope");
+        axs_cachekeeper_configure_image_cache(YES,YES);probePump(.2);
+        axs_cachekeeper_runtime_require([engine.receipt[@"imageCollection"][@"disposition"] isEqual:@"configurationChanged"],"revoked request never reactivates when base changes back");
+        NSMutableDictionary *shortLease=[request mutableCopy];
+        shortLease[@"sessionID"]=@"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";shortLease[@"requestID"]=@"55555555555555555555555555555555";
+        shortLease[@"phase"]=@"prevent";shortLease[@"step"]=@1;
+        shortLease[@"issuedAt"]=@(NSDate.date.timeIntervalSince1970);shortLease[@"expiresAt"]=@(NSDate.date.timeIntervalSince1970+.1);
+        axs_cachekeeper_runtime_require(axs_cachekeeper_capacity_atomic_write(shortLease,probeFolder,@"imageCollectionRequest.plist",4096,NULL),"short lease saved before delayed adoption");
+        __block BOOL holdFirstAdoption=YES;
+        engine.provider=^NSDictionary *{
+            NSDictionary *context=AxsCacheKeeperImageContext();
+            if (holdFirstAdoption && [context[@"imageCollection"][@"disposition"] isEqual:@"applied"]) {
+                holdFirstAdoption=NO;[NSThread sleepForTimeInterval:.25];
+            }
+            return context;
+        };
+        [engine refreshWithCompletion:nil];
+        probeAwait(^BOOL{return [engine.receipt[@"imageCollection"][@"requestID"] isEqual:shortLease[@"requestID"]] &&
+            [engine.receipt[@"imageCollection"][@"disposition"] isEqual:@"expired"] && [engine.receipt[@"restricted"] unsignedIntegerValue]==1;},
+            "lease expiring before first acknowledgement autonomously restores base without another lifecycle event");
+        axs_cachekeeper_runtime_require(!holdFirstAdoption,"expiry fixture actually held a valid incoming provider context");
+        printf("PASS: image-runtime-probe collection\n");return 0;
+    }
     dispatch_semaphore_t entered=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0);
     dispatch_async(owner.ioQueue,^{dispatch_semaphore_signal(entered);axs_cachekeeper_runtime_require(dispatch_semaphore_wait(release,dispatch_time(DISPATCH_TIME_NOW,8*NSEC_PER_SEC))==0,"probe SDK queue released in budget");});
     axs_cachekeeper_runtime_require(dispatch_semaphore_wait(entered,dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC))==0,"probe actual host SDK queue held");
@@ -100,6 +159,15 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
     } else {probeBackground();}
     probeAwait(^BOOL {return [engine.receipt[@"pending"] unsignedIntegerValue]==1;},"probe real Runtime schedules in-flight action");
     NSUInteger generation=engine.generation,events=probeConfigurationEvents(),ended=probeEnds;
+    if (!strcmp(argv[1],"same")) {
+        NSTimeInterval now=NSDate.date.timeIntervalSince1970;
+        NSDictionary *other=@{@"schemaVersion":@1,@"sessionID":@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",@"requestID":@"11111111111111111111111111111111",
+            @"bundle":@"com.baidu.netdisk",@"phase":@"prevent",@"step":@1,@"issuedAt":@(now),@"expiresAt":@(now+60),
+            @"baselineSHA256":@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",@"processFirstObserved":@1};
+        axs_cachekeeper_runtime_require(axs_cachekeeper_capacity_atomic_write(other,probeFolder,@"imageCollectionRequest.plist",4096,NULL),"unrelated APP lease fixture written");
+        notify_post(AxsCacheKeeperImageCollectionChanged.UTF8String);probePump(.2);
+        axs_cachekeeper_runtime_require(engine.generation==generation && probeConfigurationEvents()==events && probeEnds==ended,"other APP collection notification never cancels this APP work");
+    }
     for(NSUInteger i=0;i<5;i++) axs_cachekeeper_configure_image_cache(YES,YES);probePump(.3);
     axs_cachekeeper_runtime_require(engine.generation==generation && probeConfigurationEvents()==events && probeEnds==ended,"identical Runtime probe preserves in-flight generation event and UIKit task");
     BOOL changed=!strcmp(argv[1],"changed"),accessChanged=!strcmp(argv[1],"access") || !strcmp(argv[1],"rapid"),installationChanged=!strcmp(argv[1],"installation");

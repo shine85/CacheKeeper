@@ -23,7 +23,8 @@ class SessionCLITests(unittest.TestCase):
         scripts.mkdir()
         for name in ('collect_device.py', 'device_collection_batch.py',
                      'device_sdk_incremental.py', 'device_collection_session.py',
-                     'device_collection_diagnostics.py'):
+                     'device_collection_diagnostics.py',
+                     'device_collection_phase_report.py'):
             source = ROOT/'scripts'/name
             if source.exists():
                 shutil.copy2(source, scripts/name)
@@ -106,8 +107,37 @@ class SessionCLITests(unittest.TestCase):
             self.assertEqual(analysis['baselineSHA256'], hashlib.sha256(baseline.read_bytes()).hexdigest())
             self.assertEqual(len(analysis['apps']), 5)
             self.assertFalse(session['executionAvailable'])
+            self.assertEqual(session['capabilityGate']['state'],'blocked')
+            self.assertFalse(session['capabilityGate']['executionAvailable'])
             self.assertNotIn('SECRET_DIAGNOSTIC_CANARY', archive.read('session.json').decode('utf-8'))
 
+    def test_phase_reports_are_embedded_and_missing_app_capabilities_are_blocked(self):
+        base=ROOT/'tests/fixtures/collection-phases'
+        manifest=json.loads((base/'manifest.json').read_text(encoding='utf-8'))
+        reports=[(stage,base/item['file'],item['sha256']) for stage,item in manifest.items()]
+        result=self.run_cli('--prepare-session',self.report,'--output',self.output,
+                            *[arg for stage,path,pin in reports for arg in ('--phase-report',f'{stage}={path}={pin}')])
+        self.assertEqual(result.returncode,0,result.stderr)
+        with zipfile.ZipFile(self.output) as archive:
+            session=json.loads(archive.read('session.json'))
+            self.assertEqual(len(session['phaseReports']['apps']),5)
+            self.assertEqual(session['capabilityGate']['state'],'blocked')
+            self.assertFalse(session['capabilityGate']['executionAvailable'])
+            for app in session['capabilityGate']['apps']:
+                self.assertEqual(app['overall'],'blockedByCapability')
+                self.assertTrue(app['blockedCapabilities'])
+                self.assertTrue(all(item['state']=='blockedByCapability' for item in app['blockedCapabilities']))
+            baidu=next(row for row in session['phaseReports']['apps'] if row['bundle']=='com.baidu.netdisk')
+            self.assertEqual(baidu['stages']['prevent']['writer']['nonempty'],dict(attempts=30,blocked=29,allowed=1))
+            self.assertEqual(baidu['stages']['disabled']['outcome'],'insufficientEvidence')
+            douyin=next(row for row in session['phaseReports']['apps'] if row['bundle']=='com.ss.iphone.ugc.Aweme')
+            self.assertTrue(all(op['submission']=='notSubmitted' for op in douyin['stages']['prevent']['gurd']['operations']))
+
+    def test_duplicate_or_bad_phase_source_aborts_report_creation(self):
+        base=ROOT/'tests/fixtures/collection-phases';source=base/'prevent.json'
+        duplicate=self.run_cli('--prepare-session',self.report,'--output',self.output,
+                                '--phase-report',f'prevent={source}','--phase-report',f'prevent={source}')
+        self.assertEqual(duplicate.returncode,2);self.assertFalse(self.output.exists())
     def test_existing_output_is_preserved(self):
         self.output.write_bytes(b'previous-report')
         result = self.run_cli('--prepare-session', self.report, '--output', self.output)

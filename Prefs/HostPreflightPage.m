@@ -6,14 +6,20 @@
 @property(nonatomic,strong) NSTimer *axs_cachekeeper_timer;
 @property(nonatomic,strong) UITextView *text;
 @property(nonatomic,strong) UIButton *axs_cachekeeper_actionButton,*axs_cachekeeper_retryButton;
+@property(nonatomic,strong) AxsCacheKeeperCollectionSession *axs_cachekeeper_collectionSession;
 @property(nonatomic) BOOL axs_cachekeeper_backgrounded,axs_cachekeeper_departing;
+@property(nonatomic) NSTimeInterval axs_cachekeeper_roundStartedAt;
 @end
 
 @implementation AxsCacheKeeperHostPreflightPage
 - (instancetype)initWithStatusDirectory:(NSString *)directory panelVersion:(NSString *)version {
+    return [self initWithStatusDirectory:directory panelVersion:version collectionSession:nil];
+}
+- (instancetype)initWithStatusDirectory:(NSString *)directory panelVersion:(NSString *)version collectionSession:(AxsCacheKeeperCollectionSession *)session {
     if (!(self=[super init])) return nil;
     _axs_cachekeeper_batch=[[AxsCacheKeeperHostPreflight alloc] initWithStatusDirectory:directory panelVersion:version];
     if (!_axs_cachekeeper_batch) return nil;
+    _axs_cachekeeper_collectionSession=session;
     self.title=@"五 APP 宿主集中预检";
     return self;
 }
@@ -52,6 +58,7 @@
 - (void)axs_cachekeeper_render {
     NSDictionary *snapshot=[self.axs_cachekeeper_batch snapshot];
     NSMutableString *text=[NSMutableString stringWithString:@"开始后，在 5 分钟内依次打开下面的 APP，再返回本页查看。无需 SSH，不会自动启动或关闭 APP。\n只观察已加载插件的版本、已有访问结果、APP 开关配置可读性和诊断发布状态；不会改变清理或限写设置。\n\n自报告未经身份认证；无响应不能断定未注入，已响应也不证明缓存适配或清理效果。返回诊断页后汇总并导出，已保存结果会进入同一份报告。\n\n"];
+    if (self.axs_cachekeeper_collectionSession) [text appendFormat:@"集中采集会话 %@\n",self.axs_cachekeeper_collectionSession.sessionID];
     [text appendFormat:@"本轮终态：%@/%@\n\n",snapshot[@"completed"] ?: @0,snapshot[@"total"] ?: @0];
     BOOL failedSave=NO;
     NSDictionary *states=@{@"idle":@"尚未开始",@"pending":@"等待本轮响应",@"observed":@"已收到本轮自报告",@"timedOut":@"等待超时",@"cancelled":@"已取消",@"transportError":@"通知通信失败",@"invalidResponse":@"响应校验失败",@"clockChanged":@"时钟变化，会话失效"};
@@ -76,12 +83,64 @@
     self.axs_cachekeeper_timer=[NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {(void)timer;[weak axs_cachekeeper_poll];}];
 }
 - (void)axs_cachekeeper_action {
-    if (self.axs_cachekeeper_batch.running) [self.axs_cachekeeper_batch cancel];
-    else [self.axs_cachekeeper_batch startWithTimeout:300];
+    if (self.axs_cachekeeper_batch.running) {
+        [self.axs_cachekeeper_batch cancel];
+        NSError *error=nil;
+        if (self.axs_cachekeeper_collectionSession && ![self.axs_cachekeeper_collectionSession finishPhase:@"hostPreflight" result:@{@"state":@"cancelled"} error:&error])
+            self.text.text=[NSString stringWithFormat:@"取消已请求，但会话记录失败（代码 %@）；恢复时将按中断处理。\n\n%@",@(error.code),self.text.text];
+    } else {
+        NSError *sessionError=nil;
+        NSString *phaseState=self.axs_cachekeeper_collectionSession.reportProjection[@"phases"][@"hostPreflight"][@"state"];
+        BOOL retrying=self.axs_cachekeeper_collectionSession && [@[@"interrupted",@"cancelled"] containsObject:phaseState];
+        BOOL prepared=!retrying || [self.axs_cachekeeper_collectionSession prepareRetryForPhase:@"hostPreflight" error:&sessionError];
+        if (prepared && self.axs_cachekeeper_collectionSession)
+            prepared=[self.axs_cachekeeper_collectionSession beginPhase:@"hostPreflight" error:&sessionError];
+        if (!prepared) {
+            self.text.text=[NSString stringWithFormat:@"会话阶段无法持久化，未发送宿主请求（代码 %@）。\n\n%@",@(sessionError.code),self.text.text];
+            [self axs_cachekeeper_render];return;
+        }
+        self.axs_cachekeeper_roundStartedAt=floor(NSDate.date.timeIntervalSince1970);
+        if (![self.axs_cachekeeper_batch startWithTimeout:300] && self.axs_cachekeeper_collectionSession) {
+            NSError *finishError=nil;
+            [self.axs_cachekeeper_collectionSession finishPhase:@"hostPreflight" result:@{@"state":@"failed"} error:&finishError];
+            self.text.text=[NSString stringWithFormat:@"宿主批次启动失败，会话记录 %@。\n\n%@",@(finishError.code),self.text.text];
+        }
+    }
     [self axs_cachekeeper_poll];
 }
 - (void)axs_cachekeeper_poll {
-    [self.axs_cachekeeper_batch poll];[self axs_cachekeeper_render];[self axs_cachekeeper_update_timer];
+    [self.axs_cachekeeper_batch poll];
+    NSDictionary *snapshot=[self.axs_cachekeeper_batch snapshot];
+    if (self.axs_cachekeeper_collectionSession && ![snapshot[@"running"] boolValue] &&
+        [snapshot[@"completed"] unsignedIntegerValue]==[snapshot[@"total"] unsignedIntegerValue] &&
+        [snapshot[@"total"] unsignedIntegerValue]>0 &&
+        [self.axs_cachekeeper_collectionSession.reportProjection[@"phases"][@"hostPreflight"][@"state"] isEqual:@"running"]) {
+        NSMutableArray *rows=[NSMutableArray new];
+        for (NSDictionary *row in snapshot[@"rows"]) {
+            NSMutableDictionary *evidence=[@{@"bundle":row[@"bundle"],@"state":row[@"state"],@"saveState":row[@"saveState"],
+                @"transportTrust":@"unauthenticated",@"roundStartedAt":@(self.axs_cachekeeper_roundStartedAt),
+                @"observationFreshness":@"notObserved"} mutableCopy];
+            NSDictionary *result=[row[@"result"] isKindOfClass:NSDictionary.class] ? row[@"result"] : nil;
+            if (result) evidence[@"receipt"]=result;
+            NSNumber *sourceUpdated=[result[@"data"] isKindOfClass:NSDictionary.class] ? result[@"data"][@"updated"] : nil;
+            if (sourceUpdated) {
+                BOOL current=[sourceUpdated doubleValue]>=self.axs_cachekeeper_roundStartedAt;
+                evidence[@"sourceUpdated"]=sourceUpdated;
+                evidence[@"observationFreshness"]=current ? @"currentRound" : @"stale";
+                evidence[@"multipleResponders"]=result[@"multipleResponders"] ?: @NO;
+            }
+            [rows addObject:[evidence copy]];
+        }
+        BOOL complete=YES;
+        for (NSDictionary *row in rows) if (![row[@"state"] isEqual:@"observed"] || ![row[@"saveState"] isEqual:@"succeeded"] ||
+            ![row[@"transportTrust"] isEqual:@"unauthenticated"] || ![row[@"observationFreshness"] isEqual:@"currentRound"] ||
+            [row[@"multipleResponders"] boolValue]) complete=NO;
+        NSError *error=nil;
+        if (![self.axs_cachekeeper_collectionSession finishPhase:@"hostPreflight" result:@{@"state":complete ? @"complete" : @"partial",
+            @"roundStartedAt":@(self.axs_cachekeeper_roundStartedAt),@"transportTrust":@"unauthenticated",@"apps":rows} error:&error])
+            self.text.text=[NSString stringWithFormat:@"宿主结果已观测，但会话阶段保存失败（代码 %@）；后续阶段不会开始。\n\n%@",@(error.code),self.text.text];
+    }
+    [self axs_cachekeeper_render];[self axs_cachekeeper_update_timer];
 }
 - (void)axs_cachekeeper_retry_saving {
     [self.axs_cachekeeper_batch retrySaving];[self axs_cachekeeper_render];
@@ -107,7 +166,10 @@
     BOOL removed=!self.navigationController || ![self.navigationController.viewControllers containsObject:self];
     BOOL covered=self.navigationController && self.navigationController.topViewController!=self;
     if (removed || covered || self.isBeingDismissed || self.navigationController.isBeingDismissed) {
+        BOOL wasRunning=self.axs_cachekeeper_batch.running;
         [self.axs_cachekeeper_batch cancel];[self axs_cachekeeper_update_timer];
+        if (wasRunning && self.axs_cachekeeper_collectionSession && [self.axs_cachekeeper_collectionSession.reportProjection[@"phases"][@"hostPreflight"][@"state"] isEqual:@"running"])
+            [self.axs_cachekeeper_collectionSession finishPhase:@"hostPreflight" result:@{@"state":@"interrupted",@"reason":@"pageLeft"} error:NULL];
     } else if (!self.axs_cachekeeper_backgrounded) self.axs_cachekeeper_departing=NO;
 }
 - (void)dealloc {

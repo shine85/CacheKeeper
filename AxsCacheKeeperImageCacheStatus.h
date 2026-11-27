@@ -143,11 +143,55 @@ static inline NSDictionary *axs_cachekeeper_image_admission_projection(id value,
     }
     return liveTotal==live && AxsCacheKeeperImageAdmissionValid(&ledger,live) ? axs_cachekeeper_status_immutable_copy(value) : nil;
 }
+static inline BOOL axs_cachekeeper_image_collection_status_id(id value) {
+    return [value isKindOfClass:NSString.class] && [value length]==32 &&
+        [value rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"].invertedSet].location==NSNotFound;
+}
+static inline BOOL axs_cachekeeper_image_collection_counts(id value) {
+    if (![value isKindOfClass:NSDictionary.class] || [value count]!=10 ||
+        ![value[@"overflow"] isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value[@"overflow"])!=CFBooleanGetTypeID()) return NO;
+    for (NSString *key in @[@"attempts",@"allowed",@"blocked",@"nonemptyAttempts",@"nonemptyAllowed",@"nonemptyBlocked",@"emptyAttempts",@"emptyAllowed",@"emptyBlocked"])
+        if (!axs_cachekeeper_write_number(value[key])) return NO;
+    uint64_t total=[value[@"attempts"] unsignedLongLongValue],allowed=[value[@"allowed"] unsignedLongLongValue],blocked=[value[@"blocked"] unsignedLongLongValue];
+    if (allowed>total || blocked!=total-allowed || ([value[@"overflow"] boolValue] && total!=AXS_CACHEKEEPER_IMAGE_ADMISSION_MAX)) return NO;
+    uint64_t na=[value[@"nonemptyAttempts"] unsignedLongLongValue],nl=[value[@"nonemptyAllowed"] unsignedLongLongValue],nb=[value[@"nonemptyBlocked"] unsignedLongLongValue];
+    uint64_t ea=[value[@"emptyAttempts"] unsignedLongLongValue],el=[value[@"emptyAllowed"] unsignedLongLongValue],eb=[value[@"emptyBlocked"] unsignedLongLongValue];
+    return nl<=na && nb==na-nl && el<=ea && eb==ea-el && na<=total && ea<=total-na &&
+        nl<=allowed && el<=allowed-nl && nb<=blocked && eb<=blocked-nb;
+}
+static inline NSDictionary *axs_cachekeeper_image_collection_metadata(id value) {
+    NSArray *keys=@[@"sessionID",@"requestID",@"phase",@"step",@"expiresAt",@"disposition",@"configuration",@"installation",@"epochs",@"baselines",@"events"];
+    if (![value isKindOfClass:NSDictionary.class] || [value count]!=11 || !axs_cachekeeper_image_collection_status_id(value[@"sessionID"]) ||
+        ![[NSSet setWithArray:[value allKeys]] isEqual:[NSSet setWithArray:keys]] ||
+        !axs_cachekeeper_image_collection_status_id(value[@"requestID"]) || ![@[@"prevent",@"clean",@"disabled",@"restore"] containsObject:value[@"phase"]] ||
+        ![@[@"applied",@"restored",@"expired",@"configurationChanged",@"installationChanged",@"unavailable"] containsObject:value[@"disposition"]] ||
+        ![value[@"epochs"] isKindOfClass:NSArray.class] || [value[@"epochs"] count]>16 ||
+        ![value[@"events"] isKindOfClass:NSArray.class] || [value[@"events"] count]>64 ||
+        ![value[@"baselines"] isKindOfClass:NSDictionary.class] || [value[@"baselines"] count]!=[value[@"epochs"] count]) return nil;
+    for (NSString *key in @[@"step",@"expiresAt",@"configuration",@"installation"])
+        if (![value[key] isKindOfClass:NSNumber.class] || !isfinite([value[key] doubleValue]) || [value[key] doubleValue]<0) return nil;
+    NSMutableSet *seen=[NSMutableSet new];
+    for (id epoch in value[@"epochs"]) {
+        if (!axs_cachekeeper_write_number(epoch) || [epoch unsignedLongLongValue]==0) return nil;
+        if ([seen containsObject:epoch]) return nil;[seen addObject:epoch];
+        NSDictionary *baseline=value[@"baselines"][[epoch stringValue]];
+        if (![baseline isKindOfClass:NSDictionary.class] || baseline.count!=2 ||
+            !axs_cachekeeper_image_collection_counts(baseline[@"data"]) || !axs_cachekeeper_image_collection_counts(baseline[@"extended"])) return nil;
+    }
+    [seen removeAllObjects];for (id event in value[@"events"]) {
+        if (!axs_cachekeeper_write_number(event) || [event unsignedLongLongValue]==0 || [seen containsObject:event]) return nil;[seen addObject:event];
+    }
+    return [value copy];
+}
 // No cache keys, URLs, filesystem paths or installation identities cross this boundary.
 static inline NSDictionary *axs_cachekeeper_image_cache_raw_projection(id value) {
     if (![value isKindOfClass:NSDictionary.class]) return nil;
     NSArray *keys=@[@"schemaVersion",@"sdk",@"state",@"reason",@"observed",@"eligible",@"restricted",@"writesBlocked",
         @"queued",@"submitted",@"apiCompleted",@"skipped",@"pending",@"updated",@"bytesState"];
+    if (value[@"imageCollection"]) {
+        if (!axs_cachekeeper_image_collection_metadata(value[@"imageCollection"])) return nil;
+        keys=[keys arrayByAddingObject:@"imageCollection"];
+    }
     if (value[@"installationCheck"]) {
         if (!axs_cachekeeper_installation_check_projection(value[@"installationCheck"])) return nil;
         keys=[keys arrayByAddingObject:@"installationCheck"];
