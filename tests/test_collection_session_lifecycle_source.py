@@ -135,6 +135,11 @@ class GuidedSessionLifecycleTests(unittest.TestCase):
         self.assertIn('@"capacityArtifact"', SESSION)
         self.assertIn('axs_cachekeeper_capacity_projection', SESSION)
 
+    def test_running_capacity_summary_keeps_epoch_without_inventing_finished_at(self):
+        collect=DIAGNOSTICS.split('- (void)axs_cachekeeper_collect {',1)[1].split('- (void)axs_cachekeeper_message:',1)[0]
+        self.assertNotIn('removeObjectForKey:@"epoch"',collect)
+        self.assertIn('axs_cachekeeper_capacity_export:capacitySnapshot saved:saved stop:capacityStop',collect)
+
     def test_complete_host_receipts_and_manifest_use_retained_source_bytes(self):
         self.assertIn('evidence[@"receipt"]=result', HOST_PAGE)
         self.assertIn('@"hostArtifact"', SESSION)

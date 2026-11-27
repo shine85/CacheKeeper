@@ -584,9 +584,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
         NSMutableDictionary *collectionEnvironment=[environment mutableCopy];
         NSError *capacityError=nil;
         NSDictionary *saved=collectionSession ? [collectionSession savedCapacitySnapshot:&capacityError] : axs_cachekeeper_capacity_read_result(capacityPath,&capacityError);
-            NSMutableDictionary *capacityResult=collectionSession ? [saved mutableCopy] : [[weak axs_cachekeeper_capacity_export:capacitySnapshot saved:saved stop:capacityStop] mutableCopy];
-            if (capacityResult[@"epoch"] && ![capacityResult[@"finishedAt"] isKindOfClass:NSNumber.class]) [capacityResult removeObjectForKey:@"epoch"];
-            NSDictionary *capacity=[capacityResult copy];
+        NSDictionary *capacity=collectionSession ? saved : [weak axs_cachekeeper_capacity_export:capacitySnapshot saved:saved stop:capacityStop];
         BOOL capacityMatchesSavedTerminal=[capacity[@"epoch"] isEqual:saved[@"epoch"]] &&
             ![@[@"running",@"invalid",@"notMeasured"] containsObject:saved[@"state"]] &&
             [saved[@"finishedAt"] isEqual:capacity[@"finishedAt"]];

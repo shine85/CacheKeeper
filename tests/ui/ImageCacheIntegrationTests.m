@@ -86,16 +86,19 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     NSMutableDictionary *base=[self.context mutableCopy];base[@"bundle"]=@"com.baidu.netdisk";base[@"processFirstObserved"]=@1;
     NSDictionary *original=[base[@"appState"] copy];NSString *baseline=axs_cachekeeper_image_collection_baseline(base);
     NSTimeInterval now=NSDate.date.timeIntervalSince1970;
+    // The runtime provider freezes this monotonic lease when adopting the request.
+    // The pure policy projection below deliberately does not issue execution leases.
+    NSNumber *deadline=@(NSProcessInfo.processInfo.systemUptime+AxsCacheKeeperImageCollectionLease);
     NSMutableDictionary *request=[@{@"schemaVersion":@1,@"sessionID":@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",@"requestID":@"11111111111111111111111111111111",
         @"bundle":@"com.baidu.netdisk",@"phase":@"prevent",@"step":@1,@"issuedAt":@(now),@"expiresAt":@(now+300),
         @"baselineSHA256":baseline,@"processFirstObserved":@1} mutableCopy];
-    @synchronized(self) {self.context=[axs_cachekeeper_image_collection_context(base,request,now) mutableCopy];}
+    @synchronized(self) {self.context=[axs_cachekeeper_image_collection_context(base,request,now) mutableCopy];self.context[@"imageCollectionDeadline"]=deadline;}
     [self axs_cachekeeper_refresh];
     [owner storeImageDataToDisk:payload forKey:@"prevented"];XCTAssertNil([owner diskImageDataForKey:@"prevented"]);
     XCTAssertEqualObjects(self.engine.receipt[@"imageCollection"][@"requestID"],request[@"requestID"]);
     XCTAssertEqualObjects(base[@"appState"],original);
     request[@"phase"]=@"clean";request[@"step"]=@2;request[@"requestID"]=@"22222222222222222222222222222222";
-    @synchronized(self) {self.context=[axs_cachekeeper_image_collection_context(base,request,now) mutableCopy];}
+    @synchronized(self) {self.context=[axs_cachekeeper_image_collection_context(base,request,now) mutableCopy];self.context[@"imageCollectionDeadline"]=deadline;}
     [self axs_cachekeeper_refresh];[owner storeImageDataToDisk:payload forKey:@"clean-stock"];
     XCTAssertEqualObjects([owner diskImageDataForKey:@"clean-stock"],payload);
     [self.engine didEnterBackgroundWithTime:YES];
@@ -103,7 +106,7 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     XCTAssertNil([owner diskImageDataForKey:@"clean-stock"]);
     [self.engine didBecomeActive];
     request[@"phase"]=@"disabled";request[@"step"]=@3;request[@"requestID"]=@"33333333333333333333333333333333";
-    @synchronized(self) {self.context=[axs_cachekeeper_image_collection_context(base,request,now) mutableCopy];}
+    @synchronized(self) {self.context=[axs_cachekeeper_image_collection_context(base,request,now) mutableCopy];self.context[@"imageCollectionDeadline"]=deadline;}
     [self axs_cachekeeper_refresh];[owner storeImageDataToDisk:payload forKey:@"disabled-write"];
     XCTAssertEqualObjects([owner diskImageDataForKey:@"disabled-write"],payload);
     XCTAssertEqualObjects(self.context[@"installation"],base[@"installation"],@"effective disable retains independently checked base identity");

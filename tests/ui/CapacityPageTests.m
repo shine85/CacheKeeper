@@ -471,7 +471,11 @@
 - (void)testFalseStopReturnWithoutNSErrorCannotClaimSaved {
     NSString *epoch=[self cacheRunningMeasurement];self.page.rejectStopWithoutError=YES;
     [self.page axs_cachekeeper_capacity_background:nil];NSDictionary *capacity=[self collectedCapacity];
+    XCTAssertEqualObjects(capacity[@"state"],@"running");
     XCTAssertEqualObjects(capacity[@"epoch"],epoch);
+    XCTAssertNil(capacity[@"finishedAt"]);
+    XCTAssertEqualObjects(capacity[@"summaryBinding"][@"state"],@"unknown");
+    XCTAssertFalse([[self.page valueForKey:@"exportButton"] isEnabled]);
     XCTAssertEqualObjects(capacity[@"clientStop"][@"requestWrite"],@"failed",@"D1 BOOL false cannot become saved when NSError is nil");
     XCTAssertEqualObjects(capacity[@"clientStop"][@"confirmation"],@"unconfirmed");
     XCTAssertEqualObjects([self request][@"operation"],@"start");
