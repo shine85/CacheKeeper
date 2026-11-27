@@ -74,6 +74,9 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
 - (instancetype)initWithFolder:(NSString *)folder sessionID:(NSString *)sessionID error:(NSError **)error;
 - (BOOL)start:(NSError **)error;
 - (BOOL)startWithBundle:(NSString *)bundle error:(NSError **)error;
+- (BOOL)recordEntry:(NSError **)error;
+- (BOOL)skip:(NSError **)error;
+- (BOOL)readyForReport;
 - (NSArray<NSDictionary *> *)availableModules:(NSError **)error;
 - (BOOL)captureAndAdvance:(NSError **)error;
 - (BOOL)cancel:(NSError **)error;

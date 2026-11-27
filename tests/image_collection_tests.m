@@ -22,11 +22,21 @@ int main(int argc,const char **argv) {@autoreleasepool {
     AxsCacheKeeperImageCollectionSession *session=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" error:&error];
     NSArray *modules=[session availableModules:&error];
     check(modules.count==1 && [modules[0][@"bundle"] isEqual:AxsCacheKeeperImageCollectionBundle],"module selection requires existing eligible enabled receipt");
+    AxsCacheKeeperImageCollectionSession *entryReopen=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" error:&error];
+    check([entryReopen.reportProjection[@"preflight"][@"state"] isEqual:@"available"] &&
+        [entryReopen.reportProjection[@"preflight"][@"modules"] count]==2,"candidate check and rejection reasons survive reopening before start");
+    check([entryReopen.reportProjection[@"preflight"][@"modules"][1][@"reason"] isEqual:@"appDisabled"],"disabled candidate keeps explicit reason");
     NSMutableDictionary *nonJSON=[state mutableCopy];nonJSON[@"unknownDate"]=NSDate.date;
     check([@{AxsCacheKeeperImageCollectionBundle:nonJSON} writeToFile:statePath atomically:YES],"valid plist may contain unknown non-JSON value");
     check(![session start:&error] && error.code==EINVAL,"non-JSON baseline fails explicitly without constructing nil intent");
+    entryReopen=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" error:&error];
+    check([entryReopen.reportProjection[@"lastFailure"][@"stage"] isEqual:@"baseline"] &&
+        [entryReopen.reportProjection[@"lastFailure"][@"errorCode"] isEqual:@(EINVAL)],"start failure persists independently of page message");
     check([@{AxsCacheKeeperImageCollectionBundle:state,@"other.app":@NO} writeToFile:statePath atomically:YES],"restore supported baseline");
     check([session start:&error] && !error,"real fixed-path receipt and request round trip starts");
+    check([session.reportProjection[@"selectedCheck"][@"state"] isEqual:@"available"] &&
+        session.reportProjection[@"selectedCheck"][@"checkedAt"] && !session.reportProjection[@"lastFailure"] &&
+        [session.reportProjection[@"failureHistory"] count]==1,"successful retry updates current check and preserves timestamped failure history");
     NSDictionary *request=axs_cachekeeper_image_collection_read(folder,&error);check(request!=nil && !error,"runtime reader accepts published dedicated request");
     check(!axs_cachekeeper_read_input([folder stringByAppendingPathComponent:@"imageCollectionRequest.plist"],NULL),"general configuration schema remains closed to dedicated request");
     NSMutableDictionary *base=[@{@"bundle":AxsCacheKeeperImageCollectionBundle,@"valid":@YES,@"appState":state,
@@ -80,5 +90,30 @@ int main(int argc,const char **argv) {@autoreleasepool {
     check([axs_cachekeeper_image_collection_cleanup(cleanupReceipt,@{@"issuedAt":@1})[@"cleanupState"] isEqual:@"insufficientEvidence"],"one successful owner cannot hide another skipped owner");
     process[@"actions"]=@[cleanAction];history[@"historyTruncated"]=@YES;
     check([axs_cachekeeper_image_collection_cleanup(cleanupReceipt,@{@"issuedAt":@1})[@"cleanupState"] isEqual:@"insufficientEvidence"],"truncated cleanup history is never complete coverage");
+    AxsCacheKeeperImageCollectionSession *entry=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" error:&error];
+    check([entry recordEntry:&error],"entering page persists before user starts a request");
+    for (NSString *reason in @[@"receiptMissing",@"receiptInvalid",@"receiptStale",@"noEligibleOwner",@"pendingAction"]) {
+        NSMutableDictionary *raw=[receipt(nil) mutableCopy];
+        if ([reason isEqual:@"receiptStale"]) raw[@"updated"]=[NSDate dateWithTimeIntervalSinceNow:-301];
+        if ([reason isEqual:@"noEligibleOwner"]) {raw[@"eligible"]=@0;raw[@"observed"]=@0;raw[@"state"]=@"notObserved";}
+        if ([reason isEqual:@"pendingAction"]) {raw[@"queued"]=@1;raw[@"pending"]=@1;raw[@"state"]=@"queued";}
+        if ([reason isEqual:@"receiptMissing"]) check([NSFileManager.defaultManager removeItemAtPath:receiptPath error:&error],"remove only fixture receipt");
+        else check([([reason isEqual:@"receiptInvalid"] ? @{@"invalid":@YES} : raw) writeToFile:receiptPath atomically:YES],"write candidate rejection fixture");
+        check([entry availableModules:&error].count==0 && !error,"candidate rejection is a reported result rather than silent error");
+        AxsCacheKeeperImageCollectionSession *opened=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" error:&error];
+        check([opened.reportProjection[@"preflight"][@"modules"][0][@"reason"] isEqual:reason],"specific candidate reason survives process restart");
+    }
+    NSString *entryPath=[[folder stringByAppendingPathComponent:@"collectionSessions"] stringByAppendingPathComponent:@"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.image.plist"];
+    NSString *entryPrior=[entryPath stringByAppendingString:@".prior"];
+    NSDictionary *entryBefore=entry.reportProjection;
+    check([NSFileManager.defaultManager moveItemAtPath:entryPath toPath:entryPrior error:&error] &&
+        [NSFileManager.defaultManager createDirectoryAtPath:entryPath withIntermediateDirectories:NO attributes:nil error:&error],"inject actual entry-decision save failure");
+    check(![entry skip:&error] && error && [entry.reportProjection isEqual:entryBefore],"failed skip persistence never changes in-memory decision");
+    check([NSFileManager.defaultManager removeItemAtPath:entryPath error:&error] &&
+        [NSFileManager.defaultManager moveItemAtPath:entryPrior toPath:entryPath error:&error],"restore entry fixture target");
+    check([entry skip:&error],"explicit skip retries after storage repair");
+    entry=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" error:&error];
+    check([entry readyForReport] && [entry.reportProjection[@"state"] isEqual:@"skipped"] &&
+        [entry.reportProjection[@"verificationState"] isEqual:@"notPerformed"] && entry.reportProjection[@"preflight"],"skip retains candidate evidence without claiming execution");
     printf("PASS: image collection real file transport, overlay isolation, expiry, process binding and restoration\n");
 }return 0;}

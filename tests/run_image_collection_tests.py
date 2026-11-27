@@ -1,5 +1,6 @@
 """Real Foundation files and production image collection transaction."""
 from pathlib import Path
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,19 @@ with tempfile.TemporaryDirectory(prefix='image-collection-',dir=ROOT/'tmp') as f
     output=Path(folder); binary=output/'tests'
     flags=['xcrun','clang','-fobjc-arc','-fblocks','-Wall','-Wextra','-Werror=format','-Werror=implicit-function-declaration',
            '-I'+str(ROOT/'tests/include'),'-framework','Foundation']
+    # Prove the new file-backed entry assertion fails on the shipped 220.1 implementation.
+    prior=output/'prior-entry';prior.mkdir()
+    source=subprocess.run(['git','show','46721186e6e221b3bc7637ee0eae3bcef145cec2:AxsCacheKeeperImageCollection.m'],
+                          check=True,capture_output=True,timeout=30).stdout
+    assert hashlib.sha256(source).hexdigest()=='dee50cd3757f28f3905e14588fdb12066bf4f383eb437735c787ae1d3d10d9f9'
+    (prior/'AxsCacheKeeperImageCollection.m').write_bytes(source)
+    prior_binary=output/'prior-entry-tests'
+    subprocess.run(flags+['-I'+str(ROOT),str(prior/'AxsCacheKeeperImageCollection.m'),
+                          str(ROOT/'AxsCacheKeeperOperationInfo.m'),str(ROOT/'tests/image_collection_tests.m'),
+                          '-o',str(prior_binary)],check=True,timeout=60)
+    result=subprocess.run([str(prior_binary),str(output/'prior-entry-home')],capture_output=True,text=True,timeout=30)
+    assert result.returncode==1 and result.stderr.strip()=='FAIL: image-collection: candidate check and rejection reasons survive reopening before start',result.stderr
+    print('PASS: fixed 220.1 missing entry persistence exact RED',hashlib.sha256(source).hexdigest())
     sources=[str(ROOT/name) for name in ('AxsCacheKeeperImageCollection.m','AxsCacheKeeperOperationInfo.m','tests/image_collection_tests.m')]
     subprocess.run(flags+sources+['-o',str(binary)],check=True,timeout=60)
     subprocess.run([str(binary),str(output/'green')],check=True,timeout=30)

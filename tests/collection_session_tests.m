@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import "../AxsCacheKeeperCollectionSession.h"
+#import "../AxsCacheKeeperImageCollection.h"
 #import "../AxsCacheKeeperCapacityService.h"
 #import "../AxsCacheKeeperCapacityStatus.h"
 
@@ -74,6 +75,7 @@ static void CKCapacityRoundTrip(NSString *root) {
     AxsCacheKeeperCollectionSession *reopened=[AxsCacheKeeperCollectionSession openSessionAtPath:path error:&error];
     CKCheck([[reopened savedCapacitySnapshot:&error] isEqual:saved],"A snapshot survives B global overwrite and process restart");
     CKCheck([reopened beginPhase:@"diagnostics" error:&error],"resume diagnostics after stored capacity");
+    CKCheck([[reopened imageCollectionSession:&error] skip:&error],"explicit skip precedes full retained-source report");
     NSData *data=[reopened saveReport:@{@"apps":@[@{@"bundle":@"com.baidu.netdisk",@"hostObserved":@{@"state":@"available",@"data":@{@"updated":@999}}}],@"capacityMeasurement":b} diagnosticsResult:@{@"state":@"complete",@"missingSources":@[]} error:&error];
     NSDictionary *report=data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:&error] : nil;
     CKCheck([report[@"capacityMeasurement"] isEqual:saved],"export uses full retained A evidence rather than global B or missing placeholder");
@@ -102,6 +104,7 @@ static void CKCapacityRoundTrip(NSString *root) {
     CKCheck([stale beginCapacityWithEpoch:future[@"epoch"] error:&error] && [stale finishCapacityWithSnapshot:future error:&error],"backward clock does not discard source");
     CKCheck([[stale savedCapacitySnapshot:&error][@"summaryBinding"][@"state"] isEqual:@"stale"],"clock reversal is retained rather than inventing current time");
     CKCheck([stale beginPhase:@"diagnostics" error:&error],"stale capacity can produce a historical report");
+    CKCheck([[stale imageCollectionSession:&error] skip:&error],"historical report explicitly records image skip");
     CKCheck([stale saveReport:@{@"apps":@[]} diagnosticsResult:@{@"state":@"partial",@"missingSources":@[]} error:&error]!=nil,"historical report is durable");
     CKCheck([[AxsCacheKeeperCollectionSession openSessionAtPath:stalePath error:&error] savedReportData:&error]!=nil,"clock-stale historical report remains recoverable");
 }
@@ -139,6 +142,9 @@ int main(int argc,const char **argv) {@autoreleasepool {
     CKCheck(![resumed beginPhase:@"capacity" error:&error],"partial phase cannot be replayed");
     CKCheck([resumed beginPhase:@"diagnostics" error:&error],"diagnostics follows terminal partial capacity");
     CKCheck(![resumed.reportProjection[@"state"] isEqual:@"complete"],"running report cannot complete session");
+    CKCheck([resumed saveReport:@{@"apps":@[]} diagnosticsResult:@{@"state":@"complete",@"missingSources":@[]} error:&error]==nil &&
+        error.code==EBUSY && !resumed.reportProjection[@"phases"][@"export"],"unselected image stage cannot silently seal guided report");
+    CKCheck([[resumed imageCollectionSession:&error] skip:&error],"explicit skip is durable before report generation");
 
     // Real filesystem failure: the document path is temporarily a directory.
     NSString *prior=[path stringByAppendingString:@".prior"];
@@ -154,6 +160,8 @@ int main(int argc,const char **argv) {@autoreleasepool {
     NSData *data=[resumed saveReport:payload diagnosticsResult:coverage error:&error];
     CKCheck(data && !error,"same object remains mutable and saves after rollback");
     NSDictionary *exported=[NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    CKCheck([exported[@"supportedImageCollection"][@"state"] isEqual:@"skipped"] &&
+        [exported[@"supportedImageCollection"][@"verificationState"] isEqual:@"notPerformed"],"skipped image stage is present and never reported as verified");
     CKCheck([exported[@"capacityMeasurement"][@"state"] isEqual:@"notMeasured"] && !exported[@"capacityMeasurement"][@"epoch"],"another session capacity cannot be attached to this session");
     CKCheck([exported[@"guidedCollection"][@"phases"][@"diagnostics"][@"result"][@"missingSources"] containsObject:@"capacitySessionEvidence"],"missing original capacity evidence remains explicit");
     CKCheck([resumed.reportProjection[@"phases"][@"export"][@"state"] isEqual:@"complete"],"export completes only with persisted bytes");
@@ -170,6 +178,7 @@ int main(int argc,const char **argv) {@autoreleasepool {
     CKCheck([failed beginPhase:@"hostPreflight" error:&error] && [failed finishPhase:@"hostPreflight" result:CKHost() error:&error],"failed capacity fixture completes host");
     CKCheck([failed beginPhase:@"capacity" error:&error] && [failed finishPhase:@"capacity" result:CKCapacity(@"failed") error:&error],"failed capacity is recorded honestly");
     CKCheck([failed beginPhase:@"diagnostics" error:&error],"failure report can still collect diagnostics");
+    CKCheck([[failed imageCollectionSession:&error] skip:&error],"failure report explicitly records skipped image stage");
     NSData *failedData=[failed saveReport:payload diagnosticsResult:coverage error:&error];
     CKCheck(failedData!=nil,"failure report is saved");
     BOOL foundFailure=NO;

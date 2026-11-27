@@ -422,6 +422,11 @@ static BOOL axs_cachekeeper_collection_session_complete(NSDictionary *projection
         self.axs_cachekeeper_document=previous;return NO;
     }
 }
+- (AxsCacheKeeperImageCollectionSession *)imageCollectionSession:(NSError **)error {
+    NSString *directory=[self.axs_cachekeeper_path stringByDeletingLastPathComponent];
+    NSString *folder=[directory.lastPathComponent isEqual:@"collectionSessions"] ? [directory stringByDeletingLastPathComponent] : directory;
+    return [[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:self.sessionID error:error];
+}
 - (NSData *)saveReport:(NSDictionary *)report diagnosticsResult:(NSDictionary *)diagnosticsResult error:(NSError **)error {
     @synchronized(self) {
         if (error) *error=nil;
@@ -434,19 +439,15 @@ static BOOL axs_cachekeeper_collection_session_complete(NSDictionary *projection
         }
         NSMutableDictionary *previous=axs_cachekeeper_collection_copy(self.axs_cachekeeper_document);
         NSMutableDictionary *finalReport=[report mutableCopy];
-        NSString *imagePath=[[self.axs_cachekeeper_path stringByDeletingLastPathComponent] stringByAppendingPathComponent:[self.sessionID stringByAppendingString:@".image.plist"]];
-        if ([NSFileManager.defaultManager fileExistsAtPath:imagePath]) {
-            NSString *folder=[[self.axs_cachekeeper_path stringByDeletingLastPathComponent] stringByDeletingLastPathComponent];
-            AxsCacheKeeperImageCollectionSession *image=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:self.sessionID error:error];
-            if (!image) return nil;
-            if (![image.reportProjection[@"state"] isEqual:@"idle"]) {
-                NSError *pollError=nil;if (![image poll:&pollError]) {if (error) *error=pollError;return nil;}
-            }
-            if (![@[@"complete",@"idle",@"restorationUnconfirmed"] containsObject:image.reportProjection[@"state"]]) {
-                if (error) *error=[NSError errorWithDomain:NSPOSIXErrorDomain code:EBUSY userInfo:nil];return nil;
-            }
-            finalReport[@"supportedImageCollection"]=image.reportProjection;
+        AxsCacheKeeperImageCollectionSession *image=[self imageCollectionSession:error];
+        if (!image) return nil;
+        if (![@[@"idle",@"skipped",@"complete"] containsObject:image.reportProjection[@"state"]]) {
+            NSError *pollError=nil;if (![image poll:&pollError]) {if (error) *error=pollError;return nil;}
         }
+        if (![image readyForReport]) {
+            if (error) *error=[NSError errorWithDomain:NSPOSIXErrorDomain code:EBUSY userInfo:nil];return nil;
+        }
+        finalReport[@"supportedImageCollection"]=image.reportProjection;
         NSMutableDictionary *frozen=axs_cachekeeper_collection_copy(diagnosticsResult);
         if (!frozen) {if (error) *error=[NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil];return nil;}
         NSError *capacityError=nil;

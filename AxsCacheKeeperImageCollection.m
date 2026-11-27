@@ -15,6 +15,49 @@ static NSDictionary *AxsImageCollectionExportReceipt(NSDictionary *raw) {
     NSDictionary *projected=axs_cachekeeper_image_cache_projection(raw);
     return projected ? AxsImageCollectionJSON(projected) : nil;
 }
+static BOOL AxsImageCollectionNumber(id value) {
+    return [value isKindOfClass:NSNumber.class] && CFGetTypeID((__bridge CFTypeRef)value)!=CFBooleanGetTypeID() && isfinite([value doubleValue]);
+}
+static BOOL AxsImageCollectionFailure(id value) {
+    if (![value isKindOfClass:NSDictionary.class] || ![[NSSet setWithArray:[value allKeys]] isSubsetOfSet:
+        [NSSet setWithArray:@[@"stage",@"errorCode",@"at",@"bundle",@"reason"]]]) return NO;
+    return
+        [@[@"configurationRead",@"candidate",@"baseline",@"publication"] containsObject:value[@"stage"]] &&
+        AxsImageCollectionNumber(value[@"errorCode"]) && AxsImageCollectionNumber(value[@"at"]) &&
+        (!value[@"bundle"] || axs_cachekeeper_bundle_id(value[@"bundle"])) &&
+        (!value[@"reason"] || [value[@"reason"] isKindOfClass:NSString.class]);
+}
+static BOOL AxsImageCollectionCandidate(id value) {
+    if (![value isKindOfClass:NSDictionary.class] || !axs_cachekeeper_bundle_id(value[@"bundle"]) ||
+        ![@[@"available",@"unavailable"] containsObject:value[@"state"]] ||
+        ![@[@"none",@"configurationInvalid",@"appDisabled",@"receiptMissing",@"receiptReadFailed",@"receiptInvalid",@"receiptFromFuture",@"receiptStale",@"noEligibleOwner",@"pendingAction"] containsObject:value[@"reason"]]) return NO;
+    NSSet *allowed=[NSSet setWithArray:@[@"bundle",@"state",@"reason",@"errorCode",@"checkedAt",@"sourceUpdated",@"eligible",@"pending",@"hostVersion",@"hostReason"]];
+    if (![[NSSet setWithArray:[value allKeys]] isSubsetOfSet:allowed] ||
+        ([value[@"state"] isEqual:@"available"] != [value[@"reason"] isEqual:@"none"])) return NO;
+    for (NSString *key in @[@"errorCode",@"checkedAt",@"sourceUpdated",@"eligible",@"pending"]) if (value[key] && !AxsImageCollectionNumber(value[key])) return NO;
+    for (NSString *key in @[@"hostVersion",@"hostReason"]) if (value[key] && ![value[key] isKindOfClass:NSString.class]) return NO;
+    return YES;
+}
+static BOOL AxsImageCollectionEntryEvidence(NSDictionary *document) {
+    NSDictionary *entry=document[@"entry"],*decision=document[@"decision"],*preflight=document[@"preflight"];
+    if (entry && (![entry isKindOfClass:NSDictionary.class] || entry.count!=2 || ![entry[@"state"] isEqual:@"entered"] || !AxsImageCollectionNumber(entry[@"at"]))) return NO;
+    if (decision && (![decision isKindOfClass:NSDictionary.class] || !AxsImageCollectionNumber(decision[@"at"]) ||
+        !(([decision[@"state"] isEqual:@"execute"] && decision.count==2) ||
+          ([decision[@"state"] isEqual:@"explicitSkip"] && decision.count==3 && [decision[@"reason"] isEqual:@"userSkipped"])))) return NO;
+    if (preflight) {
+        if (![preflight isKindOfClass:NSDictionary.class] || preflight.count!=3 ||
+            ![@[@"available",@"noCandidate"] containsObject:preflight[@"state"]] || !AxsImageCollectionNumber(preflight[@"at"]) ||
+            ![preflight[@"modules"] isKindOfClass:NSArray.class] || [preflight[@"modules"] count]>4096) return NO;
+        for (id row in preflight[@"modules"]) if (!AxsImageCollectionCandidate(row)) return NO;
+    }
+    if (document[@"selectedCheck"] && !AxsImageCollectionCandidate(document[@"selectedCheck"])) return NO;
+    if (document[@"lastFailure"] && !AxsImageCollectionFailure(document[@"lastFailure"])) return NO;
+    if (document[@"failureHistory"]) {
+        if (![document[@"failureHistory"] isKindOfClass:NSArray.class] || [document[@"failureHistory"] count]>16) return NO;
+        for (id row in document[@"failureHistory"]) if (!AxsImageCollectionFailure(row)) return NO;
+    }
+    return !document[@"failuresOmitted"] || axs_cachekeeper_capacity_number(document[@"failuresOmitted"]);
+}
 NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSDictionary *request) {
     NSMutableDictionary *result=[NSMutableDictionary new];
             BOOL cleaned=NO,complete=YES;NSUInteger actions=0,positive=0;
@@ -58,15 +101,78 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
         id value=data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListMutableContainers format:NULL error:error] : nil;
         if (![value isKindOfClass:NSDictionary.class] || ![value[@"sessionID"] isEqual:identifier] ||
             ![value[@"events"] isKindOfClass:NSArray.class] || ![value[@"state"] isKindOfClass:NSString.class] ||
-            (value[@"request"] && !axs_cachekeeper_image_collection_request(value[@"request"]))) {AxsImageCollectionError(error,EINVAL);return nil;}
+            (value[@"request"] && !axs_cachekeeper_image_collection_request(value[@"request"])) ||
+            !AxsImageCollectionEntryEvidence(value)) {AxsImageCollectionError(error,EINVAL);return nil;}
         _document=[value mutableCopy];
-    } else _document=[@{@"schemaVersion":@1,@"sessionID":identifier,@"state":@"idle",@"events":[NSMutableArray new]} mutableCopy];
+    } else {
+        _document=[@{@"schemaVersion":@1,@"sessionID":identifier,@"state":@"idle",@"events":[NSMutableArray new]} mutableCopy];
+        if (![self axs_save:_document error:error]) return nil;
+    }
     return self;
 }
 - (BOOL)axs_save:(NSDictionary *)next error:(NSError **)error {
     NSData *data=[NSPropertyListSerialization dataWithPropertyList:next format:NSPropertyListBinaryFormat_v1_0 options:0 error:error];
     if (!data || ![data writeToFile:self.path options:NSDataWritingAtomic error:error]) return NO;
     self.document=[next mutableCopy];return YES;
+}
+- (BOOL)recordEntry:(NSError **)error {
+    if (error) *error=nil;
+    if (self.document[@"entry"]) return YES;
+    NSMutableDictionary *next=[self.document mutableCopy];
+    next[@"entry"]=@{@"state":@"entered",@"at":@(NSDate.date.timeIntervalSince1970)};
+    return [self axs_save:next error:error];
+}
+- (BOOL)readyForReport {
+    return [@[@"complete",@"skipped",@"restorationUnconfirmed"] containsObject:self.document[@"state"]];
+}
+- (BOOL)skip:(NSError **)error {
+    if (error) *error=nil;
+    if ([self.document[@"state"] isEqual:@"skipped"]) return YES;
+    if (![self.document[@"state"] isEqual:@"idle"] || self.document[@"request"]) return AxsImageCollectionError(error,EBUSY);
+    NSMutableDictionary *next=[self.document mutableCopy];
+    next[@"state"]=@"skipped";next[@"decision"]=@{@"state":@"explicitSkip",@"reason":@"userSkipped",@"at":@(NSDate.date.timeIntervalSince1970)};
+    return [self axs_save:next error:error];
+}
+- (BOOL)axs_failure:(NSError *)failure stage:(NSString *)stage error:(NSError **)error {
+    NSError *actual=failure ?: [NSError errorWithDomain:@"CacheKeeper.ImageCollection" code:EIO userInfo:nil];
+    NSMutableDictionary *next=[self.document mutableCopy];
+    NSMutableDictionary *record=[@{@"stage":stage,@"errorCode":@(actual.code),@"at":@(NSDate.date.timeIntervalSince1970)} mutableCopy];
+    if (self.document[@"bundle"]) record[@"bundle"]=self.document[@"bundle"];
+    if ([stage isEqual:@"candidate"] && self.document[@"selectedCheck"][@"reason"]) record[@"reason"]=self.document[@"selectedCheck"][@"reason"];
+    next[@"lastFailure"]=record;
+    NSMutableArray *history=[self.document[@"failureHistory"] mutableCopy] ?: [NSMutableArray new];[history addObject:record];
+    if (history.count>16) {[history removeObjectAtIndex:0];next[@"failuresOmitted"]=@([next[@"failuresOmitted"] unsignedIntegerValue]+1);}
+    next[@"failureHistory"]=history;
+    if (![self axs_save:next error:error]) return NO;
+    if (error) *error=[NSError errorWithDomain:actual.domain code:actual.code userInfo:@{@"entryEvidenceSaved":@YES}];return NO;
+}
+- (NSDictionary *)axs_check:(NSString *)bundle state:(id)state now:(NSTimeInterval)now receipt:(NSDictionary **)output {
+    NSString *reason=nil;NSError *failure=nil;NSDictionary *receipt=nil;
+    if (!axs_cachekeeper_state_valid(state)) reason=@"configurationInvalid";
+    else if (!axs_cachekeeper_app_enabled(state)) reason=@"appDisabled";
+    else {
+        NSString *directory=[self.folder stringByAppendingPathComponent:@"Status"];
+        NSDictionary *raw=axs_cachekeeper_capacity_read_plist(directory,[bundle stringByAppendingString:@".imagecache.plist"],32*1024*1024,&failure);
+        receipt=axs_cachekeeper_image_cache_raw_projection(raw);
+        if (failure) reason=failure.code==ENOENT ? @"receiptMissing" : @"receiptReadFailed";
+        else if (!receipt || !receipt[@"runtimeInfo"]) reason=@"receiptInvalid";
+        else {
+            NSTimeInterval age=now-[receipt[@"updated"] timeIntervalSince1970];
+            if (age<0) reason=@"receiptFromFuture";
+            else if (age>AxsCacheKeeperImageCollectionLease) reason=@"receiptStale";
+            else if (![receipt[@"eligible"] unsignedIntegerValue]) reason=@"noEligibleOwner";
+            else if ([receipt[@"pending"] unsignedIntegerValue]) reason=@"pendingAction";
+        }
+    }
+    NSMutableDictionary *row=[@{@"bundle":bundle,@"checkedAt":@(now),@"state":reason ? @"unavailable" : @"available",@"reason":reason ?: @"none"} mutableCopy];
+    if (failure) row[@"errorCode"]=@(failure.code);
+    if (receipt) {
+        row[@"sourceUpdated"]=@([receipt[@"updated"] timeIntervalSince1970]);
+        row[@"eligible"]=receipt[@"eligible"];row[@"pending"]=receipt[@"pending"];
+        if (receipt[@"runtimeInfo"][@"packageVersion"]) row[@"hostVersion"]=receipt[@"runtimeInfo"][@"packageVersion"];
+        row[@"hostReason"]=receipt[@"reason"];
+    }
+    if (output) *output=receipt;return row;
 }
 - (NSDictionary *)axs_base:(NSError **)error {
     NSError *stateError=nil,*selectionError=nil;
@@ -95,6 +201,7 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
     uint32_t status=notify_post(AxsCacheKeeperImageCollectionChanged.UTF8String);
     if (status!=NOTIFY_STATUS_OK) return AxsImageCollectionError(error,EIO);
     NSMutableDictionary *next=[self.document mutableCopy];next[@"publication"]=@"published";
+    [next removeObjectForKey:@"lastFailure"];
     return [self axs_save:next error:error];
 }
 - (BOOL)axs_request_phase:(NSString *)phase step:(NSUInteger)step events:(NSArray *)events error:(NSError **)error {
@@ -104,26 +211,35 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
         @"expiresAt":@(now+AxsCacheKeeperImageCollectionLease),@"baselineSHA256":self.document[@"baselineSHA256"],
         @"processFirstObserved":self.document[@"processFirstObserved"]};
     NSMutableDictionary *next=[self.document mutableCopy];next[@"request"]=request;next[@"state"]=@"awaitingHost";next[@"events"]=events;next[@"publication"]=@"pending";
+    next[@"decision"]=@{@"state":@"execute",@"at":@(now)};
+    [next removeObjectForKey:@"lastFailure"];
     // Persist intent before publishing. A crash can only leave an unacknowledged finite lease.
     if (![self axs_save:next error:error]) return NO;
-    return [self axs_publish:request error:error];
+    NSError *failure=nil;
+    if (![self axs_publish:request error:&failure]) return [self axs_failure:failure stage:@"publication" error:error];
+    return YES;
 }
 - (BOOL)start:(NSError **)error {
     return [self startWithBundle:AxsCacheKeeperImageCollectionBundle error:error];
 }
 - (NSArray<NSDictionary *> *)availableModules:(NSError **)error {
     if (error) *error=nil;
-    NSDictionary *states=axs_cachekeeper_read_input([self.folder stringByAppendingPathComponent:@"appEnabled.plist"],error);
-    if (error && *error) return nil;
-    NSString *directory=[self.folder stringByAppendingPathComponent:@"Status"];
-    NSMutableArray *modules=[NSMutableArray new];
+    NSError *failure=nil;
+    NSDictionary *states=axs_cachekeeper_read_input([self.folder stringByAppendingPathComponent:@"appEnabled.plist"],&failure);
+    if (!states || failure) {[self axs_failure:failure stage:@"configurationRead" error:error];return nil;}
+    if (states.count>4096) {[self axs_failure:[NSError errorWithDomain:@"CacheKeeper.ImageCollection" code:EOVERFLOW userInfo:nil] stage:@"configurationRead" error:error];return nil;}
+    NSTimeInterval now=NSDate.date.timeIntervalSince1970;
+    NSMutableArray *modules=[NSMutableArray new],*checks=[NSMutableArray new];
     for (NSString *bundle in [states.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
-        if (!axs_cachekeeper_app_enabled(states[bundle])) continue;
-        NSDictionary *raw=axs_cachekeeper_capacity_read_plist(directory,[bundle stringByAppendingString:@".imagecache.plist"],32*1024*1024,NULL);
-        NSDictionary *receipt=axs_cachekeeper_image_cache_raw_projection(raw);
-        NSTimeInterval age=receipt ? NSDate.date.timeIntervalSince1970-[receipt[@"updated"] timeIntervalSince1970] : INFINITY;
-        if (!receipt || !receipt[@"runtimeInfo"] || age<0 || age>300 || ![receipt[@"eligible"] unsignedIntegerValue] || [receipt[@"pending"] unsignedIntegerValue]) continue;
+        NSDictionary *receipt=nil,*check=[self axs_check:bundle state:states[bundle] now:now receipt:&receipt];[checks addObject:check];
+        if (![check[@"state"] isEqual:@"available"]) continue;
         [modules addObject:@{@"bundle":bundle,@"sdk":@"SDWebImage",@"hostVersion":receipt[@"runtimeInfo"][@"packageVersion"],@"state":@"requiresHostAcknowledgement"}];
+    }
+    if (![self readyForReport]) {
+        NSMutableDictionary *next=[self.document mutableCopy];
+        next[@"preflight"]=@{@"state":modules.count ? @"available" : @"noCandidate",@"at":@(now),@"modules":checks};
+        if (!next[@"entry"]) next[@"entry"]=@{@"state":@"entered",@"at":@(now)};
+        if (![self axs_save:next error:error]) return nil;
     }
     return modules;
 }
@@ -132,15 +248,19 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
         if (error) *error=nil;
         if (![self.document[@"state"] isEqual:@"idle"]) return AxsImageCollectionError(error,EALREADY);
         if (!axs_cachekeeper_bundle_id(bundle)) return AxsImageCollectionError(error,EINVAL);
-        self.document[@"bundle"]=bundle;
-        NSDictionary *base=[self axs_base:error],*receipt=base ? [self axs_receipt:error] : nil;
-        if (!base || !receipt) return NO;
-        if (!axs_cachekeeper_app_enabled(base[@"appState"]) || ![receipt[@"eligible"] unsignedIntegerValue] ||
-            [receipt[@"pending"] unsignedIntegerValue] || !receipt[@"runtimeInfo"] ||
-            NSDate.date.timeIntervalSince1970<[receipt[@"updated"] timeIntervalSince1970] ||
-            NSDate.date.timeIntervalSince1970-[receipt[@"updated"] timeIntervalSince1970]>300) return AxsImageCollectionError(error,ENOTSUP);
+        NSMutableDictionary *selected=[self.document mutableCopy];selected[@"bundle"]=bundle;
+        if (![self axs_save:selected error:error]) return NO;
+        NSError *failure=nil;
+        NSDictionary *base=[self axs_base:&failure];
+        if (!base) return [self axs_failure:failure stage:@"configurationRead" error:error];
+        NSDictionary *receipt=nil,*check=[self axs_check:bundle state:base[@"appState"] now:NSDate.date.timeIntervalSince1970 receipt:&receipt];
+        NSMutableDictionary *checked=[self.document mutableCopy];checked[@"selectedCheck"]=check;
+        if (![self axs_save:checked error:error]) return NO;
+        if (![check[@"state"] isEqual:@"available"]) {
+            return [self axs_failure:[NSError errorWithDomain:@"CacheKeeper.ImageCollection" code:ENOTSUP userInfo:nil] stage:@"candidate" error:error];
+        }
         NSString *baseline=axs_cachekeeper_image_collection_baseline(base);
-        if (!baseline) return AxsImageCollectionError(error,EINVAL);
+        if (!baseline) return [self axs_failure:[NSError errorWithDomain:@"CacheKeeper.ImageCollection" code:EINVAL userInfo:nil] stage:@"baseline" error:error];
         self.document[@"baselineSHA256"]=baseline;
         self.document[@"processFirstObserved"]=receipt[@"runtimeInfo"][@"firstObserved"];
         return [self axs_request_phase:@"prevent" step:1 events:@[] error:error];
@@ -257,10 +377,21 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
     }
 }
 - (NSDictionary *)reportProjection {
-    return @{@"schemaVersion":@1,@"sessionID":self.sessionID,@"module":@"existingSupportedImageSDK",@"moduleVersion":@1,@"bundle":self.document[@"bundle"] ?: @"notSelected",
+    NSMutableDictionary *report=[@{@"schemaVersion":@1,@"sessionID":self.sessionID,@"module":@"existingSupportedImageSDK",@"moduleVersion":@1,@"bundle":self.document[@"bundle"] ?: @"notSelected",
         @"state":self.document[@"state"],@"phase":self.document[@"request"][@"phase"] ?: @"notStarted",
         @"coverage":@"existingEligibleImageOwnersOnly",@"userConfigurationWritten":@NO,
         @"events":[self.document[@"events"] copy],@"publication":self.document[@"publication"] ?: @"notRequested",
-        @"restoration":self.document[@"restoration"] ?: @{@"state":@"notConfirmed"}};
+        @"entry":self.document[@"entry"] ?: @{@"state":@"notEntered"},
+        @"decision":self.document[@"decision"] ?: @{@"state":@"notChosen"},
+        @"verificationState":@"notPerformed",
+        @"restoration":self.document[@"restoration"] ?: @{@"state":@"notConfirmed"}} mutableCopy];
+    NSArray *events=self.document[@"events"];
+    if (events.count) {
+        BOOL passed=events.count==3 && [self.document[@"state"] isEqual:@"complete"],failed=NO;
+        for (NSDictionary *event in events) {passed &= [event[@"state"] isEqual:@"passed"];failed |= [event[@"state"] isEqual:@"failed"];}
+        report[@"verificationState"]=failed ? @"failed" : passed ? @"passed" : @"insufficientEvidence";
+    }
+    for (NSString *key in @[@"preflight",@"selectedCheck",@"lastFailure",@"failureHistory",@"failuresOmitted"]) if (self.document[key]) report[key]=self.document[key];
+    return report;
 }
 @end

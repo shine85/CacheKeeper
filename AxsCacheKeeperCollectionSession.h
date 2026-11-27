@@ -1,5 +1,6 @@
 #pragma once
 #import <Foundation/Foundation.h>
+@class AxsCacheKeeperImageCollectionSession;
 
 @interface AxsCacheKeeperCollectionSession : NSObject
 - (instancetype)initWithPath:(NSString *)path error:(NSError **)error;
@@ -7,6 +8,7 @@
 + (NSArray<NSDictionary *> *)resumableSessionsInDirectory:(NSString *)directory error:(NSError **)error;
 + (instancetype)openSessionAtPath:(NSString *)path error:(NSError **)error;
 @property(nonatomic,readonly,copy) NSString *sessionID;
+- (AxsCacheKeeperImageCollectionSession *)imageCollectionSession:(NSError **)error;
 - (BOOL)beginPhase:(NSString *)phase error:(NSError **)error;
 - (BOOL)beginCapacityWithEpoch:(NSString *)epoch error:(NSError **)error;
 - (BOOL)finishCapacityWithSnapshot:(NSDictionary *)snapshot error:(NSError **)error;

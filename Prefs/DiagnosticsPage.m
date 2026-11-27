@@ -2,6 +2,7 @@
 #import "HostPreflightPage.h"
 #import "ImageCollectionPage.h"
 #import "../AxsCacheKeeperCollectionSession.h"
+#import "../AxsCacheKeeperImageCollection.h"
 #import "../AxsCacheKeeperHostPreflight.h"
 #import "../AxsCacheKeeperDiagnostics.h"
 #import "../AxsCacheKeeperInstallation.h"
@@ -80,6 +81,7 @@ static NSDictionary *axs_cachekeeper_diagnostics_coverage_state(NSDictionary *re
 @property(nonatomic) BOOL axs_cachekeeper_guidedCollection;
 @property(nonatomic,strong) UIButton *axs_cachekeeper_guidedButton;
 @property(nonatomic,strong) UIButton *axs_cachekeeper_imageCollectionButton;
+@property(nonatomic,strong) UIButton *axs_cachekeeper_skipImageButton;
 @property(nonatomic,copy) NSDictionary *axs_cachekeeper_pendingReport,*axs_cachekeeper_pendingCoverage;
 @end
 
@@ -167,6 +169,8 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
         self.title=@"一次性采集向导";
         self.axs_cachekeeper_imageCollectionButton=[self axs_cachekeeper_button:@"已支持图片 SDK · 三阶段采集" action:@selector(axs_cachekeeper_image_collection)];
         [buttons insertArrangedSubview:self.axs_cachekeeper_imageCollectionButton atIndex:2];
+        self.axs_cachekeeper_skipImageButton=[self axs_cachekeeper_button:@"跳过图片阶段并记录" action:@selector(axs_cachekeeper_skip_image_collection)];
+        [buttons insertArrangedSubview:self.axs_cachekeeper_skipImageButton atIndex:3];
         [buttons removeArrangedSubview:self.axs_cachekeeper_hostPreflightButton];[self.axs_cachekeeper_hostPreflightButton removeFromSuperview];
         self.text.text=@"一个手机会话按顺序执行：五 APP 宿主只读自报告 → 全容器只读容量测量 → 可选已支持图片 SDK 三阶段 → 汇总并导出统一报告。前两阶段只读；图片阶段仅在你选择已有合格模块并点开始后，临时测试限制、实际清理与关闭恢复。它不会自动启动 APP，也不覆盖未知私有资源；缺失能力仍标记 blockedByCapability。宿主自报告未经认证，不是清理效果证明。\n\n完整脱敏报告与会话终态一起保存在手机。返回入口可继续未完成阶段或再次导出原报告，不会重发已完成请求。报告保留采集时的观测，不代表导出时重新测量。";
         if (!self.axs_cachekeeper_collectionSession) self.status=@"会话记录不可用，未开始采集。";
@@ -232,8 +236,19 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     if (!self.axs_cachekeeper_collectionSession || self.collecting || self.sharing || self.axs_cachekeeper_capacityEpoch) return;
     NSDictionary *phases=self.axs_cachekeeper_collectionSession.reportProjection[@"phases"];
     if (![@[@"complete",@"partial"] containsObject:phases[@"capacity"][@"state"]] || phases[@"export"]) return;
-    AxsCacheKeeperImageCollectionPage *page=[[AxsCacheKeeperImageCollectionPage alloc] initWithFolder:jbroot(@"/var/mobile/Library/CacheKeeper") sessionID:self.axs_cachekeeper_collectionSession.sessionID];
+    NSError *error=nil;
+    AxsCacheKeeperImageCollectionSession *image=[self.axs_cachekeeper_collectionSession imageCollectionSession:&error];
+    if (!image) {self.status=[NSString stringWithFormat:@"图片会话无法保存或读取（%@）；请重试打开，未启动测试。",@(error.code)];[self axs_cachekeeper_refresh];return;}
+    AxsCacheKeeperImageCollectionPage *page=[[AxsCacheKeeperImageCollectionPage alloc] initWithSession:image];
     [self.navigationController pushViewController:page animated:YES];
+}
+- (void)axs_cachekeeper_skip_image_collection {
+    if (!self.axs_cachekeeper_skipImageButton.enabled) return;
+    NSError *error=nil;
+    AxsCacheKeeperImageCollectionSession *image=[self.axs_cachekeeper_collectionSession imageCollectionSession:&error];
+    BOOL saved=image && [image skip:&error];
+    self.status=saved ? @"已记录主动跳过图片阶段，图片功能未验证；可汇总并导出本会话。" : [NSString stringWithFormat:@"跳过决定未保存（%@），请重试；未封存报告。",@(error.code)];
+    [self axs_cachekeeper_refresh];
 }
 - (void)axs_cachekeeper_guided_action {
     if (!self.axs_cachekeeper_guidedButton.enabled) return;
@@ -290,6 +305,16 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     NSDictionary *sessionPhases=self.axs_cachekeeper_collectionSession.reportProjection[@"phases"];
     self.axs_cachekeeper_imageCollectionButton.enabled=!self.collecting && !self.sharing && !self.axs_cachekeeper_capacityEpoch &&
         [@[@"complete",@"partial"] containsObject:sessionPhases[@"capacity"][@"state"]] && !sessionPhases[@"export"];
+    BOOL imageDecisionPending=self.axs_cachekeeper_guidedCollection && !self.reportData &&
+        [@[@"complete",@"partial",@"failed",@"blockedByCapability"] containsObject:sessionPhases[@"capacity"][@"state"]] && !sessionPhases[@"export"];
+    self.axs_cachekeeper_skipImageButton.hidden=!imageDecisionPending;
+    if (imageDecisionPending) {
+        NSError *imageError=nil;
+        AxsCacheKeeperImageCollectionSession *image=[self.axs_cachekeeper_collectionSession imageCollectionSession:&imageError];
+        self.collectButton.enabled=self.collectButton.enabled && image && [image readyForReport];
+        self.axs_cachekeeper_skipImageButton.enabled=!self.collecting && !self.sharing && [image.reportProjection[@"state"] isEqual:@"idle"];
+        if (imageError) self.progressLabel.text=[NSString stringWithFormat:@"图片阶段记录不可用（%@）；重试打开图片阶段，未封存报告。",@(imageError.code)];
+    }
     BOOL unconfirmedStop=self.axs_cachekeeper_capacityStopping && NSProcessInfo.processInfo.systemUptime-self.axs_cachekeeper_capacityStopStarted>=10;
     NSString *capacityState=self.axs_cachekeeper_collectionSession.reportProjection[@"phases"][@"capacity"][@"state"];
     BOOL capacityRetry=[@[@"interrupted",@"cancelled"] containsObject:capacityState];
@@ -417,7 +442,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
                 page.status=[page.status stringByAppendingString:@" 已保留本轮原始时间；点“汇总已保存诊断”后导出。"];
                 [page axs_cachekeeper_capacity_text:result];
                 if (page.axs_cachekeeper_guidedCollection && guidedCapacity) {
-                    page.status=[page.status stringByAppendingString:@" 可继续已支持图片 SDK 三阶段；完成或取消恢复后，再汇总同一会话。"];
+                    page.status=@"容量终态已保存。下一步请选择“已支持图片 SDK · 三阶段采集”，或“跳过图片阶段并记录”；完成选择后才能汇总同一会话。";
                 }
             }
             [page axs_cachekeeper_refresh];
@@ -548,6 +573,12 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
             [self axs_cachekeeper_refresh];return;
         }
         NSString *phase=self.axs_cachekeeper_collectionSession.reportProjection[@"phases"][@"diagnostics"][@"state"];
+        AxsCacheKeeperImageCollectionSession *image=[self.axs_cachekeeper_collectionSession imageCollectionSession:&sessionError];
+        if (!image || ![image readyForReport]) {
+            self.status=sessionError ? [NSString stringWithFormat:@"图片阶段记录不可用（%@）；未开始汇总。",@(sessionError.code)] :
+                @"请先执行图片阶段并完成恢复，或明确选择“跳过图片阶段并记录”；未开始汇总。";
+            [self axs_cachekeeper_refresh];return;
+        }
         BOOL retrying=[@[@"interrupted",@"cancelled"] containsObject:phase];
         if ((retrying && ![self.axs_cachekeeper_collectionSession prepareRetryForPhase:@"diagnostics" error:&sessionError]) ||
             ![self.axs_cachekeeper_collectionSession beginPhase:@"diagnostics" error:&sessionError]) {
@@ -739,6 +770,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     } else if ([capacityState isEqual:@"interrupted"] || [capacityState isEqual:@"cancelled"]) {
         self.status=@"上次容量测量未确认终态；本次不会自动重发，需人工明确重开容量阶段。";[self axs_cachekeeper_refresh];
     }
+    [self axs_cachekeeper_refresh];
 }
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
