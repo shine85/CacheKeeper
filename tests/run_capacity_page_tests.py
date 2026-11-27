@@ -17,6 +17,7 @@ import time
 DISCOVERY_TIMEOUT = 300
 BOOT_TIMEOUT = 60
 BOOTSTATUS_TIMEOUT = 420
+GENERATION_TIMEOUT = 180
 
 
 def prepare_simulator(output):
@@ -174,7 +175,22 @@ int main(int argc,char **argv) { @autoreleasepool {return UIApplicationMain(argc
                     "schemes": {"CapacityHost": {"build": {"targets": {"CapacityHost": "all"}}, "test": {"targets": ["CapacityPageTests"]}}}}
             project = stage / "project.json"
             project.write_text(json.dumps(spec), encoding="utf-8")
-            subprocess.run(["xcodegen", "generate", "--spec", str(project), "--project", str(stage)], check=True, timeout=60)
+            generation_command=["xcodegen", "generate", "--spec", str(project), "--project", str(stage)]
+            generation={"stage":"generation","state":"running","command":generation_command,"timeoutSeconds":GENERATION_TIMEOUT}
+            generation_started=time.monotonic()
+            try:
+                with (stage/"generation.log").open("w",encoding="utf-8") as log:
+                    generated=subprocess.run(generation_command,check=True,timeout=GENERATION_TIMEOUT,stdout=log,stderr=subprocess.STDOUT)
+                generation.update(state="passed",returncode=generated.returncode)
+            except subprocess.TimeoutExpired:
+                generation.update(state="timeout",returncode=None)
+                raise
+            except (subprocess.CalledProcessError,OSError) as error:
+                generation.update(state="failed",returncode=getattr(error,"returncode",None),error=str(error))
+                raise
+            finally:
+                generation["elapsedSeconds"]=time.monotonic()-generation_started
+                (stage/"generation-summary.json").write_text(json.dumps(generation,indent=2),encoding="utf-8")
             options = ["-project", str(stage / "CapacityPage.xcodeproj"), "-scheme", "CapacityHost",
                        "-destination", f"platform=iOS Simulator,id={device}", "-derivedDataPath", str(stage / "DerivedData"),
                        "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"]

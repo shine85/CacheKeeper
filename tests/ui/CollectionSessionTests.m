@@ -52,8 +52,8 @@
 - (void)testCapacityRetryPersistsRunningBeforeRequestAndBackgroundPersistsInterruption {
     AxsCacheKeeperCollectionSession *session=[self axs_collection_session];NSError *error=nil;
     XCTAssertTrue([session beginPhase:@"capacity" error:&error]);
-    XCTAssertTrue([session finishPhase:@"capacity" result:@{@"state":@"interrupted",@"epoch":@"previous",
-        @"terminalSource":@"clientLifecycle",@"observedAt":@1} error:&error]);
+    XCTAssertTrue(([session finishPhase:@"capacity" result:@{@"state":@"interrupted",@"epoch":@"previous",
+        @"terminalSource":@"clientLifecycle",@"observedAt":@1} error:&error]));
     AxsCollectionDiagnosticsFixture *page=[[AxsCollectionDiagnosticsFixture alloc] initWithCollectionSessionObject:session];page.axs_collection_folder=self.axs_cachekeeper_folder;
     [page loadViewIfNeeded];
     UIButton *button=[page valueForKey:@"axs_cachekeeper_capacityButton"];
@@ -84,8 +84,8 @@
 - (void)testCompletedReportReopensByteIdenticallyAndCollectDoesNotReplay {
     AxsCacheKeeperCollectionSession *session=[self axs_collection_session];NSError *error=nil;
     XCTAssertTrue([session beginPhase:@"capacity" error:&error]);
-    XCTAssertTrue([session finishPhase:@"capacity" result:@{@"state":@"partial",@"epoch":@"e1",@"finishedAt":@1,
-        @"completedRoots":@0,@"totalRoots":@1,@"failedRoots":@1} error:&error]);
+    XCTAssertTrue(([session finishPhase:@"capacity" result:@{@"state":@"partial",@"epoch":@"e1",@"finishedAt":@1,
+        @"completedRoots":@0,@"totalRoots":@1,@"failedRoots":@1} error:&error]));
     XCTAssertTrue([session beginPhase:@"diagnostics" error:&error]);
     NSData *data=[session saveReport:@{@"apps":@[],@"capacityMeasurement":@{@"state":@"notMeasured"}}
         diagnosticsResult:@{@"state":@"partial",@"appCount":@0,@"missingSources":@[@"fixture"]} error:&error];

@@ -164,7 +164,7 @@ class CapacityOrchestrationTests(unittest.TestCase):
         self.assertTrue(all(item["steps"][-1]["state"] == "running" for item in result["running"]))
         self.assertEqual(result["commands"], [("discovery", 300), ("boot", 60), ("bootstatus", 420)] +
                          [(name + ":" + stage, budget) for name in ["stale-running", "false-stop", "old-report-export", "export-latest-terminal", "green"]
-                          for stage, budget in [("generate", 60), ("build", 600), ("test", 420), ("summary", 60)]])
+                          for stage, budget in [("generate", 180), ("build", 600), ("test", 420), ("summary", 60)]])
 
     def test_preparation_failures_keep_evidence_and_never_start_tests(self):
         for stage in ["discovery", "boot", "bootstatus"]:
@@ -239,7 +239,7 @@ class CapacityOrchestrationTests(unittest.TestCase):
                 self.assertIn("child stderr", (output / row["stderr"]).read_text())
 
     def test_nonbehavior_failures_cannot_be_accepted_as_red(self):
-        for scenario in ["stale-running:generate-exit", "stale-running:build-timeout", "stale-running:test-timeout",
+        for scenario in ["stale-running:generate-exit", "stale-running:generate-timeout", "stale-running:build-timeout", "stale-running:test-timeout",
                          "stale-running:summary-exit", "red-false-green", "red-crash", "red-wrong-assertion",
                          "red-extra-failure", "green-failure"]:
             with self.subTest(scenario=scenario):
@@ -249,6 +249,18 @@ class CapacityOrchestrationTests(unittest.TestCase):
                 if scenario != "green-failure":
                     self.assertNotIn("Verified precise", result["console"])
 
+    def test_generation_timeout_preserves_its_own_failure_evidence(self):
+        result=execute("stale-running:generate-timeout")
+        self.assertEqual(result["code"],1)
+        stage=result["output"] / "stale-running"
+        summary=json.loads((stage/"generation-summary.json").read_text())
+        self.assertEqual(summary["state"],"timeout")
+        self.assertEqual(summary["timeoutSeconds"],RUNNER.GENERATION_TIMEOUT)
+        self.assertIsNone(summary["returncode"])
+        self.assertIn("partial stdout",(stage/"generation.log").read_text())
+        self.assertTrue((stage/"project.json").is_file())
+        self.assertFalse(any(name.endswith(":build") or name.endswith(":test") for name,_ in result["commands"]))
+
     def test_workflow_budget_and_failure_artifact_coverage(self):
         # Parse the bounded job block without adding a PyYAML dependency to CI.
         import re
@@ -257,7 +269,7 @@ class CapacityOrchestrationTests(unittest.TestCase):
         job_budget = int(re.search(r"^    timeout-minutes: (\d+)$", job, re.M)[1]) * 60
         step_budgets = [int(n) * 60 for n in re.findall(r"^        timeout-minutes: (\d+)$", job, re.M)]
         self.assertEqual(len(step_budgets), 4)
-        self.assertGreaterEqual(step_budgets[2], 300 + 60 + 420 + (len(METHODS) + 1) * (60 + 600 + 420 + 60) + 120)
+        self.assertGreaterEqual(step_budgets[2], 300 + 60 + 420 + (len(METHODS) + 1) * (RUNNER.GENERATION_TIMEOUT + 600 + 420 + 60) + 120)
         self.assertGreaterEqual(job_budget, sum(step_budgets) + 60)
         self.assertIn("needs: native", job)
         self.assertIn("if: always()", job)

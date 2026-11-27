@@ -143,7 +143,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     self.text.text=@"快速汇总安装快照与当前配置中 APP 的现有记录，包含新装未配置和已关闭的 APP。新装未配置 APP 保持禁用。每轮总数固定；不会自动检测目录或深度扫描。\n\n报告包含实际提供的 APP 名称、版本与构建号、插件版本、开关、目录统计、清理回执、网络状态、宿主自动／面板只读观察、按原始记录派生的统一能力摘要和已有深度档案。不会主动唤醒或探测全机 APP，也不会改变模式。宿主信号未经认证，不证明清理、写入限制或关闭恢复效果。每条记录保留原时间，缺失、损坏和覆盖不完整会明确标注。每次采集重新获取安装列表；安装信息仅反映本轮快照；未在快照中出现不代表已卸载，来源缺失或损坏会标记不可用。\n\n未知路径、账号和私人文件名会匿名化；不导出文件内容、原始日志或设备标识。搜索状态附带本次主页面最近 16 条几何、命中与编辑事件；不含输入文字。进入诊断前已冻结，不把切页收起键盘计为搜索异常。\n\n采集后只保留内存报告，不自动保存。手动点“导出报告”后，才生成临时分享文件；分享结束清理副本。只有你主动“存储到文件”的报告会保留。离开本页会释放内存报告。\n\n需要新数据时，在具体 APP 的目录页执行检测，再回来采集即可。";
     self.collectButton=[self axs_cachekeeper_button:@"汇总已保存诊断" action:@selector(axs_cachekeeper_collect)];
     self.axs_cachekeeper_hostPreflightButton=[self axs_cachekeeper_button:@"五 APP 宿主集中预检 · 只读" action:@selector(axs_cachekeeper_host_preflight)];
-    self.axs_cachekeeper_guidedButton=[self axs_cachekeeper_button:@"开始一次性只读采集向导" action:@selector(axs_cachekeeper_guided_action)];
+    self.axs_cachekeeper_guidedButton=[self axs_cachekeeper_button:@"开始一次性集中采集向导" action:@selector(axs_cachekeeper_guided_action)];
     self.axs_cachekeeper_capacityButton=[self axs_cachekeeper_button:@"重新测量全容器占用 · 只读" action:@selector(axs_cachekeeper_capacity_action)];
     self.exportButton=[self axs_cachekeeper_button:@"导出报告" action:@selector(axs_cachekeeper_export)];
     self.progressLabel=[UILabel new];self.progressLabel.numberOfLines=0;
@@ -168,7 +168,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
         self.axs_cachekeeper_imageCollectionButton=[self axs_cachekeeper_button:@"已支持图片 SDK · 三阶段采集" action:@selector(axs_cachekeeper_image_collection)];
         [buttons insertArrangedSubview:self.axs_cachekeeper_imageCollectionButton atIndex:2];
         [buttons removeArrangedSubview:self.axs_cachekeeper_hostPreflightButton];[self.axs_cachekeeper_hostPreflightButton removeFromSuperview];
-        self.text.text=@"一个手机会话按顺序执行：五 APP 宿主只读自报告 → 全容器只读容量测量 → 汇总并导出统一报告。此向导不启动 APP、不清理缓存、不验证私有写入限制；这些能力缺失会标记 blockedByCapability。宿主响应未经认证，缺失响应不证明未注入。\n\n完整脱敏报告与会话终态一起保存在手机。返回入口可继续未完成阶段或再次导出原报告，不会重发已完成请求。报告保留采集时的观测，不代表导出时重新测量。";
+        self.text.text=@"一个手机会话按顺序执行：五 APP 宿主只读自报告 → 全容器只读容量测量 → 可选已支持图片 SDK 三阶段 → 汇总并导出统一报告。前两阶段只读；图片阶段仅在你选择已有合格模块并点开始后，临时测试限制、实际清理与关闭恢复。它不会自动启动 APP，也不覆盖未知私有资源；缺失能力仍标记 blockedByCapability。宿主自报告未经认证，不是清理效果证明。\n\n完整脱敏报告与会话终态一起保存在手机。返回入口可继续未完成阶段或再次导出原报告，不会重发已完成请求。报告保留采集时的观测，不代表导出时重新测量。";
         if (!self.axs_cachekeeper_collectionSession) self.status=@"会话记录不可用，未开始采集。";
         else {
             NSDictionary *phases=self.axs_cachekeeper_collectionSession.reportProjection[@"phases"];

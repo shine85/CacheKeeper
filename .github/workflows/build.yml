@@ -88,10 +88,10 @@ jobs:
     needs: native
     if: inputs.native_only != true
     runs-on: macos-15-intel
-    # Discovery 300 + boot 60 + readiness 420 + 5*(generate 60 + build 600 +
-    # test 420 + summary 60) = 6480s/108m. Four exact REDs and the full GREEN
-    # fit runner 110m; checkout 3 + tools 8 + runner 110 + upload 5 = 126m.
-    timeout-minutes: 130
+    # Discovery 300 + boot 60 + readiness 420 + 5*(generate 180 + build 600 +
+    # test 420 + summary 60) = 7080s/118m. Generation has its own cold-host budget.
+    # Checkout 3 + tools 8 + runner 120 + upload 5 = 136m.
+    timeout-minutes: 140
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: '1'
@@ -105,7 +105,7 @@ jobs:
         run: brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
 
       - name: 运行容量页面回归
-        timeout-minutes: 110
+        timeout-minutes: 120
         run: |
           python3 tests/test_capacity_page_orchestration.py
           python3 tests/run_capacity_page_tests.py
@@ -123,6 +123,9 @@ jobs:
             tmp/feedback-1792/capacity-page-*/prepare-summary.json
             tmp/feedback-1792/capacity-page-*/**/build.log
             tmp/feedback-1792/capacity-page-*/**/test.log
+            tmp/feedback-1792/capacity-page-*/**/generation.log
+            tmp/feedback-1792/capacity-page-*/**/generation-summary.json
+            tmp/feedback-1792/capacity-page-*/**/project.json
             tmp/feedback-1792/capacity-page-*/**/Results.xcresult
           if-no-files-found: warn
 
