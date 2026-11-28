@@ -1,6 +1,7 @@
 #import <XCTest/XCTest.h>
 #import "../../AxsCacheKeeperCollectionSession.h"
 #import "../../AxsCacheKeeperImageCollection.h"
+#import "../../AxsCacheKeeperOperationInfo.h"
 #import "../../Prefs/DiagnosticsPage.h"
 #import "../../Prefs/ImageCollectionPage.h"
 
@@ -32,6 +33,12 @@
 @property(nonatomic,copy) NSString *axs_cachekeeper_folder,*axs_cachekeeper_path;
 @end
 @implementation AxsCacheKeeperCollectionSessionTests
+- (void)axs_write_receipt:(NSDictionary *)receipt path:(NSString *)path {
+    NSMutableDictionary *pending=nil;BOOL writable=NO;
+    XCTAssertTrue(axs_cachekeeper_operation_save(receipt,path,YES,&pending,&writable));
+    XCTAssertNil(pending);XCTAssertTrue(writable);
+    XCTAssertEqualObjects([NSDictionary dictionaryWithContentsOfFile:path],receipt,@"producer transport preserves fractional receipt date");
+}
 - (void)setUp {
     [super setUp];
     self.axs_cachekeeper_folder=[NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"collection-%@",NSUUID.UUID.UUIDString]];
@@ -221,10 +228,11 @@
     NSMutableDictionary *receipt=[@{@"schemaVersion":@1,@"sdk":@"SDWebImage",@"state":@"ready",@"reason":@"none",@"observed":@1,@"eligible":@1,@"restricted":@0,
         @"writesBlocked":@0,@"queued":@0,@"submitted":@0,@"apiCompleted":@0,@"skipped":@0,@"pending":@0,@"updated":[NSDate dateWithTimeIntervalSinceNow:-601],
         @"bytesState":@"notMeasured",@"runtimeInfo":@{@"schemaVersion":@1,@"packageVersion":@"0.7.2-221.1",@"firstObserved":@1}} mutableCopy];
-    XCTAssertTrue([receipt writeToFile:receiptPath atomically:YES]);
+    [self axs_write_receipt:receipt path:receiptPath];
     [(UIButton *)[page valueForKey:@"axs_cachekeeper_imageCollectionButton"] sendActionsForControlEvents:UIControlEventTouchUpInside];
     AxsCacheKeeperImageCollectionPage *image=(id)navigation.topViewController;[image loadViewIfNeeded];
-    NSArray *modules=[[session imageCollectionSession:&error] availableModules:&error];XCTAssertEqual(modules.count,1u);XCTAssertEqualObjects(modules[0][@"state"],@"requiresRefresh");
+    AxsCacheKeeperImageCollectionSession *imageSession=[image valueForKey:@"session"];
+    NSArray *modules=[imageSession availableModules:&error];XCTAssertEqual(modules.count,1u);XCTAssertEqualObjects(modules[0][@"state"],@"requiresRefresh");
     // Invoke the same selection callback used by the APP action sheet; no request is created here.
     [image axs_start_bundle:bundle];
     NSPredicate *readFinished=[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *unused){(void)object;(void)unused;return ![[image valueForKey:@"preparationReading"] boolValue];}];
@@ -235,7 +243,7 @@
     NSString *requestPath=[self.axs_cachekeeper_folder stringByAppendingPathComponent:@"imageCollectionRequest.plist"];
     XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:requestPath]);XCTAssertFalse([[image valueForKey:@"nextButton"] isEnabled]);
     receipt[@"updated"]=NSDate.date;receipt[@"runtimeInfo"]=@{@"schemaVersion":@1,@"packageVersion":@"0.7.2-221.1",@"firstObserved":@2};
-    XCTAssertTrue([receipt writeToFile:receiptPath atomically:YES]);
+    [self axs_write_receipt:receipt path:receiptPath];
     [NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidBecomeActiveNotification object:nil];
     NSPredicate *ready=[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *unused){(void)object;(void)unused;return [[image valueForKey:@"preparationStatus"][@"state"] isEqual:@"readyToStart"];}];
     XCTAssertEqual([XCTWaiter waitForExpectations:@[[[XCTNSPredicateExpectation alloc] initWithPredicate:ready object:image]] timeout:5],XCTWaiterResultCompleted);
@@ -266,7 +274,7 @@
     request=axs_cachekeeper_image_collection_read(self.axs_cachekeeper_folder,&error);XCTAssertEqualObjects(request[@"phase"],@"restore");
     NSDictionary *base=@{@"valid":@YES,@"bundle":bundle,@"appState":states[bundle],@"selected":@[],@"installation":@"fixture-installation",@"processFirstObserved":@2};
     receipt[@"imageCollection"]=axs_cachekeeper_image_collection_context(base,request,NSDate.date.timeIntervalSince1970)[@"imageCollection"];receipt[@"updated"]=NSDate.date;
-    XCTAssertTrue([receipt writeToFile:receiptPath atomically:YES]);[NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidBecomeActiveNotification object:nil];
+    [self axs_write_receipt:receipt path:receiptPath];[NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidBecomeActiveNotification object:nil];
     [navigation popViewControllerAnimated:NO];[page viewDidAppear:NO];
     [(UIButton *)[page valueForKey:@"collectButton"] sendActionsForControlEvents:UIControlEventTouchUpInside];
     NSPredicate *saved=[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *unused){(void)object;(void)unused;return [page valueForKey:@"reportData"]!=nil;}];

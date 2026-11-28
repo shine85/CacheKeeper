@@ -2,6 +2,12 @@
 #import "../AxsCacheKeeperImageCollection.h"
 #import "../AxsCacheKeeperImageCacheStatus.h"
 static void check(BOOL value,const char *message) {if (!value) {fprintf(stderr,"FAIL: image-collection: %s\n",message);exit(1);}}
+static BOOL writeReceipt(NSDictionary *value,NSString *path) {
+    NSMutableDictionary *pending=nil;BOOL writable=NO;
+    if (!axs_cachekeeper_operation_save(value,path,YES,&pending,&writable)) return NO;
+    check(!pending && writable && [[NSDictionary dictionaryWithContentsOfFile:path] isEqual:value],"production receipt writer preserves exact fields and fractional date");
+    return YES;
+}
 @interface AxsCacheKeeperImageCollectionSession (TestSaveBoundary)
 - (BOOL)axs_save:(NSDictionary *)next expected:(NSDictionary *)expected error:(NSError **)error;
 @end
@@ -25,17 +31,23 @@ int main(int argc,const char **argv) {@autoreleasepool {
     check(argc==2 || argc==3,"isolated folder supplied");NSString *folder=[NSString stringWithUTF8String:argv[1]];
     NSString *status=[folder stringByAppendingPathComponent:@"Status"];
     check([NSFileManager.defaultManager createDirectoryAtPath:status withIntermediateDirectories:YES attributes:nil error:NULL],"create status directory");
+    NSString *precisionPath=[status stringByAppendingPathComponent:@"precision.plist"];
+    NSDictionary *precision=@{@"updated":[NSDate dateWithTimeIntervalSince1970:1234567890.75]};
+    check([precision writeToFile:precisionPath atomically:YES] &&
+        [[NSDictionary dictionaryWithContentsOfFile:precisionPath][@"updated"] timeIntervalSince1970]==1234567890.0,"XML fixture deterministically loses fractional receipt date");
+    check(writeReceipt(precision,precisionPath),"actual producer transport retains fractional receipt date");
+    printf("PASS: real receipt writer preserves fractional timestamp lost by XML fixture\n");
     NSDictionary *state=@{@"enabled":@YES,@"mode":@"clean",@"autoDiscover":@NO,@"excludedPaths":@[@"Library/Caches/retained"]};
     NSString *statePath=[folder stringByAppendingPathComponent:@"appEnabled.plist"],*selectionPath=[folder stringByAppendingPathComponent:@"directories.plist"];
     check([@{AxsCacheKeeperImageCollectionBundle:state,@"other.app":@NO} writeToFile:statePath atomically:YES],"save actual base config");
     check([@{AxsCacheKeeperImageCollectionBundle:@[@"Library/Caches"]} writeToFile:selectionPath atomically:YES],"save actual selection");
     NSString *receiptPath=[status stringByAppendingPathComponent:[AxsCacheKeeperImageCollectionBundle stringByAppendingString:@".imagecache.plist"]];
-    check([receipt(nil) writeToFile:receiptPath atomically:YES],"save valid actual-format receipt");
+    check(writeReceipt(receipt(nil),receiptPath),"save valid actual-format receipt");
     NSData *originalState=[NSData dataWithContentsOfFile:statePath],*originalSelection=[NSData dataWithContentsOfFile:selectionPath];NSError *error=nil;
     AxsCacheKeeperImageCollectionSession *session=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" error:&error];
     if (argc==3) {
         NSMutableDictionary *old=[receipt(nil) mutableCopy];old[@"updated"]=[NSDate dateWithTimeIntervalSinceNow:-301];
-        check([old writeToFile:receiptPath atomically:YES],"save expired previously eligible receipt");
+        check(writeReceipt(old,receiptPath),"save expired previously eligible receipt");
         NSArray *found=[session availableModules:&error];
         check(found.count==1 && [found[0][@"state"] isEqual:@"requiresRefresh"],"stale known SDK remains selectable for refresh without execution authority");
         check(![session start:&error] && error && !axs_cachekeeper_image_collection_read(folder,NULL),"stale candidate never publishes executable lease");
@@ -76,16 +88,16 @@ int main(int argc,const char **argv) {@autoreleasepool {
     check([session cancel:&error],"explicit cancellation publishes restore intent");request=axs_cachekeeper_image_collection_read(folder,&error);
     effective=axs_cachekeeper_image_collection_context(base,request,NSDate.date.timeIntervalSince1970);
     check([effective[@"appState"] isEqual:base[@"appState"]] && [effective[@"imageCollection"][@"disposition"] isEqual:@"restored"],"restore adopts latest user state rather than saved enabled value");
-    check([receipt(effective[@"imageCollection"]) writeToFile:receiptPath atomically:YES],"write host-confirmed restoration receipt");
+    check(writeReceipt(receipt(effective[@"imageCollection"]),receiptPath),"write host-confirmed restoration receipt");
     check([[session poll:&error][@"state"] isEqual:@"complete"],"only host restoration acknowledgement completes transaction");
     NSDictionary *completed=session.reportProjection;
-    check([receipt(nil) writeToFile:receiptPath atomically:YES],"later unrelated global receipt replaces prior host response");
+    check(writeReceipt(receipt(nil),receiptPath),"later unrelated global receipt replaces prior host response");
     AxsCacheKeeperImageCollectionSession *completedReopen=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" error:&error];
     check([[completedReopen poll:&error] isEqual:completed],"completed evidence is immutable after global receipt changes");
     check([[NSData dataWithContentsOfFile:statePath] isEqual:originalState] && [[NSData dataWithContentsOfFile:selectionPath] isEqual:originalSelection],"transaction never writes user config or directories");
     NSDictionary *multiStates=@{AxsCacheKeeperImageCollectionBundle:state,@"com.xiaomi.mihome":state,@"unknown.app":state};
     check([multiStates writeToFile:statePath atomically:YES],"second already-supported module fixture enabled");
-    check([receipt(nil) writeToFile:[status stringByAppendingPathComponent:@"com.xiaomi.mihome.imagecache.plist"] atomically:YES],"second module has valid supported-engine receipt");
+    check(writeReceipt(receipt(nil),[status stringByAppendingPathComponent:@"com.xiaomi.mihome.imagecache.plist"]),"second module has valid supported-engine receipt");
     modules=[session availableModules:&error];check(modules.count==2,"same interface offers known image receipts and excludes unknown module");
     check([@{AxsCacheKeeperImageCollectionBundle:state,@"other.app":@NO} writeToFile:statePath atomically:YES],"restore isolated fixture config");
     NSString *sessionPath=[[folder stringByAppendingPathComponent:@"collectionSessions"] stringByAppendingPathComponent:@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.image.plist"];
@@ -98,7 +110,7 @@ int main(int argc,const char **argv) {@autoreleasepool {
         if ([reason isEqual:@"unavailable"]) ack[@"disposition"]=@"unavailable";
         NSMutableDictionary *record=[receipt(ack) mutableCopy];
         if ([reason isEqual:@"pendingAction"]) {record[@"queued"]=@1;record[@"submitted"]=@1;record[@"pending"]=@1;record[@"state"]=@"timedOut";}
-        check([record writeToFile:receiptPath atomically:YES],"save matched expired host acknowledgement");
+        check(writeReceipt(record,receiptPath),"save matched expired host acknowledgement");
         AxsCacheKeeperImageCollectionSession *resumed=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" error:&error];
         check([[resumed poll:&error][@"state"] isEqual:@"restorationUnconfirmed"],"expired restore with pending or unavailable ack is reportable without false restoration");
     }
@@ -119,7 +131,7 @@ int main(int argc,const char **argv) {@autoreleasepool {
         if ([reason isEqual:@"noEligibleOwner"]) {raw[@"eligible"]=@0;raw[@"observed"]=@0;raw[@"state"]=@"notObserved";}
         if ([reason isEqual:@"pendingAction"]) {raw[@"queued"]=@1;raw[@"pending"]=@1;raw[@"state"]=@"queued";}
         if ([reason isEqual:@"receiptMissing"]) check([NSFileManager.defaultManager removeItemAtPath:receiptPath error:&error],"remove only fixture receipt");
-        else check([([reason isEqual:@"receiptInvalid"] ? @{@"invalid":@YES} : raw) writeToFile:receiptPath atomically:YES],"write candidate rejection fixture");
+        else check(writeReceipt([reason isEqual:@"receiptInvalid"] ? @{@"invalid":@YES} : raw,receiptPath),"write candidate rejection fixture");
         NSUInteger candidates=[entry availableModules:&error].count;
         check(candidates==([@[@"receiptStale",@"pendingAction"] containsObject:reason] ? 1u : 0u) && !error,"only known stale or pending SDK is offered for refresh without execution");
         AxsCacheKeeperImageCollectionSession *opened=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" error:&error];
@@ -140,18 +152,20 @@ int main(int argc,const char **argv) {@autoreleasepool {
     AxsCacheKeeperImageCollectionSession *prepared=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"cccccccccccccccccccccccccccccccc" error:&error];
     NSMutableDictionary *old=[receipt(nil) mutableCopy];old[@"updated"]=[NSDate dateWithTimeIntervalSinceNow:-601];
     old[@"runtimeInfo"]=@{@"schemaVersion":@1,@"packageVersion":@"0.7.2-221.1",@"firstObserved":@10};
-    check([old writeToFile:receiptPath atomically:YES],"model full capacity delay with real stale receipt file");
+    check(writeReceipt(old,receiptPath),"model full capacity delay with real stale receipt file");
     NSData *priorRequest=[NSData dataWithContentsOfFile:[folder stringByAppendingPathComponent:@"imageCollectionRequest.plist"]];
     check([prepared prepareBundle:AxsCacheKeeperImageCollectionBundle error:&error],"known stale SDK can be selected for preparation");
     prepared=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"cccccccccccccccccccccccccccccccc" error:&error];
     check([[prepared refreshPreparation:&error][@"state"] isEqual:@"awaitingRefresh"] && ![prepared start:&error],"reopened preparation never starts from expired evidence");
     check([[NSData dataWithContentsOfFile:[folder stringByAppendingPathComponent:@"imageCollectionRequest.plist"]] isEqual:priorRequest],"preparation never publishes or replaces a lease");
     NSMutableDictionary *unsupported=[old mutableCopy];unsupported[@"eligible"]=@0;unsupported[@"observed"]=@0;unsupported[@"state"]=@"unsupported";unsupported[@"reason"]=@"unsupportedSDK";
-    check([unsupported writeToFile:receiptPath atomically:YES],"expired unsupported receipt fixture");
+    check(writeReceipt(unsupported,receiptPath),"expired unsupported receipt fixture");
     check([prepared availableModules:&error].count==0 && [[prepared refreshPreparation:&error][@"reason"] isEqual:@"noEligibleOwner"],"staleness cannot disguise unsupported SDK as refreshable");
     NSMutableDictionary *fresh=[receipt(nil) mutableCopy];fresh[@"runtimeInfo"]=@{@"schemaVersion":@1,@"packageVersion":@"0.7.2-221.1",@"firstObserved":@20};
-    check([fresh writeToFile:receiptPath atomically:YES],"new process publishes current eligible receipt");
-    check([[prepared refreshPreparation:&error][@"state"] isEqual:@"readyToStart"],"new current producer evidence readies the same selected session");
+    check(writeReceipt(fresh,receiptPath),"new process publishes current eligible receipt");
+    NSDictionary *ready=[prepared refreshPreparation:&error];
+    if (![ready[@"state"] isEqual:@"readyToStart"]) fprintf(stderr,"PREPARATION: %s error=%ld document=%s\n",ready.description.UTF8String,(long)error.code,prepared.reportProjection.description.UTF8String);
+    check([ready[@"state"] isEqual:@"readyToStart"],"new current producer evidence readies the same selected session");
     check([@{AxsCacheKeeperImageCollectionBundle:@NO} writeToFile:statePath atomically:YES],"user disable after preparation");
     check(![prepared start:&error] && [[prepared refreshPreparation:&error][@"reason"] isEqual:@"appDisabled"],"confirm rechecks current user enable without enabling it");
     check([@{AxsCacheKeeperImageCollectionBundle:state,@"other.app":@NO} writeToFile:statePath atomically:YES],"restore explicitly controlled fixture configuration");
@@ -168,8 +182,8 @@ int main(int argc,const char **argv) {@autoreleasepool {
     for (NSString *decision in @[@"skip",@"replace"]) {
         NSString *identifier=[decision isEqual:@"skip"] ? @"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" : @"ffffffffffffffffffffffffffffffff";
         AxsImagePreparationRace *race=[[AxsImagePreparationRace alloc] initWithFolder:folder sessionID:identifier error:&error];
-        check([old writeToFile:receiptPath atomically:YES] && [race prepareBundle:AxsCacheKeeperImageCollectionBundle error:&error],"race starts with persisted stale preparation");
-        fresh[@"updated"]=NSDate.date;check([fresh writeToFile:receiptPath atomically:YES],"race has refreshed selected evidence");
+        check(writeReceipt(old,receiptPath) && [race prepareBundle:AxsCacheKeeperImageCollectionBundle error:&error],"race starts with persisted stale preparation");
+        fresh[@"updated"]=NSDate.date;check(writeReceipt(fresh,receiptPath),"race has refreshed selected evidence");
         race.entered=dispatch_semaphore_create(0);race.releaseGate=dispatch_semaphore_create(0);race.holdSave=YES;
         dispatch_semaphore_t finished=dispatch_semaphore_create(0);__block NSDictionary *late=nil;__block NSError *lateError=nil;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{late=[race refreshPreparation:&lateError];dispatch_semaphore_signal(finished);});
