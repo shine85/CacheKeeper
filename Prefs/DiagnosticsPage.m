@@ -1,4 +1,6 @@
 #import "DiagnosticsPage.h"
+#import "CollectionNavigation.h"
+#import "CollectionHistoryPage.h"
 #import "HostPreflightPage.h"
 #import "ImageCollectionPage.h"
 #import "../AxsCacheKeeperCollectionSession.h"
@@ -84,6 +86,9 @@ static NSDictionary *axs_cachekeeper_diagnostics_coverage_state(NSDictionary *re
 @property(nonatomic,strong) UIButton *axs_cachekeeper_skipImageButton;
 @property(nonatomic) BOOL axs_cachekeeper_resumeImagePending;
 @property(nonatomic) BOOL axs_cachekeeper_presentResumePending;
+@property(nonatomic,strong) AxsCacheKeeperCollectionNavigation *axs_cachekeeper_returnNavigation;
+@property(nonatomic,copy) NSString *axs_cachekeeper_automaticPage;
+@property(nonatomic) BOOL axs_cachekeeper_automaticPending;
 @property(nonatomic,copy) NSDictionary *axs_cachekeeper_pendingReport,*axs_cachekeeper_pendingCoverage;
 @end
 
@@ -126,6 +131,12 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
         _axs_cachekeeper_collectionSession=session;
         _axs_cachekeeper_resumeImagePending=YES;
         if (!session) _status=@"集中会话不可用；未启动任何阶段。";
+    }return self;
+}
+- (instancetype)initWithAutomaticSession:(AxsCacheKeeperCollectionSession *)session intent:(NSDictionary *)intent {
+    self=[self initWithCollectionSessionObject:session];if(self){
+        _axs_cachekeeper_automaticPage=intent[@"page"];_axs_cachekeeper_automaticPending=YES;_axs_cachekeeper_resumeImagePending=NO;
+        _axs_cachekeeper_returnNavigation=[[AxsCacheKeeperCollectionNavigation alloc] initWithSession:session intent:intent];
     }return self;
 }
 - (AxsCacheKeeperCollectionSession *)axs_cachekeeper_openSessionInDirectory:(NSString *)directory error:(NSError **)error {
@@ -182,13 +193,13 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
             self.status=[NSString stringWithFormat:@"会话 %@；阶段：宿主 %@，容量 %@。缺少的 APP 私有清理/限写契约仍阻断最终验证。",self.axs_cachekeeper_collectionSession.sessionID,phases[@"hostPreflight"][@"state"] ?: @"待开始",phases[@"capacity"][@"state"] ?: @"待开始"];
             NSDictionary *host=phases[@"hostPreflight"];
             NSDictionary *capacity=phases[@"capacity"];
-            NSString *directory=[jbroot(@"/var/mobile/Library/CacheKeeper") stringByAppendingPathComponent:@"Status"];
-            if (!host || [@[@"interrupted",@"cancelled"] containsObject:host[@"state"]]) [self axs_cachekeeper_push_host_preflight:directory];
+            NSString *directory=[self axs_cachekeeper_capacity_file:@"Status"];
+            if (!self.axs_cachekeeper_automaticPage && (!host || [@[@"interrupted",@"cancelled"] containsObject:host[@"state"]])) [self axs_cachekeeper_push_host_preflight:directory];
             else if ([capacity[@"state"] isEqual:@"running"] && axs_cachekeeper_capacity_epoch(capacity[@"request"][@"epoch"])) {
                 self.axs_cachekeeper_capacityEpoch=capacity[@"request"][@"epoch"];
                 self.axs_cachekeeper_capacityStarted=NSProcessInfo.processInfo.systemUptime;
                 [self axs_cachekeeper_capacity_observe];
-            } else if ([@[@"complete",@"partial"] containsObject:host[@"state"]] && !capacity) [self axs_cachekeeper_capacity_action];
+            } else if (!self.axs_cachekeeper_automaticPage && [@[@"complete",@"partial"] containsObject:host[@"state"]] && !capacity) [self axs_cachekeeper_capacity_action];
             else if ([@[@"interrupted",@"cancelled"] containsObject:capacity[@"state"]]) {
                 self.status=@"上次容量阶段中断；可显式重新测量，不会自动重复启动。";
                 self.axs_cachekeeper_capacityButton.hidden=NO;
@@ -248,6 +259,10 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     AxsCacheKeeperImageCollectionSession *image=[self.axs_cachekeeper_collectionSession imageCollectionSession:&error];
     if (!image) {self.status=[NSString stringWithFormat:@"图片会话无法保存或读取（%@）；请重试打开，未启动测试。",@(error.code)];[self axs_cachekeeper_refresh];return;}
     AxsCacheKeeperImageCollectionPage *page=[[AxsCacheKeeperImageCollectionPage alloc] initWithSession:image];
+    AxsCacheKeeperCollectionNavigation *position=[[AxsCacheKeeperCollectionNavigation alloc] initWithSession:self.axs_cachekeeper_collectionSession intent:nil];
+    if (![position selectPage:@"image" error:&error]) {self.status=[NSString stringWithFormat:@"采集返回位置未保存（%@），未进入图片阶段。",@(error.code)];[self axs_cachekeeper_refresh];return;}
+    page.collectionNavigation=position;
+    __weak typeof(self) returnOwner=self;position.returnToParent=^{[returnOwner axs_cachekeeper_register_return];};
     NSMutableDictionary *names=[self.applicationNames mutableCopy] ?: [NSMutableDictionary new];
     for (NSString *bundle in self.installationCache) {
         NSString *name=self.installationCache[bundle][@"entry"][@"name"];if ([name isKindOfClass:NSString.class] && name.length) names[bundle]=name;
@@ -263,37 +278,31 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     self.status=saved ? @"已记录主动跳过图片阶段，图片功能未验证；可汇总并导出本会话。" : [NSString stringWithFormat:@"跳过决定未保存（%@），请重试；未封存报告。",@(error.code)];
     [self axs_cachekeeper_refresh];
 }
+- (void)axs_cachekeeper_clear_completed_return {
+    if(!self.axs_cachekeeper_collectionSession.reportProjection[@"phases"][@"export"])return;
+    AxsCacheKeeperCollectionReturn *store=[[AxsCacheKeeperCollectionReturn alloc] initWithDirectory:self.axs_cachekeeper_collectionSession.storagePath.stringByDeletingLastPathComponent];
+    NSDictionary *intent=[store read:NULL];if([intent[@"sessionID"] isEqual:self.axs_cachekeeper_collectionSession.sessionID])[store clear:intent error:NULL];
+}
+- (void)axs_cachekeeper_register_return {
+    if(!self.axs_cachekeeper_collectionSession || self.axs_cachekeeper_collectionSession.reportProjection[@"phases"][@"export"])return;
+    AxsCacheKeeperCollectionNavigation *position=[[AxsCacheKeeperCollectionNavigation alloc] initWithSession:self.axs_cachekeeper_collectionSession intent:nil];
+    if([position selectPage:@"guided" error:NULL]){
+        self.axs_cachekeeper_returnNavigation=position;self.axs_cachekeeper_automaticPage=nil;self.axs_cachekeeper_resumeImagePending=NO;
+        __weak typeof(self) weak=self;[position attachTo:self exit:^{typeof(self) page=weak;[page axs_cachekeeper_interrupt_capacity:@"userBack"];[page axs_cachekeeper_capacity_stop];}];
+    }
+}
 - (void)axs_cachekeeper_guided_action {
     if (!self.axs_cachekeeper_guidedButton.enabled) return;
-    NSString *directory=[jbroot(@"/var/mobile/Library/CacheKeeper/collectionSessions") copy];NSError *error=nil;
-    NSArray *resumable=[AxsCacheKeeperCollectionSession resumableSessionsInDirectory:directory error:&error];
-    if (!resumable) {[self axs_cachekeeper_message:[NSString stringWithFormat:@"无法读取本地未完成会话（代码 %@）；未发送请求。",@(error.code)]];return;}
-    if (resumable.count) {
-        NSString *message=[NSString stringWithFormat:@"发现 %@ 个未完成会话。选择对应会话继续，或另建会话。续作会保留已完成阶段，不自动重放。",@(resumable.count)];
-        UIAlertController *choice=[UIAlertController alertControllerWithTitle:@"继续集中采集" message:message preferredStyle:UIAlertControllerStyleActionSheet];
-        __weak typeof(self) weak=self;
-        for (NSDictionary *record in resumable) {
-            NSString *title=[NSString stringWithFormat:@"继续 %@ · %@",[record[@"sessionID"] substringToIndex:8],record[@"nextPhase"]];
-            [choice addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                (void)action;AxsCacheKeeperDiagnosticsPage *owner=weak;if (!owner) return;
-                NSError *openError=nil;AxsCacheKeeperCollectionSession *session=[AxsCacheKeeperCollectionSession openSessionAtPath:record[@"path"] error:&openError];
-                for (NSDictionary *target in axs_cachekeeper_host_preflight_targets())
-                    if (session && ![session blockCapability:target[@"bundle"] capability:@"privateResourceContract" error:&openError]) {session=nil;break;}
-                [owner axs_cachekeeper_push_guided_session:session error:openError];
-            }]];
-        }
-        [choice addAction:[UIAlertAction actionWithTitle:@"新建会话" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            (void)action;AxsCacheKeeperDiagnosticsPage *owner=weak;if (!owner) return;
-            NSError *newError=nil;AxsCacheKeeperCollectionSession *session=[owner axs_cachekeeper_openSessionInDirectory:directory error:&newError];
-            [owner axs_cachekeeper_push_guided_session:session error:newError];
-        }]];
-        [choice addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-        choice.popoverPresentationController.sourceView=self.axs_cachekeeper_guidedButton;
-        choice.popoverPresentationController.sourceRect=self.axs_cachekeeper_guidedButton.bounds;
-        [self presentViewController:choice animated:YES completion:nil];return;
-    }
-    AxsCacheKeeperCollectionSession *session=[self axs_cachekeeper_openSessionInDirectory:directory error:&error];
-    [self axs_cachekeeper_push_guided_session:session error:error];
+    NSString *directory=[jbroot(@"/var/mobile/Library/CacheKeeper/collectionSessions") copy];
+    __weak typeof(self) weak=self;
+    AxsCacheKeeperCollectionHistoryPage *list=[[AxsCacheKeeperCollectionHistoryPage alloc] initWithDirectory:directory selection:^(AxsCacheKeeperCollectionSession *session){
+        [weak axs_cachekeeper_push_guided_session:session error:nil];
+    } create:^{
+        typeof(self) owner=weak;if(!owner)return;NSError *error=nil;
+        AxsCacheKeeperCollectionSession *session=[owner axs_cachekeeper_openSessionInDirectory:directory error:&error];
+        [owner axs_cachekeeper_push_guided_session:session error:error];
+    }];
+    [self.navigationController pushViewController:list animated:YES];
 }
 - (void)presentResumableCollection {
     [self loadViewIfNeeded];
@@ -307,12 +316,23 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     AxsCacheKeeperDiagnosticsPage *page=[[AxsCacheKeeperDiagnosticsPage alloc] initWithCollectionSessionObject:session];
     page.applicationNames=self.applicationNames;
     if (!page.axs_cachekeeper_collectionSession) { [self axs_cachekeeper_message:[NSString stringWithFormat:@"会话文件无法创建或读取（代码 %@）；未发送宿主请求。",@(error.code)]] ;return; }
+    if(!session.reportProjection[@"phases"][@"export"]){
+        page.axs_cachekeeper_returnNavigation=[[AxsCacheKeeperCollectionNavigation alloc] initWithSession:session intent:nil];
+        NSError *positionError=nil;
+        if(![page.axs_cachekeeper_returnNavigation selectPage:@"guided" error:&positionError]){[self axs_cachekeeper_message:@"采集返回位置无法保存，尚未进入采集。"];return;}
+    }
     [self.navigationController pushViewController:page animated:YES];
 }
 - (void)axs_cachekeeper_push_host_preflight:(NSString *)directory {
     NSString *version=[NSBundle bundleForClass:self.class].infoDictionary[@"CacheKeeperPackageVersion"] ?: @"unknown";
     AxsCacheKeeperHostPreflightPage *page=[[AxsCacheKeeperHostPreflightPage alloc] initWithStatusDirectory:directory panelVersion:version collectionSession:self.axs_cachekeeper_collectionSession];
     if (!page) {self.status=@"宿主预检页面初始化失败，阶段未执行。";[self axs_cachekeeper_refresh];return;}
+    if(self.axs_cachekeeper_collectionSession){
+        AxsCacheKeeperCollectionNavigation *position=[[AxsCacheKeeperCollectionNavigation alloc] initWithSession:self.axs_cachekeeper_collectionSession intent:nil];
+        if(![position selectPage:@"host" error:NULL]){self.status=@"宿主返回位置无法保存，阶段未执行。";[self axs_cachekeeper_refresh];return;}
+        page.collectionNavigation=position;
+        __weak typeof(self) returnOwner=self;position.returnToParent=^{[returnOwner axs_cachekeeper_register_return];};
+    }
     [self.navigationController pushViewController:page animated:YES];
 }
 - (void)axs_cachekeeper_refresh {
@@ -356,6 +376,11 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
     [self axs_cachekeeper_refresh];
 }
 - (NSString *)axs_cachekeeper_capacity_file:(NSString *)name {
+    if(self.axs_cachekeeper_collectionSession){
+        NSString *directory=self.axs_cachekeeper_collectionSession.storagePath.stringByDeletingLastPathComponent;
+        NSString *folder=[directory.lastPathComponent isEqual:@"collectionSessions"] ? directory.stringByDeletingLastPathComponent : directory;
+        return [folder stringByAppendingPathComponent:name];
+    }
     return [jbroot(@"/var/mobile/Library/CacheKeeper") stringByAppendingPathComponent:name];
 }
 - (BOOL)axs_cachekeeper_capacity_write_stop:(NSString *)epoch error:(NSError **)error {
@@ -604,6 +629,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
         }
         if (self.axs_cachekeeper_pendingReport) {
             self.reportData=[self.axs_cachekeeper_collectionSession saveReport:self.axs_cachekeeper_pendingReport diagnosticsResult:self.axs_cachekeeper_pendingCoverage error:&sessionError];
+            if(self.reportData)[self axs_cachekeeper_clear_completed_return];
             if (self.reportData) {self.axs_cachekeeper_pendingReport=nil;self.axs_cachekeeper_pendingCoverage=nil;}
             self.status=self.reportData ? @"原报告已完整保存，可导出。" : [NSString stringWithFormat:@"原报告保存失败（代码 %@）；可重试保存，未重新采集。",@(sessionError.code)];
             [self axs_cachekeeper_refresh];return;
@@ -697,6 +723,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
                 if (data) {page.axs_cachekeeper_pendingReport=nil;page.axs_cachekeeper_pendingCoverage=nil;}
             } else data=[NSJSONSerialization dataWithJSONObject:finalReport options:NSJSONWritingPrettyPrinted|NSJSONWritingSortedKeys error:&error];
             page.collecting=NO;page.reportData=data;
+            if(data)[page axs_cachekeeper_clear_completed_return];
             if (capacity[@"epoch"] && ![capacity[@"state"] isEqual:@"running"] && [capacity[@"summaryBinding"][@"state"] isEqual:@"current"]) {
                 page.axs_cachekeeper_capacitySnapshot=capacity;page.axs_cachekeeper_capacityPendingStop=nil;
             }
@@ -772,6 +799,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
 }
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
+    if(self.axs_cachekeeper_returnNavigation)return;
     if (!self.isMovingFromParentViewController && !self.isBeingDismissed && !self.navigationController.isBeingDismissed) return;
     __weak typeof(self) weak=self;
     void (^releaseReport)(void)=^{
@@ -796,13 +824,38 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
 }
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    if(self.axs_cachekeeper_returnNavigation){
+        __weak typeof(self) weak=self;
+        [self.axs_cachekeeper_returnNavigation attachTo:self exit:^{
+            typeof(self) page=weak;[page axs_cachekeeper_interrupt_capacity:@"userBack"];[page axs_cachekeeper_capacity_stop];
+        }];
+    }
+    if(self.axs_cachekeeper_automaticPending){
+        self.axs_cachekeeper_automaticPending=NO;
+        NSDictionary *intent=self.axs_cachekeeper_returnNavigation.intent;
+        if(![[self.axs_cachekeeper_returnNavigation.store read:NULL] isEqual:intent])return;
+        if([self.axs_cachekeeper_automaticPage isEqual:@"image"]){
+            AxsCacheKeeperImageCollectionSession *image=[self.axs_cachekeeper_collectionSession imageCollectionSession:NULL];
+            if(image){AxsCacheKeeperImageCollectionPage *page=[[AxsCacheKeeperImageCollectionPage alloc] initWithSession:image];page.applicationNames=self.applicationNames;
+                page.collectionNavigation=[[AxsCacheKeeperCollectionNavigation alloc] initWithSession:self.axs_cachekeeper_collectionSession intent:intent];
+                __weak typeof(self) returnOwner=self;page.collectionNavigation.returnToParent=^{[returnOwner axs_cachekeeper_register_return];};
+                [self.navigationController pushViewController:page animated:NO];}
+        } else if([self.axs_cachekeeper_automaticPage isEqual:@"host"]){
+            NSString *directory=[[self.axs_cachekeeper_collectionSession.storagePath.stringByDeletingLastPathComponent stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"Status"];
+            AxsCacheKeeperHostPreflightPage *page=[[AxsCacheKeeperHostPreflightPage alloc] initWithStatusDirectory:directory panelVersion:[NSBundle bundleForClass:self.class].infoDictionary[@"CacheKeeperPackageVersion"] ?: @"unknown" collectionSession:self.axs_cachekeeper_collectionSession];
+            page.collectionNavigation=[[AxsCacheKeeperCollectionNavigation alloc] initWithSession:self.axs_cachekeeper_collectionSession intent:intent];
+            __weak typeof(self) returnOwner=self;page.collectionNavigation.returnToParent=^{[returnOwner axs_cachekeeper_register_return];};
+            if(page)[self.navigationController pushViewController:page animated:NO];
+        }
+        return;
+    }
     if (self.axs_cachekeeper_presentResumePending) {self.axs_cachekeeper_presentResumePending=NO;[self presentResumableCollection];}
     if (!self.axs_cachekeeper_guidedCollection || !self.axs_cachekeeper_collectionSession || self.collecting || self.sharing) return;
     BOOL resumeImage=self.axs_cachekeeper_resumeImagePending;self.axs_cachekeeper_resumeImagePending=NO;
     NSDictionary *phases=self.axs_cachekeeper_collectionSession.reportProjection[@"phases"];
     NSString *hostState=phases[@"hostPreflight"][@"state"];
     NSString *capacityState=phases[@"capacity"][@"state"];
-    if ([@[@"complete",@"partial"] containsObject:hostState] && !capacityState) [self axs_cachekeeper_capacity_action];
+    if (!self.axs_cachekeeper_automaticPage && [@[@"complete",@"partial"] containsObject:hostState] && !capacityState) [self axs_cachekeeper_capacity_action];
     else if (([hostState isEqual:@"interrupted"] || [hostState isEqual:@"cancelled"]) && !self.axs_cachekeeper_capacityEpoch) {
         self.status=@"上次宿主预检未完成；请重新执行该阶段后继续，不会跳过或覆盖已有成功阶段。";[self axs_cachekeeper_refresh];
     } else if ([capacityState isEqual:@"interrupted"] || [capacityState isEqual:@"cancelled"]) {
@@ -817,6 +870,7 @@ static void AxsCacheKeeperRemoveDiagnosticShare(NSURL *file) {
 }
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
+    if(self.axs_cachekeeper_returnNavigation){[self.axs_cachekeeper_capacityTimer invalidate];self.axs_cachekeeper_capacityTimer=nil;return;}
     // Capacity-only completion handling leaves PDF/share and cancelled transitions unchanged.
     if (!self.axs_cachekeeper_capacityEpoch || self.sharing) return;
     BOOL pushed=self.navigationController && self.navigationController.topViewController!=self;

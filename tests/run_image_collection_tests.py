@@ -56,3 +56,12 @@ with tempfile.TemporaryDirectory(prefix='image-collection-',dir=ROOT/'tmp') as f
     result=subprocess.run([str(red_binary),str(output/'red-home')],capture_output=True,text=True,timeout=30)
     assert result.returncode==1 and result.stderr.strip()=='FAIL: image-collection: image-only lease changes effective mode',result.stderr
     print('PASS: exact prior-no-overlay behavior RED')
+    cleanup_source=(ROOT/'AxsCacheKeeperImageCollection.m').read_text(encoding='utf8')
+    anchor='if([cleanup[@"cleanupActions"] unsignedIntegerValue]>0 && [event[@"state"] isEqual:@"notTriggered"])event[@"state"]=@"insufficientEvidence";'
+    assert cleanup_source.count(anchor)==1
+    (red/'AxsCacheKeeperImageCollection.m').write_text(cleanup_source.replace(anchor,''),encoding='utf8')
+    shutil.copyfile(ROOT/'AxsCacheKeeperImageCollection.h',red/'AxsCacheKeeperImageCollection.h')
+    subprocess.run(flags+['-I'+str(ROOT),str(red/'AxsCacheKeeperImageCollection.m'),str(ROOT/'AxsCacheKeeperOperationInfo.m'),str(red/'tests/image_collection_tests.m'),'-o',str(red_binary)],check=True,timeout=60)
+    result=subprocess.run([str(red_binary),str(output/'cleanup-red-home')],capture_output=True,text=True,timeout=30)
+    assert result.returncode==1 and result.stderr.strip()=='FAIL: image-collection: observed cleanup is not labelled untriggered and incomplete coverage stays unproven',result.stderr
+    print('PASS: writer-only stage summary reaches exact observed-cleanup RED')

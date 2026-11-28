@@ -1,4 +1,5 @@
 #import "HostPreflightPage.h"
+#import "CollectionNavigation.h"
 #import "../AxsCacheKeeperHostPreflight.h"
 
 @interface AxsCacheKeeperHostPreflightPage ()
@@ -84,12 +85,14 @@
 }
 - (void)axs_cachekeeper_action {
     if (self.axs_cachekeeper_batch.running) {
+        [self.collectionNavigation clear];
         [self.axs_cachekeeper_batch cancel];
         NSError *error=nil;
         if (self.axs_cachekeeper_collectionSession && ![self.axs_cachekeeper_collectionSession finishPhase:@"hostPreflight" result:@{@"state":@"cancelled"} error:&error])
             self.text.text=[NSString stringWithFormat:@"取消已请求，但会话记录失败（代码 %@）；恢复时将按中断处理。\n\n%@",@(error.code),self.text.text];
     } else {
         NSError *sessionError=nil;
+        if(self.collectionNavigation && ![self.collectionNavigation selectPage:@"host" error:&sessionError]){self.text.text=@"返回位置无法保存，未重启宿主请求。";return;}
         NSString *phaseState=self.axs_cachekeeper_collectionSession.reportProjection[@"phases"][@"hostPreflight"][@"state"];
         BOOL retrying=self.axs_cachekeeper_collectionSession && [@[@"interrupted",@"cancelled"] containsObject:phaseState];
         BOOL prepared=!retrying || [self.axs_cachekeeper_collectionSession prepareRetryForPhase:@"hostPreflight" error:&sessionError];
@@ -156,12 +159,20 @@
 }
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];self.axs_cachekeeper_departing=NO;[self axs_cachekeeper_poll];
+    __weak typeof(self) weak=self;
+    [self.collectionNavigation attachTo:self exit:^{
+        typeof(self) page=weak;BOOL running=page.axs_cachekeeper_batch.running;[page.axs_cachekeeper_batch cancel];
+        if(running)[page.axs_cachekeeper_collectionSession finishPhase:@"hostPreflight" result:@{@"state":@"interrupted",@"reason":@"userBack"} error:NULL];
+    }];
+    if([self.axs_cachekeeper_collectionSession.reportProjection[@"phases"][@"hostPreflight"][@"state"] isEqual:@"interrupted"])
+        self.text.text=[@"原宿主请求随页面或进程结束，未自动重发。可在此明确重启预检。\n\n" stringByAppendingString:self.text.text];
 }
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];self.axs_cachekeeper_departing=YES;[self axs_cachekeeper_update_timer];
 }
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
+    if(self.collectionNavigation){[self.axs_cachekeeper_timer invalidate];self.axs_cachekeeper_timer=nil;return;}
     // Switching apps keeps the controller in the navigation stack. A real departure releases requests.
     BOOL removed=!self.navigationController || ![self.navigationController.viewControllers containsObject:self];
     BOOL covered=self.navigationController && self.navigationController.topViewController!=self;

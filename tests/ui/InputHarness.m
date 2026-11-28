@@ -4,6 +4,10 @@
 #import "../../Prefs/SearchInput.h"
 #import "../../Prefs/SearchHitRouting.h"
 #import "../../Prefs/DiagnosticsPage.h"
+#import "../../Prefs/ImageCollectionPage.h"
+#import "../../Prefs/CollectionHistoryPage.h"
+#import "../../AxsCacheKeeperCollectionReturn.h"
+#import "../../AxsCacheKeeperCollectionSession.h"
 #import "../../AxsCacheKeeperAppList.h"
 @implementation PSViewController
 @end
@@ -19,6 +23,12 @@
 - (void)axs_cachekeeper_render;
 - (void)axs_cachekeeper_apply_pending_snapshot;
 - (void)updateBatch;
+@end
+@interface AxsCollectionReturnHarnessRoot : CKSettings
+@property(nonatomic,copy) NSString *directory;
+@end
+@implementation AxsCollectionReturnHarnessRoot
+- (NSString *)axs_cachekeeper_collection_directory {return self.directory;}
 @end
 // The visual fixture drives the production controller with synthetic metadata, without device reads/writes.
 @interface AxsCacheKeeperVisualSettings : CKSettings
@@ -260,6 +270,8 @@ static NSDictionary *axs_cachekeeper_test_region_evidence(CKSettings *settings,U
 @property(nonatomic,strong) UIWindow *window;
 @property(nonatomic,strong) UIView *axs_cachekeeper_testOverlay;
 @property(nonatomic,strong) UINavigationBar *axs_cachekeeper_testHostBar;
+@property(nonatomic,copy) NSString *axs_collectionDirectory;
+@property(nonatomic) NSUInteger axs_collectionRebuilds;
 @end
 @implementation AxsCacheKeeperInputTestDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
@@ -268,6 +280,25 @@ static NSDictionary *axs_cachekeeper_test_region_evidence(CKSettings *settings,U
         [NSProcessInfo.processInfo.arguments containsObject:@"--compact-visual"];
     Class windowClass=regrown ? AxsCacheKeeperRegrowingWindow.class : UIWindow.class;
     self.window=[[windowClass alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    if([NSProcessInfo.processInfo.arguments containsObject:@"--collection-history"]){
+        NSString *directory=[[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString] stringByAppendingPathComponent:@"collectionSessions"];
+        for(NSUInteger i=0;i<3;i++)[AxsCacheKeeperCollectionSession createNewSessionInDirectory:directory error:NULL];
+        AxsCacheKeeperCollectionHistoryPage *page=[[AxsCacheKeeperCollectionHistoryPage alloc] initWithDirectory:directory selection:^(AxsCacheKeeperCollectionSession *session){(void)session;} create:^{}];
+        self.window.rootViewController=[[UINavigationController alloc] initWithRootViewController:page];[self.window makeKeyAndVisible];return YES;
+    }
+    if([NSProcessInfo.processInfo.arguments containsObject:@"--collection-auto-return"]){
+        NSString *folder=[NSTemporaryDirectory() stringByAppendingPathComponent:@"collection-return-xcui"];
+        self.axs_collectionDirectory=[folder stringByAppendingPathComponent:@"collectionSessions"];
+        if(![NSProcessInfo.processInfo.arguments containsObject:@"--collection-resume"]){
+            NSError *error=nil;AxsCacheKeeperCollectionSession *session=[AxsCacheKeeperCollectionSession createNewSessionInDirectory:self.axs_collectionDirectory error:&error];
+            [session beginPhase:@"hostPreflight" error:&error];[session finishPhase:@"hostPreflight" result:@{@"state":@"partial"} error:&error];
+            [session beginPhase:@"capacity" error:&error];[session finishPhase:@"capacity" result:@{@"state":@"partial",@"epoch":@"fixture",@"finishedAt":@2,@"completedRoots":@0,@"totalRoots":@0,@"failedRoots":@0} error:&error];
+            [session imageCollectionSession:&error];
+            AxsCacheKeeperCollectionReturn *store=[[AxsCacheKeeperCollectionReturn alloc] initWithDirectory:self.axs_collectionDirectory];[store selectSession:session page:@"image" error:&error];
+            NSAssert(!error,@"Collection fixture must persist successfully");
+        }
+        [self axs_collection_show_root];return YES;
+    }
     if ([NSProcessInfo.processInfo.arguments containsObject:@"--compact-visual"]) {
         AxsCacheKeeperVisualSettings *settings=[AxsCacheKeeperVisualSettings new];
         AxsCacheKeeperTestNestedHost *host=[[AxsCacheKeeperTestNestedHost alloc] initWithSettings:settings];
@@ -302,6 +333,13 @@ static NSDictionary *axs_cachekeeper_test_region_evidence(CKSettings *settings,U
 }
 - (void)navigationController:(UINavigationController *)navigation didShowViewController:(UIViewController *)controller animated:(BOOL)animated {
     (void)animated;
+    if(self.axs_collectionDirectory && [controller isKindOfClass:AxsCacheKeeperImageCollectionPage.class]){
+        NSDictionary *report=[[controller valueForKey:@"session"] reportProjection];
+        for(UIView *view in controller.view.subviews)if([view.accessibilityIdentifier isEqual:@"CollectionReturnEvidence"])[view removeFromSuperview];
+        UILabel *label=[[UILabel alloc] initWithFrame:CGRectMake(8,controller.view.bounds.size.height-36,controller.view.bounds.size.width-16,30)];
+        label.accessibilityIdentifier=@"CollectionReturnEvidence";label.text=[NSString stringWithFormat:@"%@:%@:%lu",report[@"sessionID"],report[@"state"],(unsigned long)self.axs_collectionRebuilds];
+        [controller.view addSubview:label];return;
+    }
     if ([controller isKindOfClass:CKSettings.class] &&
         [NSProcessInfo.processInfo.arguments containsObject:@"--search-host-navigation-bar"]) {
         [navigation.view layoutIfNeeded];
@@ -358,6 +396,18 @@ static NSDictionary *axs_cachekeeper_test_region_evidence(CKSettings *settings,U
 }
 - (void)axs_cachekeeper_collapseHostBar {
     CGRect frame=self.axs_cachekeeper_testHostBar.frame;frame.size.height=44;self.axs_cachekeeper_testHostBar.frame=frame;
+}
+- (void)axs_collection_show_root {
+    AxsCollectionReturnHarnessRoot *root=[AxsCollectionReturnHarnessRoot new];root.directory=self.axs_collectionDirectory;
+    UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:root];nav.delegate=self;self.window.rootViewController=nav;[self.window makeKeyAndVisible];
+}
+- (void)applicationDidEnterBackground:(UIApplication *)application {
+    (void)application;if(!self.axs_collectionDirectory)return;
+    // Controlled reproduction of a host discarding its plugin navigation, not an OS diagnosis.
+    self.window.rootViewController=nil;self.axs_collectionRebuilds++;
+}
+- (void)applicationWillEnterForeground:(UIApplication *)application {
+    (void)application;if(self.axs_collectionDirectory)[self axs_collection_show_root];
 }
 @end
 int main(int argc,char *argv[]) {

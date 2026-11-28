@@ -8,6 +8,7 @@
 + (NSArray<NSDictionary *> *)resumableSessionsInDirectory:(NSString *)directory error:(NSError **)error;
 + (instancetype)openSessionAtPath:(NSString *)path error:(NSError **)error;
 @property(nonatomic,readonly,copy) NSString *sessionID;
+@property(nonatomic,readonly,copy) NSString *storagePath;
 - (AxsCacheKeeperImageCollectionSession *)imageCollectionSession:(NSError **)error;
 - (BOOL)beginPhase:(NSString *)phase error:(NSError **)error;
 - (BOOL)beginCapacityWithEpoch:(NSString *)epoch error:(NSError **)error;

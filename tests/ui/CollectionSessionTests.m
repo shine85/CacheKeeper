@@ -258,7 +258,9 @@
     XCTAssertNil(image.view.window);XCTAssertTrue([navigation.viewControllers containsObject:image]);
     [NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidBecomeActiveNotification object:nil];
     XCTAssertEqualObjects([NSData dataWithContentsOfFile:requestPath],leaseBefore,@"normal app switch preserves exact request and original expiry");
-    [navigation popViewControllerAnimated:NO];[image viewDidDisappear:NO];[page viewDidAppear:NO];
+    [image viewDidAppear:NO];UIButton *explicitBack=[UIButton buttonWithType:UIButtonTypeSystem];
+    [explicitBack addAction:image.navigationItem.backAction forControlEvents:UIControlEventTouchUpInside];[explicitBack sendActionsForControlEvents:UIControlEventTouchUpInside];
+    [image viewDidDisappear:NO];[page viewDidAppear:NO];
     XCTAssertEqual(navigation.topViewController,page,@"ordinary back remains on parent instead of reopening image page");
     XCTAssertEqualObjects(axs_cachekeeper_image_collection_read(self.axs_cachekeeper_folder,&error)[@"phase"],@"restore");
     leaseBefore=[NSData dataWithContentsOfFile:requestPath];

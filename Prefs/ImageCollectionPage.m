@@ -1,4 +1,5 @@
 #import "ImageCollectionPage.h"
+#import "CollectionNavigation.h"
 #import "../AxsCacheKeeperImageCollection.h"
 
 @interface AxsCacheKeeperImageCollectionPage ()
@@ -51,9 +52,7 @@
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(axs_foreground:) name:UIApplicationDidBecomeActiveNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(axs_background:) name:UIApplicationDidEnterBackgroundNotification object:nil];
     [self axs_render:nil];
-    __weak typeof(self) weak=self;self.timer=[NSTimer scheduledTimerWithTimeInterval:5 repeats:YES block:^(NSTimer *timer) {
-        (void)timer;if (weak.view.window && UIApplication.sharedApplication.applicationState==UIApplicationStateActive) [weak axs_poll];
-    }];
+    [self axs_start_timer];
     [self axs_poll];
 }
 - (NSString *)axs_name:(NSString *)bundle {return self.applicationNames[bundle] ?: bundle;}
@@ -89,6 +88,15 @@
             preparing ? [NSString stringWithFormat:@"已选择：%@\n准备状态：%@\n请手动打开这个 APP，进入平常会加载图片的页面，再回到这里。返回时会自动重新检查；取得新回执后，点“确认开始图片阶段”。",[self axs_name:report[@"bundle"]],reason] :
             @"先选择有历史合格 SDK 回执的 APP。历史过期只要求刷新，不授权执行。随后仅需打开所选 APP，无需重复五 APP 预检或容量测量。",
             self.message ?: @"",[self axs_preflight_summary]];
+    } else {
+        NSMutableString *evidence=[NSMutableString new];
+        for(NSDictionary *event in report[@"events"]){
+            NSDictionary *data=event[@"writers"][@"data"],*extended=event[@"writers"][@"extended"];
+            [evidence appendFormat:@"\n%@：数据写入 %@ 次，阻断 %@，放行 %@；扩展写入 %@ 次。",@{@"prevent":@"限制阶段",@"clean":@"清理阶段",@"disabled":@"关闭阶段"}[event[@"phase"]] ?: @"已保存阶段",data[@"nonemptyAttempts"] ?: @0,data[@"nonemptyBlocked"] ?: @0,data[@"nonemptyAllowed"] ?: @0,extended[@"nonemptyAttempts"] ?: @0];
+            if([event[@"cleanupActions"] unsignedIntegerValue]>0)[evidence appendFormat:@" 已观察清理 %@ 次，其中有实际文件减少 %@ 次；%@。",event[@"cleanupActions"],event[@"cleanupPositiveActions"], [event[@"cleanupCoverageComplete"] boolValue] ? @"当前清理证据完整" : @"范围完整性仍未确认"];
+        }
+        if([report[@"state"] isEqual:@"complete"])[evidence appendFormat:@"\n已确认恢复当前设置；阶段验证%@，不等于全部测试通过。",[report[@"verificationState"] isEqual:@"passed"] ? @"通过" : @"仍有未触发或证据不足项"];
+        self.text.text=[self.text.text stringByAppendingString:evidence];
     }
     BOOL ready=[self.preparationStatus[@"state"] isEqual:@"readyToStart"];
     [self.startButton setTitle:preparing ? (ready ? @"确认开始图片阶段" : @"重新检查所选 APP") : @"选择图片采集 APP" forState:UIControlStateNormal];
@@ -116,6 +124,9 @@
     }
     NSError *error=nil;NSDictionary *status=[self.session poll:&error];
     if (error) self.message=[NSString stringWithFormat:@"回执尚不可读（%@）；等待并不代表成功。",@(error.code)];
+    else if([status[@"reason"] isEqual:@"processChanged"])self.message=@"APP 已重新启动，本阶段没有取得原进程的有效回执。请取消并确认恢复；不会自动绑定新进程或重发请求。";
+    else if([status[@"state"] isEqual:@"interrupted"])self.message=@"本阶段已中断或租期已失效，未自动续期。可取消并确认恢复，已保存阶段仍保留。";
+    else if([status[@"state"] isEqual:@"restorationUnconfirmed"])self.message=@"恢复尚未获得宿主确认，不能视为已恢复。原请求与记录已保留。";
     [self axs_render:status];
 }
 - (void)axs_start {
@@ -152,18 +163,31 @@
         [failure.userInfo[@"entryEvidenceSaved"] boolValue] ? @"失败原因已保存" : @"失败记录保存未确认"];
     [self axs_poll];
 }
-- (void)axs_foreground:(NSNotification *)notification {(void)notification;self.backgrounded=NO;[self axs_poll];}
+- (void)axs_start_timer {
+    if(self.timer)return;__weak typeof(self) weak=self;
+    self.timer=[NSTimer scheduledTimerWithTimeInterval:5 repeats:YES block:^(NSTimer *timer){(void)timer;if(weak.view.window && UIApplication.sharedApplication.applicationState==UIApplicationStateActive)[weak axs_poll];}];
+}
+- (void)axs_foreground:(NSNotification *)notification {(void)notification;self.backgrounded=NO;[self axs_start_timer];[self axs_poll];}
 - (void)axs_background:(NSNotification *)notification {(void)notification;self.backgrounded=YES;}
 - (void)axs_next {NSError *error=nil;BOOL ok=[self.session captureAndAdvance:&error];self.message=ok ? @"当前阶段实际结果已保存，等待下一阶段确认。" : [NSString stringWithFormat:@"尚不能推进（%@），没有把等待或失败算成功。",@(error.code)];[self axs_poll];}
-- (void)axs_cancel {NSError *error=nil;BOOL ok=[self.session cancel:&error];self.message=ok ? @"已发出恢复请求，等待宿主确认。" : [NSString stringWithFormat:@"恢复请求未完成（%@）；租期仍有上限，可再次取消。",@(error.code)];[self axs_poll];}
+- (void)axs_cancel {NSError *error=nil;BOOL ok=[self.session cancel:&error];if(ok)[self.collectionNavigation clear];self.message=ok ? @"已发出恢复请求，等待宿主确认。" : [NSString stringWithFormat:@"恢复请求未完成（%@）；租期仍有上限，可再次取消。",@(error.code)];[self axs_poll];}
 - (void)axs_retry {
     NSError *error=nil;
     if (!self.entrySaved) {self.entrySaved=[self.session recordEntry:&error];self.message=self.entrySaved ? @"入口记录已保存，可选择执行或跳过。" : [NSString stringWithFormat:@"入口记录仍未保存（%@）。",@(error.code)];[self axs_render:nil];return;}
     BOOL ok=[self.session retryPublishing:&error];self.message=ok ? @"已重发原请求，编号和到期时间未变。" : [NSString stringWithFormat:@"原请求无法重发（%@）；可取消并恢复。",@(error.code)];[self axs_poll];
 }
-- (void)axs_skip {if (self.preparationReading) return;self.preparationGeneration++;NSError *error=nil;BOOL ok=[self.session skip:&error];self.message=ok ? @"已记录跳过；图片功能未验证。返回向导汇总并导出。" : [NSString stringWithFormat:@"跳过决定未保存（%@），请重试。",@(error.code)];[self axs_render:nil];}
+- (void)axs_skip {if (self.preparationReading) return;self.preparationGeneration++;NSError *error=nil;BOOL ok=[self.session skip:&error];if(ok)[self.collectionNavigation clear];self.message=ok ? @"已记录跳过；图片功能未验证。返回向导汇总并导出。" : [NSString stringWithFormat:@"跳过决定未保存（%@），请重试。",@(error.code)];[self axs_render:nil];}
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];[self axs_start_timer];__weak typeof(self) weak=self;
+    [self.collectionNavigation attachTo:self exit:^{
+        typeof(self) page=weak;
+        if(![page.session.reportProjection[@"state"] isEqual:@"idle"] && ![page.session readyForReport]) [page.session cancel:NULL];
+    }];
+    [self axs_poll];
+}
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
+    if(self.collectionNavigation){self.preparationGeneration++;[self.timer invalidate];self.timer=nil;return;}
     if (self.isMovingFromParentViewController || self.isBeingDismissed || ![self.navigationController.viewControllers containsObject:self]) {
         self.preparationGeneration++;
         NSError *error=nil;

@@ -27,6 +27,40 @@ static NSDictionary *receipt(NSDictionary *metadata) {
         @"updated":NSDate.date,@"bytesState":@"notMeasured",@"runtimeInfo":@{@"schemaVersion":@1,@"packageVersion":@"0.7.2-217.1",@"firstObserved":@1}} mutableCopy];
     if (metadata) value[@"imageCollection"]=metadata;return value;
 }
+static void cleanupWithoutNewWrite(NSString *folder) {
+    // Synthetic transport fixture keeps only the observed 6-to-0 cleanup shape; no device identifiers.
+    NSFileManager *files=NSFileManager.defaultManager;NSString *status=[folder stringByAppendingPathComponent:@"Status"];
+    check([files createDirectoryAtPath:status withIntermediateDirectories:YES attributes:nil error:NULL],"cleanup-only fixture directory");
+    check([@{AxsCacheKeeperImageCollectionBundle:@YES} writeToFile:[folder stringByAppendingPathComponent:@"appEnabled.plist"] atomically:YES],"cleanup-only enabled fixture");
+    check([@{} writeToFile:[folder stringByAppendingPathComponent:@"directories.plist"] atomically:YES],"cleanup-only selections");
+    NSString *receiptPath=[status stringByAppendingPathComponent:[AxsCacheKeeperImageCollectionBundle stringByAppendingString:@".imagecache.plist"]];
+    check(writeReceipt(receipt(nil),receiptPath),"cleanup initial receipt");
+    NSString *identifier=@"77777777777777777777777777777777";NSError *error=nil;
+    AxsCacheKeeperImageCollectionSession *session=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:identifier error:&error];check([session start:&error],"cleanup initial request");
+    NSString *path=[[folder stringByAppendingPathComponent:@"collectionSessions"] stringByAppendingPathComponent:[identifier stringByAppendingString:@".image.plist"]];
+    NSMutableDictionary *document=[[NSDictionary dictionaryWithContentsOfFile:path] mutableCopy],*request=[document[@"request"] mutableCopy];
+    request[@"step"]=@2;request[@"phase"]=@"clean";document[@"request"]=request;
+    NSData *saved=[NSPropertyListSerialization dataWithPropertyList:document format:NSPropertyListBinaryFormat_v1_0 options:0 error:&error];check([saved writeToFile:path atomically:YES],"persist selected clean phase fixture");
+    session=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:identifier error:&error];
+    AxsCacheKeeperWriteObservation observation={0};uint64_t epoch=axs_cachekeeper_write_epoch_begin(&observation,1,1,true,2);
+    NSDictionary *writers=axs_cachekeeper_write_observation_record(observation),*counts=writers[@"epochs"][0];
+    NSMutableDictionary *history=axs_cachekeeper_operation_history_create(@"image",nil);
+    NSUInteger event=axs_cachekeeper_operation_begin(history,@"background",1,1,NO),action=axs_cachekeeper_operation_action(history,event,1);
+    axs_cachekeeper_operation_transition(history,action,@"submitted",NO);
+    axs_cachekeeper_operation_image_effect(history,action,@{@"scope":@"sdkFlatDirectoryEntries",@"physicalRelease":@"notMeasured",@"result":@"empty",
+        @"before":@{@"state":@"complete",@"files":@6,@"logicalBytes":@6292,@"allocatedBytes":@24576},@"after":@{@"state":@"complete",@"files":@0,@"logicalBytes":@0,@"allocatedBytes":@0}});
+    axs_cachekeeper_operation_finish(history,event);history[@"raw"][@"historyTruncated"]=@YES;
+    NSDictionary *metadata=@{@"sessionID":identifier,@"requestID":request[@"requestID"],@"phase":@"clean",@"step":@2,@"expiresAt":request[@"expiresAt"],@"disposition":@"applied",@"configuration":@1,@"installation":@1,
+        @"epochs":@[@(epoch)],@"events":@[@(event)],@"baselines":@{[@(epoch) stringValue]:@{@"data":counts[@"data"],@"extended":counts[@"extended"]}}};
+    NSMutableDictionary *record=[receipt(metadata) mutableCopy];record[@"writeObservation"]=writers;record[@"operationHistory"]=axs_cachekeeper_operation_snapshot(history);
+    record[@"queued"]=@1;record[@"submitted"]=@1;record[@"apiCompleted"]=@1;record[@"state"]=@"apiCompleted";
+    check(writeReceipt(record,receiptPath),"real receipt transport has cleanup but zero new writers");
+    check([session captureAndAdvance:&error],"capture actual cleanup-only receipt");
+    NSDictionary *captured=[session.reportProjection[@"events"] lastObject];
+    check([captured[@"state"] isEqual:@"insufficientEvidence"] && [captured[@"cleanupPositiveActions"] isEqual:@1] && ![captured[@"cleanupCoverageComplete"] boolValue] &&
+        [captured[@"writers"][@"data"][@"state"] isEqual:@"notTriggered"],"observed cleanup is not labelled untriggered and incomplete coverage stays unproven");
+    printf("PASS: actual cleanup without new writer remains observed with incomplete coverage\n");
+}
 int main(int argc,const char **argv) {@autoreleasepool {
     check(argc==2 || argc==3,"isolated folder supplied");NSString *folder=[NSString stringWithUTF8String:argv[1]];
     NSString *status=[folder stringByAppendingPathComponent:@"Status"];
@@ -198,5 +232,6 @@ int main(int argc,const char **argv) {@autoreleasepool {
         check([@{AxsCacheKeeperImageCollectionBundle:state,@"other.app":@NO} writeToFile:statePath atomically:YES],"restore race fixture configuration");
     }
     printf("PASS: preparation concurrent skip and replacement preserve latest durable decision\n");
+    cleanupWithoutNewWrite([folder stringByAppendingPathComponent:@"cleanup-only"]);
     printf("PASS: image collection real file transport, overlay isolation, expiry, process binding and restoration\n");
 }return 0;}

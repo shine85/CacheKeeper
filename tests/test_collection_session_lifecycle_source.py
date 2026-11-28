@@ -152,10 +152,10 @@ class GuidedSessionLifecycleTests(unittest.TestCase):
 
     def test_guided_entry_can_select_existing_session_or_create_new(self):
         action = DIAGNOSTICS.split('- (void)axs_cachekeeper_guided_action {', 1)[1].split('- (void)axs_cachekeeper_push_host_preflight', 1)[0]
-        self.assertIn('resumableSessionsInDirectory:directory', action)
-        self.assertIn('openSessionAtPath:', action)
+        self.assertIn('AxsCacheKeeperCollectionHistoryPage', action)
+        self.assertIn('selection:^(AxsCacheKeeperCollectionSession *session)', action)
         self.assertIn('axs_cachekeeper_openSessionInDirectory:directory', action)
-        self.assertIn('UIAlertControllerStyleActionSheet', action)
+        self.assertIn('pushViewController:list', action)
 
 
 if __name__ == "__main__":

@@ -426,6 +426,7 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
             NSDictionary *cleanup=axs_cachekeeper_image_collection_cleanup(receipt,request);
             [event addEntriesFromDictionary:cleanup];
             BOOL cleaned=[cleanup[@"cleanupState"] isEqual:@"passed"];
+            if([cleanup[@"cleanupActions"] unsignedIntegerValue]>0 && [event[@"state"] isEqual:@"notTriggered"])event[@"state"]=@"insufficientEvidence";
             if (!cleaned && [event[@"state"] isEqual:@"passed"]) event[@"state"]=@"insufficientEvidence";
         }
         NSMutableArray *events=[self.document[@"events"] mutableCopy];[events addObject:event];

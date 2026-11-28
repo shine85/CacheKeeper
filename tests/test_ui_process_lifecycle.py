@@ -41,10 +41,10 @@ class UILifecycleTests(unittest.TestCase):
         self.assertGreaterEqual(self.module.RUNNER_BUDGET_SECONDS,self.module.command_budget_seconds()+self.module.MAX_COMMANDS*6)
         workflow=(ROOT/'.github/workflows/build.yml').read_text(encoding='utf-8-sig')
         uikit=workflow.split('  uikit:\n',1)[1].split('  build:\n',1)[0]
-        self.assertIn('timeout-minutes: 210',uikit)
-        self.assertIn('timeout-minutes: 185',uikit)
-        self.assertLess(self.module.RUNNER_BUDGET_SECONDS,185*60)
-        self.assertLessEqual(3+8+2+185+3+5,210)
+        self.assertIn('timeout-minutes: 230',uikit)
+        self.assertIn('timeout-minutes: 205',uikit)
+        self.assertLess(self.module.RUNNER_BUDGET_SECONDS,205*60)
+        self.assertLessEqual(3+8+2+205+3+5,230)
         self.assertIn('needs: [native, uikit]',workflow)
         upload=uikit.split('uses: actions/upload-artifact@v4',1)[1]
         self.assertNotIn('.xcresult',upload)

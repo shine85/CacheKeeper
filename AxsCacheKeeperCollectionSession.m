@@ -277,6 +277,7 @@ static BOOL axs_cachekeeper_collection_session_complete(NSDictionary *projection
     return self;
 }
 - (NSString *)sessionID { @synchronized(self) {return self.axs_cachekeeper_document[@"sessionID"];} }
+- (NSString *)storagePath {return [self.axs_cachekeeper_path copy];}
 - (void)axs_cachekeeper_event:(NSString *)phase state:(NSString *)state result:(NSDictionary *)result {
     NSMutableArray *events=self.axs_cachekeeper_document[@"events"];
     [events addObject:@{@"sequence":@(events.count+1),@"phase":phase,@"state":state,
