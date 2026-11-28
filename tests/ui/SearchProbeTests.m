@@ -3,12 +3,12 @@
 #import "../../Prefs/SearchDiagnostics.h"
 #import "../../Prefs/SearchNavigation.h"
 #import "../../Prefs/SearchHitRouting.h"
-#import "../../Prefs/DiagnosticsPage.h"
+#import "SearchHarness.h"
 #import "../../AxsCacheKeeperDiagnostics.h"
 #import "Preferences/PSViewController.h"
 
 @interface CKSettings : PSViewController
-- (void)axs_cachekeeper_diagnostics;
+- (void)axs_cachekeeper_test_snapshot;
 - (void)updateBatch;
 - (void)axs_cachekeeper_restore_title_claim:(NSDictionary *)claim keepingClaims:(NSArray<NSDictionary *> *)claims;
 @end
@@ -1240,9 +1240,9 @@
     XCTestExpectation *editing=[self expectationForNotification:UITextFieldTextDidEndEditingNotification object:input.axs_cachekeeper_field handler:nil];
     XCTestExpectation *keyboard=[self expectationForNotification:UIKeyboardDidHideNotification object:nil handler:nil];
     XCTestExpectation *pushed=[self expectationWithDescription:@"UIKit completed diagnostics push"];
-    self.navigationFinished=pushed;self.expectedControllerClass=AxsCacheKeeperDiagnosticsPage.class;
-    [settings axs_cachekeeper_diagnostics];
-    AxsCacheKeeperDiagnosticsPage *page=(id)nav.topViewController;
+    self.navigationFinished=pushed;self.expectedControllerClass=AxsCacheKeeperSearchTestPage.class;
+    [settings axs_cachekeeper_test_snapshot];
+    AxsCacheKeeperSearchTestPage *page=(id)nav.topViewController;
     NSDictionary *snapshot=[page valueForKey:@"axs_cachekeeper_searchSnapshot"];
     XCTAssertEqualObjects(snapshot[@"state"],@"frozen");
     NSDictionary *last=[snapshot[@"events"] lastObject];
@@ -1256,5 +1256,34 @@
     [nav popViewControllerAnimated:YES];[self waitForExpectations:@[popped] timeout:10];
     XCTAssertTrue([[[probe axs_cachekeeper_snapshot][@"events"] valueForKey:@"event"] containsObject:@"didBegin"],@"Returning from a page must preserve the preceding search attempt for export");
     XCTAssertEqualObjects([[probe axs_cachekeeper_snapshot][@"events"] lastObject][@"event"],@"didAppear");
+}
+- (void)testProductNavigationKeepsAppDetailsAndReturnsToRootWithoutCollection {
+    CKSettings *settings=[CKSettings new];
+    UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:settings];
+    nav.delegate=self;nav.modalPresentationStyle=UIModalPresentationFullScreen;
+    XCTestExpectation *visible=[self expectationWithDescription:@"production root displayed"];
+    [self.owner presentViewController:nav animated:NO completion:^{[visible fulfill];}];
+    [self waitForExpectations:@[visible] timeout:10];
+    XCTAssertEqual(settings.navigationItem.rightBarButtonItems.count,1u);
+    XCTAssertEqualObjects(settings.navigationItem.rightBarButtonItems.firstObject.title,@"检测全部");
+    NSDictionary *app=@{@"id":@"test.simplified.navigation",@"name":@"测试 APP"};
+    [settings setValue:@[@{@"apps":@[app]}] forKey:@"sections"];
+    UITableView *table=[settings valueForKey:@"table"];
+    XCTestExpectation *pushed=[self expectationWithDescription:@"real app row opens details"];
+    self.navigationFinished=pushed;self.expectedControllerClass=NSClassFromString(@"CKScanPage");
+    [(id<UITableViewDelegate>)settings tableView:table didSelectRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]];
+    [self waitForExpectations:@[pushed] timeout:10];
+    XCTAssertEqualObjects([nav.topViewController valueForKey:@"bundle"],app[@"id"]);
+    XCTAssertEqualObjects([nav.topViewController valueForKey:@"appName"],app[@"name"]);
+    XCTestExpectation *popped=[self expectationWithDescription:@"details return to ordinary root"];
+    self.navigationFinished=popped;self.expectedControllerClass=CKSettings.class;
+    [nav popViewControllerAnimated:YES];[self waitForExpectations:@[popped] timeout:10];
+    [NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidBecomeActiveNotification object:nil];
+    XCTestExpectation *settled=[self expectationWithDescription:@"foreground callbacks settled"];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,100*NSEC_PER_MSEC),dispatch_get_main_queue(),^{[settled fulfill];});
+    [self waitForExpectations:@[settled] timeout:5];
+    XCTAssertEqual(nav.topViewController,settings);
+    XCTAssertEqual(nav.viewControllers.count,1u);
+    XCTAssertEqual(settings.navigationItem.rightBarButtonItems.count,1u);
 }
 @end

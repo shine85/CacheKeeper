@@ -31,16 +31,6 @@ targets:
       - path: ../../Prefs/SearchInput.m
       - path: ../../Prefs/SearchDiagnostics.m
       - path: ../../Prefs/SearchHitRouting.m
-      - path: ../../Prefs/DiagnosticsPage.m
-      - path: ../../Prefs/HostPreflightPage.m
-      - path: ../../AxsCacheKeeperCollectionSession.m
-      - path: ../../AxsCacheKeeperImageCollection.m
-      - path: ../../Prefs/ImageCollectionPage.m
-      - path: ../../Prefs/CollectionNavigation.m
-      - path: ../../AxsCacheKeeperCollectionReturn.m
-      - path: ../../Prefs/CollectionHistoryPage.m
-      - path: ../../AxsCacheKeeperCollectionHistory.m
-      - path: ../../AxsCacheKeeperHostPreflight.m
       - path: ../../AxsCacheKeeperDiagnostics.m
       - path: ../../AxsCacheKeeperInjectionConditions.m
       - path: ../../AxsCacheKeeperStorageInventory.m
@@ -95,12 +85,6 @@ targets:
         CFBundleShortVersionString: "0.7.2"
     sources:
       - path: ../../tests/ui/ScanPageTests.m
-      - path: ../../tests/ui/CapacityPageTests.m
-      - path: ../../tests/ui/CollectionSessionTests.m
-      - path: ../../tests/ui/CollectionReturnTests.m
-      - path: ../../tests/ui/CollectionHistoryPageTests.m
-      - path: ../../tests/ui/HostPreflightPageTests.m
-      - path: ../../tests/ui/ScanHostEvidenceBoundary.m
       - path: ../../Prefs/InspectionPage.m
     dependencies:
       - target: InputHarness

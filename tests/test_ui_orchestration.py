@@ -49,9 +49,7 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
         nonlocal configured_sdk
         command = list(map(str, command))
         timeout = kwargs.get("timeout")
-        if len(command) > 1 and command[1].endswith("run_collection_return_red.py"):
-            stage, expected_timeout = "collectionRed", 1200
-        elif len(command) > 1 and command[1].endswith("run_search_editing_red.py"):
+        if len(command) > 1 and command[1].endswith("run_search_editing_red.py"):
             stage, expected_timeout = "searchRed", 1200
         elif len(command) > 1 and command[1].endswith("run_image_legacy_red.py"):
             stage, expected_timeout = "imageLegacyRed", 1320
@@ -159,8 +157,6 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
 
 
 cases = [
-    ("collection_return_red_failure_stop", {"collectionRed": "exit"}, None, False, [], [], True, None),
-    ("collection_return_red_timeout_stop", {"collectionRed": "timeout"}, None, False, [], [], True, None),
     ("initial_red_fail_stop", {"searchRed": "exit"}, None, False, [], [], True, None),
     ("initial_red_timeout_stop", {"searchRed": "timeout"}, None, False, [], [], True, None),
     ("all_pass", {}, None, False, ALL_SUITES, ALL_EXPORTS, False, None),

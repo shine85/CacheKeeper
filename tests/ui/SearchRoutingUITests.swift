@@ -180,7 +180,7 @@ final class SearchRoutingUITests: XCTestCase {
     }
 
     private func snapshot(_ app: XCUIApplication) throws -> [String: Any] {
-        app.buttons["诊断"].tap()
+        app.buttons["测试快照"].tap()
         let result = app.staticTexts["CacheKeeperTestSearchRoute"]
         XCTAssertTrue(result.waitForExistence(timeout: 5))
         let data = try XCTUnwrap(result.label.data(using: .utf8))

@@ -30,7 +30,6 @@ extern "C" {
 #endif
 // Called by SpringBoard initialization; no main-thread authentication or filesystem work.
 void axs_cachekeeper_pdf_session_server_start(AxsCacheKeeperPDFRootProvider provider);
-AxsCacheKeeperPDFRoot *axs_cachekeeper_pdf_resolve_root(NSString *bundle, NSString **stage, int *code);
 #ifdef __cplusplus
 }
 #endif

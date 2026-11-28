@@ -376,8 +376,6 @@ static NSDictionary *AxsCacheKeeperImageDiscover(AxsCacheKeeperImageContract pin
 @property(nonatomic) NSUInteger blockedWrites;
 @property(nonatomic,strong) AxsCacheKeeperImageWriteLedger *writeLedger;
 @property(nonatomic) uint64_t writeEpoch;
-@property(nonatomic) NSTimeInterval collectionDeadline;
-@property(nonatomic,copy) NSString *collectionRequest;
 @property(nonatomic,copy) NSString *reason;
 @end
 @implementation AxsCacheKeeperImageBinding
@@ -415,8 +413,6 @@ static void AxsCacheKeeperImageInvalidate(AxsCacheKeeperImageBinding *binding,Ax
 @property(nonatomic) BOOL discoveryRefreshPending;
 @property(nonatomic) BOOL admissionPublishPending;
 @property(atomic) BOOL capacityExceeded;
-@property(nonatomic) BOOL collectionExpiryPending;
-@property(nonatomic,copy) NSDictionary *collectionAcknowledgement;
 @property(nonatomic) NSUInteger queued,submitted,completed,skipped;
 @property(nonatomic,copy) NSString *state;
 @property(nonatomic,copy) NSString *reason;
@@ -425,7 +421,6 @@ static void AxsCacheKeeperImageInvalidate(AxsCacheKeeperImageBinding *binding,Ax
 - (void)axs_cachekeeper_unregistered:(AxsCacheKeeperImageReason)reason;
 - (void)axs_cachekeeper_unregistered:(AxsCacheKeeperImageReason)reason methodsCheck:(NSDictionary *)check;
 - (void)axs_cachekeeper_publish;
-- (void)requestCollectionExpiryRefresh:(NSString *)request;
 @end
 
 static NSString *AxsCacheKeeperImageConfigKind(id config) {
@@ -510,13 +505,10 @@ static BOOL AxsCacheKeeperImageBlocksWrite(id disk,unsigned writer,BOOL nonempty
     AxsCacheKeeperImageBinding *binding=objc_getAssociatedObject(disk,AxsCacheKeeperImageBindingKey);
     if (!binding) return NO;
     AxsCacheKeeperImageCache *engine=binding.engine;
-    BOOL restricted,leaseValid;uint64_t epoch;NSString *leaseRequest;
+    BOOL restricted;uint64_t epoch;
     @synchronized(binding) {
-        leaseValid=!binding.collectionDeadline || NSProcessInfo.processInfo.systemUptime<binding.collectionDeadline;
-        restricted=binding.restricted && leaseValid;epoch=binding.writeEpoch;
-        leaseRequest=binding.collectionRequest;
+        restricted=binding.restricted;epoch=binding.writeEpoch;
     }
-    if (!leaseValid) [engine requestCollectionExpiryRefresh:leaseRequest];
     BOOL valid=NO;
     if (restricted && binding.contract==AxsCacheKeeperImageContractFixedSerialLegacy && !AxsCacheKeeperImageExecutable().header)
         [engine requestDiscoveryRefresh];
@@ -525,12 +517,11 @@ static BOOL AxsCacheKeeperImageBlocksWrite(id disk,unsigned writer,BOOL nonempty
     // identity gates ran. Never use those old checks to block under a new epoch.
     @synchronized(binding) {
         BOOL sameEpoch=binding.writeEpoch==epoch;
-        leaseValid=leaseValid && (!binding.collectionDeadline || NSProcessInfo.processInfo.systemUptime<binding.collectionDeadline);
-        BOOL blocked=valid && binding.restricted && sameEpoch && leaseValid;
+        BOOL blocked=valid && binding.restricted && sameEpoch;
         if (blocked && binding.blockedWrites<AXS_CACHEKEEPER_WRITE_MAX) binding.blockedWrites++;
         AxsCacheKeeperImageWriteLedger *ledger=binding.writeLedger;
         if (engine && binding.disk==disk && ledger) @synchronized(ledger) {
-            axs_cachekeeper_write_observe_payload(&ledger->observation,sameEpoch && leaseValid ? epoch : 0,writer,blocked,nonempty);
+            axs_cachekeeper_write_observe_payload(&ledger->observation,sameEpoch ? epoch : 0,writer,blocked,nonempty);
         }
         return blocked;
     }
@@ -897,13 +888,6 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
 - (void)axs_cachekeeper_cancel {
     @synchronized(self) {self.generation++;for (AxsCacheKeeperImageBinding *binding in self.bindings) @synchronized(binding) {binding.restricted=NO;binding.writeEpoch=0;}}
 }
-- (void)requestCollectionExpiryRefresh:(NSString *)request {
-    @synchronized(self) {
-        if (self.collectionExpiryPending || !request || ![self.collectionAcknowledgement[@"requestID"] isEqual:request]) return;
-        self.collectionExpiryPending=YES;
-        [self refreshWithCompletion:^{@synchronized(self) {self.collectionExpiryPending=NO;}}];
-    }
-}
 - (void)axs_cachekeeper_unregistered:(AxsCacheKeeperImageReason)reason {
     [self axs_cachekeeper_unregistered:reason methodsCheck:nil];
 }
@@ -1118,8 +1102,6 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     NSDictionary *context=self.provider ? self.provider() : @{};
     @synchronized(self) {
         if (generation!=self.generation) {axs_cachekeeper_operation_refresh(self.operationHistory,event,@"obsolete");return;}
-        NSString *previous=self.context[@"imageCollection"][@"requestID"],*incoming=context[@"imageCollection"][@"requestID"];
-        if ((previous || incoming) && ![previous isEqual:incoming]) generation=++self.generation;
     }
     self.context=context;
     @synchronized(self) {if (![self.operationInstallation isEqual:context[@"installation"]]) {self.operationInstallation=context[@"installation"];self.installationGeneration++;}}
@@ -1152,17 +1134,6 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     }
     @synchronized(self) {
         if (generation!=self.generation) {axs_cachekeeper_operation_refresh(self.operationHistory,event,@"obsolete");return;}
-        NSTimeInterval collectionDeadline=[context[@"imageCollectionDeadline"] doubleValue];
-        if (collectionDeadline && NSProcessInfo.processInfo.systemUptime>=collectionDeadline) {
-            axs_cachekeeper_operation_refresh(self.operationHistory,event,@"obsolete");
-            // This incoming request has not committed an acknowledgement yet. The generation
-            // check above and this lock distinguish it from an old external expiry callback.
-            if (!self.collectionExpiryPending) {
-                self.collectionExpiryPending=YES;
-                [self refreshWithCompletion:^{@synchronized(self) {self.collectionExpiryPending=NO;}}];
-            }
-            return;
-        }
         uint64_t epoch=0;id state=context[@"appState"];
         if ([context[@"valid"] boolValue] && axs_cachekeeper_state_valid(state) &&
             (!axs_cachekeeper_app_enabled(state) ||
@@ -1174,35 +1145,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         // cancellation uses the same lock order and cannot leave a stale epoch.
         for (AxsCacheKeeperImageBinding *binding in bindings) @synchronized(binding) {
             binding.writeEpoch=epoch;
-            binding.collectionDeadline=collectionDeadline;
-            binding.collectionRequest=context[@"imageCollection"][@"requestID"];
             binding.restricted=binding.eligible && axs_cachekeeper_wants_restriction(state);
-        }
-        if (context[@"imageCollection"]) {
-            NSMutableDictionary *ack=[context[@"imageCollection"] mutableCopy];
-            BOOL sameRequest=[self.collectionAcknowledgement[@"requestID"] isEqual:ack[@"requestID"]];
-            NSMutableArray *epochs=sameRequest ?
-                [self.collectionAcknowledgement[@"epochs"] mutableCopy] : [NSMutableArray new];
-            NSMutableDictionary *baselines=sameRequest ? [self.collectionAcknowledgement[@"baselines"] mutableCopy] : [NSMutableDictionary new];
-            NSMutableArray *events=sameRequest ? [self.collectionAcknowledgement[@"events"] mutableCopy] : [NSMutableArray new];
-            BOOL applied=[ack[@"disposition"] isEqual:@"applied"];
-            if (applied && epoch && ![epochs containsObject:@(epoch)] && epochs.count<16) {
-                [epochs addObject:@(epoch)];
-                @synchronized(self.writeLedger) {
-                    NSDictionary *snapshot=axs_cachekeeper_write_observation_record(self.writeLedger->observation);
-                    for (NSDictionary *row in snapshot[@"epochs"]) if ([row[@"epoch"] isEqual:@(epoch)]) baselines[[@(epoch) stringValue]]=@{@"data":row[@"data"],@"extended":row[@"extended"]};
-                }
-            }
-            if (applied && ![events containsObject:@(event)] && events.count<64) [events addObject:@(event)];
-            ack[@"configuration"]=@(generation);ack[@"installation"]=@(self.installationGeneration);ack[@"epochs"]=epochs;
-            ack[@"baselines"]=baselines;ack[@"events"]=events;
-            self.collectionAcknowledgement=ack;
-        } else self.collectionAcknowledgement=nil;
-        if (collectionDeadline) {
-            NSString *request=context[@"imageCollection"][@"requestID"];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(MAX(0,collectionDeadline-NSProcessInfo.processInfo.systemUptime)*NSEC_PER_SEC)),dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
-                [self requestCollectionExpiryRefresh:request];
-            });
         }
     }
     axs_cachekeeper_operation_refresh(self.operationHistory,event,@"applied");
@@ -1277,10 +1220,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
             binding.operationEvent=event;binding.operationAction=action;
             binding.pending=YES;NSUInteger flight=++binding.flight;binding.flightDeadline=NSProcessInfo.processInfo.systemUptime+15;
             @synchronized(self) {self.queued++;}self.state=@"queued";[self axs_cachekeeper_publish];
-            NSDictionary *lease=self.context[@"imageCollection"];
-            NSString *leaseRequest=[lease[@"disposition"] isEqual:@"applied"] ? lease[@"requestID"] : nil;
-            NSTimeInterval leaseDeadline=[self.context[@"imageCollectionDeadline"] doubleValue];
-            dispatch_async(binding.queue,^{[self axs_cachekeeper_execute:binding generation:generation event:event action:action lease:leaseRequest deadline:leaseDeadline];});
+            dispatch_async(binding.queue,^{[self axs_cachekeeper_execute:binding generation:generation event:event action:action];});
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,15*NSEC_PER_SEC),self.work,^{
                 if (binding.pending && binding.flight==flight) {
                     axs_cachekeeper_operation_timeout(self.operationHistory,action);
@@ -1295,7 +1235,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         if (completion) completion();
     });
 }
-- (void)axs_cachekeeper_execute:(AxsCacheKeeperImageBinding *)binding generation:(NSUInteger)generation event:(NSUInteger)event action:(NSUInteger)action lease:(NSString *)leaseRequest deadline:(NSTimeInterval)leaseDeadline {
+- (void)axs_cachekeeper_execute:(AxsCacheKeeperImageBinding *)binding generation:(NSUInteger)generation event:(NSUInteger)event action:(NSUInteger)action {
     @autoreleasepool {
     // This block runs on the actual SDK queue. Configuration and the installation snapshot are
     // checked here, not only before dispatch; no second asynchronous SDK clear is submitted.
@@ -1314,13 +1254,6 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
     BOOL submitted=NO;
     @synchronized(self) {
         if (!reason && generation!=self.generation) reason=@"authorizationChanged";
-        if (!reason && leaseRequest && (NSProcessInfo.processInfo.systemUptime>=leaseDeadline ||
-            ![context[@"imageCollection"][@"requestID"] isEqual:leaseRequest] ||
-            ![context[@"imageCollection"][@"disposition"] isEqual:@"applied"])) reason=@"authorizationChanged";
-        if (!reason && ((context[@"imageCollection"] || self.context[@"imageCollection"]) &&
-            ![context[@"imageCollection"] isEqual:self.context[@"imageCollection"]])) reason=@"authorizationChanged";
-        if (!reason && [context[@"imageCollectionDeadline"] doubleValue]>0 &&
-            NSProcessInfo.processInfo.systemUptime>=[context[@"imageCollectionDeadline"] doubleValue]) reason=@"authorizationChanged";
         if (!reason && NSProcessInfo.processInfo.systemUptime>=binding.flightDeadline) reason=@"deadlineExceeded";
         if (!reason && self.foreground) reason=@"foregroundAgain";
         if (!reason && !self.hasTime) reason=@"noBackgroundTime";
@@ -1400,9 +1333,6 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
             @"queued":@(self.queued),@"submitted":@(self.submitted),@"apiCompleted":@(self.completed),@"skipped":@(self.skipped),
             @"pending":@(pending),@"updated":NSDate.date,@"bytesState":@"notMeasured",@"discoveryCheck":self.discoveryCheck,
             @"instanceAdmission":admission};
-        if (self.collectionAcknowledgement) {
-            NSMutableDictionary *record=[receipt mutableCopy];record[@"imageCollection"]=self.collectionAcknowledgement;receipt=record;
-        }
         {NSMutableDictionary *record=[receipt mutableCopy];@synchronized(self.writeLedger) {record[@"writeObservation"]=axs_cachekeeper_write_observation_record(self.writeLedger->observation);}receipt=record;}
         {NSMutableDictionary *record=[receipt mutableCopy];record[@"sdkMethodsRejectionObservation"]=self.firstSDKMethodsRejection ?: @{@"schemaVersion":@1,@"state":@"notRecorded"};receipt=record;}
         if (self.runtimeSourceObservation) {

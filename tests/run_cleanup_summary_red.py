@@ -33,14 +33,13 @@ def main():
     '''
             source = source.replace(anchor, anchor + old_overwrite)
             source = re.sub(r'^#import "\.\./([^"\n]+)"', r'#import "../../\1"', source, flags=re.M)
-            for header in ("InspectionPage.h", "DiagnosticsPage.h"):
+            for header in ("InspectionPage.h",):
                 source = source.replace(f'#import "{header}"', f'#import "../../Prefs/{header}"')
             (output / "ScanPageRed.m").write_text(source, encoding="utf-8")
             test = (root / "tests/ui/ScanPageTests.m").read_text(encoding="utf-8-sig")
             if test.count('#import "../../Prefs/ScanPage.m"') != 1:
                 raise ValueError("Ambiguous actual ScanPage test import")
             test = test.replace('#import "../../Prefs/ScanPage.m"', '#import "ScanPageRed.m"')
-            test = test.replace('#import "ScanHostEvidenceBoundary.h"', '#import "../../tests/ui/ScanHostEvidenceBoundary.h"')
             (output / "ScanPageTestsRed.m").write_text(test, encoding="utf-8")
             spec = (root / "tests/ui/project.yml").read_text(encoding="utf-8-sig")
             original = "../../tests/ui/ScanPageTests.m"

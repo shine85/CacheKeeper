@@ -7,8 +7,6 @@
 #import "../AxsCacheKeeperAppList.h"
 #import "../AxsCacheKeeperInstallation.h"
 #import "../AxsCacheKeeperPresentation.h"
-#import "DiagnosticsPage.h"
-#import "CollectionNavigation.h"
 #import "SearchInput.h"
 #import "SearchDiagnostics.h"
 #import "SearchNavigation.h"
@@ -78,8 +76,6 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
 @property(nonatomic) BOOL axs_cachekeeper_renderPending;
 @property(nonatomic,strong) AxsCacheKeeperSearchDiagnostics *axs_cachekeeper_searchDiagnostics;
 @property(nonatomic) CGRect axs_cachekeeper_lastLayoutInputRect;
-@property(nonatomic) BOOL axs_cachekeeper_returnQueued;
-@property(nonatomic,copy) NSString *axs_cachekeeper_failedReturnToken;
 @end
 @implementation CKSettings
 - (void)loadView {
@@ -133,10 +129,7 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
     swipeRight.direction=UISwipeGestureRecognizerDirectionRight;
     swipeRight.cancelsTouchesInView=NO;swipeRight.delaysTouchesBegan=NO;
     [self.table addGestureRecognizer:swipeRight];
-    self.navigationItem.rightBarButtonItems=@[
-        [[UIBarButtonItem alloc] initWithTitle:@"检测全部" style:UIBarButtonItemStylePlain target:self action:@selector(scanAll)],
-        [[UIBarButtonItem alloc] initWithTitle:@"继续采集" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_continue_collection)],
-        [[UIBarButtonItem alloc] initWithTitle:@"诊断" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_diagnostics)]];
+    self.navigationItem.rightBarButtonItems=@[[[UIBarButtonItem alloc] initWithTitle:@"检测全部" style:UIBarButtonItemStylePlain target:self action:@selector(scanAll)]];
     for (UIView *view in @[self.axs_cachekeeper_searchInput,self.tabWrap,self.tabs,self.table]) view.translatesAutoresizingMaskIntoConstraints=NO;
     UILayoutGuide *safe=self.view.safeAreaLayoutGuide;
     self.axs_cachekeeper_searchTop=[self.axs_cachekeeper_searchInput.topAnchor constraintEqualToAnchor:safe.topAnchor];
@@ -170,43 +163,6 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
     }];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(axs_cachekeeper_application_active:) name:UIApplicationDidBecomeActiveNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(axs_cachekeeper_application_inactive:) name:UIApplicationWillResignActiveNotification object:nil];
-}
-- (void)axs_cachekeeper_diagnostics {
-    // Freeze before our own resign/push so navigation does not masquerade as spontaneous focus loss.
-    NSDictionary *snapshot=[self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_freeze:AxsCacheKeeperSearchEventDiagnostics];
-    [self.axs_cachekeeper_searchInput axs_cachekeeper_dismiss_keyboard];
-    AxsCacheKeeperDiagnosticsPage *page=[[AxsCacheKeeperDiagnosticsPage alloc] initWithSearchSnapshot:snapshot];page.applicationNames=[self axs_cachekeeper_application_names];
-    [self.navigationController pushViewController:page animated:YES];
-}
-- (NSDictionary *)axs_cachekeeper_application_names {
-    NSMutableDictionary *names=[NSMutableDictionary new];
-    for (NSDictionary *app in self.apps) if ([app[@"id"] isKindOfClass:NSString.class] && [app[@"name"] isKindOfClass:NSString.class]) names[app[@"id"]]=app[@"name"];
-    return names;
-}
-- (void)axs_cachekeeper_continue_collection {
-    AxsCacheKeeperDiagnosticsPage *page=[[AxsCacheKeeperDiagnosticsPage alloc] init];page.applicationNames=[self axs_cachekeeper_application_names];
-    [page presentResumableCollection];
-    [self.navigationController pushViewController:page animated:YES];
-}
-- (NSString *)axs_cachekeeper_collection_directory {return jbroot(@"/var/mobile/Library/CacheKeeper/collectionSessions");}
-- (void)axs_cachekeeper_restore_collection {
-    if(self.axs_cachekeeper_returnQueued)return;self.axs_cachekeeper_returnQueued=YES;
-    __weak typeof(self) weak=self;
-    dispatch_async(dispatch_get_main_queue(),^{
-        typeof(self) root=weak;root.axs_cachekeeper_returnQueued=NO;
-        if(!root || !root.axs_cachekeeper_appeared || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive || !axs_cachekeeper_collection_visible_root(root))return;
-        AxsCacheKeeperCollectionReturn *store=[[AxsCacheKeeperCollectionReturn alloc] initWithDirectory:[root axs_cachekeeper_collection_directory]];
-        NSError *error=nil;NSDictionary *intent=[store read:&error];
-        NSString *attempt=intent[@"token"] ?: (error ? @"invalid" : nil);
-        if(!attempt || [attempt isEqual:root.axs_cachekeeper_failedReturnToken])return;
-        AxsCacheKeeperCollectionSession *session=intent ? [store openSession:intent error:&error] : nil;
-        if(!session){root.axs_cachekeeper_failedReturnToken=attempt;return;}
-        if(![[store read:&error] isEqual:intent] || !axs_cachekeeper_collection_visible_root(root))return;
-        AxsCacheKeeperDiagnosticsPage *page=[[AxsCacheKeeperDiagnosticsPage alloc] initWithAutomaticSession:session intent:intent];page.applicationNames=[root axs_cachekeeper_application_names];
-        root.axs_cachekeeper_failedReturnToken=attempt;
-        [root.navigationController pushViewController:page animated:NO];
-        if(root.navigationController.topViewController==page)root.axs_cachekeeper_failedReturnToken=nil;
-    });
 }
 - (void)tabChanged:(UISegmentedControl *)sender {
     self.selectedTab = sender.selectedSegmentIndex;
@@ -560,7 +516,6 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     self.axs_cachekeeper_appeared=YES;
-    [self axs_cachekeeper_restore_collection];
     [self axs_cachekeeper_layout_compact_navigation];
     [self axs_cachekeeper_update_search_top];[self.view layoutIfNeeded];
     [self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_record:AxsCacheKeeperSearchEventDidAppear];
@@ -582,7 +537,6 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
             [strong axs_cachekeeper_layout_compact_navigation];
             [strong axs_cachekeeper_update_search_top];[strong.view layoutIfNeeded];
             strong.axs_cachekeeper_searchSettledEntry=entry;
-            [strong axs_cachekeeper_restore_collection];
         });
     };
     NSMutableArray<id<UIViewControllerTransitionCoordinator>> *coordinators=[NSMutableArray new];
@@ -615,7 +569,6 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
 - (void)axs_cachekeeper_application_active:(NSNotification *)notification {
     (void)notification;
     if (!self.axs_cachekeeper_visible || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
-    [self axs_cachekeeper_restore_collection];
     self.axs_cachekeeper_lastApplicationsRefresh=NSProcessInfo.processInfo.systemUptime;
     [self.axs_cachekeeper_appList requestRefreshApplications:YES];
     if (!self.batchTimer) {

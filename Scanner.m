@@ -19,11 +19,9 @@
 #import "AxsCacheKeeperCleanupSchedule.h"
 #import "AxsCacheKeeperInspection.h"
 #import "AxsCacheKeeperInstallation.h"
-#import "AxsCacheKeeperPDFSession.h"
 #import "AxsCacheKeeperFileAccess.h"
 #import "AxsCacheKeeperScanDiagnostics.h"
 #import "AxsCacheKeeperScanTask.h"
-#import "AxsCacheKeeperCapacityService.h"
 static id SRead(id target,NSString *name) { SEL s=NSSelectorFromString(name);return [target respondsToSelector:s]?((id(*)(id,SEL))objc_msgSend)(target,s):nil; }
 static id AxsCacheKeeperAppProxy(NSString *bundle) {
     Class proxy=NSClassFromString(@"LSApplicationProxy"); SEL selector=NSSelectorFromString(@"applicationProxyForIdentifier:");
@@ -38,40 +36,6 @@ static NSURL *axs_cachekeeper_container_url(id value) {
 static NSURL *Container(NSString *bundle) {
     return axs_cachekeeper_container_url(SRead(AxsCacheKeeperAppProxy(bundle),@"dataContainerURL"));
 }
-AxsCacheKeeperPDFRoot *axs_cachekeeper_pdf_resolve_root(NSString *bundle,NSString **stage,int *code) {
-    if (stage) *stage=@"containerResolve";if (code) *code=EINVAL;
-    if (!axs_cachekeeper_bundle_id(bundle)) return nil;
-    id app=AxsCacheKeeperAppProxy(bundle);
-    NSURL *home=SRead(app,@"dataContainerURL"),*package=SRead(app,@"bundleURL");
-    if (![SRead(app,@"applicationIdentifier") isEqual:bundle] || ![home isKindOfClass:NSURL.class] || !home.isFileURL) return nil;
-    struct stat original;
-    if (lstat(home.path.fileSystemRepresentation,&original)) {if (code) *code=errno;return nil;}
-    if (!S_ISDIR(original.st_mode)) {if (code) *code=ENOTDIR;return nil;}
-    NSURL *resolved=home.URLByResolvingSymlinksInPath;
-    if (![[NSUUID alloc] initWithUUIDString:resolved.lastPathComponent] || ![resolved.URLByDeletingLastPathComponent.path hasSuffix:@"/Containers/Data/Application"]) return nil;
-    NSError *installationError=nil;
-    NSDictionary *installation=axs_cachekeeper_installation_snapshot(package,bundle,SRead(app,@"shortVersionString"),&installationError);
-    if (!installation) {if (stage) *stage=@"installation";if (code) *code=(int)installationError.code ?: EACCES;return nil;}
-    if (stage) *stage=@"containerOpen";
-    int fd=axs_cachekeeper_open_directory(resolved.path);if (fd<0) {if (code) *code=errno;return nil;}
-    struct stat opened,current;
-    if (fstat(fd,&opened) || lstat(home.path.fileSystemRepresentation,&current) || fcntl(fd,F_SETFD,FD_CLOEXEC)) {
-        if (code) *code=errno;close(fd);return nil;
-    }
-    if (!S_ISDIR(opened.st_mode) || original.st_dev!=opened.st_dev || original.st_ino!=opened.st_ino || current.st_dev!=opened.st_dev || current.st_ino!=opened.st_ino) {
-        if (code) *code=ESTALE;close(fd);return nil;
-    }
-    BOOL (^validator)(void)=^BOOL {
-        id currentApp=AxsCacheKeeperAppProxy(bundle);NSURL *currentHome=SRead(currentApp,@"dataContainerURL");struct stat held,entry;
-        if (![SRead(currentApp,@"applicationIdentifier") isEqual:bundle] || ![currentHome isKindOfClass:NSURL.class] || !currentHome.isFileURL ||
-            ![currentHome.URLByResolvingSymlinksInPath.path isEqual:resolved.path] || fstat(fd,&held) || lstat(currentHome.path.fileSystemRepresentation,&entry) ||
-            !S_ISDIR(entry.st_mode) || entry.st_dev!=opened.st_dev || entry.st_ino!=opened.st_ino || held.st_dev!=opened.st_dev || held.st_ino!=opened.st_ino) return NO;
-        return axs_cachekeeper_validate_installation_snapshot(installation,SRead(currentApp,@"bundleURL"),SRead(currentApp,@"shortVersionString"),nil);
-    };
-    AxsCacheKeeperPDFRoot *root=[[AxsCacheKeeperPDFRoot alloc] initWithDescriptor:fd path:resolved.path validator:validator];
-    if (![root validate]) {if (stage) *stage=@"identityRecheck";if (code) *code=ESTALE;return nil;}
-    if (code) *code=0;return root;
-}
 // All task state, filesystem work and receipts live on this serial queue. The
 // desktop timer is only a wake-up source; continuations do not wait two seconds.
 static void AxsCacheKeeperScanPump(AxsCacheKeeperScanService *service,dispatch_queue_t queue,BOOL *scheduled) {
@@ -79,25 +43,7 @@ static void AxsCacheKeeperScanPump(AxsCacheKeeperScanService *service,dispatch_q
     if(!active) {*scheduled=NO;return;}
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_MSEC),queue,^{AxsCacheKeeperScanPump(service,queue,scheduled);});
 }
-static void AxsCacheKeeperCapacityPump(AxsCacheKeeperCapacityService *service,dispatch_queue_t queue,BOOL *scheduled) {
-    BOOL active=[service tick];
-    if(!active) {*scheduled=NO;return;}
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_MSEC),queue,^{AxsCacheKeeperCapacityPump(service,queue,scheduled);});
-}
-static void AxsCacheKeeperCapacityRequests(void) {
-    static dispatch_queue_t queue;static AxsCacheKeeperCapacityService *service;static NSMutableDictionary *cache;
-    static BOOL scheduled;static dispatch_once_t once;
-    dispatch_once(&once,^{
-        queue=dispatch_queue_create("dev.local.cachekeeper.capacity",DISPATCH_QUEUE_SERIAL);cache=[NSMutableDictionary new];
-        service=[[AxsCacheKeeperCapacityService alloc] initWithFolder:jbroot(@"/var/mobile/Library/CacheKeeper") provider:^NSDictionary *(NSError **error) {
-            NSDictionary *plan=nil;
-            axs_cachekeeper_installed_applications_with_capacity_plan(cache,NULL,NULL,&plan,error);return plan;
-        } writer:nil];
-    });
-    dispatch_async(queue,^{if(!scheduled) {scheduled=YES;AxsCacheKeeperCapacityPump(service,queue,&scheduled);}});
-}
 void CKScanRequests(void) {
-    AxsCacheKeeperCapacityRequests();
     static dispatch_queue_t queue;static AxsCacheKeeperScanService *service;static BOOL scheduled;static dispatch_once_t once;
     dispatch_once(&once,^{
         queue=dispatch_queue_create("dev.local.cachekeeper.scan",DISPATCH_QUEUE_SERIAL);
@@ -215,8 +161,8 @@ static NSString *axs_cachekeeper_network_status(NSString *bundle) {
     NSDictionary *report = [NSDictionary dictionaryWithContentsOfFile:path];
     if (![report isKindOfClass:NSDictionary.class]) {
         NSDictionary *probe=[NSDictionary dictionaryWithContentsOfFile:[[axs_cachekeeper_folder() stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[bundle stringByAppendingString:@".probe.plist"]]];
-        if ([probe[@"message"] isKindOfClass:NSString.class]) return [NSString stringWithFormat:@"尚无网络文件回执；上次主动诊断（%@）：%@",axs_cachekeeper_time_string(probe[@"updated"]),probe[@"message"]];
-        return @"尚无网络文件回执；请点“检查网络限制”后打开此 APP，再返回查看原因";
+        if ([probe[@"message"] isKindOfClass:NSString.class]) return [NSString stringWithFormat:@"尚无网络文件回执；历史诊断记录（%@，不代表当前状态）：%@",axs_cachekeeper_time_string(probe[@"updated"]),probe[@"message"]];
+        return @"尚无网络缓存运行记录；APP 正常运行后会自动更新，缺少记录不代表限制已生效";
     }
     NSString *message = [report[@"message"] isKindOfClass:NSString.class] ? report[@"message"] : @"回执格式不完整";
     return [NSString stringWithFormat:@"网络缓存回执：%@（%@）", message, axs_cachekeeper_time_string(report[@"updated"])];

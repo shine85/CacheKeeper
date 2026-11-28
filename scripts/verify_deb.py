@@ -47,11 +47,9 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
             '/CacheKeeper.dylib': (b'AxsCacheKeeperImageCache', b'AxsCacheKeeperWebKitCache',
                                     b'AxsCacheKeeperScanService', b'AxsCacheKeeperScanCursor',
                                     b'AxsCacheKeeperScanAllocation', b'AxsCacheKeeperWebKitCoordinator',
-                                    b'AxsCacheKeeperCapacityRoot', b'AxsCacheKeeperCapacityService',
                                     b'AxsCacheKeeperHostEvidenceServer', b'AxsCacheKeeperImageCoordinator',
                                     b'AxsCacheKeeperGurdSource', b'AxsCacheKeeperGurdCache'),
-            '/CacheKeeperPrefs': (b'AxsCacheKeeperSearchHitRouting', b'AxsCacheKeeperSearchInput',
-                                    b'AxsCacheKeeperHostEvidenceClient'),
+            '/CacheKeeperPrefs': (b'AxsCacheKeeperSearchHitRouting', b'AxsCacheKeeperSearchInput'),
             '/ckrestore': (),
         }
         for suffix, markers in required_classes.items():
@@ -76,9 +74,14 @@ with tempfile.TemporaryFile(dir=tmp) as archive:
                 if ((suffix == '/CacheKeeper.dylib' and b'AxsCacheKeeperHostEvidenceClient' in payload) or
                         (suffix == '/CacheKeeperPrefs' and b'AxsCacheKeeperHostEvidenceServer' in payload)):
                     raise SystemExit(f'Host runtime class leaked across target boundary: {suffix}')
-                if suffix == '/CacheKeeperPrefs' and any(marker in payload for marker in
-                        (b'AxsCacheKeeperCapacityRoot', b'AxsCacheKeeperCapacityService')):
-                    raise SystemExit('Read-only traversal implementation leaked into preferences target')
+                retired = (b'AxsCacheKeeperCollectionSession', b'AxsCacheKeeperCollectionReturn',
+                           b'AxsCacheKeeperCollectionHistory', b'AxsCacheKeeperImageCollectionSession',
+                           b'AxsCacheKeeperHostPreflight', b'AxsCacheKeeperDiagnosticsPage',
+                           b'imageCollectionRequest.plist', b'capacityRequest.plist',
+                           b'AxsCacheKeeperCapacityRoot', b'AxsCacheKeeperCapacityService',
+                           b'AxsCacheKeeperSearchTestPage', b'AxsCacheKeeperHostEvidenceClient')
+                if any(marker in payload for marker in retired):
+                    raise SystemExit(f'Developer collection or test UI leaked into product target: {suffix}')
                 if suffix == '/CacheKeeper.dylib':
                     runtime_markers = (version.encode('ascii') + b'\0', b'runtimeInfo\0',
                                        b'packageVersion\0', b'firstObserved\0')

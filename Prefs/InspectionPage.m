@@ -1,6 +1,5 @@
 #import "InspectionPage.h"
 #import "../AxsCacheKeeperInspectionStatus.h"
-#import "DiagnosticsPage.h"
 #import "../AxsCacheKeeperPolicy.h"
 #import "../AxsCacheKeeperRecords.h"
 #import "../AxsCacheKeeperSelection.h"
@@ -34,21 +33,6 @@
     self.textView=[[UITextView alloc] initWithFrame:self.view.bounds];self.textView.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
     self.textView.editable=NO;self.textView.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody];self.textView.adjustsFontForContentSizeCategory=YES;
     self.textView.textContainerInset=UIEdgeInsetsMake(16,16,16,16);[self.view addSubview:self.textView];
-    if (![self.relative hasPrefix:@"Group/"] && !axs_cachekeeper_protected_path(self.relative)) {
-        UIButton *pdf=[UIButton buttonWithType:UIButtonTypeSystem];[pdf setTitle:@"检查读取权限并定位 PDF" forState:UIControlStateNormal];
-        pdf.titleLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody];pdf.titleLabel.adjustsFontForContentSizeCategory=YES;
-        [pdf addTarget:self action:@selector(axs_cachekeeper_pdf) forControlEvents:UIControlEventTouchUpInside];
-        self.textView.translatesAutoresizingMaskIntoConstraints=NO;pdf.translatesAutoresizingMaskIntoConstraints=NO;[self.view addSubview:pdf];
-        [NSLayoutConstraint activateConstraints:@[
-            [pdf.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
-            [pdf.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:16],
-            [pdf.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-16],
-            [pdf.heightAnchor constraintGreaterThanOrEqualToConstant:44],
-            [self.textView.topAnchor constraintEqualToAnchor:pdf.bottomAnchor],
-            [self.textView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-            [self.textView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-            [self.textView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]]];
-    }
     self.navigationItem.rightBarButtonItems=@[
         [[UIBarButtonItem alloc] initWithTitle:@"深度检测" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_start)],
         [[UIBarButtonItem alloc] initWithTitle:@"停止" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_stop)]];
@@ -66,9 +50,6 @@
 }
 - (void)viewWillDisappear:(BOOL)animated { [super viewWillDisappear:animated];[self.timer invalidate];self.timer=nil; }
 - (void)dealloc { [self.timer invalidate]; }
-- (void)axs_cachekeeper_pdf {
-    [self.navigationController pushViewController:[[AxsCacheKeeperDiagnosticsPage alloc] initWithPDFBundle:self.bundle relativeDirectory:self.relative] animated:YES];
-}
 - (void)axs_cachekeeper_start {
     NSString *token=NSUUID.UUID.UUIDString;NSError *error=nil;
     NSDictionary *request=@{@"bundle":self.bundle,@"path":self.relative,@"token":token};

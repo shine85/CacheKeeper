@@ -3,13 +3,11 @@
 #import "AxsCacheKeeperInstallation.h"
 #import "AxsCacheKeeperRuntimeBuild.h"
 #import "AxsCacheKeeperPolicy.h"
-#import "AxsCacheKeeperImageCollection.h"
 #import <UIKit/UIKit.h>
 #include <roothide.h>
 #include <mach-o/dyld.h>
 #include <stdatomic.h>
 #include <stdbool.h>
-#include <notify.h>
 
 static AxsCacheKeeperImageCache *axs_cachekeeper_image_engine;
 static NSObject *axs_cachekeeper_image_context_lock;
@@ -27,17 +25,11 @@ static _Atomic(unsigned long) axs_cachekeeper_image_access_generation;
 // UIKit lifecycle owns these values; worker callbacks carry only policy tokens.
 static BOOL axs_cachekeeper_image_background;
 static NSUInteger axs_cachekeeper_image_lifecycle;
-static NSString *axs_cachekeeper_image_collection_request_id;
-static NSTimeInterval axs_cachekeeper_image_collection_deadline;
-static NSString *axs_cachekeeper_image_collection_session,*axs_cachekeeper_image_collection_installation;
-static NSUInteger axs_cachekeeper_image_collection_step;
-static NSString *axs_cachekeeper_image_collection_revoked_id,*axs_cachekeeper_image_collection_revoked_reason;
 extern void axs_cachekeeper_image_runtime_view_changed(void);
 
 static NSString *AxsCacheKeeperImageFolder(void) { return jbroot(@"/var/mobile/Library/CacheKeeper"); }
 static NSDictionary *AxsCacheKeeperImagePolicy(NSDictionary *context) {
     NSMutableDictionary *policy=[[context dictionaryWithValuesForKeys:@[@"valid",@"appState",@"selected",@"home",@"bundle",@"version",@"installation"]] mutableCopy];
-    if (context[@"imageCollection"]) policy[@"imageCollection"]=context[@"imageCollection"];
     return policy;
 }
 static void AxsCacheKeeperImageFlushReport(void) {
@@ -73,45 +65,6 @@ static NSDictionary *AxsCacheKeeperImageContext(void) {
         if (installationRequested) {
             context[@"installationImage"]=axs_cachekeeper_installation_image_observation(
                 axs_cachekeeper_image_installation,NSBundle.mainBundle.bundleURL,version);
-        }
-        if (axs_cachekeeper_image_access) {
-            context[@"processFirstObserved"]=axs_cachekeeper_runtime_info()[@"firstObserved"];
-            NSDictionary *request=axs_cachekeeper_image_collection_read(folder,NULL);
-            if (axs_cachekeeper_image_collection_request(request) && [request[@"bundle"] isEqual:bundle]) {
-                NSTimeInterval now=NSDate.date.timeIntervalSince1970,uptime=NSProcessInfo.processInfo.systemUptime;
-                BOOL sameSession=[axs_cachekeeper_image_collection_session isEqual:request[@"sessionID"]];
-                BOOL replay=sameSession && ([request[@"step"] unsignedIntegerValue]<axs_cachekeeper_image_collection_step ||
-                    ([request[@"step"] unsignedIntegerValue]==axs_cachekeeper_image_collection_step &&
-                     ![axs_cachekeeper_image_collection_request_id isEqual:request[@"requestID"]]));
-                if (![axs_cachekeeper_image_collection_request_id isEqual:request[@"requestID"]]) {
-                    if (!replay) {
-                        axs_cachekeeper_image_collection_request_id=request[@"requestID"];
-                        axs_cachekeeper_image_collection_step=[request[@"step"] unsignedIntegerValue];
-                        axs_cachekeeper_image_collection_deadline=uptime+MAX(0,MIN(AxsCacheKeeperImageCollectionLease,[request[@"expiresAt"] doubleValue]-now));
-                    }
-                }
-                NSTimeInterval evaluation=replay || uptime>=axs_cachekeeper_image_collection_deadline ? [request[@"expiresAt"] doubleValue] : now;
-                context=[axs_cachekeeper_image_collection_context(context,request,evaluation) mutableCopy];
-                if (![axs_cachekeeper_image_collection_session isEqual:request[@"sessionID"]]) {
-                    axs_cachekeeper_image_collection_session=request[@"sessionID"];
-                    axs_cachekeeper_image_collection_installation=installation;
-                } else if ([context[@"imageCollection"][@"disposition"] isEqual:@"applied"] &&
-                    ![axs_cachekeeper_image_collection_installation isEqual:installation]) {
-                    context[@"appState"]=state;
-                    NSMutableDictionary *metadata=[context[@"imageCollection"] mutableCopy];metadata[@"disposition"]=@"installationChanged";
-                    context[@"imageCollection"]=metadata;
-                }
-                NSString *disposition=context[@"imageCollection"][@"disposition"];
-                if (![@[@"applied",@"restored"] containsObject:disposition]) {
-                    axs_cachekeeper_image_collection_revoked_id=request[@"requestID"];
-                    axs_cachekeeper_image_collection_revoked_reason=disposition;
-                }
-                if ([axs_cachekeeper_image_collection_revoked_id isEqual:request[@"requestID"]] && ![request[@"phase"] isEqual:@"restore"]) {
-                    context[@"appState"]=state;NSMutableDictionary *metadata=[context[@"imageCollection"] mutableCopy];
-                    metadata[@"disposition"]=axs_cachekeeper_image_collection_revoked_reason;context[@"imageCollection"]=metadata;
-                }
-                if ([context[@"imageCollection"][@"disposition"] isEqual:@"applied"]) context[@"imageCollectionDeadline"]=@(axs_cachekeeper_image_collection_deadline);
-            }
         }
         // Retry state and sampled diagnostic timestamps are evidence, not policy.
         NSDictionary *policy=AxsCacheKeeperImagePolicy(context);
@@ -171,20 +124,10 @@ void axs_cachekeeper_configure_image_cache(BOOL containerEligible,BOOL configura
                 (void)note;axs_cachekeeper_image_background=YES;axs_cachekeeper_image_lifecycle++;
                 [axs_cachekeeper_image_coordinator didEnterBackground];
             }];
-            int token=0;
-            notify_register_dispatch(AxsCacheKeeperImageCollectionChanged.UTF8String,&token,dispatch_get_main_queue(),^(int current) {
-                (void)current;
-                dispatch_async(axs_cachekeeper_image_policy_queue,^{
-                    NSDictionary *request=axs_cachekeeper_image_collection_read(AxsCacheKeeperImageFolder(),NULL);
-                    BOOL target=[request[@"bundle"] isEqual:NSBundle.mainBundle.bundleIdentifier];
-                    dispatch_async(dispatch_get_main_queue(),^{
-                        NSDictionary *active=axs_cachekeeper_image_engine.receipt[@"imageCollection"];
-                        if (!target && ![active[@"disposition"] isEqual:@"applied"]) return;
-                        [axs_cachekeeper_image_engine refreshWithCompletion:nil];
-                        axs_cachekeeper_configure_image_cache(YES,atomic_load(&axs_cachekeeper_image_access));
-                    });
-                });
-            });
+            if (UIApplication.sharedApplication.applicationState==UIApplicationStateBackground) {
+                axs_cachekeeper_image_background=YES;axs_cachekeeper_image_lifecycle++;
+                [axs_cachekeeper_image_coordinator didEnterBackground];
+            }
         });
     });
     // Never wait for provider filesystem/identity IO on a lifecycle caller.

@@ -13,7 +13,7 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUDGETS = dict(generate=60, discovery=300, boot=60, bootstatus=420,
-               search_red=1200, collection_red=1200, build=600, codesign=60, suite=420, search=1200,
+               search_red=1200, build=600, codesign=60, suite=420, search=1200,
                legacy_red=1320, history_red=1200, export=60, archive=120)
 MAX_COMMANDS = 30
 # Run 208 needed 792s for the serial probe/XCUI assertions before result finalization.
@@ -35,7 +35,7 @@ SUITES = ("WebKit", "SDWebImage 5.21.7", "ScanPage", "Search/XCUI", "SDWebImage 
 def command_budget_seconds():
     # 3 generations/builds, seven test invocations, three RED wrappers, seven exports.
     return (3*BUDGETS['generate'] + BUDGETS['discovery'] + BUDGETS['boot'] + BUDGETS['bootstatus'] +
-            BUDGETS['search_red'] + BUDGETS['collection_red'] + 3*BUDGETS['build'] + BUDGETS['codesign'] +
+            BUDGETS['search_red'] + 3*BUDGETS['build'] + BUDGETS['codesign'] +
             6*BUDGETS['suite'] + BUDGETS['search'] + BUDGETS['legacy_red'] + BUDGETS['history_red'] + 7*BUDGETS['export'])
 
 
@@ -194,7 +194,7 @@ def archive_candidates(root):
     candidates = [output / name for pair in RESULTS for name in pair]
     candidates += [output / 'run-summary.json']
     candidates += [root / 'tmp/history-display-red-results']
-    for directory in ('search-editing-red', 'collection-return-red', 'image-legacy-red'):
+    for directory in ('search-editing-red', 'image-legacy-red'):
         candidates += [root / 'tmp' / directory / name for name in
                        ('RedResults.xcresult', 'red-summary.json', 'red.log', 'build.log', 'source-manifest.json')]
     return candidates
@@ -385,7 +385,6 @@ class UIRun:
                                   '-destination', f'platform=iOS Simulator,id={device}', '-derivedDataPath', str(self.output / 'DerivedData'),
                                   'CODE_SIGNING_ALLOWED=YES', 'CODE_SIGN_IDENTITY=-']
             self.command('search editing baseline', [sys.executable, str(self.root / 'tests/run_search_editing_red.py'), device], BUDGETS['search_red'])
-            self.command('automatic collection return baseline', [sys.executable, str(self.root / 'tests/run_collection_return_red.py'), device], BUDGETS['collection_red'])
             self.command('current build', ['xcodebuild', 'build-for-testing', *self.build_options], BUDGETS['build'])
             self.verify_sdk_revision(CURRENT)
             self.command('codesign', ['codesign', '--verify', '--deep', '--strict',

@@ -8,12 +8,10 @@
 #import "../AxsCacheKeeperFilza.h"
 #import "InspectionPage.h"
 #import "../AxsCacheKeeperInspection.h"
-#import "../AxsCacheKeeperProbe.h"
 #import "../AxsCacheKeeperHostEvidence.h"
 #import "../AxsCacheKeeperInjectionConditions.h"
 #import "../AxsCacheKeeperWebKitStatus.h"
 #import "../AxsCacheKeeperImageCacheStatus.h"
-#import "DiagnosticsPage.h"
 #include <dlfcn.h>
 
 @interface CKScanPage : UITableViewController
@@ -38,19 +36,9 @@
 @property(nonatomic) BOOL showUnknownData;
 @property(nonatomic,copy) NSString *actionStatus;
 @property(nonatomic,strong) NSDate *scanUpdated;
-@property(nonatomic) int probeRequestToken;
-@property(nonatomic) int probeResponseToken;
-@property(nonatomic) uint32_t probeNonce;
-@property(nonatomic) BOOL probePending;
-@property(nonatomic,strong) NSDate *probeStarted;
-@property(nonatomic,copy) NSString *probeStatus;
-@property(nonatomic,strong) AxsCacheKeeperHostEvidenceClient *axs_cachekeeper_hostClient;
-@property(nonatomic,copy) NSString *axs_cachekeeper_hostStatus;
-@property(nonatomic) BOOL axs_cachekeeper_hostPending;
-@property(nonatomic) BOOL axs_cachekeeper_hostResultConsumed;
 @end
 @implementation CKScanPage
-- (instancetype)init { self=[super initWithStyle:UITableViewStyleInsetGrouped];if (self) { _probeRequestToken=-1;_probeResponseToken=-1; }return self; }
+- (instancetype)init { return [super initWithStyle:UITableViewStyleInsetGrouped]; }
 - (NSString *)file:(NSString *)name {return [jbroot(@"/var/mobile/Library/CacheKeeper") stringByAppendingPathComponent:name];}
 - (NSDictionary *)axs_cachekeeper_display:(NSString *)name {
     if (!self.displayCache) self.displayCache=[NSMutableDictionary new];
@@ -64,8 +52,6 @@
     return self.displayCache[name];
 }
 - (void)axs_cachekeeper_reload {
-    [self axs_cachekeeper_check_probe];
-    [self axs_cachekeeper_check_host];
     self.displayCache=nil;
     [self axs_cachekeeper_refresh_injection_conditions];
     NSDictionary *report=[self axs_cachekeeper_display:[@"Status/" stringByAppendingFormat:@"%@.auto.plist",self.bundle]];
@@ -93,7 +79,7 @@
                 if (!self) return;
                 self.axs_cachekeeper_injectionReadPending=NO;
                 self.axs_cachekeeper_savedInjectionConditions=projection;
-                [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:8 inSection:0]]
+                [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:7 inSection:0]]
                                       withRowAnimation:UITableViewRowAnimationNone];
             });
         }
@@ -111,12 +97,7 @@
     self.enableAllButton=[[UIBarButtonItem alloc] initWithTitle:@"一键开启" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_enable_all)];
     self.enableAllButton.accessibilityLabel=@"开启自动模式、网络磁盘缓存限制与新增缓存自动发现";
     self.navigationItem.rightBarButtonItems=@[self.enableAllButton,self.scanButton];
-    self.navigationItem.leftBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"全容器 · 只读" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_capacity_page)];
-    self.navigationItem.leftItemsSupplementBackButton=YES;
     [self axs_cachekeeper_reload];
-}
-- (void)axs_cachekeeper_capacity_page {
-    [self.navigationController pushViewController:[AxsCacheKeeperDiagnosticsPage new] animated:YES];
 }
 - (void)scan {
     if (self.timer) {
@@ -181,73 +162,7 @@
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];[self.statusTimer invalidate];self.statusTimer=nil;
 }
-- (void)viewDidDisappear:(BOOL)animated {
-    [super viewDidDisappear:animated];
-    // App backgrounding leaves this controller in the stack; release only after a completed departure.
-    if (self.isMovingFromParentViewController || self.isBeingDismissed || self.navigationController.isBeingDismissed ||
-        (self.navigationController && self.navigationController.topViewController!=self) || self.presentedViewController)
-        [self.axs_cachekeeper_hostClient axs_cachekeeper_cancel];
-}
-- (void)dealloc {
-    [self.timer invalidate];[self.statusTimer invalidate];[self.axs_cachekeeper_hostClient axs_cachekeeper_cancel];
-    if (_probeRequestToken>=0) notify_cancel(_probeRequestToken);
-    if (_probeResponseToken>=0) notify_cancel(_probeResponseToken);
-}
-- (void)axs_cachekeeper_begin_host {
-    [self.axs_cachekeeper_hostClient axs_cachekeeper_cancel];
-    self.axs_cachekeeper_hostClient=[[AxsCacheKeeperHostEvidenceClient alloc] initWithBundle:self.bundle];
-    BOOL sent=[self.axs_cachekeeper_hostClient axs_cachekeeper_beginWithTimeout:300];
-    self.axs_cachekeeper_hostPending=sent;
-    self.axs_cachekeeper_hostResultConsumed=NO;
-    self.axs_cachekeeper_hostStatus=sent ? @"已发送只读请求；打开 APP 后返回查看，不会更改开关或策略。" : @"只读请求发送失败；未确认宿主状态。";
-    [self axs_cachekeeper_reload];
-}
-- (void)axs_cachekeeper_check_host {
-    if (!self.axs_cachekeeper_hostClient || self.axs_cachekeeper_hostResultConsumed) return;
-    NSDictionary *result=[self.axs_cachekeeper_hostClient axs_cachekeeper_poll];
-    if ([result[@"state"] isEqual:@"pending"]) return;
-    self.axs_cachekeeper_hostPending=NO;
-    self.axs_cachekeeper_hostResultConsumed=YES;
-    NSString *version=[NSBundle bundleForClass:self.class].infoDictionary[@"CacheKeeperPackageVersion"];
-    NSDictionary *projected=axs_cachekeeper_host_observed_projection(result);
-    self.axs_cachekeeper_hostStatus=projected ? axs_cachekeeper_host_summary(@{@"state":@"available",@"data":projected},version) : @"只读观察状态无效，未确认宿主状态。";
-    NSError *error=nil;
-    if (projected && ![projected writeToURL:[NSURL fileURLWithPath:[self file:[NSString stringWithFormat:@"Status/%@.hostObserved.plist",self.bundle]]] error:&error])
-        self.axs_cachekeeper_hostStatus=[self.axs_cachekeeper_hostStatus stringByAppendingFormat:@"\n面板观察保存失败（%@/%ld）",error.domain,(long)error.code];
-}
-- (void)axs_cachekeeper_begin_probe {
-    NSDictionary *states=[NSDictionary dictionaryWithContentsOfFile:[self file:@"appEnabled.plist"]];
-    if (!axs_cachekeeper_app_enabled(states[self.bundle])) { self.probePending=NO;self.probeStatus=@"此 APP 未开启，不发送网络诊断请求。";[self axs_cachekeeper_reload];return; }
-    if (self.probeRequestToken>=0) notify_cancel(self.probeRequestToken);
-    if (self.probeResponseToken>=0) notify_cancel(self.probeResponseToken);
-    self.probeRequestToken=-1;self.probeResponseToken=-1;
-    int requestToken=-1,responseToken=-1;
-    uint32_t error=notify_register_check(axs_cachekeeper_probe_name(self.bundle,NO).UTF8String,&requestToken);
-    if (error==NOTIFY_STATUS_OK) error=notify_register_check(axs_cachekeeper_probe_name(self.bundle,YES).UTF8String,&responseToken);
-    self.probeRequestToken=requestToken;self.probeResponseToken=responseToken;
-    self.probeNonce=arc4random_uniform(UINT32_MAX-1)+1;
-    uint64_t request=axs_cachekeeper_probe_request(self.probeNonce,NSDate.date.timeIntervalSince1970);
-    if (error==NOTIFY_STATUS_OK) error=notify_set_state(requestToken,request);
-    if (error==NOTIFY_STATUS_OK) error=notify_post(axs_cachekeeper_probe_name(self.bundle,NO).UTF8String);
-    self.probePending=error==NOTIFY_STATUS_OK;self.probeStarted=NSDate.date;
-    self.probeStatus=error ? [NSString stringWithFormat:@"诊断请求发送失败（notify %u）",error] : @"请求已发送。请在 5 分钟内打开此 APP 一次，再返回这里查看；无需先允许共享文件写入。";
-    [self axs_cachekeeper_reload];
-}
-- (void)axs_cachekeeper_check_probe {
-    if (!self.probePending) return;
-    uint64_t response=0;
-    uint32_t error=notify_get_state(self.probeResponseToken,&response);
-    if (error!=NOTIFY_STATUS_OK) { self.probeStatus=[NSString stringWithFormat:@"诊断响应读取失败（notify %u）",error];self.probePending=NO;return; }
-    if ((uint32_t)(response>>32)==self.probeNonce && (uint32_t)response) {
-        self.probePending=NO;self.probeStatus=axs_cachekeeper_probe_description((uint32_t)response);
-        NSError *writeError=nil;
-        if (![@{@"updated":NSDate.date,@"result":@((uint32_t)response),@"message":self.probeStatus}
-            writeToURL:[NSURL fileURLWithPath:[self file:[NSString stringWithFormat:@"Status/%@.probe.plist",self.bundle]]] error:&writeError])
-            self.probeStatus=[self.probeStatus stringByAppendingFormat:@"\n诊断记录保存失败：%@",writeError.localizedDescription];
-    } else if (-self.probeStarted.timeIntervalSinceNow>300) {
-        self.probePending=NO;self.probeStatus=@"5 分钟内未收到 APP 响应。请确认 RootHide 允许此 APP 注入 CacheKeeper，再重新检查；通知通信失败也可能造成无响应，不能单凭这一项断定未注入。";
-    } else if (-self.probeStarted.timeIntervalSinceNow>15) self.probeStatus=@"仍未收到 APP 响应。请打开此 APP 一次再返回；持续无响应请核对 RootHide 的应用注入设置。";
-}
+- (void)dealloc { [self.timer invalidate];[self.statusTimer invalidate]; }
 - (void)message:(NSString *)text {
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"目录检测" message:text preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];[self presentViewController:alert animated:YES completion:nil];
@@ -341,7 +256,7 @@
 }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)table { return 4; }
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
-    if (section==0) return 9;
+    if (section==0) return 8;
     if (section==1) return MAX((NSUInteger)1,self.cacheRows.count);
     if (section==2) return self.unknownRows.count ? 1+(self.showUnknownData ? self.unknownRows.count : 0) : 0;
     return self.otherRows.count ? 1+(self.showOtherData ? self.otherRows.count : 0) : 0;
@@ -439,13 +354,6 @@
     }
     if (path.section==0 && path.row==4) {
         UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
-        cell.textLabel.text=@"检查网络限制";cell.textLabel.textColor=UIColor.systemBlueColor;cell.detailTextLabel.numberOfLines=0;
-        NSDictionary *previous=[self axs_cachekeeper_display:[NSString stringWithFormat:@"Status/%@.probe.plist",self.bundle]];
-        cell.detailTextLabel.text=self.probeStatus ?: (previous[@"message"] ? [NSString stringWithFormat:@"上次诊断（%@）：%@\n点击重新检查",axs_cachekeeper_time_string(previous[@"updated"]),previous[@"message"]] : @"此检查会刷新已有缓存策略并可能重新申请授权；打开 APP 后返回查看网络容量结果。只查看宿主请使用下方只读入口");
-        cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;return cell;
-    }
-    if (path.section==0 && path.row==5) {
-        UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
         cell.textLabel.text=@"切后台回收网页缓存";
         cell.detailTextLabel.numberOfLines=0;
         NSDictionary *states=[self axs_cachekeeper_display:@"appEnabled.plist"];
@@ -464,20 +372,19 @@
         cell.detailTextLabel.text=detail;cell.accessoryView=toggle;
         cell.selectionStyle=UITableViewCellSelectionStyleNone;return cell;
     }
-    if (path.section==0 && path.row==8) {
+    if (path.section==0 && path.row==7) {
         UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
         cell.textLabel.text=@"保存的注入条件（只读）";cell.detailTextLabel.numberOfLines=0;
         cell.accessibilityIdentifier=@"CacheKeeperSavedInjectionConditions";
         cell.detailTextLabel.text=axs_cachekeeper_injection_conditions_summary(self.axs_cachekeeper_savedInjectionConditions);
         cell.selectionStyle=UITableViewCellSelectionStyleNone;return cell;
     }
-    if (path.section==0 && path.row==7) {
+    if (path.section==0 && path.row==6) {
         UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
-        cell.textLabel.text=@"查看／检查宿主（只读）";cell.textLabel.textColor=UIColor.systemBlueColor;
+        cell.textLabel.text=@"宿主运行状态";
         cell.accessibilityIdentifier=@"CacheKeeperReadonlyHost";cell.detailTextLabel.numberOfLines=0;
         NSString *version=[NSBundle bundleForClass:self.class].infoDictionary[@"CacheKeeperPackageVersion"];
         NSMutableArray *parts=[NSMutableArray new];
-        if (self.axs_cachekeeper_hostStatus) [parts addObject:self.axs_cachekeeper_hostStatus];
         for (NSArray *source in @[@[@"host",@"宿主自动记录"],@[@"hostObserved",@"面板观察"]]) {
             NSString *file=[self file:[NSString stringWithFormat:@"Status/%@.%@.plist",self.bundle,source[0]]];
             NSError *error=nil;NSData *bytes=[NSData dataWithContentsOfFile:file options:0 error:&error];
@@ -487,10 +394,10 @@
             NSDictionary *envelope=projected ? @{@"state":state,@"data":projected} : @{@"state":state};
             [parts addObject:[NSString stringWithFormat:@"%@：%@",source[1],axs_cachekeeper_host_summary(envelope,version)]];
         }
-        [parts addObject:@"禁用 APP 也可检查；不申请授权、不刷新缓存策略、不清理或改变配置。请在五分钟内打开 APP 再返回。"];
-        cell.detailTextLabel.text=[parts componentsJoinedByString:@"\n"];cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;return cell;
+        [parts addObject:@"显示已有运行记录及原始时间；不会主动请求采集或改变配置。"];
+        cell.detailTextLabel.text=[parts componentsJoinedByString:@"\n"];cell.selectionStyle=UITableViewCellSelectionStyleNone;return cell;
     }
-    if (path.section==0 && path.row==6) {
+    if (path.section==0 && path.row==5) {
         UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
         cell.textLabel.text=@"已适配图片缓存";cell.detailTextLabel.numberOfLines=0;
         id state=[self axs_cachekeeper_display:@"appEnabled.plist"][self.bundle];
@@ -672,8 +579,7 @@
 }
 - (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
     [table deselectRowAtIndexPath:path animated:YES];
-    if (path.section==0 && path.row==7) { [self axs_cachekeeper_begin_host];return; }
-    if (path.section==0 && path.row==4) { [self axs_cachekeeper_begin_probe];return; }
+    if (path.section==0) return;
     NSDictionary *row=[self axs_cachekeeper_row_at:path];
     if (row) { [self.navigationController pushViewController:[[AxsCacheKeeperInspectionPage alloc] initWithBundle:self.bundle path:row[@"path"]] animated:YES];return; }
     if (path.section==2 && path.row==0) { self.showUnknownData=!self.showUnknownData;[self axs_cachekeeper_reload]; }

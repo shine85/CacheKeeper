@@ -27,7 +27,7 @@ def main():
         folder=Path(temporary);helper=folder/"autorelease.o"
         run([compiler,"clang","-fno-objc-arc","-c",str(ROOT/"tests/image_runtime_autorelease_fixture.m"),"-o",str(helper)],check=True)
         flags=[compiler,"clang","-fobjc-arc","-fblocks","-Wall","-Wextra","-Werror=format","-Werror=implicit-function-declaration","-DAXS_CACHEKEEPER_IMAGE_TESTING=1",'-DAXS_CACHEKEEPER_PACKAGE_VERSION="0.0.0-0.0"',"-I"+str(ROOT/"tests/image_runtime_context_platform"),"-I"+str(ROOT),"-I"+str(ROOT/"tests"),"-framework","Foundation"]
-        sources=[str(ROOT/p) for p in ("tests/image_runtime_probe_tests.m","AxsCacheKeeperCleanupRules.m","AxsCacheKeeperOperationInfo.m","AxsCacheKeeperImageCoordinator.m","AxsCacheKeeperImageCollection.m")]+[str(helper)]
+        sources=[str(ROOT/p) for p in ("tests/image_runtime_probe_tests.m","AxsCacheKeeperCleanupRules.m","AxsCacheKeeperOperationInfo.m","AxsCacheKeeperImageCoordinator.m")]+[str(helper)]
         baseline=folder/"receipt-baseline";baseline.mkdir()
         old=run(["git","show",RECEIPT_BASELINE+":AxsCacheKeeperImageCache.m"],15,cwd=ROOT,capture_output=True,check=True).stdout
         if hashlib.sha256(old).hexdigest()!=RECEIPT_SOURCE_SHA256:raise RuntimeError("unexpected receipt IO baseline source")
@@ -52,10 +52,25 @@ def main():
         if result.returncode!=1 or result.stdout.strip() or re.findall(r"^FAIL:.*$",result.stderr,re.MULTILINE)!=[expected]:raise RuntimeError("incorrect terminal publication RED\n"+result.stdout+result.stderr)
         print("PASS: image-runtime-probe exact unfinished terminal publication RED")
         binary=folder/"image-probes";run(flags+sources+["-o",str(binary)],check=True)
-        for scenario in ("receipt-io","receipt-order","receipt-terminal","same","changed","access","installation","delayed","rapid","late-provider","collection","preparation"):
+        for scenario in ("receipt-io","receipt-order","receipt-terminal","same","changed","access","installation","delayed","rapid","late-provider","legacy-request","initial-background"):
             home=folder/scenario;home.mkdir();result=run([str(binary),scenario,str(home)],20,capture_output=True,text=True)
             if result.returncode or result.stdout.strip()!=f"PASS: image-runtime-probe {scenario}":raise RuntimeError(result.stdout+result.stderr)
             print(result.stdout,end="")
+        old_runtime=run(["git","show","060d27747bda3c540217a6ec86ea5534d4a8409d:AxsCacheKeeperImageCacheRuntime.m"],15,cwd=ROOT,capture_output=True,check=True).stdout
+        if hashlib.sha256(old_runtime).hexdigest()!='ad26b8957570d07e468c87f2132b9699a4f8d5585bcb5d008fecd269df84d2ec':raise RuntimeError("unexpected legacy overlay baseline")
+        old_header=run(["git","show","060d27747bda3c540217a6ec86ea5534d4a8409d:AxsCacheKeeperImageCollection.h"],15,cwd=ROOT,capture_output=True,check=True).stdout
+        legacy_source=folder/"LegacyRuntime.m";legacy_source.write_bytes(old_runtime)
+        (folder/"AxsCacheKeeperImageCollection.h").write_bytes(old_header)
+        legacy=folder/"legacy-request-red"
+        run(flags+['-DAXS_CACHEKEEPER_PROBE_RUNTIME_INCLUDE="'+str(legacy_source)+'"']+sources+["-o",str(legacy)],check=True)
+        home=folder/"legacy-request-red-home";home.mkdir();result=run([str(legacy),"legacy-request",str(home)],20,capture_output=True,text=True)
+        expected="FAIL: image-runtime-source: legacy collection request never overrides ordinary user policy"
+        if result.returncode!=1 or result.stdout.strip() or re.findall(r"^FAIL:.*$",result.stderr,re.MULTILINE)!=[expected]:raise RuntimeError("incorrect legacy overlay RED\n"+result.stdout+result.stderr)
+        print("PASS: image-runtime-probe fixed 230.1 legacy overlay RED")
+        home=folder/"initial-background-red-home";home.mkdir();result=run([str(legacy),"initial-background",str(home)],20,capture_output=True,text=True)
+        expected="FAIL: image-runtime-source: initial background state triggers ordinary cleanup without another notification"
+        if result.returncode!=1 or result.stdout.strip() or re.findall(r"^FAIL:.*$",result.stderr,re.MULTILINE)!=[expected]:raise RuntimeError("incorrect initial background RED\n"+result.stdout+result.stderr)
+        print("PASS: image-runtime-probe fixed 230.1 missed initial background RED")
         runtime=(ROOT/"AxsCacheKeeperImageCacheRuntime.m").read_text(encoding="utf-8")
         anchors=("if (policy<=axs_cachekeeper_image_notified_policy) return;","if (axs_cachekeeper_image_background && applied) return;")
         for anchor in anchors:
