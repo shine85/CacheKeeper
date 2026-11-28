@@ -29,6 +29,38 @@ def main():
             'AxsCacheKeeperCapacityService.m','AxsCacheKeeperCapacity.m','AxsCacheKeeperScanTask.m','AxsCacheKeeperDirectories.m',
             'AxsCacheKeeperInstallation.m','AxsCacheKeeperHostEvidence.m','AxsCacheKeeperOperationInfo.m')]
         fixture=output/'fixture';fixture.mkdir()
+        old=subprocess.run(['git','show','d05e5ef4383e0d729795a292031ca8782f1ac917:tools/diagnose/AxsCacheKeeperStandaloneDiagnostics.m'],cwd=root,capture_output=True,check=True,timeout=15).stdout
+        import hashlib,re
+        assert hashlib.sha256(old).hexdigest()=='8e3ca1d4df52342d0ddd5d8145cfbfec9619efa89bd724ad93cada4e1a78731b'
+        baseline=output/'StandaloneBeforeAggregate.m';baseline.write_bytes(old)
+        red_sources=[baseline]+dependencies[1:]
+        red=output/'aggregate-red'
+        subprocess.run(flags+[str(source/'tests/standalone_diagnostics_tests.m')]+list(map(str,red_sources))+['-o',str(red)],check=True,timeout=60)
+        red_home=output/'aggregate-red-home';red_home.mkdir()
+        result=subprocess.run([str(red),str(red_home)],capture_output=True,text=True,timeout=30)
+        assert result.returncode==1 and result.stdout.strip()=='' and re.findall(r'^FAIL:.*$',result.stderr,re.MULTILINE)==['FAIL: standalone: invalid saved record makes aggregate partial'],result.stdout+result.stderr
+        print('PASS: fixed 232.1 invalid saved record aggregation RED')
+        test_source=(source/'tests/standalone_diagnostics_tests.m').read_text(encoding='utf-8')
+        assertion='    axs_cachekeeper_standalone_require([read[@"state"] isEqual:@"partial"],"invalid saved record makes aggregate partial");'
+        assert test_source.count(assertion)==1
+        fault_fixture=output/'fault-aggregate-fixture.m';fault_fixture.write_text(test_source.replace(assertion,''),encoding='utf-8')
+        fault_red=output/'fault-aggregate-red'
+        subprocess.run(flags+[str(fault_fixture)]+list(map(str,red_sources))+['-o',str(fault_red)],check=True,timeout=60)
+        fault_home=output/'fault-aggregate-red-home';fault_home.mkdir()
+        result=subprocess.run([str(fault_red),str(fault_home)],capture_output=True,text=True,timeout=30)
+        assert result.returncode==1 and result.stdout.strip()=='' and re.findall(r'^FAIL:.*$',result.stderr,re.MULTILINE)==['FAIL: standalone: fault source read error makes aggregate partial'],result.stdout+result.stderr
+        print('PASS: fixed 232.1 failed fault source aggregation RED')
+        fault_assertion='    axs_cachekeeper_standalone_require([mixed[@"state"] isEqual:@"partial"] && [mixed[@"sources"][1][@"state"] isEqual:@"readError"],"fault source read error makes aggregate partial");'
+        assert test_source.count(fault_assertion)==1
+        eof_fixture=output/'fault-eof-fixture.m';eof_fixture.write_text(test_source.replace(assertion,'').replace(fault_assertion,''),encoding='utf-8')
+        eof_red=output/'fault-eof-red'
+        subprocess.run(flags+[str(eof_fixture)]+list(map(str,red_sources))+['-o',str(eof_red)],check=True,timeout=60)
+        eof_home=output/'fault-eof-red-home';eof_home.mkdir()
+        result=subprocess.run([str(eof_red),str(eof_home)],capture_output=True,text=True,timeout=30)
+        assert result.returncode==1 and result.stdout.strip()=='' and re.findall(r'^FAIL:.*$',result.stderr,re.MULTILINE)==['FAIL: standalone: directory EOF preserves earlier metadata lookup error'],result.stdout+result.stderr
+        print('PASS: fixed 232.1 metadata error lost at EOF RED')
+
+
         tests=output/'tests'
         subprocess.run(flags+[str(source/'tests/standalone_diagnostics_tests.m')]+list(map(str,dependencies))+['-o',str(tests)],check=True,timeout=60)
         subprocess.run([str(tests),str(fixture)],check=True,timeout=60)

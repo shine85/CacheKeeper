@@ -383,7 +383,7 @@ class UIRun:
             self.command('bootstatus', ['xcrun', 'simctl', 'bootstatus', device, '-b'], BUDGETS['bootstatus'])
             self.build_options = ['-project', str(self.output / 'CacheKeeperInputTests.xcodeproj'), '-scheme', 'InputHarness',
                                   '-destination', f'platform=iOS Simulator,id={device}', '-derivedDataPath', str(self.output / 'DerivedData'),
-                                  'CODE_SIGNING_ALLOWED=YES', 'CODE_SIGN_IDENTITY=-']
+                                  '-skipPackageUpdates', 'CODE_SIGNING_ALLOWED=YES', 'CODE_SIGN_IDENTITY=-']
             self.command('search editing baseline', [sys.executable, str(self.root / 'tests/run_search_editing_red.py'), device], BUDGETS['search_red'])
             self.command('current build', ['xcodebuild', 'build-for-testing', *self.build_options], BUDGETS['build'])
             self.verify_sdk_revision(CURRENT)

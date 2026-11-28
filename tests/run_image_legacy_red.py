@@ -44,7 +44,7 @@ def main():
                "-destination", f"platform=iOS Simulator,id={sys.argv[1]}",
                "-derivedDataPath", str(output / "DerivedData"),
                "-only-testing:ImageCacheLegacyIntegrationTests/ImageCacheLegacyIntegrationTests/" + METHOD,
-               "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"]
+               "-skipPackageUpdates", "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"]
     with (output / "build.log").open("w", encoding="utf-8") as log:
         subprocess.run(["xcodebuild", "build-for-testing", *options], stdout=log, stderr=subprocess.STDOUT,
                        check=True, timeout=600)

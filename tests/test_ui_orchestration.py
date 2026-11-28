@@ -69,9 +69,11 @@ def execute(name, failures=None, bad_pin=None, ambiguous_spec=False):
             stage = "generate" + configured_sdk
             expected_timeout = 60
         elif command[:2] == ["xcodebuild", "build-for-testing"]:
+            assert "-skipPackageUpdates" in command, "pinned SDK builds must not update existing repositories"
             stage = "build" + configured_sdk
             expected_timeout = 600
         elif command[:2] == ["xcodebuild", "test-without-building"]:
+            assert "-skipPackageUpdates" in command
             result = Path(command[command.index("-resultBundlePath") + 1])
             stage = RESULTS[result.name]
             result.mkdir(parents=True)

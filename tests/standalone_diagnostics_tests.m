@@ -32,6 +32,7 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
     axs_cachekeeper_standalone_require([[@"malformed" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:[status stringByAppendingPathComponent:@"test.capacity.imagecache.plist"] atomically:YES],"write malformed state");
     read=axs_cachekeeper_diagnose_saved(saved,@[@"test.capacity"]);
     axs_cachekeeper_standalone_require([read[@"apps"][0][@"image"][@"state"] isEqual:@"invalid"],"malformed state remains invalid");
+    axs_cachekeeper_standalone_require([read[@"state"] isEqual:@"partial"],"invalid saved record makes aggregate partial");
     NSString *privateFile=[base stringByAppendingPathComponent:@"private-canary"];
     axs_cachekeeper_standalone_require([@{@"private":@"NEVER_EXPORT_SYMLINK"} writeToFile:privateFile atomically:YES],"private canary");
     NSString *link=[status stringByAppendingPathComponent:@"test.capacity.network.plist"];
@@ -47,6 +48,17 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
     NSDictionary *metadata=axs_cachekeeper_diagnose_fault_metadata(@[faults]);
     json=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:metadata options:0 error:nil] encoding:NSUTF8StringEncoding];
     axs_cachekeeper_standalone_require([metadata[@"records"] count]==1 && ![json containsString:@"SECRET_CRASH_BODY"] && ![json containsString:@"private-2026"] && ![json containsString:faults],"fault metadata contains neither names nor contents");
+    NSDictionary *mixed=axs_cachekeeper_diagnose_fault_metadata(@[faults,privateFile]);
+    axs_cachekeeper_standalone_require([mixed[@"state"] isEqual:@"partial"] && [mixed[@"sources"][1][@"state"] isEqual:@"readError"],"fault source read error makes aggregate partial");
+    NSDictionary *optional=axs_cachekeeper_diagnose_fault_metadata(@[faults,[base stringByAppendingPathComponent:@"absent-fault-directory"]]);
+    axs_cachekeeper_standalone_require([optional[@"state"] isEqual:@"available"],"optional missing fault source does not erase successful metadata");
+    NSString *denied=axs_cachekeeper_standalone_directory(base,@"fault-entry-denied");
+    axs_cachekeeper_standalone_require([[@"metadata only" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:[denied stringByAppendingPathComponent:@"BaiduNetdisk-denied.ips"] atomically:YES],"create denied metadata fixture");
+    axs_cachekeeper_standalone_require(geteuid()!=0 && !chmod(denied.fileSystemRepresentation,0400),"nonroot directory readable without entry lookup permission");
+    NSDictionary *deniedMetadata=axs_cachekeeper_diagnose_fault_metadata(@[denied,faults]);
+    axs_cachekeeper_standalone_require(!chmod(denied.fileSystemRepresentation,0700),"restore fixture permission");
+    axs_cachekeeper_standalone_require([deniedMetadata[@"state"] isEqual:@"partial"] && [deniedMetadata[@"sources"][0][@"state"] isEqual:@"readError"] &&
+        [deniedMetadata[@"sources"][0][@"errorCode"] intValue]==EACCES && [deniedMetadata[@"records"] count]==1,"directory EOF preserves earlier metadata lookup error");
     NSString *capacityHome=axs_cachekeeper_standalone_directory(base,@"container"),*capacityOutput=axs_cachekeeper_standalone_directory(base,@"capacity");
     axs_cachekeeper_standalone_require([[NSMutableData dataWithLength:8192] writeToFile:[capacityHome stringByAppendingPathComponent:@"private-business-name"] atomically:YES],"real capacity file");
     NSDictionary *source=axs_cachekeeper_standalone_plan(capacityHome);

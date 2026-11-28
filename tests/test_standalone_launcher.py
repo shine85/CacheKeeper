@@ -26,7 +26,7 @@ class LauncherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='ck-launcher-',dir=SOURCE/'tmp') as name:
             base=Path(name);tools=base/'bin';tools.mkdir();root=base/'bootstrap';(root/'usr/lib').mkdir(parents=True)
             (root/'usr/lib/libroothide.dylib').write_bytes(b'fixture-library')
-            package=base/'tool package';package.mkdir();shutil.copyfile(SOURCE/'tools/diagnose/run.sh',package/'run.sh')
+            package=base/'诊断 工具包 中文';package.mkdir();shutil.copyfile(SOURCE/'tools/diagnose/run.sh',package/'run.sh')
             def executable(path,text):path.write_text(text);path.chmod(0o755)
             executable(tools/'jbroot','#!/bin/sh\nif [ "$1" = / ]; then printf "%s\\n" "$CK_FIXTURE_ROOT"; else printf "%s\\n" "$1"; fi\n')
             executable(tools/'rootfs','#!/bin/sh\nprintf "%s\\n" "$1"\n')

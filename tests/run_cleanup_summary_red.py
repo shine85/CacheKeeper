@@ -55,7 +55,7 @@ def main():
                        "testEnabledAppWithoutDirectoriesKeepsHistoricalSummaryAndActionStatus")
             options = ["-project", str(output / "CacheKeeperInputTests.xcodeproj"), "-scheme", "InputHarness",
                        "-destination", f"platform=iOS Simulator,id={sys.argv[1]}", "-derivedDataPath", str(output / "DerivedData"),
-                       "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"]
+                       "-skipPackageUpdates", "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"]
             options += ["-only-testing:ScanPageTests/AxsCacheKeeperScanPageTests/" + method for method in methods]
             with (artifact / "build.log").open("w", encoding="utf-8") as log:
                 subprocess.run(["xcodebuild", "build-for-testing", *options], stdout=log, stderr=subprocess.STDOUT,

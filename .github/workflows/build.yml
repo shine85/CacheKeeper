@@ -137,7 +137,6 @@ jobs:
 
   build:
     name: 测试、编译与检查 deb
-    needs: [native, uikit]
     if: inputs.native_only != true
     # macos-15 的 arm64 池连续未分配 runner；宿主改为 Intel，设备目标仍由 Makefile 定义。
     runs-on: macos-15-intel
@@ -245,7 +244,7 @@ jobs:
 
   release:
     name: 发布可下载测试包
-    needs: build
+    needs: [native, uikit, build]
     if: inputs.native_only != true && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
     timeout-minutes: 5

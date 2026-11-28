@@ -68,16 +68,18 @@ NSDictionary *axs_cachekeeper_diagnose_saved(NSString *folder,NSArray<NSString *
     NSMutableOrderedSet *bundles=[NSMutableOrderedSet orderedSetWithArray:requested ?: AxsCacheKeeperDiagnoseTargets()];
     if(!requested)for(NSString *bundle in [configuration[@"data"] allKeys])if(axs_cachekeeper_bundle_id(bundle))[bundles addObject:bundle];
     NSMutableArray *apps=[NSMutableArray new];NSUInteger omitted=bundles.count>64 ? bundles.count-64 : 0,readBytes=0,reportBytes=0;
-    BOOL limited=NO;NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+3;
+    BOOL limited=NO,failed=![@[@"available",@"missing"] containsObject:configuration[@"state"]];NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+3;
     for(NSString *bundle in bundles){
         if(apps.count>=64)break;if(!axs_cachekeeper_bundle_id(bundle))continue;
-        NSMutableDictionary *app=[@{@"bundle":bundle,@"configuration":AxsCacheKeeperDiagnoseConfiguration(configuration[@"data"][bundle])} mutableCopy];
+        NSDictionary *state=AxsCacheKeeperDiagnoseConfiguration(configuration[@"data"][bundle]);
+        failed |= [state[@"state"] isEqual:@"invalid"] || [state[@"invalidFields"] boolValue];
+        NSMutableDictionary *app=[@{@"bundle":bundle,@"configuration":state} mutableCopy];
         for(NSArray *pair in @[@[@"network",@"network"],@[@"host",@"host"],@[@"image",@"imagecache"],@[@"webkit",@"webkit"],@[@"gurd",@"gurd"],@[@"cleanup",@"auto"]]){
             if(readBytes>=8*1024*1024 || NSProcessInfo.processInfo.systemUptime>=deadline){app[pair[0]]=@{@"state":@"budgetExceeded"};limited=YES;continue;}
             NSDictionary *read=AxsCacheKeeperDiagnoseRead([folder stringByAppendingPathComponent:@"Status"],[NSString stringWithFormat:@"%@.%@.plist",bundle,pair[1]],AxsCacheKeeperDiagnoseStateLimit);
             // Charge the maximum attempted read; reserialized plist size is not input size.
             readBytes+=AxsCacheKeeperDiagnoseStateLimit;
-            if(![read[@"state"] isEqual:@"available"]){app[pair[0]]=read;continue;}
+            if(![read[@"state"] isEqual:@"available"]){app[pair[0]]=read;failed |= ![read[@"state"] isEqual:@"missing"];continue;}
             id raw=read[@"data"];NSDictionary *projection=nil;
             if([pair[0] isEqual:@"network"])projection=axs_cachekeeper_network_projection(raw);
             else if([pair[0] isEqual:@"host"])projection=axs_cachekeeper_host_projection(raw);
@@ -85,13 +87,14 @@ NSDictionary *axs_cachekeeper_diagnose_saved(NSString *folder,NSArray<NSString *
             else if([pair[0] isEqual:@"webkit"])projection=axs_cachekeeper_webkit_projection(raw);
             else if([pair[0] isEqual:@"gurd"])projection=axs_cachekeeper_gurd_receipt_projection(raw);
             else projection=AxsCacheKeeperDiagnoseCleanup(raw);
+            failed |= projection==nil;
             app[pair[0]]=projection ? @{@"state":@"available",@"data":AxsCacheKeeperDiagnoseJSON(projection,0)} : AxsCacheKeeperDiagnoseError(@"invalid",EINVAL);
         }
         NSData *row=[NSJSONSerialization dataWithJSONObject:app options:0 error:nil];
         if(!row || row.length>AxsCacheKeeperDiagnoseSavedReportLimit-reportBytes){omitted=bundles.count-apps.count;limited=YES;break;}
         reportBytes+=row.length;[apps addObject:app];
     }
-    return @{@"state":limited || omitted ? @"partial" : @"complete",@"observation":@"savedRecords",@"capturedAt":@(NSDate.date.timeIntervalSince1970),@"configurationSource":configuration[@"state"],@"nonAtomic":@YES,@"apps":apps,@"omittedApps":@(omitted),@"recordsAreNotLiveVerification":@YES};
+    return @{@"state":limited || omitted || failed ? @"partial" : @"complete",@"observation":@"savedRecords",@"capturedAt":@(NSDate.date.timeIntervalSince1970),@"configurationSource":configuration[@"state"],@"nonAtomic":@YES,@"apps":apps,@"omittedApps":@(omitted),@"recordsAreNotLiveVerification":@YES};
 }
 static NSString *AxsCacheKeeperDiagnoseDigest(NSString *text) {
     NSData *bytes=[text dataUsingEncoding:NSUTF8StringEncoding];unsigned char digest[CC_SHA256_DIGEST_LENGTH];CC_SHA256(bytes.bytes,(CC_LONG)bytes.length,digest);
@@ -113,12 +116,12 @@ NSDictionary *axs_cachekeeper_diagnose_fault_metadata(NSArray<NSString *> *folde
         int code=0;
         while(YES){
             if(inspected>=1024 || records.count>=128 || NSProcessInfo.processInfo.systemUptime>=deadline){truncated=YES;break;}
-            errno=0;struct dirent *entry=readdir(directory);if(!entry){code=errno;break;}
+            errno=0;struct dirent *entry=readdir(directory);if(!entry){if(errno && !code)code=errno;break;}
             if(!strcmp(entry->d_name,".") || !strcmp(entry->d_name,".."))continue;inspected++;
             NSString *name=[NSFileManager.defaultManager stringWithFileSystemRepresentation:entry->d_name length:strlen(entry->d_name)];
             NSString *kind=name.pathExtension.lowercaseString,*subject=AxsCacheKeeperDiagnoseFaultSubject(name);
             if(!subject || ![@[@"ips",@"crash",@"spin",@"hang"] containsObject:kind])continue;
-            struct stat info;if(fstatat(fd,entry->d_name,&info,AT_SYMLINK_NOFOLLOW)){code=errno;continue;}
+            struct stat info;if(fstatat(fd,entry->d_name,&info,AT_SYMLINK_NOFOLLOW)){if(!code)code=errno;continue;}
             if(!S_ISREG(info.st_mode) || info.st_size<0)continue;
             NSString *identifier=AxsCacheKeeperDiagnoseDigest([NSString stringWithFormat:@"%lu:%@",(unsigned long)index,name]);
             [records addObject:@{@"id":identifier,@"subjectHint":subject,@"association":@"filenameOnlyUnverified",@"kind":kind,@"bytes":@((uint64_t)info.st_size),@"modifiedAt":@(info.st_mtimespec.tv_sec),@"source":@(index+1)}];
@@ -127,8 +130,11 @@ NSDictionary *axs_cachekeeper_diagnose_fault_metadata(NSArray<NSString *> *folde
         [sources addObject:@{@"source":@(index+1),@"state":code ? @"readError" : truncated ? @"partial" : @"complete",@"errorCode":@(code)}];
         if(truncated)break;
     }
-    BOOL available=NO;for(NSDictionary *source in sources)if([source[@"state"] isEqual:@"complete"] || [source[@"state"] isEqual:@"partial"])available=YES;
-    return @{@"state":truncated ? @"partial" : available ? @"available" : @"unavailable",@"sources":sources,@"records":records,@"entriesExamined":@(inspected),@"contentRead":@NO,@"systemSamplingTriggered":@NO};
+    BOOL available=NO,failed=NO;for(NSDictionary *source in sources){
+        available |= [source[@"state"] isEqual:@"complete"] || [source[@"state"] isEqual:@"partial"];
+        failed |= [source[@"state"] isEqual:@"readError"];
+    }
+    return @{@"state":truncated || (available && failed) ? @"partial" : available ? @"available" : @"unavailable",@"sources":sources,@"records":records,@"entriesExamined":@(inspected),@"contentRead":@NO,@"systemSamplingTriggered":@NO};
 }
 NSDictionary *axs_cachekeeper_diagnose_processes(void) {
     int mib[3]={CTL_KERN,KERN_PROC,KERN_PROC_ALL};size_t size=0;NSMutableData *data=nil;int code=0;

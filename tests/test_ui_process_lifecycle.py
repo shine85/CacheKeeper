@@ -45,7 +45,10 @@ class UILifecycleTests(unittest.TestCase):
         self.assertIn('timeout-minutes: 205',uikit)
         self.assertLess(self.module.RUNNER_BUDGET_SECONDS,205*60)
         self.assertLessEqual(3+8+2+205+3+5,230)
-        self.assertIn('needs: [native, uikit]',workflow)
+        release=workflow.split('  release:\n',1)[1]
+        build=workflow.split('  build:\n',1)[1].split('  release:\n',1)[0]
+        self.assertIn('needs: [native, uikit, build]',release)
+        self.assertNotIn('    needs:',build)
         upload=uikit.split('uses: actions/upload-artifact@v4',1)[1]
         self.assertNotIn('.xcresult',upload)
         self.assertIn('UIKit-results.tar.gz',upload)
