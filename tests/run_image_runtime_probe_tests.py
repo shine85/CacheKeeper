@@ -39,8 +39,20 @@ def main():
         expected="FAIL: image-runtime-source: foreground and receipt access never wait for receipt IO"
         if result.returncode!=1 or result.stdout.strip() or re.findall(r"^FAIL:.*$",result.stderr,re.MULTILINE)!=[expected]:raise RuntimeError("incorrect receipt IO baseline RED\n"+result.stdout+result.stderr)
         print("PASS: image-runtime-probe fixed 228.1 receipt IO foreground blocking RED")
+        coordinator=(ROOT/"AxsCacheKeeperImageCoordinator.m").read_text(encoding="utf-8")
+        published='_publishedReceipt && ![_publishedReceipt[@"pending"] unsignedIntegerValue]'
+        if coordinator.count(published)!=1:raise RuntimeError("ambiguous completed publication decision boundary")
+        future=coordinator.replace(published,'_cache.receipt && ![_cache.receipt[@"pending"] unsignedIntegerValue]')
+        terminal_source=folder/"ImageCoordinator-terminal-red.m";terminal_source.write_text(future,encoding="utf-8")
+        terminal_sources=[str(terminal_source) if Path(source).name=="AxsCacheKeeperImageCoordinator.m" else source for source in sources]
+        terminal_red=folder/"image-terminal-red";run(flags+terminal_sources+["-o",str(terminal_red)],check=True)
+        home=folder/"receipt-terminal-red-home";home.mkdir()
+        result=run([str(terminal_red),"receipt-terminal",str(home)],20,capture_output=True,text=True)
+        expected="FAIL: image-runtime-source: background task survives older notices until terminal receipt publication finishes"
+        if result.returncode!=1 or result.stdout.strip() or re.findall(r"^FAIL:.*$",result.stderr,re.MULTILINE)!=[expected]:raise RuntimeError("incorrect terminal publication RED\n"+result.stdout+result.stderr)
+        print("PASS: image-runtime-probe exact unfinished terminal publication RED")
         binary=folder/"image-probes";run(flags+sources+["-o",str(binary)],check=True)
-        for scenario in ("receipt-io","receipt-order","same","changed","access","installation","delayed","rapid","late-provider","collection","preparation"):
+        for scenario in ("receipt-io","receipt-order","receipt-terminal","same","changed","access","installation","delayed","rapid","late-provider","collection","preparation"):
             home=folder/scenario;home.mkdir();result=run([str(binary),scenario,str(home)],20,capture_output=True,text=True)
             if result.returncode or result.stdout.strip()!=f"PASS: image-runtime-probe {scenario}":raise RuntimeError(result.stdout+result.stderr)
             print(result.stdout,end="")

@@ -38,6 +38,9 @@ typedef struct AxsCacheKeeperNetworkInitialization {
     uint64_t beganAtRequest, request;
     BOOL suppressed;
     BOOL restorationUnverified;
+    // The initializer's precise-lifetime local owns this stable state, never
+    // the receiver. Same-receiver nested frames borrow the outer state.
+    __unsafe_unretained AxsCacheKeeperNetworkCapacity *provisional;
     struct AxsCacheKeeperNetworkInitialization *parent, *next, *root;
 } AxsCacheKeeperNetworkInitialization;
 static __thread AxsCacheKeeperNetworkInitialization *axs_cachekeeper_thread_initialization;
@@ -92,12 +95,14 @@ static BOOL axs_cachekeeper_failed_current(AxsCacheKeeperNetworkCapacity *state)
 // Only a completed, overtaken call schedules repair. Normal setters stay synchronous;
 // plugin coordination adds no wait for another native call or contention loop.
 static void axs_cachekeeper_reconcile_locked(NSURLCache *cache,AxsCacheKeeperNetworkCapacity *state) {
+    if ([axs_cachekeeper_capacities objectForKey:cache]!=state || axs_cachekeeper_initializing_cache(cache)) return;
     if (state.active || state.reconcileScheduled || !state.hasDesired || axs_cachekeeper_failed_current(state)) return;
     state.reconcileScheduled=YES;
     dispatch_async(axs_cachekeeper_reconcile_queue,^{
         @synchronized(axs_cachekeeper_cache_lock) {
             state.reconcileScheduled=NO;
-            if (state.active || !state.dirty || axs_cachekeeper_failed_current(state)) return;
+            if (state.active || !state.dirty || axs_cachekeeper_failed_current(state) ||
+                [axs_cachekeeper_capacities objectForKey:cache]!=state || axs_cachekeeper_initializing_cache(cache)) return;
         }
         @try {(void)axs_cachekeeper_apply_capacity(cache,state,NO,YES,NULL);}
         @catch (NSException *error) {
@@ -110,7 +115,8 @@ static void axs_cachekeeper_reconcile_locked(NSURLCache *cache,AxsCacheKeeperNet
 static BOOL axs_cachekeeper_apply_capacity(NSURLCache *cache,AxsCacheKeeperNetworkCapacity *state,BOOL allowConcurrent,BOOL automatic,const AxsCacheKeeperNetworkWrite *request) {
     NSUInteger desired;uint64_t revision,policy;
     @synchronized(axs_cachekeeper_cache_lock) {
-        if (!state.hasDesired) return NO;
+        if (!state.hasDesired && !request) return NO;
+        if (automatic && ([axs_cachekeeper_capacities objectForKey:cache]!=state || axs_cachekeeper_initializing_cache(cache))) return NO;
         if (automatic && axs_cachekeeper_failed_current(state)) return NO;
         if (!allowConcurrent && state.active) {state.dirty=YES;state.pending=YES;return NO;}
         desired=request ? request->capacity : (axs_cachekeeper_prevent_network ? 0 : state.desired);
@@ -204,7 +210,8 @@ static void axs_cachekeeper_set_capacity(NSURLCache *cache, SEL selector, NSUInt
     @synchronized (axs_cachekeeper_cache_lock) {
         AxsCacheKeeperNetworkInitialization *frame=axs_cachekeeper_initializing_cache(cache);
         AxsCacheKeeperCapacitySource origin=axs_cachekeeper_capacity_source(frame,&source);
-        state=axs_cachekeeper_capacity_state(cache);
+        AxsCacheKeeperNetworkCapacity *published=[axs_cachekeeper_capacities objectForKey:cache];
+        state=frame ? (published ?: frame->provisional) : axs_cachekeeper_capacity_state(cache);
         if (frame) {
             if (origin!=AxsCacheKeeperCapacitySourceInternal) {
                 frame->desired=capacity;
@@ -213,16 +220,26 @@ static void axs_cachekeeper_set_capacity(NSURLCache *cache, SEL selector, NSUInt
                     (frame->suppressed || axs_cachekeeper_prevent_network);
             }
             frame->suppressed |= axs_cachekeeper_prevent_network;
-            state.desired=frame->desired;state.request=frame->request;
-            state.restorationUnverified=frame->restorationUnverified;
+            if (!published || origin==AxsCacheKeeperCapacitySourceExplicit) {
+                state.desired=frame->desired;state.request=frame->request;
+                state.restorationUnverified=frame->restorationUnverified;
+                state.hasDesired=YES;
+            }
+            // Only an actual external request survives an initializer that may
+            // throw or return nil. Internal/unknown observations stay provisional
+            // until success and cannot poison an already published object's intent.
+            if (origin==AxsCacheKeeperCapacitySourceExplicit && !published)
+                [axs_cachekeeper_capacities setObject:state forKey:cache];
         } else {
             state.desired=capacity;
             state.request=++axs_cachekeeper_capacity_request;
             state.restorationUnverified=origin==AxsCacheKeeperCapacitySourceUnverified &&
                 (state.pending || axs_cachekeeper_prevent_network);
+            state.hasDesired=YES;
         }
-        state.hasDesired=YES;state.revision++;
-        state.pending=axs_cachekeeper_prevent_network || state.restorationUnverified;
+        state.revision++;
+        state.pending=(frame && published && origin!=AxsCacheKeeperCapacitySourceExplicit) ||
+            axs_cachekeeper_prevent_network || state.restorationUnverified;
         reportUnverified=state.restorationUnverified;
         write=(AxsCacheKeeperNetworkWrite){axs_cachekeeper_prevent_network ? 0 : capacity,state.revision,axs_cachekeeper_policy_revision};
         state.active++;state.dirty=YES;
@@ -231,11 +248,12 @@ static void axs_cachekeeper_set_capacity(NSURLCache *cache, SEL selector, NSUInt
     (void)axs_cachekeeper_apply_capacity(cache,state,YES,NO,&write);
     if (reportUnverified) axs_cachekeeper_unknown_initialization_source();
 }
-static void axs_cachekeeper_begin_initialization(AxsCacheKeeperNetworkInitialization *frame, id object, NSUInteger disk) {
+static void axs_cachekeeper_begin_initialization(AxsCacheKeeperNetworkInitialization *frame, id object, NSUInteger disk,AxsCacheKeeperNetworkCapacity *provisional) {
     @synchronized (axs_cachekeeper_cache_lock) {
         frame->receiver=(uintptr_t)(__bridge void *)object;
         frame->parent=axs_cachekeeper_thread_initialization;
         frame->root=frame;
+        frame->provisional=provisional;
         for (AxsCacheKeeperNetworkInitialization *parent=frame->parent;parent;parent=parent->parent)
             if (parent->receiver==frame->receiver || parent->result==frame->receiver) { frame->root=parent->root; break; }
         frame->desired=disk;
@@ -254,7 +272,11 @@ static void axs_cachekeeper_finish_initialization(AxsCacheKeeperNetworkInitializ
     @synchronized (axs_cachekeeper_cache_lock) {
         frame->root->result=(uintptr_t)(__bridge void *)cache;
         if (frame->root!=frame) { axs_cachekeeper_end_initialization(frame); return; }
-        state=axs_cachekeeper_capacity_state(cache);
+        state=[axs_cachekeeper_capacities objectForKey:cache];
+        if (!state) {
+            state=(uintptr_t)(__bridge void *)cache==frame->receiver ? frame->provisional : [AxsCacheKeeperNetworkCapacity new];
+            [axs_cachekeeper_capacities setObject:state forKey:cache];
+        }
         if (state.request>frame->beganAtRequest && state.request>frame->request) {
             frame->desired=state.desired;frame->request=state.request;
             frame->restorationUnverified=state.restorationUnverified;
@@ -285,7 +307,8 @@ static void axs_cachekeeper_end_initialization(AxsCacheKeeperNetworkInitializati
 static id axs_cachekeeper_init_path(id object __attribute__((ns_consumed)), SEL selector, NSUInteger memory, NSUInteger disk, NSString *path) __attribute__((ns_returns_retained));
 static id axs_cachekeeper_init_path(id object __attribute__((ns_consumed)), SEL selector, NSUInteger memory, NSUInteger disk, NSString *path) {
     AxsCacheKeeperNetworkInitialization frame={0};
-    axs_cachekeeper_begin_initialization(&frame,object,disk);
+    __attribute__((objc_precise_lifetime)) AxsCacheKeeperNetworkCapacity *provisional=[AxsCacheKeeperNetworkCapacity new];
+    axs_cachekeeper_begin_initialization(&frame,object,disk,provisional);
     @try {
         // 原初始化器在锁外执行；只压缩磁盘参数，内存、路径、Cookie 与请求策略不变。
         id result=axs_cachekeeper_original_init_path(object,selector,memory,frame.forwarded,path);
@@ -296,7 +319,8 @@ static id axs_cachekeeper_init_path(id object __attribute__((ns_consumed)), SEL 
 static id axs_cachekeeper_init_url(id object __attribute__((ns_consumed)), SEL selector, NSUInteger memory, NSUInteger disk, NSURL *url) __attribute__((ns_returns_retained));
 static id axs_cachekeeper_init_url(id object __attribute__((ns_consumed)), SEL selector, NSUInteger memory, NSUInteger disk, NSURL *url) {
     AxsCacheKeeperNetworkInitialization frame={0};
-    axs_cachekeeper_begin_initialization(&frame,object,disk);
+    __attribute__((objc_precise_lifetime)) AxsCacheKeeperNetworkCapacity *provisional=[AxsCacheKeeperNetworkCapacity new];
+    axs_cachekeeper_begin_initialization(&frame,object,disk,provisional);
     @try {
         id result=axs_cachekeeper_original_init_url(object,selector,memory,frame.forwarded,url);
         axs_cachekeeper_finish_initialization(&frame,result);
@@ -355,12 +379,13 @@ BOOL axs_cachekeeper_configure_network_cache(BOOL prevent) {
     @synchronized (axs_cachekeeper_cache_lock) {
         if (axs_cachekeeper_policy_revision!=policy || axs_cachekeeper_prevent_network!=prevent) return NO;
         for (NSURLCache *cache in axs_cachekeeper_capacities.keyEnumerator.allObjects) {
-            if (axs_cachekeeper_initializing_cache(cache)) continue;
             AxsCacheKeeperNetworkCapacity *state=[axs_cachekeeper_capacities objectForKey:cache];
-            if (state.active || state.dirty || state.reconcileScheduled || (!prevent && (state.pending || state.restorationUnverified))) return NO;
+            if (state.active) return NO;
+            if (axs_cachekeeper_initializing_cache(cache)) continue;
+            if (state.dirty || state.reconcileScheduled || (!prevent && (state.pending || state.restorationUnverified))) return NO;
         }
-        if (!prevent) for (AxsCacheKeeperNetworkInitialization *frame=axs_cachekeeper_initializations;frame;frame=frame->next)
-            if (frame->root->restorationUnverified) return NO;
+        for (AxsCacheKeeperNetworkInitialization *frame=axs_cachekeeper_initializations;frame;frame=frame->next)
+            if (frame->root->provisional.active || (!prevent && frame->root->restorationUnverified)) return NO;
         return applied && (!prevent || shared!=nil);
     }
 }

@@ -17,5 +17,6 @@
 - (void)didBecomeActive;
 - (void)didEnterBackground;
 - (void)configurationDidChange;
-- (void)receiptDidChange;
+// Call only after the observer's synchronous persistence attempt has returned.
+- (void)receiptDidChange:(NSDictionary *)receipt;
 @end

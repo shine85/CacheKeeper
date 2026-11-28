@@ -111,6 +111,46 @@ static void probeReceiptIO(AxsCacheKeeperImageCache *engine,SDImageCache *owner)
     NSString *path=[[probeFolder stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[probeBundle stringByAppendingString:@".imagecache.plist"]];
     axs_cachekeeper_runtime_require(axs_cachekeeper_image_cache_raw_projection([NSDictionary dictionaryWithContentsOfFile:path])!=nil,"real Runtime observer still persists valid receipt after IO resumes");
 }
+static void probeTerminalReceipt(AxsCacheKeeperImageCache *engine,SDImageCache *owner) {
+    dispatch_sync(engine.work,^{});probePump(.05);dispatch_sync(engine.work,^{});
+    NSString *path=[[probeFolder stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[probeBundle stringByAppendingString:@".imagecache.plist"]];
+    NSString *stock=[owner.diskCachePath stringByAppendingPathComponent:@"terminal-stock"];
+    axs_cachekeeper_runtime_require([[@"actual cache stock" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:stock atomically:YES],"terminal publication fixture has actual SDK stock");
+    dispatch_semaphore_t sdkHeld=dispatch_semaphore_create(0),sdkRelease=dispatch_semaphore_create(0);
+    dispatch_semaphore_t terminalEntered=dispatch_semaphore_create(0),terminalRelease=dispatch_semaphore_create(0);
+    dispatch_async(owner.ioQueue,^{
+        dispatch_semaphore_signal(sdkHeld);
+        axs_cachekeeper_runtime_require(dispatch_semaphore_wait(sdkRelease,dispatch_time(DISPATCH_TIME_NOW,8*NSEC_PER_SEC))==0,"terminal fixture SDK queue released");
+    });
+    axs_cachekeeper_runtime_require(dispatch_semaphore_wait(sdkHeld,dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC))==0,"terminal fixture owns real SDK queue fence");
+    void (^original)(NSDictionary *)=[engine.observer copy];__block BOOL terminalHeld=NO;
+    engine.observer=^(NSDictionary *receipt) {
+        if (!terminalHeld && [receipt[@"apiCompleted"] unsignedIntegerValue]==1 && ![receipt[@"pending"] unsignedIntegerValue]) {
+            terminalHeld=YES;dispatch_semaphore_signal(terminalEntered);
+            axs_cachekeeper_runtime_require(dispatch_semaphore_wait(terminalRelease,dispatch_time(DISPATCH_TIME_NOW,8*NSEC_PER_SEC))==0,"terminal observer persistence released");
+        }
+        original(receipt);
+    };
+    NSUInteger ended=probeEnds,begun=probeBegins;
+    probeBackground();
+    // Do not run main callbacks until completion is queued and the following
+    // terminal snapshot is visible but its real Runtime observer is still held.
+    dispatch_sync(engine.work,^{});
+    NSDictionary *pending=[NSDictionary dictionaryWithContentsOfFile:path];
+    axs_cachekeeper_runtime_require(probeBegins==begun+1 && probeEnds==ended && [pending[@"pending"] unsignedIntegerValue]==1,"pending SDK action is persisted before preparation completion is delivered");
+    dispatch_semaphore_signal(sdkRelease);
+    axs_cachekeeper_runtime_require(dispatch_semaphore_wait(terminalEntered,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"completed SDK action reaches terminal publication before disk write");
+    axs_cachekeeper_runtime_require([NSFileManager.defaultManager fileExistsAtPath:stock] && atomic_load(&axs_cachekeeper_runtime_clears)==1,"established no-op SDK fixture completed with actual residual stock before terminal persistence");
+    probePump(.1);
+    axs_cachekeeper_runtime_require(probeEnds==ended,"background task survives older notices until terminal receipt publication finishes");
+    axs_cachekeeper_runtime_require([[NSDictionary dictionaryWithContentsOfFile:path][@"pending"] unsignedIntegerValue]==1,"terminal receipt is still pending on disk while observer is held");
+    dispatch_semaphore_signal(terminalRelease);
+    probeAwait(^BOOL{return probeEnds==ended+1;},"terminal publication ends exactly the active background task");
+    dispatch_sync(engine.work,^{});engine.observer=original;
+    NSDictionary *saved=[NSDictionary dictionaryWithContentsOfFile:path];
+    axs_cachekeeper_runtime_require([saved[@"apiCompleted"] unsignedIntegerValue]==1 && [saved[@"pending"] unsignedIntegerValue]==0 && axs_cachekeeper_image_cache_raw_projection(saved)!=nil,"terminal SDK result is actually persisted before task completion");
+    probePump(.05);axs_cachekeeper_runtime_require(probeEnds==ended+1,"older and terminal notices never end the task twice");
+}
 static void probeReceiptOrder(AxsCacheKeeperImageCache *engine) {
     dispatch_sync(engine.work,^{});
     void (^original)(NSDictionary *)=[engine.observer copy];
@@ -150,8 +190,10 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
     AxsCacheKeeperImageCache *engine=axs_cachekeeper_image_engine;
     __attribute__((objc_precise_lifetime)) SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"probe" diskCacheDirectory:[probeHome stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
     probeAwait(^BOOL {return [engine.receipt[@"eligible"] unsignedIntegerValue]==1;},"probe actual host owner is admitted");
-    if (!strcmp(argv[1],"receipt-io") || !strcmp(argv[1],"receipt-order")) {
-        if (!strcmp(argv[1],"receipt-io")) probeReceiptIO(engine,owner);else probeReceiptOrder(engine);
+    if (!strcmp(argv[1],"receipt-io") || !strcmp(argv[1],"receipt-order") || !strcmp(argv[1],"receipt-terminal")) {
+        if (!strcmp(argv[1],"receipt-io")) probeReceiptIO(engine,owner);
+        else if (!strcmp(argv[1],"receipt-terminal")) probeTerminalReceipt(engine,owner);
+        else probeReceiptOrder(engine);
         printf("PASS: image-runtime-probe %s\n",argv[1]);return 0;
     }
     if (!strcmp(argv[1],"preparation")) {

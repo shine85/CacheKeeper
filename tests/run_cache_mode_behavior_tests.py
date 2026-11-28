@@ -42,7 +42,8 @@ def main():
             ("memory-loss", "id result=axs_cachekeeper_original_init_path(object,selector,memory,frame.forwarded,path);",
              "id result=axs_cachekeeper_original_init_path(object,selector,(frame.forwarded==disk ? memory : 0),frame.forwarded,path);",
              "FAIL: network initialization: limited initializer still stores a real memory response"),
-            ("lost-restore", "NSUInteger desired=prevent ? 0 : state.desired;", "NSUInteger desired=0;",
+            ("lost-restore", "desired=request ? request->capacity : (axs_cachekeeper_prevent_network ? 0 : state.desired);",
+             "desired=request ? request->capacity : ((axs_cachekeeper_prevent_network || state.pending) ? 0 : state.desired);",
              "FAIL: cache mode behavior: same limited cache resumes real disk IO after disable"),
         )
         product = source.read_text(encoding="utf-8-sig")

@@ -130,7 +130,7 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
         beginBackground:^NSUInteger(void (^expiration)(void)){(void)expiration;begins++;return begins;}
         endBackground:^(NSUInteger token){(void)token;ends++;} backgroundTime:^BOOL(NSUInteger token){return token!=0;}];
     __weak AxsCacheKeeperImageCoordinator *weakCoordinator=coordinator;
-    [self.engine setObserver:^(NSDictionary *receipt){(void)receipt;dispatch_async(dispatch_get_main_queue(),^{[weakCoordinator receiptDidChange];});}];
+    [self.engine setObserver:^(NSDictionary *receipt){dispatch_async(dispatch_get_main_queue(),^{[weakCoordinator receiptDidChange:receipt];});}];
     XCTestExpectation *entered=[self expectationWithDescription:@"actual provider preparation held"];
     dispatch_semaphore_t release=dispatch_semaphore_create(0);__block BOOL first=YES;
     self.contextBarrier=^{if (first) {first=NO;[entered fulfill];dispatch_semaphore_wait(release,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC));}};
@@ -139,7 +139,9 @@ static id AxsCacheKeeperImageTestChangedGetter(id object, SEL selector) {
     self.contextBarrier=nil;dispatch_semaphore_signal(release);
     [self axs_cachekeeper_wait:^BOOL(NSDictionary *r){return [r[@"apiCompleted"] unsignedIntegerValue]==1 && [r[@"pending"] unsignedIntegerValue]==0;} description:@"delayed preparation actually clears SDK stock"];
     XCTAssertNil([owner diskImageDataForKey:@"stock"]);
-    [coordinator receiptDidChange];XCTAssertEqual(ends,1u);
+    XCTestExpectation *published=[self expectationWithDescription:@"completed publication notice reaches main"];
+    dispatch_async(self.engine.work,^{dispatch_async(dispatch_get_main_queue(),^{[published fulfill];});});
+    [self waitForExpectations:@[published] timeout:3];XCTAssertEqual(ends,1u);
 #endif
 }
 - (void)testBackgroundPreparationRacesPreserveActualSDKFiles {

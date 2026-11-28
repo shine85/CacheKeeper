@@ -148,7 +148,7 @@ void axs_cachekeeper_configure_image_cache(BOOL containerEligible,BOOL configura
                     else {axs_cachekeeper_image_report_writable=NO;NSLog(@"[CacheKeeper] 图片操作回执字段无效，保留待写历史");}
                 }
                 dispatch_async(dispatch_get_main_queue(),^{
-                    [axs_cachekeeper_image_coordinator receiptDidChange];
+                    [axs_cachekeeper_image_coordinator receiptDidChange:receipt];
                 });
             }];
         axs_cachekeeper_image_coordinator=[[AxsCacheKeeperImageCoordinator alloc] initWithCache:axs_cachekeeper_image_engine

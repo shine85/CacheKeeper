@@ -91,7 +91,27 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
     AxsNetworkRequire(axs_cachekeeper_configure_network_cache(NO),"initial disable succeeds");
     NSURLCache *first=AxsNetworkCreate(folder,@"first"),*second=AxsNetworkCreate(folder,@"second");
     AxsNetworkTarget=first;
-    if ([@[@"setter-reentry",@"getter-reentry",@"setter-same-instance-reentry"] containsObject:scenario]) {
+    if ([scenario isEqual:@"published-initialization-flight"]) {
+#if AXS_CACHEKEEPER_NETWORK_LOCK_CURRENT
+        // Model only the outer initializer lifetime around an already published
+        // real cache. The setter and configuration calls remain production code.
+        __attribute__((objc_precise_lifetime)) AxsCacheKeeperNetworkCapacity *provisional=[AxsCacheKeeperNetworkCapacity new];
+        AxsCacheKeeperNetworkInitialization frame={0};
+        axs_cachekeeper_begin_initialization(&frame,first,8388608,provisional);
+        dispatch_semaphore_t entered=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0),done=dispatch_semaphore_create(0);
+        AxsNetworkAction=^{dispatch_semaphore_signal(entered);AxsNetworkWait(release,"published initializer setter released");};
+        atomic_store(&AxsNetworkSetterArmed,true);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^{first.diskCapacity=33554432;dispatch_semaphore_signal(done);});
+        AxsNetworkWait(entered,"published initializer has a real native call in flight");
+        BOOL applied=axs_cachekeeper_configure_network_cache(NO);
+        dispatch_semaphore_signal(release);AxsNetworkWait(done,"published initializer native call completes");
+        axs_cachekeeper_end_initialization(&frame);
+        AxsNetworkRequire(!applied,"published in-flight state cannot be hidden by a provisional initialization frame");
+        AxsNetworkAwaitPolicy(NO);AxsNetworkRequire(first.diskCapacity==33554432,"published explicit request survives initialization frame retirement");
+#else
+        AxsNetworkRequire(NO,"published initializer flight is a current-source scenario");
+#endif
+    } else if ([@[@"setter-reentry",@"getter-reentry",@"setter-same-instance-reentry"] containsObject:scenario]) {
         BOOL same=[scenario isEqual:@"setter-same-instance-reentry"];
         AxsNetworkAction=^{
             dispatch_semaphore_t done=dispatch_semaphore_create(0);

@@ -349,14 +349,60 @@ void axs_cachekeeper_run_network_cache_tests(NSString *fixture) {
             axs_cachekeeper_network_require(!missing && axs_cachekeeper_configure_network_cache(NO),@"nil 返回移除未知活动帧，不能遗留全局失败");
 
             axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(YES),@"异常初始化退出测试开启限制");
+            __block NSURLCache *failedRetained=nil;
             axs_cachekeeper_test_after_init=^NSURLCache *(NSURLCache *cache) {
-                (void)cache;
+                // Keep the real receiver alive after unwinding: removal of a
+                // failed provisional state must not rely on an autorelease pool.
+                failedRetained=cache;
                 @throw [NSException exceptionWithName:@"AxsCacheKeeperTestInitializationFailure" reason:@"fixture" userInfo:nil];
             };
             BOOL caught=NO;
             @try { (void)axs_cachekeeper_test_create_unknown_cache(fixture,[name stringByAppendingString:@"-exception"],url,mode); }
             @catch (NSException *exception) { caught=[exception.name isEqual:@"AxsCacheKeeperTestInitializationFailure"]; }
             axs_cachekeeper_network_require(caught && axs_cachekeeper_configure_network_cache(NO),@"异常退出移除未知活动帧，不能遗留全局失败");
+            failedRetained.diskCapacity=33554432;
+            axs_cachekeeper_network_require(failedRetained.diskCapacity==33554432 && axs_cachekeeper_configure_network_cache(NO),
+                @"异常返回后存活接收者的新明确请求必须正常记录，不能保留失败初始化状态");
+
+            for (NSNumber *explicitCapacity in @[@0,@25165824]) {
+                axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(YES),@"异常前明确请求测试开启限制");
+                __block NSURLCache *explicitRetained=nil;
+                axs_cachekeeper_test_after_init=^NSURLCache *(NSURLCache *cache) {
+                    explicitRetained=cache;
+                    dispatch_semaphore_t requested=dispatch_semaphore_create(0);
+                    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^{
+                        cache.diskCapacity=explicitCapacity.unsignedIntegerValue;
+                        dispatch_semaphore_signal(requested);
+                    });
+                    axs_cachekeeper_network_require(dispatch_semaphore_wait(requested,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,
+                        @"真实初始化内另一线程的明确请求必须完成");
+                    @throw [NSException exceptionWithName:@"AxsCacheKeeperTestInitializationFailure" reason:@"explicit request survives unwind" userInfo:nil];
+                };
+                caught=NO;
+                @try {(void)axs_cachekeeper_test_create_unknown_cache(fixture,[name stringByAppendingFormat:@"-exception-explicit-%@",explicitCapacity],url,mode);}
+                @catch (NSException *exception) {caught=[exception.name isEqual:@"AxsCacheKeeperTestInitializationFailure"];}
+                axs_cachekeeper_network_require(caught && axs_cachekeeper_configure_network_cache(NO) &&
+                    explicitRetained.diskCapacity==explicitCapacity.unsignedIntegerValue,
+                    @"异常只丢弃未完成初始化来源，保留另一线程已发布的明确容量或零请求");
+            }
+
+            NSURLCache *existing=axs_cachekeeper_test_create_cache(fixture,[name stringByAppendingString:@"-existing-before-exception"],url);
+            existing.diskCapacity=16777216;
+            axs_cachekeeper_network_require(axs_cachekeeper_configure_network_cache(YES),@"独立对象保留测试开启限制");
+            __block NSURLCache *nestedRetained=nil;
+            axs_cachekeeper_test_after_init=^NSURLCache *(NSURLCache *cache) {
+                (void)cache;
+                nestedRetained=axs_cachekeeper_test_create_cache(fixture,[name stringByAppendingString:@"-nested-before-exception"],url);
+                nestedRetained.diskCapacity=25165824;
+                existing.diskCapacity=41943040;
+                @throw [NSException exceptionWithName:@"AxsCacheKeeperTestInitializationFailure" reason:@"other cache states survive unwind" userInfo:nil];
+            };
+            caught=NO;
+            @try {(void)axs_cachekeeper_test_create_unknown_cache(fixture,[name stringByAppendingString:@"-exception-preserves-others"],url,mode);}
+            @catch (NSException *exception) {caught=[exception.name isEqual:@"AxsCacheKeeperTestInitializationFailure"];}
+            axs_cachekeeper_network_require(caught && axs_cachekeeper_configure_network_cache(NO) &&
+                existing.diskCapacity==41943040 && nestedRetained.diskCapacity==25165824,
+                @"外层初始化异常不得清除已存在对象的新请求或独立成功嵌套对象");
         }
         axs_cachekeeper_test_observe_network=NO;
     }

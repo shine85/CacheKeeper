@@ -8,7 +8,7 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-SCENARIOS = ("setter-reentry", "getter-reentry", "setter-same-instance-reentry", "initial-getter-new-request", "newer-setter", "late-write-after-read", "disable-during-setter", "enable-during-setter", "off-on-during-setter", "setter-exception", "getter-exception", "replay-exception", "queued-replay-exception", "parallel-setters", "existing")
+SCENARIOS = ("setter-reentry", "getter-reentry", "setter-same-instance-reentry", "initial-getter-new-request", "published-initialization-flight", "newer-setter", "late-write-after-read", "disable-during-setter", "enable-during-setter", "off-on-during-setter", "setter-exception", "getter-exception", "replay-exception", "queued-replay-exception", "parallel-setters", "existing")
 BASELINE_SHA256 = "417fb7827ef3b08be4ede4b52d3e695ccbaf2b76b3d8be3edb85c0a96fffd068"
 BASELINE_REF = "2eb4f85046c6634ac3b785904fd3a561ba3bf49d"
 TOTAL_BUDGET_SECONDS = 360

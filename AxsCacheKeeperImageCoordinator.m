@@ -8,6 +8,7 @@
     BOOL (^_time)(NSUInteger);
     NSUInteger _request,_task;
     BOOL _background,_scheduling,_expired;
+    NSDictionary *_publishedReceipt;
 }
 @end
 @implementation AxsCacheKeeperImageCoordinator
@@ -20,11 +21,16 @@
 - (void)axs_cachekeeper_end_task {
     NSUInteger task=_task;_task=0;if (task && _end) _end(task);
 }
-- (void)receiptDidChange {
-    NSAssert(NSThread.isMainThread,@"Image lifecycle requires main thread");
+- (void)axs_cachekeeper_finish_published_work {
     // refresh_event publishes zero pending before it schedules owners. Only the
-    // explicit completion can end that preparation interval.
-    if (!_scheduling && ![_cache.receipt[@"pending"] unsignedIntegerValue]) [self axs_cachekeeper_end_task];
+    // explicit completion can end preparation; a future in-memory snapshot cannot
+    // end the task while its synchronous publication is still in progress.
+    if (!_scheduling && _publishedReceipt && ![_publishedReceipt[@"pending"] unsignedIntegerValue]) [self axs_cachekeeper_end_task];
+}
+- (void)receiptDidChange:(NSDictionary *)receipt {
+    NSAssert(NSThread.isMainThread,@"Image lifecycle requires main thread");
+    _publishedReceipt=[receipt copy];
+    [self axs_cachekeeper_finish_published_work];
 }
 - (void)configurationDidChange {
     NSAssert(NSThread.isMainThread,@"Image lifecycle requires main thread");
@@ -40,7 +46,7 @@
 - (void)didEnterBackground {
     NSAssert(NSThread.isMainThread,@"Image lifecycle requires main thread");
     if (_background) return;
-    _background=YES;_scheduling=YES;_expired=NO;NSUInteger request=++_request;
+    _background=YES;_scheduling=YES;_expired=NO;_publishedReceipt=nil;NSUInteger request=++_request;
     __weak typeof(self) weakSelf=self;
     // Time covers asynchronous preparation, whose eligible count is not known yet.
     NSUInteger task=_begin ? _begin(^{
@@ -60,7 +66,7 @@
         void (^complete)(void)=^{
             AxsCacheKeeperImageCoordinator *self=weakSelf;
             if (!self || request!=self->_request || !self->_background) return;
-            self->_scheduling=NO;[self receiptDidChange];
+            self->_scheduling=NO;[self axs_cachekeeper_finish_published_work];
         };
         if (NSThread.isMainThread) complete();else dispatch_async(dispatch_get_main_queue(),complete);
     }];

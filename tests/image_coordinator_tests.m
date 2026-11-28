@@ -34,10 +34,11 @@ int main(int argc,const char **argv) {@autoreleasepool {
     [coordinator didEnterBackground];
     require(begins==1 && cache.receivedTime,"a stale zero eligible receipt cannot deny preparation time");
     [coordinator didEnterBackground];require(begins==1 && cache.backgrounds==1,"duplicate background notification starts one attempt");
-    [coordinator receiptDidChange];require(ended.count==0,"intermediate empty refresh cannot end preparation time");
-    cache.receipt=@{@"eligible":@1,@"pending":@1};cache.scheduled();
-    require(ended.count==0,"scheduled owner keeps its task until completion");
-    cache.receipt=@{@"eligible":@1,@"pending":@0};[coordinator receiptDidChange];
+    [coordinator receiptDidChange:cache.receipt];require(ended.count==0,"intermediate empty refresh cannot end preparation time");
+    cache.receipt=@{@"eligible":@1,@"pending":@1};[coordinator receiptDidChange:cache.receipt];
+    cache.receipt=@{@"eligible":@1,@"pending":@0};cache.scheduled();
+    require(ended.count==0,"a newer unpersisted zero snapshot cannot retire the preparation task");
+    cache.receipt=@{@"eligible":@1,@"pending":@0};[coordinator receiptDidChange:cache.receipt];
     require([ended isEqual:@[@1]],"completed scheduled work ends exactly its task");
     NSUInteger finishedExpired=cache.expired;((void (^)(void))expirations[0])();
     require(cache.expired==finishedExpired,"ended task expiration cannot revoke an already completed request");
@@ -53,9 +54,9 @@ int main(int argc,const char **argv) {@autoreleasepool {
     [coordinator didBecomeActive];synchronousExpiration=YES;[coordinator didEnterBackground];
     require(!cache.receivedTime && [ended.lastObject isEqual:@4],"synchronous expiration returns and ends its token without usable time");
     [coordinator didBecomeActive];synchronousExpiration=NO;denyTask=YES;endings=ended.count;
-    [coordinator didEnterBackground];cache.scheduled();
+    [coordinator didEnterBackground];[coordinator receiptDidChange:cache.receipt];cache.scheduled();
     require(!cache.receivedTime && ended.count==endings,"invalid task never grants time or gets ended");
-    [coordinator didBecomeActive];denyTask=NO;timeAvailable=NO;[coordinator didEnterBackground];cache.scheduled();
+    [coordinator didBecomeActive];denyTask=NO;timeAvailable=NO;[coordinator didEnterBackground];[coordinator receiptDidChange:cache.receipt];cache.scheduled();
     require(!cache.receivedTime && [ended.lastObject isEqual:@6],"insufficient platform time never becomes usable preparation time");
     [coordinator didBecomeActive];timeAvailable=YES;__weak AxsCacheKeeperImageCoordinator *weak=coordinator;
     reenter=^{[weak didBecomeActive];[weak didEnterBackground];};
@@ -63,6 +64,6 @@ int main(int argc,const char **argv) {@autoreleasepool {
     require(begins==8 && [ended.lastObject isEqual:@7] && cache.receivedTime,"reentrant task acquisition retires only its obsolete returned token");
     NSUInteger before=ended.count;((void (^)(void))expirations[6])();
     require(ended.count==before,"obsolete reentrant expiration cannot end the replacement task");
-    cache.scheduled();require([ended.lastObject isEqual:@8],"replacement request owns its independent completion");
+    [coordinator receiptDidChange:cache.receipt];cache.scheduled();require([ended.lastObject isEqual:@8],"replacement request owns its independent completion");
     puts("PASS: image-coordinator preparation and lifecycle task ownership");return 0;
 }}
