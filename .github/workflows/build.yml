@@ -155,6 +155,8 @@ jobs:
       - name: 验证 UIKit 编排与进程收尾
         timeout-minutes: 2
         run: |
+          python3 tests/test_xctest_macros.py
+          python3 tests/check_xctest_macros.py
           python3 tests/test_ui_orchestration.py
           python3 tests/test_ui_process_lifecycle.py
           python3 tests/test_cleanup_summary_diagnostics.py

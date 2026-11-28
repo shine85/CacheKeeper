@@ -264,7 +264,7 @@
     leaseBefore=[NSData dataWithContentsOfFile:requestPath];
     AxsCacheKeeperCollectionSession *reopened=[AxsCacheKeeperCollectionSession openSessionAtPath:self.axs_cachekeeper_path error:&error];
     NSArray *resumable=[AxsCacheKeeperCollectionSession resumableSessionsInDirectory:self.axs_cachekeeper_folder error:&error];
-    XCTAssertTrue([@[@"imagePreparation",@"imageCollection"] containsObject:resumable.firstObject[@"nextPhase"]]);
+    XCTAssertTrue(([@[@"imagePreparation",@"imageCollection"] containsObject:resumable.firstObject[@"nextPhase"]]));
     AxsCollectionLiveDiagnosticsFixture *resumed=[[AxsCollectionLiveDiagnosticsFixture alloc] initWithCollectionSessionObject:reopened];resumed.axs_collection_folder=self.axs_cachekeeper_folder;
     UINavigationController *resumedNavigation=[[UINavigationController alloc] initWithRootViewController:resumed];[resumed loadViewIfNeeded];[resumed viewDidAppear:NO];
     XCTAssertTrue([resumedNavigation.topViewController isKindOfClass:AxsCacheKeeperImageCollectionPage.class]);
