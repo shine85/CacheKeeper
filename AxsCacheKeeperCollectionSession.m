@@ -187,6 +187,12 @@ static BOOL axs_cachekeeper_collection_session_complete(NSDictionary *projection
         if ([document[@"reportArtifact"] isKindOfClass:NSDictionary.class]) {
             if (![self openSessionAtPath:path error:NULL]) continue;
             nextPhase=@"export";failedWithoutResume=NO;
+        } else if ([@[@"complete",@"partial"] containsObject:phases[@"capacity"][@"state"]]) {
+            NSString *folder=[directory.lastPathComponent isEqual:@"collectionSessions"] ? [directory stringByDeletingLastPathComponent] : directory;
+            NSString *imagePath=[[folder stringByAppendingPathComponent:@"collectionSessions"] stringByAppendingPathComponent:[document[@"sessionID"] stringByAppendingString:@".image.plist"]];
+            AxsCacheKeeperImageCollectionSession *image=[NSFileManager.defaultManager fileExistsAtPath:imagePath] ?
+                [[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:document[@"sessionID"] error:NULL] : nil;
+            if (image && ![image readyForReport]) nextPhase=[image.reportProjection[@"state"] isEqual:@"idle"] && image.reportProjection[@"preparation"] ? @"imagePreparation" : @"imageCollection";
         }
         if (!nextPhase || failedWithoutResume) continue;
         [sessions addObject:@{ @"path":path,@"sessionID":document[@"sessionID"],
@@ -247,6 +253,8 @@ static BOOL axs_cachekeeper_collection_session_complete(NSDictionary *projection
         for (NSString *phase in axs_cachekeeper_collection_phases()) {
             NSMutableDictionary *entry=_axs_cachekeeper_document[@"phases"][phase];
             if ([entry[@"state"] isEqual:@"running"] || [entry[@"state"] isEqual:@"pending"]) {
+                if ([phase isEqual:@"capacity"] && [entry[@"state"] isEqual:@"running"] &&
+                    axs_cachekeeper_capacity_epoch(entry[@"request"][@"epoch"])) continue;
                 entry[@"state"]=@"interrupted";
                 [self axs_cachekeeper_event:phase state:@"interrupted" result:@{}];
                 recovered=YES;

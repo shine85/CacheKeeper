@@ -28,9 +28,18 @@ with tempfile.TemporaryDirectory(prefix='image-collection-',dir=ROOT/'tmp') as f
     result=subprocess.run([str(prior_binary),str(output/'prior-entry-home')],capture_output=True,text=True,timeout=30)
     assert result.returncode==1 and result.stderr.strip()=='FAIL: image-collection: candidate check and rejection reasons survive reopening before start',result.stderr
     print('PASS: fixed 220.1 missing entry persistence exact RED',hashlib.sha256(source).hexdigest())
+    stale_source=subprocess.run(['git','show','6af0c5e7563840daf51bd0d97dee2530af3dc5db:AxsCacheKeeperImageCollection.m'],check=True,capture_output=True,timeout=30).stdout
+    assert hashlib.sha256(stale_source).hexdigest()=='31f61e0ec6f86bb5b33cbb5c33c31ab0e2082907b7bedc1e073273d665fefe34'
+    (prior/'AxsCacheKeeperImageCollection.m').write_bytes(stale_source)
+    subprocess.run(flags+['-I'+str(ROOT),str(prior/'AxsCacheKeeperImageCollection.m'),str(ROOT/'AxsCacheKeeperOperationInfo.m'),
+                          str(ROOT/'tests/image_collection_tests.m'),'-o',str(prior_binary)],check=True,timeout=60)
+    result=subprocess.run([str(prior_binary),str(output/'prior-stale-home'),'refresh-discovery'],capture_output=True,text=True,timeout=30)
+    assert result.returncode==1 and result.stderr.strip()=='FAIL: image-collection: stale known SDK remains selectable for refresh without execution authority',result.stderr
+    print('PASS: fixed 221.1 stale candidate exact RED',hashlib.sha256(stale_source).hexdigest())
     sources=[str(ROOT/name) for name in ('AxsCacheKeeperImageCollection.m','AxsCacheKeeperOperationInfo.m','tests/image_collection_tests.m')]
     subprocess.run(flags+sources+['-o',str(binary)],check=True,timeout=60)
     subprocess.run([str(binary),str(output/'green')],check=True,timeout=30)
+    subprocess.run([str(binary),str(output/'stale-green'),'refresh-discovery'],check=True,timeout=30)
     # Exact semantic RED changes the production overlay, with the same file/receipt path.
     red=output/'red';(red/'tests').mkdir(parents=True)
     for name in ('AxsCacheKeeperImageCollection.m','AxsCacheKeeperImageCollection.h'):

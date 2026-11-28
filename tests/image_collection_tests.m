@@ -2,6 +2,19 @@
 #import "../AxsCacheKeeperImageCollection.h"
 #import "../AxsCacheKeeperImageCacheStatus.h"
 static void check(BOOL value,const char *message) {if (!value) {fprintf(stderr,"FAIL: image-collection: %s\n",message);exit(1);}}
+@interface AxsCacheKeeperImageCollectionSession (TestSaveBoundary)
+- (BOOL)axs_save:(NSDictionary *)next expected:(NSDictionary *)expected error:(NSError **)error;
+@end
+@interface AxsImagePreparationRace : AxsCacheKeeperImageCollectionSession
+@property(nonatomic) BOOL holdSave;
+@property(nonatomic,strong) dispatch_semaphore_t entered,releaseGate;
+@end
+@implementation AxsImagePreparationRace
+- (BOOL)axs_save:(NSDictionary *)next expected:(NSDictionary *)expected error:(NSError **)error {
+    if (self.holdSave) {self.holdSave=NO;dispatch_semaphore_signal(self.entered);check(dispatch_semaphore_wait(self.releaseGate,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"release held preparation save");}
+    return [super axs_save:next expected:expected error:error];
+}
+@end
 static NSDictionary *receipt(NSDictionary *metadata) {
     NSMutableDictionary *value=[@{@"schemaVersion":@1,@"sdk":@"SDWebImage",@"state":@"ready",@"reason":@"none",@"observed":@1,
         @"eligible":@1,@"restricted":@0,@"writesBlocked":@0,@"queued":@0,@"submitted":@0,@"apiCompleted":@0,@"skipped":@0,@"pending":@0,
@@ -9,7 +22,7 @@ static NSDictionary *receipt(NSDictionary *metadata) {
     if (metadata) value[@"imageCollection"]=metadata;return value;
 }
 int main(int argc,const char **argv) {@autoreleasepool {
-    check(argc==2,"isolated folder supplied");NSString *folder=[NSString stringWithUTF8String:argv[1]];
+    check(argc==2 || argc==3,"isolated folder supplied");NSString *folder=[NSString stringWithUTF8String:argv[1]];
     NSString *status=[folder stringByAppendingPathComponent:@"Status"];
     check([NSFileManager.defaultManager createDirectoryAtPath:status withIntermediateDirectories:YES attributes:nil error:NULL],"create status directory");
     NSDictionary *state=@{@"enabled":@YES,@"mode":@"clean",@"autoDiscover":@NO,@"excludedPaths":@[@"Library/Caches/retained"]};
@@ -20,6 +33,14 @@ int main(int argc,const char **argv) {@autoreleasepool {
     check([receipt(nil) writeToFile:receiptPath atomically:YES],"save valid actual-format receipt");
     NSData *originalState=[NSData dataWithContentsOfFile:statePath],*originalSelection=[NSData dataWithContentsOfFile:selectionPath];NSError *error=nil;
     AxsCacheKeeperImageCollectionSession *session=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" error:&error];
+    if (argc==3) {
+        NSMutableDictionary *old=[receipt(nil) mutableCopy];old[@"updated"]=[NSDate dateWithTimeIntervalSinceNow:-301];
+        check([old writeToFile:receiptPath atomically:YES],"save expired previously eligible receipt");
+        NSArray *found=[session availableModules:&error];
+        check(found.count==1 && [found[0][@"state"] isEqual:@"requiresRefresh"],"stale known SDK remains selectable for refresh without execution authority");
+        check(![session start:&error] && error && !axs_cachekeeper_image_collection_read(folder,NULL),"stale candidate never publishes executable lease");
+        printf("PASS: stale image candidate discovery without execution\n");return 0;
+    }
     NSArray *modules=[session availableModules:&error];
     check(modules.count==1 && [modules[0][@"bundle"] isEqual:AxsCacheKeeperImageCollectionBundle],"module selection requires existing eligible enabled receipt");
     AxsCacheKeeperImageCollectionSession *entryReopen=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" error:&error];
@@ -99,7 +120,8 @@ int main(int argc,const char **argv) {@autoreleasepool {
         if ([reason isEqual:@"pendingAction"]) {raw[@"queued"]=@1;raw[@"pending"]=@1;raw[@"state"]=@"queued";}
         if ([reason isEqual:@"receiptMissing"]) check([NSFileManager.defaultManager removeItemAtPath:receiptPath error:&error],"remove only fixture receipt");
         else check([([reason isEqual:@"receiptInvalid"] ? @{@"invalid":@YES} : raw) writeToFile:receiptPath atomically:YES],"write candidate rejection fixture");
-        check([entry availableModules:&error].count==0 && !error,"candidate rejection is a reported result rather than silent error");
+        NSUInteger candidates=[entry availableModules:&error].count;
+        check(candidates==([@[@"receiptStale",@"pendingAction"] containsObject:reason] ? 1u : 0u) && !error,"only known stale or pending SDK is offered for refresh without execution");
         AxsCacheKeeperImageCollectionSession *opened=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" error:&error];
         check([opened.reportProjection[@"preflight"][@"modules"][0][@"reason"] isEqual:reason],"specific candidate reason survives process restart");
     }
@@ -115,5 +137,52 @@ int main(int argc,const char **argv) {@autoreleasepool {
     entry=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" error:&error];
     check([entry readyForReport] && [entry.reportProjection[@"state"] isEqual:@"skipped"] &&
         [entry.reportProjection[@"verificationState"] isEqual:@"notPerformed"] && entry.reportProjection[@"preflight"],"skip retains candidate evidence without claiming execution");
+    AxsCacheKeeperImageCollectionSession *prepared=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"cccccccccccccccccccccccccccccccc" error:&error];
+    NSMutableDictionary *old=[receipt(nil) mutableCopy];old[@"updated"]=[NSDate dateWithTimeIntervalSinceNow:-601];
+    old[@"runtimeInfo"]=@{@"schemaVersion":@1,@"packageVersion":@"0.7.2-221.1",@"firstObserved":@10};
+    check([old writeToFile:receiptPath atomically:YES],"model full capacity delay with real stale receipt file");
+    NSData *priorRequest=[NSData dataWithContentsOfFile:[folder stringByAppendingPathComponent:@"imageCollectionRequest.plist"]];
+    check([prepared prepareBundle:AxsCacheKeeperImageCollectionBundle error:&error],"known stale SDK can be selected for preparation");
+    prepared=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"cccccccccccccccccccccccccccccccc" error:&error];
+    check([[prepared refreshPreparation:&error][@"state"] isEqual:@"awaitingRefresh"] && ![prepared start:&error],"reopened preparation never starts from expired evidence");
+    check([[NSData dataWithContentsOfFile:[folder stringByAppendingPathComponent:@"imageCollectionRequest.plist"]] isEqual:priorRequest],"preparation never publishes or replaces a lease");
+    NSMutableDictionary *unsupported=[old mutableCopy];unsupported[@"eligible"]=@0;unsupported[@"observed"]=@0;unsupported[@"state"]=@"unsupported";unsupported[@"reason"]=@"unsupportedSDK";
+    check([unsupported writeToFile:receiptPath atomically:YES],"expired unsupported receipt fixture");
+    check([prepared availableModules:&error].count==0 && [[prepared refreshPreparation:&error][@"reason"] isEqual:@"noEligibleOwner"],"staleness cannot disguise unsupported SDK as refreshable");
+    NSMutableDictionary *fresh=[receipt(nil) mutableCopy];fresh[@"runtimeInfo"]=@{@"schemaVersion":@1,@"packageVersion":@"0.7.2-221.1",@"firstObserved":@20};
+    check([fresh writeToFile:receiptPath atomically:YES],"new process publishes current eligible receipt");
+    check([[prepared refreshPreparation:&error][@"state"] isEqual:@"readyToStart"],"new current producer evidence readies the same selected session");
+    check([@{AxsCacheKeeperImageCollectionBundle:@NO} writeToFile:statePath atomically:YES],"user disable after preparation");
+    check(![prepared start:&error] && [[prepared refreshPreparation:&error][@"reason"] isEqual:@"appDisabled"],"confirm rechecks current user enable without enabling it");
+    check([@{AxsCacheKeeperImageCollectionBundle:state,@"other.app":@NO} writeToFile:statePath atomically:YES],"restore explicitly controlled fixture configuration");
+    check([prepared start:&error],"explicit confirmation publishes only after current checks");
+    NSDictionary *preparedRequest=axs_cachekeeper_image_collection_read(folder,&error);
+    check([preparedRequest[@"processFirstObserved"] isEqual:@20] && [preparedRequest[@"sessionID"] isEqual:@"cccccccccccccccccccccccccccccccc"],"request binds newly checked process rather than historical process");
+    AxsCacheKeeperImageCollectionSession *newer=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:@"cccccccccccccccccccccccccccccccc" error:&error];
+    check([newer cancel:&error],"newer page publishes restore request");
+    NSData *restoreBytes=[NSData dataWithContentsOfFile:[folder stringByAppendingPathComponent:@"imageCollectionRequest.plist"]];
+    check(![prepared retryPublishing:&error] && error.code==ESTALE &&
+        [[NSData dataWithContentsOfFile:[folder stringByAppendingPathComponent:@"imageCollectionRequest.plist"]] isEqual:restoreBytes],"stale retry rejects before overwriting newer restore request");
+    check([[NSData dataWithContentsOfFile:statePath] isEqual:originalState] && [[NSData dataWithContentsOfFile:selectionPath] isEqual:originalSelection],"preparation and start never write original settings");
+    printf("PASS: image preparation stale selection, refreshed process binding and explicit execution\n");
+    for (NSString *decision in @[@"skip",@"replace"]) {
+        NSString *identifier=[decision isEqual:@"skip"] ? @"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" : @"ffffffffffffffffffffffffffffffff";
+        AxsImagePreparationRace *race=[[AxsImagePreparationRace alloc] initWithFolder:folder sessionID:identifier error:&error];
+        check([old writeToFile:receiptPath atomically:YES] && [race prepareBundle:AxsCacheKeeperImageCollectionBundle error:&error],"race starts with persisted stale preparation");
+        fresh[@"updated"]=NSDate.date;check([fresh writeToFile:receiptPath atomically:YES],"race has refreshed selected evidence");
+        race.entered=dispatch_semaphore_create(0);race.releaseGate=dispatch_semaphore_create(0);race.holdSave=YES;
+        dispatch_semaphore_t finished=dispatch_semaphore_create(0);__block NSDictionary *late=nil;__block NSError *lateError=nil;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{late=[race refreshPreparation:&lateError];dispatch_semaphore_signal(finished);});
+        check(dispatch_semaphore_wait(race.entered,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"old refresh reached actual persistence boundary");
+        AxsCacheKeeperImageCollectionSession *other=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:identifier error:&error];
+        if ([decision isEqual:@"skip"]) check([other skip:&error],"other page persists skip while old refresh waits");
+        else {check([multiStates writeToFile:statePath atomically:YES],"other candidate enabled fixture");check([other prepareBundle:@"com.xiaomi.mihome" error:&error],"other page replaces selected preparation");}
+        dispatch_semaphore_signal(race.releaseGate);check(dispatch_semaphore_wait(finished,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"old refresh completes without deadlock");
+        check(!late && lateError.code==ESTALE,"stale preparation snapshot cannot overwrite current decision");
+        other=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:folder sessionID:identifier error:&error];
+        check([decision isEqual:@"skip"] ? [other.reportProjection[@"state"] isEqual:@"skipped"] : [other.reportProjection[@"preparation"][@"bundle"] isEqual:@"com.xiaomi.mihome"],"new decision remains durable after old refresh resumes");
+        check([@{AxsCacheKeeperImageCollectionBundle:state,@"other.app":@NO} writeToFile:statePath atomically:YES],"restore race fixture configuration");
+    }
+    printf("PASS: preparation concurrent skip and replacement preserve latest durable decision\n");
     printf("PASS: image collection real file transport, overlay isolation, expiry, process binding and restoration\n");
 }return 0;}

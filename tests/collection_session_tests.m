@@ -200,6 +200,13 @@ int main(int argc,const char **argv) {@autoreleasepool {
     CKCheck([recovered.reportProjection[@"phases"][@"hostPreflight"][@"state"] isEqual:@"interrupted"],"process loss becomes explicit interruption");
     CKCheck(![recovered beginPhase:@"hostPreflight" error:&error],"recovered work cannot restart without retry transition");
     CKCheck([recovered prepareRetryForPhase:@"hostPreflight" error:&error] && [recovered beginPhase:@"hostPreflight" error:&error],"explicit interrupted work can restart");
+    CKCheck([recovered finishPhase:@"hostPreflight" result:CKHost() error:&error],"background capacity fixture host completes");
+    NSString *durableEpoch=NSUUID.UUID.UUIDString;
+    CKCheck([recovered beginCapacityWithEpoch:durableEpoch error:&error],"durable capacity starts once");
+    recovered=[AxsCacheKeeperCollectionSession openSessionAtPath:interrupted error:&error];
+    CKCheck([recovered.reportProjection[@"phases"][@"capacity"][@"state"] isEqual:@"running"] &&
+        [recovered.reportProjection[@"phases"][@"capacity"][@"request"][@"epoch"] isEqual:durableEpoch],"recreated settings preserves service epoch instead of inventing interruption");
+    CKCheck(![recovered beginCapacityWithEpoch:NSUUID.UUID.UUIDString error:&error],"recreated settings cannot silently issue a new capacity run");
     CKCapacityRoundTrip(root);
     printf("PASS: durable collection state, atomic report rollback, capability-aware resume and integrity\n");
 }return 0;}

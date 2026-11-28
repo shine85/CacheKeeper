@@ -56,6 +56,11 @@ static BOOL AxsImageCollectionEntryEvidence(NSDictionary *document) {
         if (![document[@"failureHistory"] isKindOfClass:NSArray.class] || [document[@"failureHistory"] count]>16) return NO;
         for (id row in document[@"failureHistory"]) if (!AxsImageCollectionFailure(row)) return NO;
     }
+    NSDictionary *preparation=document[@"preparation"];
+    if (preparation && (![preparation isKindOfClass:NSDictionary.class] || preparation.count!=4 ||
+        !axs_cachekeeper_bundle_id(preparation[@"bundle"]) || ![preparation[@"bundle"] isEqual:document[@"bundle"]] ||
+        !AxsImageCollectionNumber(preparation[@"selectedAt"]) || !AxsImageCollectionNumber(preparation[@"previousUpdated"]) ||
+        !AxsImageCollectionNumber(preparation[@"previousProcess"]))) return NO;
     return !document[@"failuresOmitted"] || axs_cachekeeper_capacity_number(document[@"failuresOmitted"]);
 }
 NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSDictionary *request) {
@@ -86,6 +91,7 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
 @interface AxsCacheKeeperImageCollectionSession ()
 @property(nonatomic,copy) NSString *folder,*path,*sessionID;
 @property(nonatomic,strong) NSMutableDictionary *document;
+@property(nonatomic,copy) NSDictionary *persistedDocument;
 @end
 @implementation AxsCacheKeeperImageCollectionSession
 - (instancetype)initWithFolder:(NSString *)folder sessionID:(NSString *)identifier error:(NSError **)error {
@@ -104,6 +110,7 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
             (value[@"request"] && !axs_cachekeeper_image_collection_request(value[@"request"])) ||
             !AxsImageCollectionEntryEvidence(value)) {AxsImageCollectionError(error,EINVAL);return nil;}
         _document=[value mutableCopy];
+        _persistedDocument=[value copy];
     } else {
         _document=[@{@"schemaVersion":@1,@"sessionID":identifier,@"state":@"idle",@"events":[NSMutableArray new]} mutableCopy];
         if (![self axs_save:_document error:error]) return nil;
@@ -111,9 +118,16 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
     return self;
 }
 - (BOOL)axs_save:(NSDictionary *)next error:(NSError **)error {
+    return [self axs_save:next expected:self.persistedDocument error:error];
+}
+- (BOOL)axs_save:(NSDictionary *)next expected:(NSDictionary *)expected error:(NSError **)error {
+    @synchronized(AxsCacheKeeperImageCollectionSession.class) {
+    NSDictionary *current=[NSDictionary dictionaryWithContentsOfFile:self.path];
+    if ((current || expected) && ![current isEqual:expected]) return AxsImageCollectionError(error,ESTALE);
     NSData *data=[NSPropertyListSerialization dataWithPropertyList:next format:NSPropertyListBinaryFormat_v1_0 options:0 error:error];
     if (!data || ![data writeToFile:self.path options:NSDataWritingAtomic error:error]) return NO;
-    self.document=[next mutableCopy];return YES;
+    self.document=[next mutableCopy];self.persistedDocument=[next copy];return YES;
+    }
 }
 - (BOOL)recordEntry:(NSError **)error {
     if (error) *error=nil;
@@ -158,9 +172,9 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
         else if (!receipt || !receipt[@"runtimeInfo"]) reason=@"receiptInvalid";
         else {
             NSTimeInterval age=now-[receipt[@"updated"] timeIntervalSince1970];
-            if (age<0) reason=@"receiptFromFuture";
+            if (![receipt[@"eligible"] unsignedIntegerValue]) reason=@"noEligibleOwner";
+            else if (age<0) reason=@"receiptFromFuture";
             else if (age>AxsCacheKeeperImageCollectionLease) reason=@"receiptStale";
-            else if (![receipt[@"eligible"] unsignedIntegerValue]) reason=@"noEligibleOwner";
             else if ([receipt[@"pending"] unsignedIntegerValue]) reason=@"pendingAction";
         }
     }
@@ -173,6 +187,52 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
         row[@"hostReason"]=receipt[@"reason"];
     }
     if (output) *output=receipt;return row;
+}
+- (BOOL)prepareBundle:(NSString *)bundle error:(NSError **)error {
+    if (error) *error=nil;
+    if (![self.document[@"state"] isEqual:@"idle"] || self.document[@"request"]) return AxsImageCollectionError(error,EBUSY);
+    if (!axs_cachekeeper_bundle_id(bundle)) return AxsImageCollectionError(error,EINVAL);
+    NSDictionary *states=axs_cachekeeper_read_input([self.folder stringByAppendingPathComponent:@"appEnabled.plist"],error);if (!states) return NO;
+    NSDictionary *receipt=nil,*check=[self axs_check:bundle state:states[bundle] now:NSDate.date.timeIntervalSince1970 receipt:&receipt];
+    NSMutableDictionary *next=[self.document mutableCopy];next[@"bundle"]=bundle;next[@"selectedCheck"]=check;
+    if (![self.document[@"preparation"][@"bundle"] isEqual:bundle]) [next removeObjectForKey:@"preparation"];
+    if (![@[@"none",@"receiptStale",@"pendingAction"] containsObject:check[@"reason"]] || ![receipt[@"eligible"] unsignedIntegerValue]) {
+        if (![self axs_save:next error:error]) return NO;
+        return [self axs_failure:[NSError errorWithDomain:@"CacheKeeper.ImageCollection" code:ENOTSUP userInfo:nil] stage:@"candidate" error:error];
+    }
+    next[@"preparation"]=@{@"bundle":bundle,@"selectedAt":@(NSDate.date.timeIntervalSince1970),
+        @"previousUpdated":@([receipt[@"updated"] timeIntervalSince1970]),@"previousProcess":receipt[@"runtimeInfo"][@"firstObserved"]};
+    return [self axs_save:next error:error];
+}
+- (NSDictionary *)refreshPreparation:(NSError **)error {
+    if (error) *error=nil;
+    NSDictionary *snapshot;
+    @synchronized(AxsCacheKeeperImageCollectionSession.class) {
+        NSDictionary *current=[NSDictionary dictionaryWithContentsOfFile:self.path];
+        if (!current || ![current[@"sessionID"] isEqual:self.sessionID] || !AxsImageCollectionEntryEvidence(current)) {AxsImageCollectionError(error,EINVAL);return nil;}
+        self.document=[current mutableCopy];self.persistedDocument=[current copy];snapshot=current;
+    }
+    NSDictionary *preparation=snapshot[@"preparation"];
+    if (!preparation || ![snapshot[@"state"] isEqual:@"idle"] || snapshot[@"request"]) return nil;
+    NSDictionary *states=axs_cachekeeper_read_input([self.folder stringByAppendingPathComponent:@"appEnabled.plist"],error);
+    if (!states) return nil;
+    NSDictionary *receipt=nil,*check=[self axs_check:preparation[@"bundle"] state:states[preparation[@"bundle"]] now:NSDate.date.timeIntervalSince1970 receipt:&receipt];
+    BOOL newer=[check[@"sourceUpdated"] doubleValue]>[preparation[@"previousUpdated"] doubleValue] &&
+        [check[@"sourceUpdated"] doubleValue]>=[preparation[@"selectedAt"] doubleValue];
+    BOOL ready=[check[@"state"] isEqual:@"available"] && newer;
+    NSMutableDictionary *old=[snapshot[@"selectedCheck"] mutableCopy],*current=[check mutableCopy];
+    [old removeObjectForKey:@"checkedAt"];[current removeObjectForKey:@"checkedAt"];
+    NSDictionary *expected=snapshot;
+    if (![old isEqual:current]) {
+        NSMutableDictionary *next=[snapshot mutableCopy];next[@"selectedCheck"]=check;
+        if (![self axs_save:next expected:snapshot error:error]) return nil;
+        expected=next;
+    }
+    @synchronized(AxsCacheKeeperImageCollectionSession.class) {
+        if (![[NSDictionary dictionaryWithContentsOfFile:self.path] isEqual:expected]) {AxsImageCollectionError(error,ESTALE);return nil;}
+    }
+    return @{@"state":ready ? @"readyToStart" : @"awaitingRefresh",@"bundle":preparation[@"bundle"],
+        @"reason":ready ? @"none" : [check[@"reason"] isEqual:@"none"] ? @"awaitingNewReceipt" : check[@"reason"]};
 }
 - (NSDictionary *)axs_base:(NSError **)error {
     NSError *stateError=nil,*selectionError=nil;
@@ -192,6 +252,9 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
     return receipt;
 }
 - (BOOL)axs_publish:(NSDictionary *)request error:(NSError **)error {
+    @synchronized(AxsCacheKeeperImageCollectionSession.class) {
+    NSDictionary *saved=[NSDictionary dictionaryWithContentsOfFile:self.path];
+    if (![saved isEqual:self.persistedDocument] || ![saved[@"request"] isEqual:request]) return AxsImageCollectionError(error,ESTALE);
     NSDictionary *current=axs_cachekeeper_image_collection_read(self.folder,error);
     if (error && *error) return NO;
     if (axs_cachekeeper_image_collection_request(current) && ![current[@"sessionID"] isEqual:self.sessionID] &&
@@ -203,6 +266,7 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
     NSMutableDictionary *next=[self.document mutableCopy];next[@"publication"]=@"published";
     [next removeObjectForKey:@"lastFailure"];
     return [self axs_save:next error:error];
+    }
 }
 - (BOOL)axs_request_phase:(NSString *)phase step:(NSUInteger)step events:(NSArray *)events error:(NSError **)error {
     NSTimeInterval now=NSDate.date.timeIntervalSince1970;
@@ -232,8 +296,11 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
     NSMutableArray *modules=[NSMutableArray new],*checks=[NSMutableArray new];
     for (NSString *bundle in [states.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
         NSDictionary *receipt=nil,*check=[self axs_check:bundle state:states[bundle] now:now receipt:&receipt];[checks addObject:check];
-        if (![check[@"state"] isEqual:@"available"]) continue;
-        [modules addObject:@{@"bundle":bundle,@"sdk":@"SDWebImage",@"hostVersion":receipt[@"runtimeInfo"][@"packageVersion"],@"state":@"requiresHostAcknowledgement"}];
+        BOOL available=[check[@"state"] isEqual:@"available"];
+        BOOL refreshable=[@[@"receiptStale",@"pendingAction"] containsObject:check[@"reason"]] && [receipt[@"eligible"] unsignedIntegerValue]>0;
+        if (!available && !refreshable) continue;
+        [modules addObject:@{@"bundle":bundle,@"sdk":@"SDWebImage",@"hostVersion":receipt[@"runtimeInfo"][@"packageVersion"],
+            @"state":available ? @"requiresHostAcknowledgement" : @"requiresRefresh"}];
     }
     if (![self readyForReport]) {
         NSMutableDictionary *next=[self.document mutableCopy];
@@ -248,12 +315,19 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
         if (error) *error=nil;
         if (![self.document[@"state"] isEqual:@"idle"]) return AxsImageCollectionError(error,EALREADY);
         if (!axs_cachekeeper_bundle_id(bundle)) return AxsImageCollectionError(error,EINVAL);
+        if (self.document[@"preparation"] && (![self.document[@"preparation"][@"bundle"] isEqual:bundle] ||
+            ![[self refreshPreparation:error][@"state"] isEqual:@"readyToStart"])) {
+            if (!error || !*error) AxsImageCollectionError(error,EAGAIN);return NO;
+        }
         NSMutableDictionary *selected=[self.document mutableCopy];selected[@"bundle"]=bundle;
         if (![self axs_save:selected error:error]) return NO;
         NSError *failure=nil;
         NSDictionary *base=[self axs_base:&failure];
         if (!base) return [self axs_failure:failure stage:@"configurationRead" error:error];
         NSDictionary *receipt=nil,*check=[self axs_check:bundle state:base[@"appState"] now:NSDate.date.timeIntervalSince1970 receipt:&receipt];
+        NSDictionary *prepared=self.document[@"preparation"];
+        if (prepared && ([check[@"sourceUpdated"] doubleValue]<[prepared[@"selectedAt"] doubleValue] ||
+            [check[@"sourceUpdated"] doubleValue]<=[prepared[@"previousUpdated"] doubleValue])) return AxsImageCollectionError(error,EAGAIN);
         NSMutableDictionary *checked=[self.document mutableCopy];checked[@"selectedCheck"]=check;
         if (![self axs_save:checked error:error]) return NO;
         if (![check[@"state"] isEqual:@"available"]) {
@@ -377,6 +451,7 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
     }
 }
 - (NSDictionary *)reportProjection {
+    @synchronized(AxsCacheKeeperImageCollectionSession.class) {
     NSMutableDictionary *report=[@{@"schemaVersion":@1,@"sessionID":self.sessionID,@"module":@"existingSupportedImageSDK",@"moduleVersion":@1,@"bundle":self.document[@"bundle"] ?: @"notSelected",
         @"state":self.document[@"state"],@"phase":self.document[@"request"][@"phase"] ?: @"notStarted",
         @"coverage":@"existingEligibleImageOwnersOnly",@"userConfigurationWritten":@NO,
@@ -391,7 +466,8 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
         for (NSDictionary *event in events) {passed &= [event[@"state"] isEqual:@"passed"];failed |= [event[@"state"] isEqual:@"failed"];}
         report[@"verificationState"]=failed ? @"failed" : passed ? @"passed" : @"insufficientEvidence";
     }
-    for (NSString *key in @[@"preflight",@"selectedCheck",@"lastFailure",@"failureHistory",@"failuresOmitted"]) if (self.document[key]) report[key]=self.document[key];
+    for (NSString *key in @[@"preflight",@"selectedCheck",@"preparation",@"lastFailure",@"failureHistory",@"failuresOmitted"]) if (self.document[key]) report[key]=self.document[key];
     return report;
+    }
 }
 @end

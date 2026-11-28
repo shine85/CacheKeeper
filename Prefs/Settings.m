@@ -132,6 +132,7 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
     [self.table addGestureRecognizer:swipeRight];
     self.navigationItem.rightBarButtonItems=@[
         [[UIBarButtonItem alloc] initWithTitle:@"检测全部" style:UIBarButtonItemStylePlain target:self action:@selector(scanAll)],
+        [[UIBarButtonItem alloc] initWithTitle:@"继续采集" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_continue_collection)],
         [[UIBarButtonItem alloc] initWithTitle:@"诊断" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_diagnostics)]];
     for (UIView *view in @[self.axs_cachekeeper_searchInput,self.tabWrap,self.tabs,self.table]) view.translatesAutoresizingMaskIntoConstraints=NO;
     UILayoutGuide *safe=self.view.safeAreaLayoutGuide;
@@ -171,7 +172,18 @@ static NSDictionary *axs_cachekeeper_title_resource_claim(NSArray<NSDictionary *
     // Freeze before our own resign/push so navigation does not masquerade as spontaneous focus loss.
     NSDictionary *snapshot=[self.axs_cachekeeper_searchDiagnostics axs_cachekeeper_freeze:AxsCacheKeeperSearchEventDiagnostics];
     [self.axs_cachekeeper_searchInput axs_cachekeeper_dismiss_keyboard];
-    [self.navigationController pushViewController:[[AxsCacheKeeperDiagnosticsPage alloc] initWithSearchSnapshot:snapshot] animated:YES];
+    AxsCacheKeeperDiagnosticsPage *page=[[AxsCacheKeeperDiagnosticsPage alloc] initWithSearchSnapshot:snapshot];page.applicationNames=[self axs_cachekeeper_application_names];
+    [self.navigationController pushViewController:page animated:YES];
+}
+- (NSDictionary *)axs_cachekeeper_application_names {
+    NSMutableDictionary *names=[NSMutableDictionary new];
+    for (NSDictionary *app in self.apps) if ([app[@"id"] isKindOfClass:NSString.class] && [app[@"name"] isKindOfClass:NSString.class]) names[app[@"id"]]=app[@"name"];
+    return names;
+}
+- (void)axs_cachekeeper_continue_collection {
+    AxsCacheKeeperDiagnosticsPage *page=[[AxsCacheKeeperDiagnosticsPage alloc] init];page.applicationNames=[self axs_cachekeeper_application_names];
+    [page presentResumableCollection];
+    [self.navigationController pushViewController:page animated:YES];
 }
 - (void)tabChanged:(UISegmentedControl *)sender {
     self.selectedTab = sender.selectedSegmentIndex;

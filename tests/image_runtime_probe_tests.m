@@ -76,7 +76,7 @@ static void probeBackground(void) {probeState=UIApplicationStateBackground;[NSNo
 static void probeForeground(void) {probeState=UIApplicationStateActive;[NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidBecomeActiveNotification object:nil];}
 int main(int argc,const char *argv[]) {@autoreleasepool {
     axs_cachekeeper_runtime_require(argc==3,"probe scenario and temporary home supplied");probeHome=[NSString stringWithUTF8String:argv[2]];probeFolder=[probeHome stringByAppendingPathComponent:@"shared"];
-    if (!strcmp(argv[1],"collection")) probeBundle=@"com.baidu.netdisk";
+    if (!strcmp(argv[1],"collection") || !strcmp(argv[1],"preparation")) probeBundle=@"com.baidu.netdisk";
     axs_cachekeeper_runtime_require([NSFileManager.defaultManager createDirectoryAtPath:[probeFolder stringByAppendingPathComponent:@"Status"] withIntermediateDirectories:YES attributes:nil error:nil],"probe configuration directory created");
     for(uint32_t i=0;i<_dyld_image_count();i++) if(_dyld_get_image_header(i)->filetype==MH_EXECUTE) axs_cachekeeper_runtime_main_header=_dyld_get_image_header(i);
     axs_cachekeeper_runtime_fingerprinted=YES;axs_cachekeeper_runtime_helper_original=method_getImplementation(class_getClassMethod(AxsCacheKeeperRuntimeSourceHelper.class,@selector(axs_cachekeeper_sample)));
@@ -84,6 +84,24 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
     AxsCacheKeeperImageCache *engine=axs_cachekeeper_image_engine;
     __attribute__((objc_precise_lifetime)) SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"probe" diskCacheDirectory:[probeHome stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
     probeAwait(^BOOL {return [engine.receipt[@"eligible"] unsignedIntegerValue]==1;},"probe actual host owner is admitted");
+    if (!strcmp(argv[1],"preparation")) {
+        NSString *receiptPath=[[probeFolder stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[probeBundle stringByAppendingString:@".imagecache.plist"]];
+        probeAwait(^BOOL{return [NSDictionary dictionaryWithContentsOfFile:receiptPath][@"eligible"]!=nil;},"real Runtime producer publishes actual shared receipt");
+        dispatch_sync(engine.work,^{});
+        NSMutableDictionary *aged=[[NSDictionary dictionaryWithContentsOfFile:receiptPath] mutableCopy];aged[@"updated"]=[NSDate dateWithTimeIntervalSinceNow:-601];
+        axs_cachekeeper_runtime_require([aged writeToFile:receiptPath atomically:YES],"model elapsed full-capacity wait on producer receipt");
+        NSError *error=nil;AxsCacheKeeperImageCollectionSession *session=[[AxsCacheKeeperImageCollectionSession alloc] initWithFolder:probeFolder sessionID:@"dddddddddddddddddddddddddddddddd" error:&error];
+        axs_cachekeeper_runtime_require([session prepareBundle:probeBundle error:&error] && [[session refreshPreparation:&error][@"state"] isEqual:@"awaitingRefresh"],"consumer prepares stale producer without bypassing admission");
+        NSData *settings=[NSData dataWithContentsOfFile:[probeFolder stringByAppendingPathComponent:@"appEnabled.plist"]];
+        axs_cachekeeper_runtime_require(!axs_cachekeeper_image_collection_read(probeFolder,NULL),"selection never sends runtime lease");
+        probeForeground();
+        probeAwait(^BOOL{return [[session refreshPreparation:NULL][@"state"] isEqual:@"readyToStart"];},"actual foreground producer refresh readies consumer in same session");
+        axs_cachekeeper_runtime_require([session startWithBundle:probeBundle error:&error],"explicit confirmation sends freshly bound request");
+        axs_cachekeeper_configure_image_cache(YES,YES);
+        probeAwait(^BOOL{return [engine.receipt[@"imageCollection"][@"sessionID"] isEqual:@"dddddddddddddddddddddddddddddddd"] && [engine.receipt[@"restricted"] unsignedIntegerValue]==1;},"real Runtime acknowledges fresh prepared request");
+        axs_cachekeeper_runtime_require([[NSData dataWithContentsOfFile:[probeFolder stringByAppendingPathComponent:@"appEnabled.plist"]] isEqual:settings],"producer-consumer preparation preserves user configuration");
+        printf("PASS: image-runtime-probe preparation\n");return 0;
+    }
     if (!strcmp(argv[1],"collection")) {
         NSString *statesPath=[probeFolder stringByAppendingPathComponent:@"appEnabled.plist"];
         NSDictionary *baseState=@{@"enabled":@YES,@"mode":@"prevent",@"autoDiscover":@NO};

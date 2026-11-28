@@ -60,12 +60,13 @@
     XCTAssertFalse([resumed beginPhase:@"capacity" error:&error]);
     XCTAssertEqualObjects(resumed.reportProjection[@"state"],@"blocked");
 }
-- (void)testCapacityRetryPersistsRunningBeforeRequestAndBackgroundPersistsInterruption {
+- (void)testCapacityRetryPersistsRunningAndBackgroundKeepsOriginalEpoch {
     AxsCacheKeeperCollectionSession *session=[self axs_collection_session];NSError *error=nil;
     XCTAssertTrue([session beginPhase:@"capacity" error:&error]);
     XCTAssertTrue(([session finishPhase:@"capacity" result:@{@"state":@"interrupted",@"epoch":@"previous",
         @"terminalSource":@"clientLifecycle",@"observedAt":@1} error:&error]));
     AxsCollectionDiagnosticsFixture *page=[[AxsCollectionDiagnosticsFixture alloc] initWithCollectionSessionObject:session];page.axs_collection_folder=self.axs_cachekeeper_folder;
+    UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:page];
     [page loadViewIfNeeded];
     UIButton *button=[page valueForKey:@"axs_cachekeeper_capacityButton"];
     XCTAssertNotNil(button.superview);XCTAssertFalse(button.hidden);XCTAssertTrue(button.enabled);
@@ -75,16 +76,14 @@
     XCTAssertEqualObjects(request[@"operation"],@"start");XCTAssertNotNil(request[@"epoch"]);
     [page axs_cachekeeper_capacity_background:nil];
     NSDictionary *phase=session.reportProjection[@"phases"][@"capacity"];
-    XCTAssertEqualObjects(phase[@"state"],@"interrupted");
-    XCTAssertEqualObjects(phase[@"result"][@"epoch"],request[@"epoch"]);
-    XCTAssertEqualObjects(phase[@"result"][@"terminalSource"],@"clientLifecycle");
-    XCTAssertNil(phase[@"result"][@"finishedAt"]);
+    XCTAssertEqualObjects(phase[@"state"],@"running");
+    XCTAssertEqualObjects(phase[@"request"][@"epoch"],request[@"epoch"]);
+    [page viewDidDisappear:NO];XCTAssertEqual(navigation.topViewController,page);
     request=[NSDictionary dictionaryWithContentsOfFile:[self.axs_cachekeeper_folder stringByAppendingPathComponent:@"capacityRequest.plist"]];
-    XCTAssertEqualObjects(request[@"operation"],@"cancel");
+    XCTAssertEqualObjects(request[@"operation"],@"start");
+    [NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidBecomeActiveNotification object:nil];
     [page viewDidAppear:NO];
     XCTAssertNotNil(button.superview);XCTAssertFalse(button.hidden);XCTAssertTrue(button.enabled);
-    [button sendActionsForControlEvents:UIControlEventTouchUpInside];
-    XCTAssertEqualObjects(session.reportProjection[@"phases"][@"capacity"][@"state"],@"running");
     [button sendActionsForControlEvents:UIControlEventTouchUpInside];
     [page setValue:@(NSProcessInfo.processInfo.systemUptime-11) forKey:@"axs_cachekeeper_capacityStopStarted"];
     [button sendActionsForControlEvents:UIControlEventTouchUpInside];
@@ -197,5 +196,94 @@
     XCTAssertEqualObjects(report[@"guidedCollection"][@"phases"][@"capacity"][@"state"],@"failed");
     XCTAssertEqualObjects(report[@"supportedImageCollection"][@"state"],@"skipped");
     XCTAssertEqualObjects(report[@"capacityMeasurement"][@"state"],@"notMeasured");
+}
+- (void)testCapacityDelayKeepsStaleSDKSelectableThenForegroundRefreshRequiresConfirmation {
+    AxsCacheKeeperCollectionSession *session=[self axs_collection_session];NSError *error=nil;
+    AxsCollectionLiveDiagnosticsFixture *page=[[AxsCollectionLiveDiagnosticsFixture alloc] initWithCollectionSessionObject:session];page.axs_collection_folder=self.axs_cachekeeper_folder;
+    page.applicationNames=@{AxsCacheKeeperImageCollectionBundle:@"图片测试 APP"};
+    UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:page];[page loadViewIfNeeded];
+    [page viewDidAppear:NO];
+    NSString *epoch=[NSDictionary dictionaryWithContentsOfFile:[self.axs_cachekeeper_folder stringByAppendingPathComponent:@"capacityRequest.plist"]][@"epoch"];
+    NSDictionary *terminal=@{@"schemaVersion":@1,@"epoch":epoch,@"state":@"partial",@"sourceSampledAt":@0,@"startedAt":@1,@"updatedAt":@602,@"finishedAt":@602,
+        @"totalRoots":@0,@"completedRoots":@0,@"failedRoots":@0,@"excludedBundles":@[@"com.tencent.qy.xin"],@"registry":axs_cachekeeper_registry_inventory_projection(nil),
+        @"roots":@[],@"entries":@[],@"deletionAuthorization":@"notGranted",@"physicalUniqueBytes":@"notMeasured",@"reclaimableBytes":@"notMeasured",@"freshness":@"savedObservationUnverified",@"measurementWindow":@"nonAtomicTraversal",@"installationMatch":@"notRevalidatedAtExport"};
+    XCTAssertTrue([terminal writeToFile:[self.axs_cachekeeper_folder stringByAppendingPathComponent:@"capacityResult.plist"] atomically:YES]);[page axs_cachekeeper_capacity_poll];
+    NSPredicate *capacitySaved=[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *unused){(void)object;(void)unused;return [session.reportProjection[@"phases"][@"capacity"][@"state"] isEqual:@"partial"];}];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[[[XCTNSPredicateExpectation alloc] initWithPredicate:capacitySaved object:session]] timeout:5],XCTWaiterResultCompleted);
+    NSString *bundle=AxsCacheKeeperImageCollectionBundle,*statesPath=[self.axs_cachekeeper_folder stringByAppendingPathComponent:@"appEnabled.plist"];
+    NSMutableDictionary *states=[NSMutableDictionary new];states[bundle]=@{@"enabled":@YES,@"mode":@"clean",@"autoDiscover":@YES};
+    for (NSUInteger i=0;i<139;i++) states[[NSString stringWithFormat:@"disabled.app%lu",(unsigned long)i]]=@NO;
+    XCTAssertTrue([states writeToFile:statesPath atomically:YES]);NSData *settings=[NSData dataWithContentsOfFile:statesPath];
+    XCTAssertTrue([@{} writeToFile:[self.axs_cachekeeper_folder stringByAppendingPathComponent:@"directories.plist"] atomically:YES]);
+    NSString *status=[self.axs_cachekeeper_folder stringByAppendingPathComponent:@"Status"];
+    XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtPath:status withIntermediateDirectories:YES attributes:nil error:&error]);
+    NSString *receiptPath=[status stringByAppendingPathComponent:[bundle stringByAppendingString:@".imagecache.plist"]];
+    NSMutableDictionary *receipt=[@{@"schemaVersion":@1,@"sdk":@"SDWebImage",@"state":@"ready",@"reason":@"none",@"observed":@1,@"eligible":@1,@"restricted":@0,
+        @"writesBlocked":@0,@"queued":@0,@"submitted":@0,@"apiCompleted":@0,@"skipped":@0,@"pending":@0,@"updated":[NSDate dateWithTimeIntervalSinceNow:-601],
+        @"bytesState":@"notMeasured",@"runtimeInfo":@{@"schemaVersion":@1,@"packageVersion":@"0.7.2-221.1",@"firstObserved":@1}} mutableCopy];
+    XCTAssertTrue([receipt writeToFile:receiptPath atomically:YES]);
+    [(UIButton *)[page valueForKey:@"axs_cachekeeper_imageCollectionButton"] sendActionsForControlEvents:UIControlEventTouchUpInside];
+    AxsCacheKeeperImageCollectionPage *image=(id)navigation.topViewController;[image loadViewIfNeeded];
+    NSArray *modules=[[session imageCollectionSession:&error] availableModules:&error];XCTAssertEqual(modules.count,1u);XCTAssertEqualObjects(modules[0][@"state"],@"requiresRefresh");
+    // Invoke the same selection callback used by the APP action sheet; no request is created here.
+    [image axs_start_bundle:bundle];
+    NSPredicate *readFinished=[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *unused){(void)object;(void)unused;return ![[image valueForKey:@"preparationReading"] boolValue];}];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[[[XCTNSPredicateExpectation alloc] initWithPredicate:readFinished object:image]] timeout:5],XCTWaiterResultCompleted);
+    XCTAssertEqualObjects([image valueForKey:@"preparationStatus"][@"state"],@"awaitingRefresh");
+    NSString *text=((UITextView *)[image valueForKey:@"text"]).text;
+    XCTAssertTrue([text containsString:@"图片测试 APP"]);XCTAssertFalse([text containsString:@"disabled.app138"]);XCTAssertLessThan(text.length,1500u);
+    NSString *requestPath=[self.axs_cachekeeper_folder stringByAppendingPathComponent:@"imageCollectionRequest.plist"];
+    XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:requestPath]);XCTAssertFalse([[image valueForKey:@"nextButton"] isEnabled]);
+    receipt[@"updated"]=NSDate.date;receipt[@"runtimeInfo"]=@{@"schemaVersion":@1,@"packageVersion":@"0.7.2-221.1",@"firstObserved":@2};
+    XCTAssertTrue([receipt writeToFile:receiptPath atomically:YES]);
+    [NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidBecomeActiveNotification object:nil];
+    NSPredicate *ready=[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *unused){(void)object;(void)unused;return [[image valueForKey:@"preparationStatus"][@"state"] isEqual:@"readyToStart"];}];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[[[XCTNSPredicateExpectation alloc] initWithPredicate:ready object:image]] timeout:5],XCTWaiterResultCompleted);
+    XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:requestPath]);
+    UIButton *start=[image valueForKey:@"startButton"];XCTAssertEqualObjects([start titleForState:UIControlStateNormal],@"确认开始图片阶段");[start sendActionsForControlEvents:UIControlEventTouchUpInside];
+    NSDictionary *request=axs_cachekeeper_image_collection_read(self.axs_cachekeeper_folder,&error);
+    XCTAssertEqualObjects(request[@"sessionID"],session.sessionID);XCTAssertEqualObjects(request[@"processFirstObserved"],@2);
+    XCTAssertEqualObjects([NSData dataWithContentsOfFile:statesPath],settings);
+    NSData *leaseBefore=[NSData dataWithContentsOfFile:requestPath];
+    [NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidEnterBackgroundNotification object:nil];
+    [image viewWillDisappear:NO];[image viewDidDisappear:NO];
+    XCTAssertNil(image.view.window);XCTAssertTrue([navigation.viewControllers containsObject:image]);
+    [NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidBecomeActiveNotification object:nil];
+    XCTAssertEqualObjects([NSData dataWithContentsOfFile:requestPath],leaseBefore,@"normal app switch preserves exact request and original expiry");
+    [navigation popViewControllerAnimated:NO];[image viewDidDisappear:NO];[page viewDidAppear:NO];
+    XCTAssertEqual(navigation.topViewController,page,@"ordinary back remains on parent instead of reopening image page");
+    XCTAssertEqualObjects(axs_cachekeeper_image_collection_read(self.axs_cachekeeper_folder,&error)[@"phase"],@"restore");
+    leaseBefore=[NSData dataWithContentsOfFile:requestPath];
+    AxsCacheKeeperCollectionSession *reopened=[AxsCacheKeeperCollectionSession openSessionAtPath:self.axs_cachekeeper_path error:&error];
+    NSArray *resumable=[AxsCacheKeeperCollectionSession resumableSessionsInDirectory:self.axs_cachekeeper_folder error:&error];
+    XCTAssertTrue([@[@"imagePreparation",@"imageCollection"] containsObject:resumable.firstObject[@"nextPhase"]]);
+    AxsCollectionLiveDiagnosticsFixture *resumed=[[AxsCollectionLiveDiagnosticsFixture alloc] initWithCollectionSessionObject:reopened];resumed.axs_collection_folder=self.axs_cachekeeper_folder;
+    UINavigationController *resumedNavigation=[[UINavigationController alloc] initWithRootViewController:resumed];[resumed loadViewIfNeeded];[resumed viewDidAppear:NO];
+    XCTAssertTrue([resumedNavigation.topViewController isKindOfClass:AxsCacheKeeperImageCollectionPage.class]);
+    XCTAssertEqualObjects([NSData dataWithContentsOfFile:requestPath],leaseBefore,@"restoring current stage never renews or replays lease");
+    navigation=resumedNavigation;page=resumed;session=reopened;image=(id)resumedNavigation.topViewController;[image loadViewIfNeeded];
+    [(UIButton *)[image valueForKey:@"cancelButton"] sendActionsForControlEvents:UIControlEventTouchUpInside];
+    request=axs_cachekeeper_image_collection_read(self.axs_cachekeeper_folder,&error);XCTAssertEqualObjects(request[@"phase"],@"restore");
+    NSDictionary *base=@{@"valid":@YES,@"bundle":bundle,@"appState":states[bundle],@"selected":@[],@"installation":@"fixture-installation",@"processFirstObserved":@2};
+    receipt[@"imageCollection"]=axs_cachekeeper_image_collection_context(base,request,NSDate.date.timeIntervalSince1970)[@"imageCollection"];receipt[@"updated"]=NSDate.date;
+    XCTAssertTrue([receipt writeToFile:receiptPath atomically:YES]);[NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidBecomeActiveNotification object:nil];
+    [navigation popViewControllerAnimated:NO];[page viewDidAppear:NO];
+    [(UIButton *)[page valueForKey:@"collectButton"] sendActionsForControlEvents:UIControlEventTouchUpInside];
+    NSPredicate *saved=[NSPredicate predicateWithBlock:^BOOL(id object,NSDictionary *unused){(void)object;(void)unused;return [page valueForKey:@"reportData"]!=nil;}];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[[[XCTNSPredicateExpectation alloc] initWithPredicate:saved object:page]] timeout:10],XCTWaiterResultCompleted);
+    NSDictionary *report=[NSJSONSerialization JSONObjectWithData:[session savedReportData:&error] options:0 error:&error];
+    XCTAssertEqualObjects(report[@"supportedImageCollection"][@"preparation"][@"previousProcess"],@1);
+    XCTAssertEqualObjects(report[@"supportedImageCollection"][@"restoration"][@"state"],@"hostConfirmed");
+}
+- (void)testMainContinueEntryPassesExistingApplicationNamesWithoutStartingAnotherSession {
+    UIViewController *root=[NSClassFromString(@"CKSettings") new];UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:root];
+    [root loadViewIfNeeded];[root setValue:@[@{@"id":@"com.baidu.netdisk",@"name":@"图片测试 APP"}] forKey:@"apps"];
+    UIBarButtonItem *continuation=nil;
+    for (UIBarButtonItem *item in root.navigationItem.rightBarButtonItems) if ([item.title isEqual:@"继续采集"]) continuation=item;
+    XCTAssertNotNil(continuation);XCTAssertTrue([UIApplication.sharedApplication sendAction:continuation.action to:continuation.target from:continuation forEvent:nil]);
+    AxsCacheKeeperDiagnosticsPage *page=(id)navigation.topViewController;XCTAssertTrue([page isKindOfClass:AxsCacheKeeperDiagnosticsPage.class]);
+    XCTAssertEqualObjects(page.applicationNames[@"com.baidu.netdisk"],@"图片测试 APP");
+    XCTAssertTrue([[page valueForKey:@"axs_cachekeeper_presentResumePending"] boolValue]);
+    XCTAssertNil([page valueForKey:@"axs_cachekeeper_collectionSession"]);
 }
 @end

@@ -77,6 +77,8 @@ NSDictionary *axs_cachekeeper_image_collection_cleanup(NSDictionary *receipt,NSD
 - (BOOL)recordEntry:(NSError **)error;
 - (BOOL)skip:(NSError **)error;
 - (BOOL)readyForReport;
+- (BOOL)prepareBundle:(NSString *)bundle error:(NSError **)error;
+- (NSDictionary *)refreshPreparation:(NSError **)error;
 - (NSArray<NSDictionary *> *)availableModules:(NSError **)error;
 - (BOOL)captureAndAdvance:(NSError **)error;
 - (BOOL)cancel:(NSError **)error;
