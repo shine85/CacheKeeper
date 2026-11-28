@@ -393,6 +393,7 @@ static void AxsCacheKeeperImageInvalidate(AxsCacheKeeperImageBinding *binding,Ax
     AxsCacheKeeperImageAdmission _admission;
 }
 @property(nonatomic,strong) dispatch_queue_t work;
+@property(nonatomic,strong) NSObject *publicationLock;
 @property(nonatomic,copy) AxsCacheKeeperImageContextProvider provider;
 @property(nonatomic,copy) void (^observer)(NSDictionary *);
 @property(nonatomic,strong) NSMutableArray<AxsCacheKeeperImageBinding *> *bindings;
@@ -749,6 +750,7 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         // Weak getters and SDK calls may return autoreleased objects. Close their
         // lifetime at each worker item instead of inheriting the global queue pool.
         _work=dispatch_queue_create("dev.local.cachekeeper.images",DISPATCH_QUEUE_SERIAL_WITH_AUTORELEASE_POOL);
+        _publicationLock=[NSObject new];
         _state=@"notObserved";_reason=@"none";_foreground=YES;
         _discoveryCheck=AxsCacheKeeperImageDiscoveryCheck(0,@"unknown",@"unknown",@"notChecked",@"none",0);
         [self axs_cachekeeper_publish];
@@ -1363,6 +1365,10 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
 - (void)axs_cachekeeper_publish {
     // Direct and dispatch_sync calls do not inherit the queue's per-item pool.
     @autoreleasepool {
+    // Preserve snapshot/write order without holding the lifecycle lock while
+    // the observer validates or persists a receipt. Foreground revocation must
+    // remain available even when the shared report directory is slow.
+    @synchronized(self.publicationLock) {
     NSDictionary *receipt;
     @synchronized(self) {
         NSUInteger observed=0,eligible=0,restricted=0,writes=0;
@@ -1411,8 +1417,8 @@ static NSDictionary *AxsCacheKeeperImageInstalledRelation(NSDictionary *installa
         }
         NSMutableDictionary *withHistory=[receipt mutableCopy];withHistory[@"operationHistory"]=axs_cachekeeper_operation_snapshot(self.operationHistory);receipt=[withHistory copy];
         self.lastReceipt=receipt;
-        // Publish under the snapshot lock so an older callback cannot replace newer cumulative history.
-        if (self.observer) self.observer(receipt);
+    }
+    if (self.observer) self.observer(receipt);
     }
     }
 }

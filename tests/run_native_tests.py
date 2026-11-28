@@ -28,6 +28,7 @@ SCRIPT_GROUPS = (
     ("configuration-red", "run_configuration_red.py", 240),
     ("diagnostics-red", "run_diagnostics_red.py", 180),
     ("network-initialization-red", "run_network_initialization_red.py", 180),
+    ("network-lock", "run_network_lock_tests.py", 390),
     ("owner-snapshot", "test_owner_snapshot.py", 60),
     ("storage-inventory", "run_storage_inventory_tests.py", 300),
     ("platform-cache-policy", "run_platform_cache_policy_tests.py", 495),

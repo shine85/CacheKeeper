@@ -74,6 +74,72 @@ static NSUInteger probeConfigurationEvents(void) {
 }
 static void probeBackground(void) {probeState=UIApplicationStateBackground;[NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidEnterBackgroundNotification object:nil];}
 static void probeForeground(void) {probeState=UIApplicationStateActive;[NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidBecomeActiveNotification object:nil];}
+static void probeReceiptIO(AxsCacheKeeperImageCache *engine,SDImageCache *owner) {
+    dispatch_sync(engine.work,^{});
+    axs_cachekeeper_runtime_require([engine.receipt[@"restricted"] unsignedIntegerValue]==1,"receipt IO case begins with an active write restriction");
+    unsigned writes=atomic_load(&axs_cachekeeper_runtime_writes);
+    [owner.diskCache setData:[@"blocked before foreground" dataUsingEncoding:NSUTF8StringEncoding] forKey:@"receipt-io-blocked"];
+    axs_cachekeeper_runtime_require(atomic_load(&axs_cachekeeper_runtime_writes)==writes,"actual nonempty SDK write is blocked before foreground revocation");
+    void (^original)(NSDictionary *)=[engine.observer copy];
+    dispatch_semaphore_t held=dispatch_semaphore_create(0),entered=dispatch_semaphore_create(0);
+    dispatch_semaphore_t returned=dispatch_semaphore_create(0),released=dispatch_semaphore_create(0);
+    __block BOOL returnedWhileHeld=NO;
+    engine.observer=^(NSDictionary *receipt) {dispatch_semaphore_signal(entered);original(receipt);};
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+        @synchronized(axs_cachekeeper_image_context_lock) {
+            dispatch_semaphore_signal(held);
+            returnedWhileHeld=dispatch_semaphore_wait(returned,dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC))==0;
+        }
+        dispatch_semaphore_signal(released);
+    });
+    axs_cachekeeper_runtime_require(dispatch_semaphore_wait(held,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"receipt IO context is held");
+    dispatch_async(engine.work,^{[engine axs_cachekeeper_publish];});
+    axs_cachekeeper_runtime_require(dispatch_semaphore_wait(entered,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"actual Runtime observer reaches held receipt IO");
+    // The timeout belongs to the holder: a regressed main-thread call is released
+    // and fails explicitly instead of hanging the test process indefinitely.
+    probeForeground();
+    NSDictionary *snapshot=engine.receipt;
+    NSData *payload=[@"foreground write after synchronous revocation" dataUsingEncoding:NSUTF8StringEncoding];
+    axs_cachekeeper_runtime_lazy_root=YES;
+    [owner.diskCache setData:payload forKey:@"receipt-io-write"];
+    dispatch_semaphore_signal(returned);
+    axs_cachekeeper_runtime_require(dispatch_semaphore_wait(released,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"receipt IO holder finishes");
+    axs_cachekeeper_runtime_require(returnedWhileHeld,"foreground and receipt access never wait for receipt IO");
+    axs_cachekeeper_runtime_require(snapshot && [[NSData dataWithContentsOfFile:[owner.diskCachePath stringByAppendingPathComponent:@"receipt-io-write"]] isEqual:payload],"foreground revocation reaches original nonempty writer while report IO is held");
+    dispatch_sync(engine.work,^{});
+    engine.observer=original;
+    NSString *path=[[probeFolder stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[probeBundle stringByAppendingString:@".imagecache.plist"]];
+    axs_cachekeeper_runtime_require(axs_cachekeeper_image_cache_raw_projection([NSDictionary dictionaryWithContentsOfFile:path])!=nil,"real Runtime observer still persists valid receipt after IO resumes");
+}
+static void probeReceiptOrder(AxsCacheKeeperImageCache *engine) {
+    dispatch_sync(engine.work,^{});
+    void (^original)(NSDictionary *)=[engine.observer copy];
+    dispatch_semaphore_t first=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0);
+    dispatch_semaphore_t attempting=dispatch_semaphore_create(0),second=dispatch_semaphore_create(0);
+    dispatch_group_t publishers=dispatch_group_create();
+    NSMutableArray<NSDate *> *finished=[NSMutableArray new];
+    __block NSUInteger ordinal=0;
+    engine.observer=^(NSDictionary *receipt) {
+        NSUInteger current;@synchronized(finished) {current=++ordinal;}
+        if (current==1) {
+            dispatch_semaphore_signal(first);
+            axs_cachekeeper_runtime_require(dispatch_semaphore_wait(release,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"first receipt publisher released");
+        } else dispatch_semaphore_signal(second);
+        original(receipt);
+        @synchronized(finished) {[finished addObject:receipt[@"updated"]];}
+    };
+    dispatch_group_async(publishers,dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{[engine axs_cachekeeper_publish];});
+    axs_cachekeeper_runtime_require(dispatch_semaphore_wait(first,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"first receipt observer entered");
+    dispatch_group_async(publishers,dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{dispatch_semaphore_signal(attempting);[engine axs_cachekeeper_publish];});
+    axs_cachekeeper_runtime_require(dispatch_semaphore_wait(attempting,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"second receipt publisher starts concurrently");
+    BOOL overtook=dispatch_semaphore_wait(second,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC))==0;
+    dispatch_semaphore_signal(release);
+    axs_cachekeeper_runtime_require(dispatch_group_wait(publishers,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"both receipt publishers finish");
+    engine.observer=original;
+    NSString *path=[[probeFolder stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[probeBundle stringByAppendingString:@".imagecache.plist"]];
+    NSDate *saved=[NSDictionary dictionaryWithContentsOfFile:path][@"updated"];
+    axs_cachekeeper_runtime_require(!overtook && finished.count==2 && [finished[0] compare:finished[1]]!=NSOrderedDescending && [saved isEqual:finished.lastObject],"receipt callbacks stay ordered and newest snapshot remains on disk");
+}
 int main(int argc,const char *argv[]) {@autoreleasepool {
     axs_cachekeeper_runtime_require(argc==3,"probe scenario and temporary home supplied");probeHome=[NSString stringWithUTF8String:argv[2]];probeFolder=[probeHome stringByAppendingPathComponent:@"shared"];
     if (!strcmp(argv[1],"collection") || !strcmp(argv[1],"preparation")) probeBundle=@"com.baidu.netdisk";
@@ -84,6 +150,10 @@ int main(int argc,const char *argv[]) {@autoreleasepool {
     AxsCacheKeeperImageCache *engine=axs_cachekeeper_image_engine;
     __attribute__((objc_precise_lifetime)) SDImageCache *owner=[[SDImageCache alloc] initWithNamespace:@"probe" diskCacheDirectory:[probeHome stringByAppendingPathComponent:@"Library/Caches"] config:[SDImageCacheConfig new]];
     probeAwait(^BOOL {return [engine.receipt[@"eligible"] unsignedIntegerValue]==1;},"probe actual host owner is admitted");
+    if (!strcmp(argv[1],"receipt-io") || !strcmp(argv[1],"receipt-order")) {
+        if (!strcmp(argv[1],"receipt-io")) probeReceiptIO(engine,owner);else probeReceiptOrder(engine);
+        printf("PASS: image-runtime-probe %s\n",argv[1]);return 0;
+    }
     if (!strcmp(argv[1],"preparation")) {
         NSString *receiptPath=[[probeFolder stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[probeBundle stringByAppendingString:@".imagecache.plist"]];
         probeAwait(^BOOL{return [NSDictionary dictionaryWithContentsOfFile:receiptPath][@"eligible"]!=nil;},"real Runtime producer publishes actual shared receipt");

@@ -1,5 +1,6 @@
 """Actual image Runtime/engine/coordinator and established synthetic host ABI fixture."""
 from pathlib import Path
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -8,6 +9,8 @@ import time
 import re
 ROOT=Path(__file__).resolve().parents[1]
 TOTAL_BUDGET_SECONDS=360
+RECEIPT_BASELINE="2eb4f85046c6634ac3b785904fd3a561ba3bf49d"
+RECEIPT_SOURCE_SHA256="a2e4f7941f1cbd8e33110f6135510eb869b26faef3a80fced4353efbed443e75"
 
 def main():
     compiler=shutil.which("xcrun")
@@ -25,8 +28,19 @@ def main():
         run([compiler,"clang","-fno-objc-arc","-c",str(ROOT/"tests/image_runtime_autorelease_fixture.m"),"-o",str(helper)],check=True)
         flags=[compiler,"clang","-fobjc-arc","-fblocks","-Wall","-Wextra","-Werror=format","-Werror=implicit-function-declaration","-DAXS_CACHEKEEPER_IMAGE_TESTING=1",'-DAXS_CACHEKEEPER_PACKAGE_VERSION="0.0.0-0.0"',"-I"+str(ROOT/"tests/image_runtime_context_platform"),"-I"+str(ROOT),"-I"+str(ROOT/"tests"),"-framework","Foundation"]
         sources=[str(ROOT/p) for p in ("tests/image_runtime_probe_tests.m","AxsCacheKeeperCleanupRules.m","AxsCacheKeeperOperationInfo.m","AxsCacheKeeperImageCoordinator.m","AxsCacheKeeperImageCollection.m")]+[str(helper)]
+        baseline=folder/"receipt-baseline";baseline.mkdir()
+        old=run(["git","show",RECEIPT_BASELINE+":AxsCacheKeeperImageCache.m"],15,cwd=ROOT,capture_output=True,check=True).stdout
+        if hashlib.sha256(old).hexdigest()!=RECEIPT_SOURCE_SHA256:raise RuntimeError("unexpected receipt IO baseline source")
+        (baseline/"AxsCacheKeeperImageCache.m").write_bytes(old)
+        receipt_red=folder/"receipt-io-red"
+        run(flags[:2]+["-I"+str(baseline)]+flags[2:]+sources+["-o",str(receipt_red)],check=True)
+        home=folder/"receipt-io-red-home";home.mkdir()
+        result=run([str(receipt_red),"receipt-io",str(home)],20,capture_output=True,text=True)
+        expected="FAIL: image-runtime-source: foreground and receipt access never wait for receipt IO"
+        if result.returncode!=1 or result.stdout.strip() or re.findall(r"^FAIL:.*$",result.stderr,re.MULTILINE)!=[expected]:raise RuntimeError("incorrect receipt IO baseline RED\n"+result.stdout+result.stderr)
+        print("PASS: image-runtime-probe fixed 228.1 receipt IO foreground blocking RED")
         binary=folder/"image-probes";run(flags+sources+["-o",str(binary)],check=True)
-        for scenario in ("same","changed","access","installation","delayed","rapid","late-provider","collection","preparation"):
+        for scenario in ("receipt-io","receipt-order","same","changed","access","installation","delayed","rapid","late-provider","collection","preparation"):
             home=folder/scenario;home.mkdir();result=run([str(binary),scenario,str(home)],20,capture_output=True,text=True)
             if result.returncode or result.stdout.strip()!=f"PASS: image-runtime-probe {scenario}":raise RuntimeError(result.stdout+result.stderr)
             print(result.stdout,end="")
