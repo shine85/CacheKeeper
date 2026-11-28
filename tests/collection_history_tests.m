@@ -53,7 +53,11 @@ int main(int argc,const char **argv) {@autoreleasepool {
     NSData *runningBytes=[NSData dataWithContentsOfFile:running.storagePath];NSDictionary *active=row(history,running.sessionID);
     check(![active[@"deletable"] boolValue] && [[NSData dataWithContentsOfFile:running.storagePath] isEqual:runningBytes],"listing never recovers active phase into deletable interruption");
     check([[history deleteRecord:active confirmed:YES error:&error][@"state"] isEqual:@"rejected"] && error.code==EBUSY,"running phase rejected at delete time");
-    AxsCacheKeeperCollectionSession *capacity=session(directory);check([capacity beginCapacityWithEpoch:NSUUID.UUID.UUIDString error:&error],"running capacity fixture");
+    AxsCacheKeeperCollectionSession *capacity=session(directory);
+    check([capacity beginPhase:@"hostPreflight" error:&error] && [capacity finishPhase:@"hostPreflight" result:@{@"state":@"partial"} error:&error],"capacity fixture completes required host phase through production API");
+    BOOL capacityStarted=[capacity beginCapacityWithEpoch:NSUUID.UUID.UUIDString error:&error];
+    if(!capacityStarted)fprintf(stderr,"HISTORY_SETUP: error=%ld phases=%s\n",(long)error.code,[capacity.reportProjection[@"phases"] description].UTF8String);
+    check(capacityStarted,"running capacity fixture");
     check(![row(history,capacity.sessionID)[@"deletable"] boolValue],"capacity request is protected without opening or interrupting its session");
     AxsCacheKeeperCollectionReturn *position=[[AxsCacheKeeperCollectionReturn alloc] initWithDirectory:directory];
     NSDictionary *intent=[position selectSession:other page:@"guided" error:&error];check(intent!=nil,"active navigation fixture");
