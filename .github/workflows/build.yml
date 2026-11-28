@@ -156,6 +156,7 @@ jobs:
         run: |
           python3 tests/test_xctest_macros.py
           python3 tests/check_xctest_macros.py
+          python3 tests/test_collection_return_red.py
           python3 tests/test_ui_orchestration.py
           python3 tests/test_ui_process_lifecycle.py
           python3 tests/test_cleanup_summary_diagnostics.py

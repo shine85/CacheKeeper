@@ -168,7 +168,9 @@ int main(int argc,char **argv) { @autoreleasepool {return UIApplicationMain(argc
             spec = {"name": "CapacityPage", "options": {"bundleIdPrefix": "dev.local.cachekeeper.capacity", "deploymentTarget": {"iOS": "16.0"}},
                     "settings": {"base": {"CLANG_ENABLE_OBJC_ARC": True, "GENERATE_INFOPLIST_FILE": True, "CODE_SIGN_IDENTITY": "-"}},
                     "targets": {
-                        "CapacityHost": {"type": "application", "platform": "iOS", "sources": [str(host), str(copied), str(root / "Prefs/HostPreflightPage.m"), str(root / "Prefs/ImageCollectionPage.m")] +
+                        "CapacityHost": {"type": "application", "platform": "iOS", "sources": [str(host), str(copied)] +
+                                         [str(root / ("Prefs/" + page + ".m")) for page in ("HostPreflightPage", "ImageCollectionPage", "CollectionNavigation", "CollectionHistoryPage")] +
+                                         [str(root / ("AxsCacheKeeper" + module + ".m")) for module in ("CollectionReturn", "CollectionHistory")] +
                                          [str(root / ("AxsCacheKeeper" + module + ".m")) for module in modules], "settings": {"base": settings}},
                         "CapacityPageTests": {"type": "bundle.unit-test", "platform": "iOS", "sources": [str(root / "tests/ui/CapacityPageTests.m")],
                                               "dependencies": [{"target": "CapacityHost"}], "settings": {"base": settings}}},

@@ -19,7 +19,7 @@ def main():
     source=source.replace('"../Axs','"../../Axs')
     (out/'Settings.m').write_text(source,encoding='utf8')
     (out/'source-manifest.json').write_text(json.dumps({'mutation':'remove automatic collection root navigation only','sourceSHA256':hashlib.sha256(original.encode()).hexdigest(),'mutatedSHA256':hashlib.sha256(source.encode()).hexdigest(),'expectedFailure':'COLLECTION_AUTO_RETURN'},indent=2),encoding='utf8')
-    spec=(root/'tests/ui/project.yml').read_text(encoding='utf8-sig');anchor='../../Prefs/Settings.m';assert spec.count(anchor)==1
+    spec=(root/'tests/ui/project.yml').read_text(encoding='utf-8-sig');anchor='../../Prefs/Settings.m';assert spec.count(anchor)==1
     (out/'project.yml').write_text(spec.replace(anchor,'../../tmp/collection-return-red/Settings.m'),encoding='utf8')
     subprocess.run(['xcodegen','generate','--spec',str(out/'project.yml'),'--project',str(out),'--project-root',str(out)],check=True,timeout=60)
     method='testRecreatedRootAutomaticallyReturnsToOriginalImageWithoutContinue'

@@ -143,6 +143,18 @@ def execute(scenario):
 
 
 class CapacityOrchestrationTests(unittest.TestCase):
+    def test_all_generated_targets_link_current_collection_navigation(self):
+        result = execute("all-pass")
+        self.assertEqual(result["code"], 0)
+        projects = sorted(result["output"].glob("*/project.json"))
+        self.assertEqual(len(projects), 5)
+        required = {"CollectionHistoryPage.m", "CollectionNavigation.m", "AxsCacheKeeperCollectionReturn.m", "AxsCacheKeeperCollectionHistory.m"}
+        for project in projects:
+            spec = json.loads(project.read_text(encoding="utf-8"))
+            sources = spec["targets"]["CapacityHost"]["sources"]
+            self.assertTrue(required.issubset({Path(source).name for source in sources}), project)
+            self.assertEqual(len(sources), len(set(sources)), project)
+
     def test_capacity_export_is_bound_to_latest_terminal_epoch(self):
         source = (ROOT / "Prefs/DiagnosticsPage.m").read_text(encoding="utf-8-sig")
         status = (ROOT / "AxsCacheKeeperCapacityStatus.h").read_text(encoding="utf-8-sig")
