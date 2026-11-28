@@ -117,11 +117,14 @@ NSDictionary *axs_cachekeeper_host_decode(NSArray *frames,uint64_t request,NSTim
         @"runtimeInfo":@{@"schemaVersion":@1,@"packageVersion":version,@"firstObserved":@(first)},@"existingContainerGatePassed":@((BOOL)((w[3]&1)!=0)),@"authorizationAttempted":@((BOOL)((w[3]&2)!=0)),@"sharedAccessGranted":@((BOOL)((w[3]&4)!=0)),
         @"authorizationCode":@((int32_t)w[4]),@"configurationReadScope":@"appEnabled",@"configurationReadState":axs_cachekeeper_host_config_states()[config],@"previousPublishState":axs_cachekeeper_host_publish_states()[publish],@"previousPublishErrorCode":@((int32_t)(w[4]>>32))});
 }
+#if !defined(AXS_CACHEKEEPER_HOST_CLIENT_ONLY) || !defined(AXS_CACHEKEEPER_HOST_SERVER_ONLY)
 static void axs_cachekeeper_host_cancel_tokens(NSMutableArray *tokens) {for (NSNumber *n in tokens) notify_cancel(n.intValue);[tokens removeAllObjects];}
 static uint32_t axs_cachekeeper_host_register(NSString *name,NSMutableArray *tokens,int *token) {
     *token=-1;uint32_t status=notify_register_check(name.UTF8String,token);
     if (status==NOTIFY_STATUS_OK) [tokens addObject:@(*token)];else if (*token>=0) {notify_cancel(*token);*token=-1;}return status;
 }
+
+#endif
 
 #if !defined(AXS_CACHEKEEPER_HOST_CLIENT_ONLY)
 @interface AxsCacheKeeperHostEvidenceServer ()
