@@ -11,22 +11,14 @@ if sys.platform!='darwin' or not shutil.which('xcrun'):
     raise SystemExit(2)
 (ROOT/'tmp').mkdir(exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='collection-session-',dir=ROOT/'tmp') as folder:
-    output=Path(folder);binary=output/'collection-session-tests'
-    subprocess.run(['xcrun','clang','-fobjc-arc','-fblocks','-Wall','-Wextra','-Werror=format','-framework','Foundation',
-                    '-I'+str(ROOT/'tests/include'),str(ROOT/'AxsCacheKeeperCollectionSession.m'),str(ROOT/'tests/collection_session_tests.m'),
-                    *[str(ROOT/(name+'.m')) for name in ('AxsCacheKeeperImageCollection','AxsCacheKeeperOperationInfo','AxsCacheKeeperInstallation','AxsCacheKeeperHostEvidence','AxsCacheKeeperCapacityService','AxsCacheKeeperCapacity','AxsCacheKeeperScanTask','AxsCacheKeeperDirectories')],'-o',str(binary)],
-                   check=True,timeout=60)
-    subprocess.run([str(binary),str(output)],check=True,timeout=15)
-    subprocess.run([sys.executable,str(ROOT/'scripts/device_collection_manifest.py'),str(output/'native-capacity-report.json')],check=True,timeout=15)
-    returned=output/'collection-return-tests'
-    subprocess.run(['xcrun','clang','-fobjc-arc','-fblocks','-Wall','-Wextra','-Werror=format','-framework','Foundation',
-                    '-I'+str(ROOT/'tests/include'),str(ROOT/'AxsCacheKeeperCollectionReturn.m'),str(ROOT/'AxsCacheKeeperCollectionSession.m'),
-                    str(ROOT/'tests/collection_return_tests.m'),str(ROOT/'AxsCacheKeeperImageCollection.m'),str(ROOT/'AxsCacheKeeperOperationInfo.m'),
-                    str(ROOT/'AxsCacheKeeperHostEvidence.m'),'-o',str(returned)],check=True,timeout=60)
-    subprocess.run([str(returned),str(output/'return')],check=True,timeout=15)
-    history=output/'collection-history-tests'
-    subprocess.run(['xcrun','clang','-fobjc-arc','-fblocks','-Wall','-Wextra','-Werror=format','-framework','Foundation',
-                    '-I'+str(ROOT/'tests/include'),str(ROOT/'AxsCacheKeeperCollectionHistory.m'),str(ROOT/'AxsCacheKeeperCollectionReturn.m'),str(ROOT/'AxsCacheKeeperCollectionSession.m'),
-                    str(ROOT/'tests/collection_history_tests.m'),str(ROOT/'AxsCacheKeeperImageCollection.m'),str(ROOT/'AxsCacheKeeperOperationInfo.m'),
-                    str(ROOT/'AxsCacheKeeperHostEvidence.m'),'-o',str(history)],check=True,timeout=60)
-    subprocess.run([str(history),str(output/'history')],check=True,timeout=30)
+    output=Path(folder)
+    flags=['xcrun','clang','-fobjc-arc','-fblocks','-Wall','-Wextra','-Werror=format','-framework','Foundation','-I'+str(ROOT/'tests/include')]
+    production=[str(ROOT/(name+'.m')) for name in ('AxsCacheKeeperCollectionSession','AxsCacheKeeperCollectionReturn','AxsCacheKeeperCollectionHistory',
+        'AxsCacheKeeperImageCollection','AxsCacheKeeperOperationInfo','AxsCacheKeeperInstallation','AxsCacheKeeperHostEvidence',
+        'AxsCacheKeeperCapacityService','AxsCacheKeeperCapacity','AxsCacheKeeperScanTask','AxsCacheKeeperDirectories')]
+    for fixture,destination,budget in [('collection_session_tests',output,15),('collection_return_tests',output/'return',15),('collection_history_tests',output/'history',30)]:
+        binary=output/fixture
+        subprocess.run(flags+production+[str(ROOT/'tests'/(fixture+'.m')),'-o',str(binary)],check=True,timeout=60)
+        subprocess.run([str(binary),str(destination)],check=True,timeout=budget)
+        if fixture=='collection_session_tests':
+            subprocess.run([sys.executable,str(ROOT/'scripts/device_collection_manifest.py'),str(output/'native-capacity-report.json')],check=True,timeout=15)
